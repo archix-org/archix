@@ -79,8 +79,24 @@ Order: local package cache, then rebuild from the locked commit, then prompt.
 - Passwords are never managed. This matches the NixOS default of mutable users. Onboarding runs `passwd` for newly created users.
 - Homes of every declared user. archix runs as root and drops to each user for their home.
 - Dotfiles are written as real files with recorded hashes, so out-of-band edits show up in `diff` and are never silently overwritten. Live symlinks remain available for app-written configs (e.g. matugen).
-- App modules (Home Manager `programs.*` style): kitty, git, zsh, starship, fastfetch, mimeapps, user units, KDE kconfig. Format writers cover everything else: toml, json, yaml, ini, kdl, key-value, kconfig.
+- App configs, Home Manager `programs.*` style. See "App modules and Home Manager" below.
 - Activation hooks run on switch.
+
+## App modules and Home Manager
+
+archix maintains its own module set, ported from Home Manager (MIT, credited) and kept in sync with it. Upstream projects never have to do anything for archix.
+
+- **Three layers:**
+  1. Format writers (toml, json, yaml, ini, kdl, key-value, kconfig) configure any app with no module: `files["~/.config/foot/foot.ini"] = archix.ini { ... }`.
+  2. `archix.program "foot" { package = "foot", file = "~/.config/foot/foot.ini", format = "ini" }` defines a thin module in one line. Users then write `programs.foot = { enable = true, settings = { ... } }`, and `settings` passes straight through to the file.
+  3. Hand-written modules, ported from Home Manager, only where options interact or need validation (git, zsh, ssh, ...).
+- **Porting** is LLM-assisted. Home Manager's option JSON supplies names, types, defaults and descriptions.
+- **Cross-validation.** Each ported module's Home Manager test cases (input config plus expected rendered file) are ported too. A port only lands when archix renders byte-identical output for the same input.
+- **Tracking upstream.**
+  - The repo records the Home Manager commit each module was ported from.
+  - A scheduled CI job compares that against Home Manager's HEAD. When a ported module or its tests change upstream, it opens an issue with the diff, and optionally a draft PR with an LLM re-port that is checked against the updated tests.
+  - Because `settings` passes through, new upstream app keys need no archix change.
+- **Order:** first the author's set (kitty, git, zsh, starship, fastfetch, mimeapps, user units, KDE kconfig). The bulk port of Home Manager comes before the public release, so people arriving from Nix find their modules.
 
 ## Generations and rollback
 
@@ -153,6 +169,6 @@ A static `archix` binary on GitHub Releases exists only as a rescue tool (see ab
 3. Generations, runtime rollback, gc.
 4. AUR: helper, chroot builds, review, fallbacks. Then third-party repos.
 5. System config.
-6. Dotfiles and app modules. The Arch box can switch over here.
+6. Dotfiles, format writers, `archix.program`, Home Manager ports with cross-validation and the upstream tracking job. The Arch box can switch over here.
 7. Boot entries, Secure Boot, boot-time rollback, rescue mode in the initramfs. The desktop can switch over here.
 8. `archix init` and the TUI.
