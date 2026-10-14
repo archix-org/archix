@@ -1,11 +1,12 @@
 use std::fs;
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
+
+mod packages;
 
 use archix::eval::{self, Evaluation, Input};
 use archix::options::{self, Def};
@@ -32,6 +33,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Resolve the declared packages into archix.lock, keeping the locked snapshot date
+    Lock,
+    /// Move archix.lock to the newest archive snapshot and re-resolve
+    Update,
+    /// Show what a switch would change to make this machine match the lock
+    Diff,
 }
 
 #[derive(Serialize)]
@@ -44,6 +51,8 @@ struct OptionDoc {
 }
 
 fn main() -> ExitCode {
+    // Rust ignores SIGPIPE by default, which turns `archix diff | head` into a panic instead of a quiet exit.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     match run() {
         Ok(code) => code,
         Err(e) => {
@@ -60,8 +69,8 @@ fn run() -> Result<ExitCode> {
         None => system_hostname()?,
     };
     let evaluation = match eval::evaluate(&Input {
-        config_dir: cli.config,
-        hostname,
+        config_dir: cli.config.clone(),
+        hostname: hostname.clone(),
     }) {
         Ok(evaluation) => evaluation,
         Err(errors) => {
@@ -69,18 +78,19 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::FAILURE);
         }
     };
+    let target = packages::Target {
+        config_dir: &cli.config,
+        host: &hostname,
+        config: &evaluation.config,
+    };
     match cli.command {
-        Command::Eval => write_stdout(&format!("{}\n", serde_json::to_string_pretty(&evaluation.config)?))?,
-        Command::Options { json } => write_stdout(&render_options(&evaluation, json)?)?,
+        Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
+        Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
+        Command::Lock => packages::lock(&target, false)?,
+        Command::Update => packages::lock(&target, true)?,
+        Command::Diff => packages::diff(&target)?,
     }
     Ok(ExitCode::SUCCESS)
-}
-
-fn write_stdout(text: &str) -> Result<()> {
-    match io::stdout().lock().write_all(text.as_bytes()) {
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        result => Ok(result?),
-    }
 }
 
 fn system_hostname() -> Result<String> {

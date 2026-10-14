@@ -14,7 +14,6 @@ return {
       enable = archix.option { type = t.bool, default = false, description = "Install and configure kitty" },
       font = { size = archix.option { type = t.int, default = 12 } },
     } },
-    packages = archix.option { type = t.list_of(t.str), default = {} },
   },
   config = function(cfg)
     if not cfg.programs.kitty.enable then return {} end

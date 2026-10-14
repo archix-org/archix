@@ -1,3 +1,9 @@
+pub mod archive;
+pub mod date;
 pub mod eval;
+pub mod lock;
 pub mod options;
+pub mod pacman;
+pub mod plan;
+pub mod resolve;
 pub mod value;

@@ -11,7 +11,6 @@ return {
         },
       },
     },
-    packages = archix.option { type = t.list_of(t.str), default = {}, description = "Packages to install" },
   },
   config = function(cfg)
     if not cfg.programs.kitty.enable then return {} end
