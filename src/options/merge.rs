@@ -1,199 +1,8 @@
 use std::collections::BTreeMap;
-use std::fmt;
 use std::rc::Rc;
 
+use super::{Children, Def, Diagnostic, Node, PRIO_OPTION_DEFAULT, PRIO_PLAIN, Type, did_you_mean, join};
 use crate::value::{Raw, Value};
-
-pub const PRIO_FORCE: i32 = 50;
-pub const PRIO_PLAIN: i32 = 100;
-pub const PRIO_DEFAULT: i32 = 1000;
-pub const PRIO_OPTION_DEFAULT: i32 = 1500;
-
-pub type Children = BTreeMap<String, Node>;
-
-#[derive(Debug, Clone)]
-pub enum Node {
-    Group(Rc<Children>),
-    Opt(Rc<Decl>),
-}
-
-#[derive(Debug)]
-pub struct Decl {
-    pub ty: Type,
-    pub default: Option<Raw>,
-    pub description: Option<String>,
-    pub source: Rc<str>,
-}
-
-#[derive(Debug, Clone)]
-pub enum Type {
-    Bool,
-    Int,
-    Float,
-    Str,
-    Path,
-    Lines,
-    Any,
-    Enum(Vec<String>),
-    List(Box<Type>),
-    Attrs(Box<Type>),
-    Nullable(Box<Type>),
-    Submodule(Rc<Children>),
-}
-
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Bool => f.write_str("bool"),
-            Type::Int => f.write_str("int"),
-            Type::Float => f.write_str("float"),
-            Type::Str => f.write_str("str"),
-            Type::Path => f.write_str("path"),
-            Type::Lines => f.write_str("lines"),
-            Type::Any => f.write_str("any"),
-            Type::Enum(values) => {
-                let quoted: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
-                write!(f, "one of {}", quoted.join(", "))
-            }
-            Type::List(elem) => write!(f, "list of {elem}"),
-            Type::Attrs(elem) => write!(f, "attrs of {elem}"),
-            Type::Nullable(elem) => write!(f, "null or {elem}"),
-            Type::Submodule(_) => f.write_str("submodule"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Def {
-    pub raw: Raw,
-    pub prio: Option<i32>,
-    pub source: Rc<str>,
-}
-
-impl Def {
-    pub fn new(raw: Raw, source: Rc<str>) -> Self {
-        Def {
-            raw,
-            prio: None,
-            source,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Diagnostic {
-    pub path: Option<String>,
-    pub message: String,
-}
-
-impl Diagnostic {
-    pub fn new(path: &str, message: impl Into<String>) -> Self {
-        let path = (!path.is_empty()).then(|| path.to_string());
-        Diagnostic {
-            path,
-            message: message.into(),
-        }
-    }
-}
-
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.path {
-            Some(path) => write!(f, "`{path}`: {}", self.message),
-            None => f.write_str(&self.message),
-        }
-    }
-}
-
-pub fn join(path: &str, key: &str) -> String {
-    if path.is_empty() {
-        key.to_string()
-    } else {
-        format!("{path}.{key}")
-    }
-}
-
-pub fn declare(root: &mut Children, path: &[String], decl: Decl) -> Result<(), Diagnostic> {
-    declare_in(root, "", path, decl)
-}
-
-fn declare_in(children: &mut Children, prefix: &str, rest: &[String], decl: Decl) -> Result<(), Diagnostic> {
-    let (head, tail) = rest.split_first().expect("option path is never empty");
-    let here = join(prefix, head);
-    if tail.is_empty() {
-        return match children.get(head) {
-            Some(Node::Opt(existing)) => Err(Diagnostic::new(
-                &here,
-                format!("option is declared twice, in {} and {}", existing.source, decl.source),
-            )),
-            Some(Node::Group(_)) => Err(Diagnostic::new(
-                &here,
-                format!(
-                    "declared as an option in {} but other options are declared under it",
-                    decl.source
-                ),
-            )),
-            None => {
-                children.insert(head.clone(), Node::Opt(Rc::new(decl)));
-                Ok(())
-            }
-        };
-    }
-    let entry = children
-        .entry(head.clone())
-        .or_insert_with(|| Node::Group(Rc::default()));
-    match entry {
-        Node::Opt(existing) => Err(Diagnostic::new(
-            &here,
-            format!(
-                "is an option declared in {}, so {} can't declare options under it",
-                existing.source, decl.source
-            ),
-        )),
-        Node::Group(group) => declare_in(Rc::make_mut(group), &here, tail, decl),
-    }
-}
-
-/// Every declared option with its display path, including options inside submodules.
-pub fn flatten(children: &Children) -> Vec<(String, Rc<Decl>)> {
-    let mut out = Vec::new();
-    flatten_into(children, "", &mut out);
-    out
-}
-
-fn flatten_into(children: &Children, prefix: &str, out: &mut Vec<(String, Rc<Decl>)>) {
-    for (name, node) in children {
-        let path = join(prefix, name);
-        match node {
-            Node::Group(group) => flatten_into(group, &path, out),
-            Node::Opt(decl) => {
-                out.push((path.clone(), decl.clone()));
-                flatten_type(&decl.ty, &path, out);
-            }
-        }
-    }
-}
-
-fn flatten_type(ty: &Type, path: &str, out: &mut Vec<(String, Rc<Decl>)>) {
-    match ty {
-        Type::Submodule(children) => flatten_into(children, path, out),
-        Type::List(elem) => flatten_type(elem, &format!("{path}.*"), out),
-        Type::Attrs(elem) => flatten_type(elem, &format!("{path}.<name>"), out),
-        Type::Nullable(elem) => flatten_type(elem, path, out),
-        _ => {}
-    }
-}
-
-/// A "; did you mean `x`?" suffix naming the closest sibling of an unknown key, or "".
-pub fn did_you_mean(path: &str, key: &str, children: &Children) -> String {
-    children
-        .keys()
-        .map(|name| (strsim::damerau_levenshtein(name, key), name))
-        .filter(|(distance, _)| *distance <= 2)
-        .min()
-        .map(|(_, name)| format!("; did you mean `{}`?", join(path, name)))
-        .unwrap_or_default()
-}
 
 pub fn merge(root: &Children, defs: Vec<Def>) -> (Value, Vec<Diagnostic>) {
     let mut merger = Merger::default();
@@ -471,6 +280,7 @@ fn describe(raw: &Raw) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::options::{Decl, PRIO_DEFAULT, PRIO_FORCE};
 
     fn opt(ty: Type, default: Option<Raw>) -> Node {
         Node::Opt(Rc::new(Decl {
@@ -687,20 +497,5 @@ mod tests {
             ],
         );
         assert_eq!(get(&value, "extra"), &Value::Str("one\ntwo".into()));
-    }
-
-    #[test]
-    fn declaring_twice_is_an_error() {
-        let mut root = Children::new();
-        let decl = || Decl {
-            ty: Type::Bool,
-            default: None,
-            description: None,
-            source: "x.lua".into(),
-        };
-        let path = vec!["programs".to_string(), "kitty".to_string()];
-        declare(&mut root, &path, decl()).unwrap();
-        assert!(declare(&mut root, &path, decl()).is_err());
-        assert!(declare(&mut root, &path[..1], decl()).is_err());
     }
 }
