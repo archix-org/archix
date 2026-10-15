@@ -2,7 +2,7 @@
 # Runs the whole suite, including pacman, AUR-build and network tests, inside a systemd-booted Arch container.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
-docker build -q -t archix-arch-test "$root/tests/arch" >/dev/null
+docker build -t archix-arch-test "$root/tests/arch" >/tmp/archix-docker-build.log 2>&1 || { cat /tmp/archix-docker-build.log; exit 1; }
 cid=$(docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
   -v "$root":/src:ro -v archix-target:/target -v archix-cargo:/root/.cargo/registry \
   archix-arch-test /usr/lib/systemd/systemd)
