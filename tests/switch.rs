@@ -166,8 +166,9 @@ fn switch_installs_then_removes_and_is_idempotent() {
 #[ignore]
 fn warn_mode_keeps_undeclared_packages() {
     let _system = lock_system();
-    pacman(&["-S", "--needed", "tree"]);
-    let setup = Setup::new(&[], "undeclared_packages = \"warn\"");
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "undeclared_packages = \"warn\"");
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
         out.contains("kept because undeclared_packages = \"warn\": tree"),
