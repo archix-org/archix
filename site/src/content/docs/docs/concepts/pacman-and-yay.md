@@ -101,7 +101,7 @@ archix imports it automatically whenever it exists, so you don't have to. `archi
 
 ## Undeclared packages
 
-Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/) option decides what happens to it, and `archix init` asks you to choose: `Later, when you install something with plain pacman or yay`.
+Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/) option decides what happens to it, and `archix init` asks you to choose in its Packages step: `Later, when you install something with plain pacman or yay`.
 
 **`"remove"`** is the default: `switch offers to declare it, and removes it if you say no`. The next switch lists the explicitly installed packages the pacman hook saw arrive since the last switch, and asks:
 
