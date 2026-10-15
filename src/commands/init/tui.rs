@@ -448,7 +448,7 @@ impl<'a> App<'a> {
         let in_list = matches!(row, Row::Item(..));
         match key.code {
             KeyCode::Enter | KeyCode::Char(' ') => return self.activate(row),
-            KeyCode::Esc => self.back(),
+            KeyCode::Esc => return Flow::Quit,
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if self.only_buttons() && key.code != KeyCode::Tab => {
                 self.scroll = self.scroll.saturating_add(1);
             }
@@ -785,16 +785,7 @@ impl<'a> App<'a> {
             if matches!(row, Row::Item(..)) {
                 hints.extend([key("a/n"), label(" all/none"), gap()]);
             }
-            hints.extend([
-                key("esc"),
-                label(" back"),
-                gap(),
-                key("←→"),
-                label(" step"),
-                gap(),
-                key("q"),
-                label(" quit"),
-            ]);
+            hints.extend([key("←→"), label(" step"), gap(), key("esc"), label(" quit")]);
         }
         let first = match &self.error {
             Some(error) => Line::styled(format!(" ! {error}"), Style::new().fg(WARN).bold()),
@@ -1519,5 +1510,6 @@ mod tests {
             }
         }
         assert_eq!(press(&mut app, KeyCode::Char('q')), Flow::Quit);
+        assert_eq!(press(&mut app, KeyCode::Esc), Flow::Quit, "esc quits outside editing");
     }
 }
