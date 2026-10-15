@@ -1,0 +1,56 @@
+---
+interface Props {
+	title: string;
+}
+
+const { title } = Astro.props;
+---
+
+<figure class="artifact">
+	<figcaption>{title}</figcaption>
+	<div class="body"><slot /></div>
+</figure>
+
+<style>
+	.artifact {
+		margin: 0;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--term-bg);
+		overflow: hidden;
+	}
+	figcaption {
+		padding: 0.6rem 1rem;
+		border-bottom: 1px solid #233650;
+		color: var(--term-mist);
+		font: 0.68rem var(--mono);
+		font-stretch: 87.5%;
+	}
+	.body :global(pre) {
+		margin: 0;
+		padding: 1rem 1.1rem 1.15rem;
+		overflow-x: auto;
+		background: transparent !important;
+		color: #d8e4ef;
+		font-size: 0.72rem;
+		line-height: 1.75;
+	}
+	.body :global(.m) {
+		color: var(--term-mist);
+	}
+	.body :global(.w) {
+		color: #ffffff;
+	}
+	.body :global(.ok) {
+		color: #6fd6a8;
+	}
+	.body :global(.bad) {
+		color: #ff6b4a;
+	}
+	.body :global(.k) {
+		color: #7ebae4;
+	}
+	.body :global(.s) {
+		color: #e6d3a3;
+	}
+</style>

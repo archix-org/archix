@@ -1,0 +1,58 @@
+---
+import '../styles/fonts.css';
+import '../styles/site.css';
+
+interface Props {
+	title: string;
+	description: string;
+}
+
+const { title, description } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const jsonLd = {
+	'@context': 'https://schema.org',
+	'@type': 'SoftwareApplication',
+	name: 'archix',
+	description,
+	url: 'https://archix.dev',
+	applicationCategory: 'DeveloperApplication',
+	operatingSystem: 'Arch Linux',
+	license: 'https://github.com/archix-org/archix#license',
+	codeRepository: 'https://github.com/archix-org/archix',
+	offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+};
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>{title}</title>
+		<meta name="description" content={description} />
+		<link rel="canonical" href={canonical} />
+		<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+		<link rel="icon" href="/favicon.ico" sizes="any" />
+		<link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+		<link rel="sitemap" href="/sitemap-index.xml" />
+		<meta name="theme-color" content="#0a1220" />
+		<meta property="og:type" content="website" />
+		<meta property="og:title" content={title} />
+		<meta property="og:description" content={description} />
+		<meta property="og:url" content={canonical} />
+		<meta property="og:image" content="https://archix.dev/og.png" />
+		<meta property="og:image:width" content="1280" />
+		<meta property="og:image:height" content="640" />
+		<meta name="twitter:card" content="summary_large_image" />
+		<script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+		<script is:inline>
+			// Shares Starlight's storage key so the choice carries over into /docs.
+			const stored = localStorage.getItem('starlight-theme');
+			const theme = stored === 'light' || stored === 'dark' ? stored : matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+			document.documentElement.dataset.theme = theme;
+		</script>
+	</head>
+	<body>
+		<slot />
+	</body>
+</html>
