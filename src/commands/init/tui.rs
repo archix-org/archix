@@ -1121,30 +1121,17 @@ impl<'a> App<'a> {
                     ),
                 };
                 const LABEL: usize = 38;
-                const FIELD: usize = 24;
                 let row = Row::Edit(control);
                 let editing = focused == row && self.editing.is_some();
                 let pointer = pointer(row, cursor_line, lines.len());
                 let mut spans = vec![pointer, Span::styled(format!("{title:<LABEL$}"), label_style(row))];
-                let typed = if editing { format!("{value}▏") } else { value.clone() };
-                let underline = Modifier::UNDERLINED;
+                if editing {
+                    spans.push(Span::styled(format!("{value}▏"), Style::new().fg(ACCENT)));
+                }
                 if value.is_empty() {
-                    let caret = if editing { "▏" } else { "" };
-                    let pad = FIELD.saturating_sub(caret.chars().count() + placeholder.chars().count());
-                    spans.push(Span::styled(caret, Style::new().fg(ACCENT).add_modifier(underline)));
-                    spans.push(Span::styled(
-                        placeholder,
-                        Style::new().fg(QUIET).add_modifier(underline),
-                    ));
-                    spans.push(Span::styled(" ".repeat(pad), Style::new().add_modifier(underline)));
-                } else {
-                    let style = if editing {
-                        Style::new().fg(ACCENT)
-                    } else {
-                        label_style(row)
-                    };
-                    let width = FIELD.max(typed.chars().count() + 1);
-                    spans.push(Span::styled(format!("{typed:<width$}"), style.add_modifier(underline)));
+                    spans.push(Span::styled(placeholder, Style::new().fg(QUIET)));
+                } else if !editing {
+                    spans.push(Span::styled(value.clone(), label_style(row)));
                 }
                 if focused == row && !editing {
                     spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
