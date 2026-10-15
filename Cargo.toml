@@ -11,11 +11,11 @@ homepage = "https://archix.dev"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console = "0.16"
-dialoguer = { version = "0.12.0", default-features = false }
 flate2 = "1.1.10"
 libc = "0.2.190"
 md-5 = "0.11.0"
 mlua = { version = "0.12.2", features = ["lua54", "vendored"] }
+ratatui = "0.30"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
