@@ -62,10 +62,10 @@ The sidebar marks the steps you've seen with `✓` and the current one with `›
 | `End` | Focus the `Next` button. |
 | `esc` | Go back a step. |
 | `a`, `n` | In a checklist, select all or none. |
-| `r` | In Config files, go back to the recommended files. |
+| `r` | In a checklist, go back to the recommended entries: the recommended files in Config files and dotfiles in Dotfiles, everything in System's lists. |
 | `q`, `ctrl-c` | Quit without writing anything: `init was cancelled; nothing was written`. |
 
-Text fields (the config location and the generation limits) are edited in place: press `enter` on one, type, then `enter` keeps the value and `esc` puts the old one back. Only while you're editing do letters and digits go into the field, and the bottom line reads `type to edit  ·  enter done  ·  esc cancel`. Next and `→` refuse to leave a step whose text fields are invalid, and shows the problem above the key hints, such as `! the config directory must be an absolute path`. Steps with nothing to answer (Welcome, System and Review) start on Next, and `↑` `↓` scroll their content. Answers stay as you left them when you move between steps.
+Text fields (the config location and the generation limits) start empty, showing their default in gray, such as `/etc/archix (default)`; left empty, they keep it. They're edited in place: press `enter` on one, type, then `enter` keeps the value and `esc` puts the old one back. Only while you're editing do letters and digits go into the field, and the bottom line reads `type to edit  ·  enter done  ·  esc cancel`. Next and `→` refuse to leave a step whose text fields are invalid, and shows the problem above the key hints, such as `! the config directory must be an absolute path`. Steps with nothing to answer (Welcome and Review) start on Next, and `↑` `↓` scroll their content; every other step starts on its first field. Answers stay as you left them when you move between steps.
 
 What each step decides:
 
@@ -73,21 +73,21 @@ What each step decides:
 
 1. **Welcome.** What init found: how many packages to declare and how many come from the AUR, config files, user accounts and Flatpak apps. Nothing to answer.
 
-2. **Config.** `Where should the config live?` is `/etc/archix` by default, but any directory works, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. When git is installed, `Make it a git repository` runs `git init` and `git add`; nothing is committed.
+2. **Config.** `Where should the config live?` shows `/etc/archix (default)` until you type something else. Any directory works, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. When git is installed, `Make it a git repository` is on, and init runs `git init` and `git add -A` in the config directory; nothing is committed.
 
 3. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR are left alone, in `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. `Later, when you install something with plain pacman or yay` sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, there are also review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at. Apps installed with `--user` are left out, and so are apps whose remote is gone, with a `!` line. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
 
-4. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999), each listed with uid, shell and groups, declared with their real groups, shell, home and description so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset, each listed as `on` or `off`. Nothing to answer; this step shows what gets taken over.
+4. **System.** Four checklists of what init takes over as it is, all ticked: `Settings` (hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now), `Users` (regular users, uid 1000 to 59999, each with uid, shell and groups, declared with their real groups, shell, home and description so declaring them changes nothing), `Groups` (regular groups, with their gid) and `Services that differ from their preset` (each `enabled` or `disabled`). Untick anything archix should leave alone; it isn't declared. Passwords stay where they are; archix never manages them.
 
-5. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never listed or copied, only counted. The rest is one scrollable checklist, each file tagged with why it's there: `recommended`, then `changed from its package's version` or `not from any package`. Recommended files, such as `/etc/fstab` and anything hand-written, start ticked; the others are mostly changed by package install scripts. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
+5. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never listed or copied, only counted: `· 3 files that hold secrets stay out of the config and aren't listed`. The rest is one scrollable checklist, each file tagged with why it's there: `recommended`, then `changed from its package's version` or `not from any package`. Recommended files, such as `/etc/fstab` and anything hand-written, start ticked; the others are mostly changed by package install scripts. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
 
 6. **Boot.** On a btrfs root, `Snapshot / before every switch, as an extra recovery point`. If systemd-boot is installed and your kernel command line has `root=`, the step shows the command line and offers `Write a boot entry for each generation`.
 
-7. **Generations.** `Generations gc always keeps` (10) and `…and any younger than this many days` (30). Both have to be whole numbers.
+7. **Generations.** `Generations gc always keeps`, shown as `10 (default)`, and `…and any younger than this many days`, shown as `30 (default)`. Leave them empty for the defaults; anything you type has to be a whole number.
 
-8. **Dotfiles.** Opt-in. Pick a user if there's more than one, then tick entries from `~/.config` and top-level dotfiles; nothing is ticked by default. They're copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
+8. **Dotfiles.** Pick a user if there's more than one, then choose entries from `~/.config` and top-level dotfiles. Recommended ones, such as your shell's rc files, `.gitconfig`, and editor, terminal and window manager configs, start ticked; untick everything to bring in none. Caches, browsers and app state aren't offered, and credentials such as `~/.ssh` are only counted. Ticked entries are copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
 
-9. **Review.** Everything init will write, one line each: the config location, packages, undeclared and unused packages, Flatpak apps, accounts, services, config files, boot, snapshots, generations and dotfiles. `Write the config ›` writes it.
+9. **Review.** Everything init will write, one line each: the config location, packages, undeclared and unused packages, Flatpak apps, accounts, services (`3 of 4` when you unticked one), config files, boot, snapshots, generations and dotfiles. `Write the config ›` writes it.
 
 </Steps>
 
@@ -113,7 +113,7 @@ Then the wizard closes, and init prints the rest in the terminal. With AUR revie
   Next: look it over, then run sudo archix switch
 ```
 
-For scripts, `sudo archix init --defaults` takes every recommended answer without opening the wizard, so it needs no terminal. It ticks the recommended config files, brings in no dotfiles and doesn't make a git repository, and prints what it captured in Packages, System, Config files, Boot and Generations sections before the same Lock and Result. The config files you didn't get are counted, so you can run the wizard later to pick them.
+For scripts, `sudo archix init --defaults` takes every recommended answer without opening the wizard, so it needs no terminal. It ticks the recommended config files, makes the config directory a git repository when git is installed, and prints what it captured in Packages, System, Config files, Boot and Generations sections before the same Lock and Result. The config files you didn't get are counted, so you can run the wizard later to pick them.
 
 There are two exceptions to an empty Result. Dotfiles you imported are listed, because the first switch backs up the originals and replaces them with links into the config. And if you let archix write boot entries, it declares the boot tooling it needs, `mkinitcpio` and `systemd-ukify`, so the Result lists them as installs if they're missing. Either way, the section starts with `! the first switch would still change these:`.
 
@@ -198,7 +198,7 @@ firefox = { version = "144.0-1", repo = "extra", file = "firefox-144.0-1-x86_64.
 "org.mozilla.firefox" = { remote = "flathub", ref = "app/org.mozilla.firefox/x86_64/stable", commit = "0bb3a9e40c1f8d2e4b6a7c9d1e3f5a7b9c0d2e4f6a8b1c3d5e7f9a0b2c4d6e8f" }
 ```
 
-git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If you said yes to git, `init` already ran `git init` and `git add`, so commit now, from the config directory (with `sudo` if it's the root-owned `/etc/archix`):
+git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If git is installed and you left `Make it a git repository` on, `init` already ran `git init` and `git add -A`, so commit now, from the config directory (with `sudo` if it's the root-owned `/etc/archix`):
 
 ```console
 $ git add -A && git commit -m "Capture desktop with archix init"

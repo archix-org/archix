@@ -39,7 +39,7 @@ Write a config that describes this machine as it is, and a lock pinned to exactl
 $ sudo archix init
 ```
 
-`init` opens a full-screen wizard with nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which config files to manage (a checklist, each file tagged `recommended`, `changed from its package's version` or `not from any package`), whether to write boot entries, how many generations to keep, and which dotfiles to bring in. Every answer starts at the recommended one.
+`init` opens a full-screen wizard with nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which settings, users, groups and services to take over (four checklists, all ticked), which config files to manage (a checklist, each file tagged `recommended`, `changed from its package's version` or `not from any package`), whether to write boot entries, how many generations to keep, and which dotfiles to bring in (recommended ones start ticked). Every answer starts at the recommended one.
 
 Focus moves one line at a time, over every option, setting, text field, checklist entry and button; `›` marks it.
 
@@ -51,10 +51,10 @@ Focus moves one line at a time, over every option, setting, text field, checklis
 | `End` | Focus the `Next` button. |
 | `esc` | Previous step (while editing a text field, put the old value back instead). |
 | `a`, `n` | Select all or none in a checklist. |
-| `r` | Reset the config files to the recommended ones. |
+| `r` | Reset a checklist to its recommended entries. |
 | `q`, `ctrl-c` | Quit without writing anything. |
 
-Text fields are edited in place: `enter` starts editing, `enter` keeps the value and `esc` puts the old one back, and only while editing do typed keys go into the field. The config location must be an absolute path and the generation limits whole numbers, or `Next` and `→` refuse to leave the step. Steps with nothing to answer start on `Next`, and `↑` `↓` scroll them. Quitting prints `init was cancelled; nothing was written`.
+Text fields start empty and show their default in gray, `/etc/archix (default)`, `10 (default)` and `30 (default)`; left empty, the default applies. They're edited in place: `enter` starts editing, `enter` keeps the value and `esc` puts the old one back, and only while editing do typed keys go into the field. A typed config location must be an absolute path and typed generation limits whole numbers, or `Next` and `→` refuse to leave the step. Steps with nothing to answer, Welcome and Review, start on `Next`, and `↑` `↓` scroll them; the others start on their first field. Quitting prints `init was cancelled; nothing was written`.
 
 Nothing is written until `Write the config ›` on Review. Then the wizard closes, and init writes the config and the lock and shows what the first switch would change:
 
@@ -82,7 +82,7 @@ System-wide Flatpak apps are declared too, each locked to the commit it's instal
 
 | Flag | Description |
 | --- | --- |
-| `--defaults` | Take every recommended answer without opening the wizard: the recommended config files, no dotfiles, no git. It needs no terminal, and prints what it captured in Packages, System, Config files, Boot and Generations sections before Lock and Result. Config files lists the recommended files it chose, then `· N more files left unmanaged; the wizard (archix init without --defaults) lets you pick them`. Its output includes `! their remote is gone, so archix leaves these Flatpak apps alone: ...` when that applies. Without it, `init` needs a terminal: `` `archix init` asks questions; run it in a terminal, or pass --defaults to take every default ``. |
+| `--defaults` | Take every recommended answer without opening the wizard: everything in System, the recommended config files, and a git repository (`git init`, `git add -A`) when git is installed. It needs no terminal, and prints what it captured in Packages, System, Config files, Boot and Generations sections before Lock and Result. Config files lists the recommended files it chose, then `· N more files left unmanaged; the wizard (archix init without --defaults) lets you pick them`. Its output includes `! their remote is gone, so archix leaves these Flatpak apps alone: ...` when that applies. Without it, `init` needs a terminal: `` `archix init` asks questions; run it in a terminal, or pass --defaults to take every default ``. |
 
 `init` refuses to run if the config directory already has an `init.lua`.
 

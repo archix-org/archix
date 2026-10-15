@@ -258,7 +258,14 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 
 ## Bringing your existing dotfiles in
 
-`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it. In the wizard's Dotfiles step, pick the user under `Whose dotfiles` if init captured more than one, then tick entries in `Dotfiles to bring in` with `space`; nothing is ticked by default. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
+`archix init` can import the dotfiles you already have. In the wizard's Dotfiles step, pick the user under `Whose dotfiles` if init captured more than one, then choose entries in `Dotfiles to bring in`. It looks at each entry in `~/.config` and the top-level dotfiles in the home:
+
+- **Recommended** entries start ticked and are tagged `recommended`: shell rc files such as `.bashrc` and `.zshrc`, `.gitconfig` and `.config/git`, editors such as `nvim` and `helix`, terminals (`kitty`, `alacritty`, `foot`, `wezterm`, `ghostty`), window managers, bars and launchers (`hypr`, `sway`, `i3`, `niri`, `waybar`, `rofi` and similar), tools such as `btop` and `fastfetch`, and `mimeapps.list` and `user-dirs.dirs`.
+- **Everything else** is offered unticked, such as most KDE `*rc` files.
+- **Caches and app state** aren't offered: `.cache`, `.local`, toolchains such as `.cargo` and `.rustup`, browsers, IDEs, chat apps and shell histories.
+- **Credentials** are never offered, only counted: `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.cloudflared`, `.config/gh`, password stores, `.claude.json`, `.config/sunshine` and anything else that looks like a secret. The step says so: `· 1 entry that holds a secret stays out of the config and isn't listed`, or `· 4 entries that hold secrets stay out of the config and aren't listed`.
+
+`space` or `enter` toggles an entry, `a` and `n` select all or none, and `r` goes back to the recommended ones. The full lists are in [`src/capture.json`](https://github.com/archix-org/archix/blob/main/src/capture.json).
 
 Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
 
