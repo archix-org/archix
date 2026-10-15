@@ -164,8 +164,14 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             esp: declared.boot.as_ref().map(|boot| boot.esp.clone()),
             boot: declared.boot.as_ref().map(|boot| {
                 format!(
-                    "{} {} {:?} {:?} {:?} {}",
-                    boot.kernel, boot.cmdline, boot.microcode, boot.secure_boot, boot.entries, boot.esp
+                    "{} {} {:?} {:?} {:?} {}{}",
+                    boot.kernel,
+                    boot.cmdline,
+                    boot.microcode,
+                    boot.secure_boot,
+                    boot.entries,
+                    boot.esp,
+                    if boot.protected_entry { " protected" } else { "" }
                 )
             }),
         },
@@ -238,6 +244,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         println!("boot entry for the new generation");
     }
     print_hooks(&system_change);
+    if let Some(boot) = &declared.boot {
+        system::boot::check_signing(boot.secure_boot)?;
+    }
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
         noconfirm,
@@ -338,6 +347,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             cmdline: boot.cmdline.clone(),
             keep: boot.entries,
             secure_boot: boot.secure_boot,
+            anticheat: boot.protected_entry,
         });
     }
     if declared.snapshots && snapshot::root_is_btrfs() {

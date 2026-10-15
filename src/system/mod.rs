@@ -5,6 +5,7 @@ pub mod hooks;
 pub mod rescue;
 pub mod restart;
 pub mod running;
+pub mod secureboot;
 pub mod snapshot;
 
 use std::collections::BTreeMap;

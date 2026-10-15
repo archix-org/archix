@@ -19,6 +19,17 @@ pub struct BootPlan {
     pub cmdline: String,
     pub keep: u32,
     pub secure_boot: Option<bool>,
+    /// Also write a protected entry with the command line Easy Anti-Cheat Linux v2 asks for.
+    #[serde(default)]
+    pub anticheat: bool,
+}
+
+/// The entries one generation gets: the normal one, a rescue twin and a protected twin.
+#[derive(Clone, Copy, PartialEq)]
+enum Variant {
+    Normal,
+    Rescue,
+    Protected,
 }
 
 pub const MODULES: &str = "/usr/lib/modules";
@@ -108,15 +119,15 @@ fn linux_dir(esp: &str) -> PathBuf {
     Path::new(esp).join("EFI/Linux")
 }
 
-fn entry_name(generation: u32, rescue: bool) -> String {
-    if rescue {
-        format!("archix-{generation}-rescue.efi")
-    } else {
-        format!("archix-{generation}.efi")
+fn entry_name(generation: u32, variant: Variant) -> String {
+    match variant {
+        Variant::Normal => format!("archix-{generation}.efi"),
+        Variant::Rescue => format!("archix-{generation}-rescue.efi"),
+        Variant::Protected => format!("archix-{generation}-protected.efi"),
     }
 }
 
-/// The generations that have a boot entry on the ESP, with whether it's a rescue entry.
+/// The generations that have a boot entry on the ESP, with whether it's an extra (rescue or protected) entry.
 pub fn entries(esp: &str) -> Vec<(u32, bool, PathBuf)> {
     let mut found = Vec::new();
     for entry in fs::read_dir(linux_dir(esp)).into_iter().flatten().flatten() {
@@ -124,7 +135,7 @@ pub fn entries(esp: &str) -> Vec<(u32, bool, PathBuf)> {
         let Some(stem) = name.strip_prefix("archix-").and_then(|n| n.strip_suffix(".efi")) else {
             continue;
         };
-        let (number, rescue) = match stem.strip_suffix("-rescue") {
+        let (number, rescue) = match stem.strip_suffix("-rescue").or_else(|| stem.strip_suffix("-protected")) {
             Some(number) => (number, true),
             None => (stem, false),
         };
@@ -213,11 +224,15 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     let secure_boot = plan.secure_boot.unwrap_or_else(sbctl_has_keys);
     let rescue_hook = Path::new("/etc/initcpio/install/archix-rescue").exists();
     let mut built = Vec::new();
-    for rescue in [false, true] {
-        if rescue && !rescue_hook {
+    for variant in [Variant::Normal, Variant::Rescue, Variant::Protected] {
+        if (variant == Variant::Rescue && !rescue_hook) || (variant == Variant::Protected && !plan.anticheat) {
             continue;
         }
-        let title = if rescue { "archix rescue" } else { "archix" };
+        let title = match variant {
+            Variant::Normal => "archix",
+            Variant::Rescue => "archix rescue",
+            Variant::Protected => "archix protected",
+        };
         let mut text = release.clone();
         text.push(format!(
             "PRETTY_NAME=\"Arch Linux ({title}, generation {})\"",
@@ -225,13 +240,18 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         ));
         text.push("IMAGE_ID=archix".to_string());
         text.push(format!("IMAGE_VERSION={}", plan.generation));
-        let release_file = work.join(if rescue { "os-release-rescue" } else { "os-release" });
+        let release_file = work.join(format!("os-release-{title}").replace(' ', "-"));
         fs::write(&release_file, text.join("\n") + "\n")?;
         let mut cmdline = format!("{} archix.generation={}", plan.cmdline.trim(), plan.generation);
-        if rescue {
-            cmdline.push_str(" archix.rescue");
+        match variant {
+            Variant::Rescue => cmdline.push_str(" archix.rescue"),
+            Variant::Protected => {
+                cmdline.push(' ');
+                cmdline.push_str(super::secureboot::ANTICHEAT_CMDLINE);
+            }
+            Variant::Normal => {}
         }
-        let output = work.join(entry_name(plan.generation, rescue));
+        let output = work.join(entry_name(plan.generation, variant));
         let mut ukify = Command::new("ukify");
         ukify
             .arg("build")
@@ -254,7 +274,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
                 "sbctl sign",
             )?;
         }
-        built.push((rescue, output));
+        built.push((variant, output));
     }
     if secure_boot {
         for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
@@ -271,6 +291,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         }
     }
 
+    refuse_unsigned(plan, &built)?;
     let dir = linux_dir(&plan.esp);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut keep: Vec<u32> = entries(&plan.esp)
@@ -303,14 +324,59 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             None => bail!("the ESP at {} has no room for a boot entry", plan.esp),
         }
     }
-    for (rescue, path) in built {
-        let dest = dir.join(entry_name(plan.generation, rescue));
-        let tmp = dir.join(format!(".{}.tmp", entry_name(plan.generation, rescue)));
+    for (variant, path) in built {
+        let dest = dir.join(entry_name(plan.generation, variant));
+        let tmp = dir.join(format!(".{}.tmp", entry_name(plan.generation, variant)));
         fs::copy(&path, &tmp).with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, &dest)?;
     }
     let _ = fs::remove_dir_all(&work);
     Ok(version)
+}
+
+/// Checked before a switch changes anything: with Secure Boot enforcing, entries archix won't sign could never boot.
+pub fn check_signing(secure_boot: Option<bool>) -> Result<()> {
+    let enforcing = super::secureboot::Machine::new()
+        .state()
+        .is_some_and(|state| state.enabled && !state.setup_mode);
+    if enforcing && !secure_boot.unwrap_or_else(sbctl_has_keys) && super::secureboot::in_chroot() {
+        eprintln!(
+            "warning: this host's Secure Boot is on and the boot entry won't be signed; ignored, since this runs in a chroot"
+        );
+    } else if enforcing && !secure_boot.unwrap_or_else(sbctl_has_keys) {
+        bail!(
+            "Secure Boot is on, but this switch's boot entry wouldn't be signed ({}), so the firmware would refuse it; nothing was changed. Run `sudo archix secure-boot setup`, or set boot.secure_boot = true if sbctl already has keys",
+            if secure_boot == Some(false) {
+                "boot.secure_boot = false"
+            } else {
+                "sbctl has no keys"
+            }
+        );
+    }
+    Ok(())
+}
+
+/// With Secure Boot enforcing, an unsigned entry or loader would leave the new default unbootable, so it fails the switch before anything moves.
+fn refuse_unsigned(plan: &BootPlan, built: &[(Variant, PathBuf)]) -> Result<()> {
+    let Some(state) = super::secureboot::Machine::new().state() else {
+        return Ok(());
+    };
+    if !state.enabled || state.setup_mode || super::secureboot::in_chroot() {
+        return Ok(());
+    }
+    let loaders = ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"]
+        .iter()
+        .map(|loader| Path::new(&plan.esp).join(loader))
+        .filter(|path| path.exists());
+    for path in built.iter().map(|(_, path)| path.clone()).chain(loaders) {
+        if !super::secureboot::is_signed(&path)? {
+            bail!(
+                "Secure Boot is on, but {} isn't signed, so the firmware would refuse it; nothing was moved. Run `sudo archix secure-boot setup` (or set boot.secure_boot = true if sbctl already has keys)",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The value of `archix.generation=` on a kernel command line.

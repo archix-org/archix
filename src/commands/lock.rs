@@ -205,6 +205,16 @@ pub fn status(target: &Target) -> Result<()> {
         }
         None => println!("no generation yet; `archix switch` creates the first one"),
     }
+    if let Some(state) = archix::system::secureboot::Machine::new().state() {
+        println!(
+            "Secure Boot: {}",
+            match (state.enabled, state.setup_mode) {
+                (_, true) => "setup mode (no keys enrolled; `sudo archix secure-boot setup` enrolls them)",
+                (true, false) => "on",
+                (false, false) => "off",
+            }
+        );
+    }
     let outside = integration::outside_changes(&paths)?;
     if !outside.is_empty() {
         let packages: BTreeSet<&String> = outside.iter().flat_map(|change| &change.packages).collect();

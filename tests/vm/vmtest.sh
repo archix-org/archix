@@ -26,9 +26,8 @@ case $stage in
     [ "$(current)" = 1 ] || fail "booting generation 1's entry should make it current"
     pacman -Q tree > /dev/null 2>&1 && fail "the rollback at boot should have removed tree"
     say "PASS: booting an older entry rolled the system back to it"
-    sbctl create-keys > /dev/console 2>&1 || fail "sbctl create-keys"
-    sbctl enroll-keys --yes-this-might-brick-my-machine > /dev/console 2>&1 || fail "sbctl enroll-keys"
-    sed -i 's|esp = "/boot" }|esp = "/boot", secure_boot = true }|' "$config"
+    archix secure-boot setup > /dev/console 2>&1 || fail "archix secure-boot setup"
+    sed -i 's|esp = "/boot" }|esp = "/boot", secure_boot = true, protected_entry = true }|' "$config"
     archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch with Secure Boot"
     echo 3 > "$state/stage"
     systemctl reboot
@@ -36,6 +35,17 @@ case $stage in
   3)
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
     say "PASS: booted a signed entry with Secure Boot enforcing"
+    archix secure-boot check > /dev/console 2>&1 || fail "secure-boot check should pass"
+    archix secure-boot check --anticheat > /dev/console 2>&1 && fail "the anti-cheat check can't pass with a self-signed kernel"
+    [ -f "/boot/EFI/Linux/archix-$(current)-protected.efi" ] || fail "protected_entry should write a protected entry"
+    sed -i 's|secure_boot = true|secure_boot = false|' "$config"
+    before=$(current)
+    archix --host archix-vm install jq --noconfirm > /dev/console 2>&1 && fail "an unsigned switch must be refused under Secure Boot"
+    [ "$(current)" = "$before" ] || fail "the refused switch changed the current generation"
+    [ -e /var/lib/archix/journal.json ] && fail "the refused switch left a journal"
+    pacman -Q jq > /dev/null 2>&1 && fail "the refused switch installed jq"
+    sed -i 's|secure_boot = false|secure_boot = true|' "$config"
+    say "PASS: secure-boot setup, check, the protected entry, and refusing unsigned entries"
     rm -f /usr/lib/libalpm.so*
     pacman -V > /dev/null 2>&1 && fail "pacman should be broken now"
     bootctl set-oneshot "archix-$(current)-rescue.efi" || fail "bootctl set-oneshot rescue"

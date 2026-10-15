@@ -178,9 +178,28 @@ enum Command {
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+    /// Set up and check Secure Boot
+    #[command(subcommand)]
+    SecureBoot(SecureBoot),
     /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
     #[command(external_subcommand)]
     Pick(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum SecureBoot {
+    /// Create sbctl keys if needed and enroll them, with Microsoft's, while the firmware is in setup mode
+    Setup {
+        /// Leave Microsoft's keys out; GPU option ROMs and Windows may then fail to start, and some boards won't boot at all
+        #[arg(long)]
+        no_microsoft: bool,
+    },
+    /// Show whether Secure Boot is on and keys are enrolled
+    Check {
+        /// Also check what Easy Anti-Cheat Linux v2 requires of the boot
+        #[arg(long)]
+        anticheat: bool,
+    },
 }
 
 /// Turns pacman-style `-S` operations into the native command they mean.
@@ -276,6 +295,17 @@ fn run() -> Result<ExitCode> {
         Command::BootCheck { cmdline } => {
             commands::boot_check(cmdline)?;
             return Ok(ExitCode::SUCCESS);
+        }
+        Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
+            commands::secure_boot_setup(!no_microsoft)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::SecureBoot(SecureBoot::Check { anticheat }) => {
+            return Ok(if commands::secure_boot_check(anticheat) {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            });
         }
         _ => {}
     }
@@ -412,6 +442,7 @@ fn run() -> Result<ExitCode> {
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
+        | Command::SecureBoot(_)
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }

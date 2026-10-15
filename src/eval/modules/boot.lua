@@ -25,6 +25,11 @@ return {
         default = archix.null,
         description = "Sign boot entries with sbctl; by default, whenever sbctl has keys.",
       },
+      protected_entry = archix.option {
+        type = t.bool,
+        default = false,
+        description = "Also write an 'archix protected' entry for the newest generations with the kernel command line Easy Anti-Cheat Linux v2 asks for (integrity lockdown, kexec off, the BPF LSM, IOMMU without passthrough). It can't make the kernel well-known-signed; `archix secure-boot check --anticheat` shows what's still missing.",
+      },
       snapshots = archix.option {
         type = t.bool,
         default = true,

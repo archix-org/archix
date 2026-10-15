@@ -33,6 +33,33 @@ pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, up
 pub use init::init;
 pub use lock::{diff, lock, status};
 pub use recover::recover;
+
+/// `archix secure-boot setup`.
+pub fn secure_boot_setup(microsoft: bool) -> Result<()> {
+    require_root("secure-boot setup")?;
+    if !microsoft {
+        eprintln!(
+            "warning: without Microsoft's keys, GPU option ROMs and Windows may fail to start, and some boards won't boot at all"
+        );
+    }
+    archix::system::secureboot::setup(microsoft)
+}
+
+/// `archix secure-boot check`; true when everything checked is met.
+pub fn secure_boot_check(anticheat: bool) -> bool {
+    let lines = archix::system::secureboot::Machine::new().check(anticheat);
+    for (ok, line) in &lines {
+        println!("{} {line}", if *ok { "  ok " } else { "  no " });
+    }
+    let missing = lines.iter().filter(|(ok, _)| !ok).count();
+    if anticheat && missing > 0 {
+        println!(
+            "Easy Anti-Cheat Linux v2 would refuse this boot: {}",
+            count(missing, "requirement isn't met", "requirements aren't met")
+        );
+    }
+    missing == 0
+}
 pub use switch::{boot_check, declare_and_switch, gc, generations, hook_record, rescue, rollback, switch};
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
@@ -88,6 +115,7 @@ struct BootSettings {
     entries: u32,
     secure_boot: Option<bool>,
     cmdline: String,
+    protected_entry: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -252,6 +280,7 @@ fn declared(config: &Value) -> Result<Declared> {
                         _ => None,
                     },
                     cmdline: params.join(" "),
+                    protected_entry: boot.get("protected_entry") == Some(&Value::Bool(true)),
                 })
             }
             _ => None,
