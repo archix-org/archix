@@ -248,13 +248,13 @@ fn pairs_iterates_in_sorted_order() {
         local t = archix.types
         return {
           options = {
-            users = archix.option { type = t.attrs_of(t.int), default = {} },
+            people = archix.option { type = t.attrs_of(t.int), default = {} },
             names = archix.option { type = t.list_of(t.str), default = {} },
           },
           config = function(cfg)
             local names = {}
-            for name in pairs(cfg.users) do names[#names + 1] = name end
-            return { users = { zed = 1, amy = 2, kim = 3 }, names = names }
+            for name in pairs(cfg.people) do names[#names + 1] = name end
+            return { people = { zed = 1, amy = 2, kim = 3 }, names = names }
           end,
         }"#,
     )]);
