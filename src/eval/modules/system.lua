@@ -38,7 +38,7 @@ return {
     files = archix.option {
       type = t.attrs_of(text_file),
       default = {},
-      description = "Files archix writes, keyed by absolute path; give one of text, source, link or url. Files archix replaces are backed up and restored when they leave the config.",
+      description = "Files archix writes, keyed by absolute path; give one of text, source, link, url or merge. Files archix replaces are backed up and restored when they leave the config.",
     },
     mutable_files = archix.option {
       type = t.bool,

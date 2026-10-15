@@ -383,6 +383,15 @@ fn usermod(name: &str, user: &User) -> Command {
 /// Refuses, before anything changes, managed files that would replace something archix can't safely back up.
 pub fn check(paths: &Paths, change: &SystemChange) -> Result<()> {
     let backups = paths.state.join("backups");
+    for (path, want) in &change.to.files {
+        if let Some(merge) = &want.merge
+            && let Ok(text) = fs::read_to_string(path)
+        {
+            merge
+                .apply(&text)
+                .with_context(|| format!("{path} can't take its merged keys; nothing was changed"))?;
+        }
+    }
     for path in change.to.files.keys() {
         let target = Path::new(path);
         if on_disk(target)? != OnDisk::Other {

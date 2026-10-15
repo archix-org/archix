@@ -21,7 +21,7 @@ impl Merge {
                 let mut current: Value = if text.trim().is_empty() {
                     Value::Object(Default::default())
                 } else {
-                    serde_json::from_str(text).context("the file isn't valid JSON")?
+                    serde_json::from_str(&strip_jsonc(text)).context("the file isn't valid JSON or JSONC")?
                 };
                 deep_merge(&mut current, &self.values);
                 Ok(serde_json::to_string_pretty(&current)? + "\n")
@@ -50,7 +50,7 @@ impl Merge {
     /// Whether `text` already has every declared key at its declared value; JSON is compared by value, not layout.
     pub fn satisfied(&self, text: &str) -> bool {
         match self.format.as_str() {
-            "json" => serde_json::from_str::<Value>(text).is_ok_and(|current| {
+            "json" => serde_json::from_str::<Value>(&strip_jsonc(text)).is_ok_and(|current| {
                 self.apply(text)
                     .ok()
                     .and_then(|t| serde_json::from_str::<Value>(&t).ok())
@@ -61,6 +61,50 @@ impl Merge {
                 .is_ok_and(|merged| merged.trim_end() == text.trim_end()),
         }
     }
+}
+
+/// JSONC (VS Code's settings, waybar's config) as plain JSON: comments and trailing commas removed; strings are left alone.
+fn strip_jsonc(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let (mut i, mut in_string) = (0, false);
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 1;
+            } else if c == '"' {
+                in_string = false;
+            }
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        } else if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        } else if c == ','
+            && chars[i + 1..]
+                .iter()
+                .find(|n| !n.is_whitespace())
+                .is_some_and(|n| *n == '}' || *n == ']')
+        {
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
 }
 
 fn deep_merge(into: &mut Value, from: &Value) {
@@ -233,5 +277,16 @@ mod tests {
         );
         let rewritten = "{\"theme\":\"dank\",\"other\":1,\"bar\":{\"height\":30,\"position\":\"top\"}}";
         assert!(m.satisfied(rewritten), "the app's own formatting isn't drift");
+    }
+
+    #[test]
+    fn jsonc_comments_and_trailing_commas_are_read() {
+        let m = merge("json", json!({ "editor.fontSize": 14 }));
+        let file = "{\n  // the editor\n  \"editor.tabSize\": 2, /* two */\n  \"url\": \"https://x//y\",\n}\n";
+        let value: Value = serde_json::from_str(&m.apply(file).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            json!({ "editor.tabSize": 2, "url": "https://x//y", "editor.fontSize": 14 })
+        );
     }
 }
