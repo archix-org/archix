@@ -35,7 +35,7 @@ The layout follows neovim: an entry point at the top, and modules under `lua/`.
 
 - `init.lua` is the entry point. It usually does nothing but import other modules.
 - `lua/hosts/<host>/init.lua`, or just `lua/hosts/<host>.lua`, holds what's specific to one machine. `archix init` writes the directory form.
-- `lua/hosts/<host>/installed.lua` belongs to archix: `archix install` and `archix remove` edit it, and archix imports it automatically when it exists. See [pacman and yay](/docs/concepts/pacman-and-yay/#installedlua).
+- `lua/hosts/<host>/installed.lua` lists the host's packages. Edit it freely; `archix install` and `archix remove` edit it too, and archix imports it automatically when it exists. See [pacman and yay](/docs/concepts/pacman-and-yay/#installedlua).
 - `lua/modules/...` holds what you share between machines.
 - `files/` holds files that options such as `files` and `home.files` copy with `source`. `archix init` puts the `/etc` files it captures under `files/<host>/`, and the dotfiles you let it import under `home/`.
 - `archix.lock` is generated. Commit it next to `init.lua`.

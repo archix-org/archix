@@ -39,6 +39,7 @@ It works through the system one section at a time. `✓` lines are what it captu
 ✔ Later, when you install something with plain pacman or yay · switch offers to declare it, and removes it if you say no (recommended)
 ✔ Show each AUR build recipe and ask before trusting it? · yes
 ✔ If a locked AUR version can't be built any more · ask, defaulting to the nearest newer version (recommended)
+  ✓ 2 Flatpak apps, locked to their installed commits
 
 ── System ──────────────────────────────────────
   ✓ hostname desktop, timezone Europe/Berlin
@@ -91,7 +92,7 @@ What each section does:
 
 1. **Config.** The config can live in `/etc/archix` or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Making it a git repository runs `git init` and `git add`; nothing is committed.
 
-2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions).
+2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at; apps installed with `--user` are left out. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
 
 3. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999) with their real groups, shell, home and description, so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset.
 
@@ -145,6 +146,7 @@ return {
   timezone = "Europe/Berlin",
   repos = { "core", "extra", "multilib" },
   ignored_packages = { "nvidia-dkms-custom" },
+  flatpak = { apps = { "com.spotify.Client", "org.mozilla.firefox" } },
   users = {
     me = { uid = 1000, groups = { "wheel" }, shell = "/usr/bin/zsh", description = "Me" },
   },
@@ -159,9 +161,21 @@ return {
 }
 ```
 
-Your explicitly installed packages, from the repos and the AUR, are in `installed.lua`. The file is yours to edit freely; `archix install` and `archix remove` add and remove names there too. Dependencies aren't listed; the lock records them.
+Your explicitly installed packages, from the repos and the AUR, are in `installed.lua`. The file is yours to edit freely; `archix install` and `archix remove` add and remove names there too, as its first line says. Dependencies aren't listed; the lock records them.
 
-`archix.lock` holds the snapshot date and every package's exact version. Packages that didn't match the snapshot are listed under `pinned`:
+```lua title="lua/hosts/desktop/installed.lua"
+-- This host's packages. Edit freely; `archix install` and `archix remove` add and remove names here too.
+return {
+  packages = {
+    "base",
+    "firefox",
+    "linux",
+    -- ...
+  },
+}
+```
+
+`archix.lock` holds the snapshot date and every package's exact version. Packages that didn't match the snapshot are listed under `pinned`, and Flatpak apps get their own table with the commit each is installed at:
 
 ```toml title="archix.lock"
 [hosts.desktop]
@@ -173,6 +187,10 @@ pinned = ["mesa"]
 [hosts.desktop.packages]
 firefox = { version = "144.0-1", repo = "extra", file = "firefox-144.0-1-x86_64.pkg.tar.zst", sha256 = "37895f9d195203f4981ee730bec23c4079d10b5b53fc2c3e69db37c1bfed1257", explicit = true }
 # ...
+
+[hosts.desktop.flatpak]
+"com.spotify.Client" = { remote = "flathub", ref = "app/com.spotify.Client/x86_64/stable", commit = "5f8806197a2b3c4d6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9012a3b4c5d6e" }
+"org.mozilla.firefox" = { remote = "flathub", ref = "app/org.mozilla.firefox/x86_64/stable", commit = "0bb3a9e40c1f8d2e4b6a7c9d1e3f5a7b9c0d2e4f6a8b1c3d5e7f9a0b2c4d6e8f" }
 ```
 
 git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If you said yes to git, `init` already ran `git init` and `git add`, so commit now, from the config directory (with `sudo` if it's the root-owned `/etc/archix`):
@@ -186,7 +204,7 @@ $ git add -A && git commit -m "Capture desktop with archix init"
 ```console
 $ sudo archix switch
 boot entry for the new generation
-apply 1 changes? [Y/n]
+apply 1 change? [Y/n]
 :: installing packages
 ...
 :: writing the boot entry

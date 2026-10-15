@@ -17,12 +17,17 @@ The goal is simple: no failure during a switch, including pulling the power cord
 - resolves the lock with pacman itself, so dependencies are consistent, and shows new AUR build recipes for review,
 - offers to adopt packages that are newer than the lock,
 - lists the changes and asks you to confirm,
+- stores every managed file's contents, and downloads files declared with a `url`, checking each against its `sha256`,
 - builds every AUR package in a clean chroot,
 - downloads every package and checks it against the lock.
 
 If anything fails here, a typo, a network error, an AUR build that won't compile, a declined prompt, archix stops and the packages, files and services are exactly as they were. Most problems surface in this phase.
 
-Packages are downloaded to `/var/cache/archix/pkg`, and every file is checked against the `sha256` in the lock before it's used. Files already in pacman's own cache are reused. A file that doesn't match its checksum stops the switch here.
+Packages are downloaded to `/var/cache/archix/pkg`, and every file is checked against the `sha256` in the lock before it's used. Files already in pacman's own cache are reused. A file that doesn't match its checksum stops the switch here. The same goes for files declared with [`archix.fetchurl`](/docs/reference/lua-api/#archixfetchurl):
+
+```console
+error: https://downloads.example.org/hello/1.2.0/hello-x86_64 has sha256 0c1f3a5e7b9d2f4a6c8e0b1d3f5a7c9e2b4d6f8a0c1e3b5d7f9a2c4e6b8d0f1a, but the config says 5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+```
 
 **Apply** changes the system, in a fixed order of steps:
 
@@ -76,6 +81,7 @@ On btrfs, archix also takes a read-only snapshot of `/` right before apply. It's
 Everything archix manages on disk, from `files` and `units` to `sysctl`, `hostname`, `locales` and dotfiles, becomes a managed file. archix is careful never to lose a file it didn't write:
 
 - **A file archix replaces** is moved to `/var/lib/archix/backups/<path>` first. When the file leaves your config, the original comes back.
+- **A directory archix replaces** with a file or a link, such as an existing `~/.config/nvim` that a [live link](/docs/guides/dotfiles-and-apps/#live-links-for-app-written-configs) takes over, is moved to the same place, contents and all. When the entry leaves your config, the link goes and the directory comes back.
 - **A file archix takes over unchanged**, such as `/etc/fstab` after `archix init` captured it, is copied to the same place when archix first manages it. Unmanaging it later restores it instead of deleting it.
 - **A managed file you edited by hand** is saved to `/var/lib/archix/edited/<time>/<path>` before archix overwrites it, with a warning. `archix diff` flags it beforehand:
 
@@ -85,11 +91,13 @@ Everything archix manages on disk, from `files` and `units` to `sysctl`, `hostna
 
 - **A file archix created** is deleted when it leaves your config, but only if it still has the contents archix wrote.
 
+archix only replaces a directory it has never managed, and only once. It refuses when an earlier backup of that path still exists, `/home/me/.config/nvim is a directory and an earlier backup of it exists; move one of them away`, and when the path held something archix managed in the previous generation: `/home/me/.config/nvim exists and is not a file or symlink; archix won't replace it`. Both stop the switch at the file step, as a [hard failure](#hard-and-soft-failures), without touching the directory. Move the directory or the old backup aside, then finish with `sudo archix recover --continue`.
+
 Users and groups archix created are removed when they leave the config, and their home directories are kept. archix never touches passwords: a new user gets a hint instead, ``created user me; set a password with `passwd me` ``.
 
 archix is strict about what *it* manages, and only that. It doesn't revert changes to `/etc` files it never managed, and it doesn't disable services it never managed. Doing that blindly could, for example, delete users that packages create. `archix init` captures the files and services you'd changed, which makes them managed.
 
-Files archix takes over unchanged are backed up even when a switch has nothing else to do, as with the first switch after `archix init`, which usually prints only `switched to generation 1 (snapshot 2026-10-09); no package changes were needed`.
+Files archix takes over unchanged are backed up even when a switch has nothing else to do, as with the first switch after `archix init`, which usually prints only `switched to generation 1 (snapshot 2026-10-09); no package changes were needed`. Every switch that records a generation, that one included, also stores the contents of every file the generation manages in `/var/lib/archix/blobs`, so a later rollback to it never finds them missing.
 
 ### What init captures and never captures
 
@@ -116,7 +124,7 @@ Not every failure during apply means the same thing.
 error: installing packages failed; the switch is unfinished, run `archix recover`: pacman exited with exit status: 1
 ```
 
-**Soft failures** don't: a service that fails to start, or a reload such as `sysctl --system` that fails. The new generation becomes current, archix lists what failed and exits non-zero, like NixOS does. A broken unit is usually a config problem you fix and switch again, and undoing the whole generation for it would be worse.
+**Soft failures** don't: a service that fails to start, a reload such as `sysctl --system` that fails, or a Flatpak app that can't be installed, pinned or removed. Flatpak apps are synced after the new generation becomes current, outside the journal. The new generation becomes current, archix lists what failed and exits non-zero, like NixOS does. A broken unit is usually a config problem you fix and switch again, and undoing the whole generation for it would be worse.
 
 ```console
 :: enabling and starting services
@@ -125,7 +133,7 @@ error: installing packages failed; the switch is unfinished, run `archix recover
 :: making the new generation current
 switched to generation 43 (snapshot 2026-10-15)
 failed: systemctl enable --now nginx.service: Job for nginx.service failed because the control process exited with error code.
-error: the new generation is current, but 1 services or reloads failed (listed above)
+error: the new generation is current, but 1 service or reload failed (listed above)
 ```
 
 ## Unfinished switches

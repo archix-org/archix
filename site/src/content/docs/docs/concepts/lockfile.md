@@ -1,6 +1,6 @@
 ---
 title: The lockfile
-description: How archix.lock pins every package to an Arch Linux Archive snapshot, an AUR commit or a cached file, and how lock, update and missing versions work.
+description: How archix.lock pins every package to an Arch Linux Archive snapshot, an AUR commit or a cached file, and every Flatpak app to a commit, and how lock, update and missing versions work.
 sidebar:
   order: 2
 ---
@@ -55,6 +55,7 @@ Each package is one inline table on one line, sorted by name, so a lock diff in 
 | `base`, `commit` | For AUR packages: the package base and the git commit of its build recipe. |
 | `explicit` | Whether pacman marks it as explicitly installed or as a dependency. |
 | `build_only` | `true` for an AUR package that's only needed to build other AUR packages. It's built, but never installed. |
+| `flatpak` | One inline table per Flatpak app, with its remote, ref and commit. Only present when the host declares apps. See [Flatpak apps](#flatpak-apps-commits). |
 
 Every host can sit on a different date. The laptop doesn't have to update just because the desktop did.
 
@@ -83,7 +84,7 @@ Pins survive `archix lock` at the same date, so adding a package doesn't lose th
 
 `archix init` locks to exactly what's installed, so the first `archix diff` is empty. It starts from the newest build date among your installed official packages, then scores the sync databases of the days around it by how many installed versions they match, walking back and forth while the score improves. It keeps the best day. One partially upgraded package can't drag the whole system onto a later snapshot that way.
 
-Then it pins every installed version that differs from that snapshot, newer *or* older. AUR packages are locked to the commit whose recipe builds the installed version. If a pinned version can't be fetched, init warns and keeps the snapshot's version, which the first switch will then install.
+Then it pins every installed version that differs from that snapshot, newer *or* older. AUR packages are locked to the commit whose recipe builds the installed version. If a pinned version can't be fetched, init warns and keeps the snapshot's version, which the first switch will then install. System-wide Flatpak apps are locked to the commits they're installed at.
 
 ## AUR packages: commits
 
@@ -112,7 +113,7 @@ On the machine that made the lock, that's as solid as an ALA snapshot. On a fres
 
 ## `lock` and `update`
 
-Two commands write the lock. They differ in whether the snapshot date and the AUR commits move. Neither changes the system.
+Two commands write the lock. They differ in whether the snapshot date, the AUR commits and the Flatpak commits move. Neither changes the system.
 
 `archix lock` keeps the host's date and AUR commits, and resolves your current config against them. Use it after adding or removing packages. New packages come from the same day as everything else, so nothing else changes:
 
@@ -188,3 +189,35 @@ $ sudo archix switch --accept-nearest older
 `--accept-nearest` overrides the option. `--noconfirm` with neither takes the nearest newer version.
 
 Third-party repos have their own way out when a locked package is gone, the fallback chain; see [Third-party repos](/docs/guides/third-party-repos/#the-fallback-chain).
+
+## Flatpak apps: commits
+
+A Flatpak app is an OSTree commit on its remote, so archix locks it by commit. Hosts that declare [`flatpak.apps`](/docs/reference/options/#flatpakapps) get a `flatpak` table after their packages, one inline table per app, keyed by app id:
+
+```toml title="archix.lock"
+[hosts.desktop.flatpak]
+"com.spotify.Client" = { remote = "flathub", ref = "app/com.spotify.Client/x86_64/stable", commit = "5f8806197a2b3c4d6e8f0a1b2c3d4e5f60718293a4b5c6d7e8f9012a3b4c5d6e" }
+"org.mozilla.firefox" = { remote = "flathub", ref = "app/org.mozilla.firefox/x86_64/stable", commit = "0bb3a9e40c1f8d2e4b6a7c9d1e3f5a7b9c0d2e4f6a8b1c3d5e7f9a0b2c4d6e8f" }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `remote` | The remote the app comes from: `flatpak.remote`, or the one named in `remote:id`. |
+| `ref` | The app's full Flatpak ref: app id, architecture and branch. |
+| `commit` | The exact commit. `switch` installs the app and pins it there with `flatpak update --commit=`, even when the remote has something newer. |
+
+The commits move like AUR commits do:
+
+- `archix lock` keeps them, and locks a newly declared app to its remote's current commit.
+- `archix update` moves every app to its remote's current commit.
+- An app that leaves the config leaves the lock.
+
+`lock` and `update` ask the remote for the current commit through flatpak itself. When a lock is written before flatpak is installed, the app has no entry yet; the switch that installs flatpak locks it and writes it into `archix.lock`.
+
+Runtimes aren't locked. An app's runtime follows the branch the app's metadata asks for, at that branch's current commit when the app is installed or updated.
+
+Each generation records the commits it pinned, so [rollback](/docs/concepts/generations/#rolling-back-from-a-running-system) pins the older ones again. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
+
+## Fetched files: hashes
+
+Files declared with [`archix.fetchurl`](/docs/reference/lua-api/#archixfetchurl), AppImages included, don't appear in `archix.lock`. Their `sha256` is in your config, which is lock enough: a download that doesn't match is refused, and the contents are kept in archix's store with every generation that uses them.

@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-This page documents every option archix ships: packages and repositories, the AUR, third-party repos, generations, the system (files, users, services and more), booting, your home directory and the `programs.*` modules. Your installed archix is still the authoritative list, because `archix options` is generated from the declarations themselves, and it includes options your own modules declare.
+This page documents every option archix ships: packages and repositories, the AUR, third-party repos, generations, the system (files, users, services and more), booting, AppImages, Flatpak apps, your home directory and the `programs.*` modules. Your installed archix is still the authoritative list, because `archix options` is generated from the declarations themselves, and it includes options your own modules declare.
 
 All of these modules are built in and loaded before your `init.lua`. You never import them.
 
@@ -281,18 +281,22 @@ Every setting in this section renders to files archix manages. Their contents ar
 | Default | `{}` |
 | Declared in | `<archix>/system.lua` |
 
-Files archix writes, keyed by absolute path; give one of `text`, `source` or `link`. Files archix replaces are backed up and restored when they leave the config.
+Files archix writes, keyed by absolute path; give one of `text`, `source`, `link` or `url`. Files archix replaces are backed up and restored when they leave the config.
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `text` | `null or lines` | `null` | The file's contents. A final newline is added if missing. |
 | `source` | `null or str` | `null` | A file in the config directory to copy, as a path relative to it. |
 | `link` | `null or str` | `null` | Make the file a symlink to this target. |
+| `url` | `null or str` | `null` | Download the file from here; needs `sha256`. [`archix.fetchurl`](/docs/reference/lua-api/#archixfetchurl) builds both. |
+| `sha256` | `null or str` | `null` | The sha256 the download from `url` must have; [`archix prefetch <url>`](/docs/reference/cli/#prefetch) prints it. |
 | `mode` | `str` | `"0644"` | Octal permissions. |
 | `owner` | `str` | `"root"` | |
 | `group` | `str` | `"root"` | |
 
-Give exactly one of `text`, `source` and `link`. `text` is a `lines` value, so several modules can each add lines to the same file. A `source` path can't leave the config directory.
+Give exactly one of `text`, `source`, `link` and `url`. `text` is a `lines` value, so several modules can each add lines to the same file. A `source` path can't leave the config directory.
+
+A `url` needs a `sha256` of 64 hex digits; without one, `diff` and `switch` stop with `files.<path>: url needs sha256`. The hash is what's locked: `diff` compares the file on disk against it without downloading anything, and `switch` downloads the file after you confirm, before it changes anything. A download whose hash differs stops the switch: `<url> has sha256 <actual>, but the config says <sha256>`. The contents go into the same store as every other managed file, so rollback restores them even after the URL is gone.
 
 archix doesn't write under `/usr` (except `/usr/local`), `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/home` or `/boot`. Files in a home directory go in [`home.files`](#homefiles).
 
@@ -302,6 +306,11 @@ files = {
   ["/etc/sudoers.d/wheel"] = { text = "%wheel ALL=(ALL:ALL) ALL", mode = "0440" },
   ["/etc/X11/xorg.conf.d/30-touchpad.conf"] = { source = "files/30-touchpad.conf" },
   ["/etc/resolv.conf"] = { link = "/run/systemd/resolve/stub-resolv.conf" },
+  ["/usr/local/bin/hello"] = archix.fetchurl {
+    url = "https://downloads.example.org/hello/1.2.0/hello-x86_64",
+    sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+    mode = "0755",
+  },
 },
 ```
 
@@ -614,6 +623,106 @@ On a btrfs root, take a read-only snapshot of `/` before every switch.
 
 A snapshot is deleted along with its generation. It's a manual recovery point; booting an older generation works by reinstalling its packages, on any filesystem. This option applies whether or not `boot.loader` is set.
 
+## AppImages
+
+See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/) for a walkthrough.
+
+### `appimages`
+
+| | |
+| --- | --- |
+| Type | `attrs of submodule` |
+| Default | `{}` |
+| Declared in | `<archix>/appimages.lua` |
+
+AppImages to download, keyed by command name: installed to `/opt/archix/appimages`, linked into `/usr/local/bin` and added to app menus. Declares `fuse2`, which AppImages need.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `url` | `str` | *required* | Where to download the AppImage. |
+| `sha256` | `str` | *required* | Its sha256; `archix prefetch <url>` prints it. |
+| `name` | `null or str` | `null` | The name in app menus; the attribute name by default. |
+| `icon` | `null or str` | `null` | An icon name or path for the menu entry. |
+| `categories` | `list of str` | `[]` | Menu categories, such as `Office` or `Development`. |
+| `desktop` | `bool` | `true` | Add an entry to app menus. |
+
+Each entry becomes three managed files, so it's locked by its hash and rolls back like any other [`files`](#files) entry:
+
+| File | What it is |
+| --- | --- |
+| `/opt/archix/appimages/<name>.AppImage` | The download, mode `0755`. |
+| `/usr/local/bin/<name>` | A link to it, so `<name>` runs from your `PATH`. |
+| `/usr/local/share/applications/archix-<name>.desktop` | The menu entry, unless `desktop = false`. |
+
+The key has to be usable as a command name: letters, digits, `.`, `_` and `-`. Anything else is an error, such as `appimages: my app isn't a valid command name`.
+
+```lua
+appimages = {
+  obsidian = {
+    url = "https://example.org/releases/Obsidian-1.9.14.AppImage",
+    sha256 = "3b9f2c4e8a1d6f0b7c5e2a9d4f1b8c6e3a0d7f5b2c9e4a1d8f6b3c0e7a5d2f9b",
+    name = "Obsidian",
+    categories = { "Office" },
+  },
+},
+```
+
+## Flatpak
+
+archix installs Flatpak apps system-wide and locks each one to a commit in [`archix.lock`](/docs/concepts/lockfile/#flatpak-apps-commits). Declaring any app also declares the `flatpak` package. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
+
+### `flatpak.apps`
+
+| | |
+| --- | --- |
+| Type | `list of str` |
+| Default | `[]` |
+| Declared in | `<archix>/flatpak.lua` |
+
+Flatpak app ids to install system-wide, such as `org.mozilla.firefox`; write `remote:id` for a remote other than `flatpak.remote`. Each is locked to a commit in `archix.lock`.
+
+Apps that leave the list are uninstalled, but only ones archix managed in the current generation. Apps you installed by hand, and every `--user` installation, are left alone.
+
+```lua
+flatpak = {
+  apps = { "org.mozilla.firefox", "com.spotify.Client", "myremote:org.example.App" },
+},
+```
+
+### `flatpak.remote`
+
+| | |
+| --- | --- |
+| Type | `str` |
+| Default | `"flathub"` |
+| Declared in | `<archix>/flatpak.lua` |
+
+The remote apps come from unless they name one.
+
+### `flatpak.remotes`
+
+| | |
+| --- | --- |
+| Type | `attrs of submodule` |
+| Default | `{"flathub":{"gpg_verify":true,"url":"https://dl.flathub.org/repo/flathub.flatpakrepo"}}` |
+| Declared in | `<archix>/flatpak.lua` |
+
+Remotes archix adds system-wide, keyed by name.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `url` | `str` | *required* | The remote's `.flatpakrepo` file or repository URL. |
+| `gpg_verify` | `bool` | `true` | Check the remote's GPG signatures. `false` adds it with `--no-gpg-verify`. |
+
+Flathub is always available, even when you set `remotes` and leave it out. An app naming any other remote that `remotes` doesn't declare is an error: `flatpak.apps: myremote:org.example.App uses remote myremote, which flatpak.remotes doesn't declare`. archix adds the remotes your apps use with `flatpak remote-add --system --if-not-exists`, so a remote that already exists under that name is left as it is. Remotes are never removed.
+
+```lua
+flatpak = {
+  apps = { "org.mozilla.firefox", "myremote:org.example.App" },
+  remotes = { myremote = { url = "https://flatpak.example.org/repo/example.flatpakrepo" } },
+},
+```
+
 ## Home
 
 archix manages one user's home directory per machine. Set `home.user`, and declare the same user in [`users`](#users) so it exists before its files are written. Files in the home, and directories archix creates for them, are owned by that user.
@@ -661,9 +770,13 @@ Files in the user's home, keyed by path relative to it (a leading `~/` is allowe
 | `source` | `null or str` | `null` | A file or directory in the config directory, as a path relative to it. |
 | `live` | `bool` | `false` | Symlink to `source` in the config directory instead of copying it, so apps that write their own config edit your repo. |
 | `link` | `null or str` | `null` | Make the file a symlink to this target. |
+| `url` | `null or str` | `null` | Download the file from here; needs `sha256`. `archix.fetchurl { url, sha256 }` builds both. |
+| `sha256` | `null or str` | `null` | The sha256 the download from `url` must have; `archix prefetch <url>` prints it. |
 | `executable` | `bool` | `false` | Write the file with mode `0755` instead of `0644`. |
 
-Give exactly one of `text`, `source` and `link`. A `source` is copied, and a directory `source` needs `live = true`. `live` only works with `source`; with `text` or `link` it's an error: `home.files.<path>: live = true needs source, the file in the config to link to`. Paths can't leave the home or the config directory. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
+Give exactly one of `text`, `source`, `link` and `url`. A `source` is copied, and a directory `source` needs `live = true`. `live` only works with `source`; with `text`, `link` or `url` it's an error: `home.files.<path>: live = true needs source, the file in the config to link to`. A `url` works as it does in [`files`](#files): the hash is locked, and the download happens at switch. Paths can't leave the home or the config directory.
+
+When a path is a directory archix didn't manage before, such as an existing `~/.config/nvim` you now link into the config, it's moved to `/var/lib/archix/backups` and comes back when the entry leaves the config. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
 
 ```lua
 home = {
@@ -672,6 +785,10 @@ home = {
     [".config/nvim"] = { source = "home/.config/nvim", live = true },
     ["bin/hello"] = { text = "#!/bin/sh\necho hi\n", executable = true },
     [".config/user-dirs.dirs"] = { source = "home/user-dirs.dirs" },
+    [".local/share/fonts/Inter.ttf"] = archix.fetchurl {
+      url = "https://downloads.example.org/fonts/Inter-4.1.ttf",
+      sha256 = "9f0c6a3d1b7e24c58a6d0e3f9b1c47a2e8d5f06b3c9a1e7d4f2b8c0a6e3d9f15",
+    },
   },
 },
 ```

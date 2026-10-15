@@ -184,6 +184,35 @@ return function(cfg)
 end
 ```
 
+## `archix.fetchurl`
+
+```lua
+archix.fetchurl { url = "https://...", sha256 = "..." } -- returns a file spec
+```
+
+Builds a file that's downloaded from `url` and checked against `sha256`, for [`files`](/docs/reference/options/#files) and [`home.files`](/docs/reference/options/#homefiles). It checks the table while the config is evaluated, and returns a copy of it, so other fields such as `mode`, `owner` or `executable` pass through.
+
+```lua
+return {
+  files = {
+    ["/usr/local/bin/hello"] = archix.fetchurl {
+      url = "https://downloads.example.org/hello/1.2.0/hello-x86_64",
+      sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+      mode = "0755",
+    },
+  },
+}
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `url` | yes | Where to download the file. `https://`, `http://` and `file://` URLs work. |
+| `sha256` | yes | The file's sha256, as 64 hex digits. |
+
+A missing `url` is an error, `archix.fetchurl needs { url = ..., sha256 = ... }`, and so is a `sha256` that isn't 64 hex digits: ``archix.fetchurl: sha256 must be 64 hex digits; `archix prefetch https://...` prints it``. You don't compute the hash yourself: [`archix prefetch <url>`](/docs/reference/cli/#prefetch) downloads the file and prints the whole `archix.fetchurl { ... }` line to paste.
+
+Evaluating the config never downloads anything; it only records the URL and the hash. The download happens at `archix switch`, and the hash is what's locked.
+
 ## `archix.program`
 
 ```lua

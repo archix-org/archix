@@ -60,7 +60,7 @@ $ sudo archix init
   Next: look it over, then run sudo archix switch
 ```
 
-`init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. Imported dotfiles are the exception: the first switch replaces them with links, and the Result section lists them under `! the first switch would still change these:`. Secret files are never shown or copied, only counted. See the [quick start](/docs/quick-start/) for every section and question.
+System-wide Flatpak apps are declared too, each locked to the commit it's installed at; `--user` apps are left out. `init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. Imported dotfiles are the exception: the first switch replaces them with links, and the Result section lists them under `! the first switch would still change these:`. Secret files are never shown or copied, only counted. See the [quick start](/docs/quick-start/) for every section and question.
 
 | Flag | Description |
 | --- | --- |
@@ -100,7 +100,17 @@ downloading htop-3.4.1-1-x86_64.pkg.tar.zst
 switched to generation 2 (snapshot 2026-10-09)
 ```
 
-`switch` re-locks at the locked date if the config changed, lists the package, file, user, group and service changes, and asks before applying them. Then it builds AUR packages in a clean chroot, downloads every package to `/var/cache/archix/pkg` (each file checked against the lock's `sha256`) and applies the steps above from a [journal](/docs/concepts/safety/#the-journal).
+`switch` re-locks at the locked date if the config changed, lists the package, file, user, group, service and Flatpak changes, and asks before applying them. Then it downloads files declared with a `url` into the store (each checked against its `sha256`), builds AUR packages in a clean chroot, downloads every package to `/var/cache/archix/pkg` (each file checked against the lock's `sha256`) and applies the steps above from a [journal](/docs/concepts/safety/#the-journal).
+
+With [Flatpak apps](/docs/guides/flatpak-and-appimages/) declared, `switch` adds the remotes they use and locks new apps to their remote's current commit, then, once the new generation is current, installs missing apps, pins every app to its locked commit with `flatpak update --commit=`, and uninstalls the apps that left the config:
+
+```console
+flatpak    install org.mozilla.firefox (0bb3a9e40c1f)
+flatpak    com.spotify.Client 5f8806197a2b -> 81c2d4e6f0a3
+flatpak    remove org.gimp.GIMP
+```
+
+A Flatpak step that fails is a soft failure, like a service that doesn't start.
 
 If the system already matches, it prints `nothing to do: the system matches generation 2 (snapshot 2026-10-09)`. If only settings changed, such as `ignored_packages`, and archix doesn't manage booting, it records a new generation without running the apply steps: `switched to generation 3 (snapshot 2026-10-09); no package changes were needed`. That's also what the first switch after `archix init` usually prints. Files archix takes over unchanged are backed up either way.
 
@@ -158,7 +168,7 @@ $ sudo archix install zen-browser-bin
 $ sudo archix -S neovim ripgrep
 ```
 
-The names go into `lua/hosts/<host>/installed.lua`, a file archix owns and imports automatically, and then archix switches. Names that aren't in your configured repos are looked up in the AUR, and new AUR build recipes are shown for review. If you abort, the switch fails or the config stops evaluating, `installed.lua` is put back as it was.
+The names go into `lua/hosts/<host>/installed.lua`, a plain Lua file archix imports automatically and you can edit too, and then archix switches. Names that aren't in your configured repos are looked up in the AUR, and new AUR build recipes are shown for review. If you abort, the switch fails or the config stops evaluating, `installed.lua` is put back as it was.
 
 | Flag | Description |
 | --- | --- |
@@ -169,7 +179,7 @@ The names go into `lua/hosts/<host>/installed.lua`, a file archix owns and impor
 ```console
 $ sudo archix install --temp sl
 install    sl 5.05-4
-install 1 packages without declaring them? [Y/n]
+install 1 package without declaring them? [Y/n]
 ...
 installed sl without declaring it; the next `archix switch` removes it unless it's declared
 ```
@@ -192,7 +202,7 @@ archix only edits `installed.lua`, never your own Lua. A package declared elsewh
 
 ### `rollback`
 
-Put back the packages, files, users, groups and services of an earlier generation: the previous one, or the generation you name.
+Put back the packages, files, users, groups, services and Flatpak apps of an earlier generation: the previous one, or the generation you name.
 
 ```console
 $ sudo archix rollback
@@ -205,7 +215,7 @@ roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n]
 rolled back to generation 41 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-Packages are reinstalled at the generation's exact versions, from the cache when they're there and from the Arch Linux Archive otherwise. `rollback` doesn't evaluate the config, so it works even when the config is broken. `archix rollback 42` moves forward again. Naming the current generation repairs it: `generation 42 is current; putting back whatever differs from it`, which reinstalls drifted packages and rewrites changed files, users and services. It runs through the same journal as a switch, and refuses while a switch is unfinished; use `archix recover --rollback` for that. See [Generations and rollback](/docs/concepts/generations/).
+Packages are reinstalled at the generation's exact versions, from the cache when they're there and from the Arch Linux Archive otherwise. Files, fetched ones included, come from the store, so they don't need their URL. Flatpak apps are pinned back to the generation's commits, which are downloaded from their remote, and apps the newer generation added are uninstalled. `rollback` doesn't evaluate the config, so it works even when the config is broken. `archix rollback 42` moves forward again. Naming the current generation repairs it: `generation 42 is current; putting back whatever differs from it`, which reinstalls drifted packages and rewrites changed files, users and services. It runs through the same journal as a switch, and refuses while a switch is unfinished; use `archix recover --rollback` for that. See [Generations and rollback](/docs/concepts/generations/).
 
 | Argument or flag | Description |
 | --- | --- |
@@ -299,6 +309,12 @@ When everything matches, it prints `the system matches the lock and the config`.
 not declared, kept because undeclared_packages = "warn": htop ncdu
 ```
 
+Files declared with a `url` are compared by their `sha256`, so `diff` downloads nothing. Flatpak changes are listed as in [`switch`](#switch), and system-wide Flatpak apps that aren't in the config, and weren't in the current generation, are listed on their own line. archix leaves them alone:
+
+```console
+flatpak apps archix doesn't manage: com.valvesoftware.Steam
+```
+
 ### `status`
 
 Show any unfinished switch, the current generation, changes made outside archix, the lock and pending changes. It works while a switch is unfinished.
@@ -307,7 +323,7 @@ Show any unfinished switch, the current generation, changes made outside archix,
 $ archix status
 no unfinished switch
 current generation: 41 (snapshot 2026-10-09)
-2 packages were changed outside archix in 1 transactions since the last switch
+2 packages were changed outside archix in 1 transaction since the last switch
 desktop is locked to snapshot 2026-10-09 (212 packages)
 2 changes pending; see `archix diff`
 ```
@@ -356,13 +372,15 @@ wrote /etc/archix/archix.lock
 
 If the lock already matches, it prints `archix.lock is up to date for desktop (snapshot 2026-10-09)` and changes nothing. New AUR build recipes are shown for review before they're locked.
 
+Flatpak apps keep their locked commits. A newly declared app is locked to its remote's current commit, `flatpak org.mozilla.firefox at 0bb3a9e40c1f`. If flatpak isn't installed yet, the app is locked by the switch that installs it, and `lock` says so: ``note: org.mozilla.firefox: flatpak isn't installed yet; the next `archix switch` locks it``.
+
 | Flag | Description |
 | --- | --- |
 | `--noconfirm` | Trust new AUR build recipes without showing them. |
 
 ### `update`
 
-Move the host's lock to the newest archive snapshot, or to a date you choose, move AUR packages to their newest commits, and re-resolve. It applies nothing.
+Move the host's lock to the newest archive snapshot, or to a date you choose, move AUR packages to their newest commits and Flatpak apps to their remote's current commits, and re-resolve. It applies nothing.
 
 ```console
 $ archix update
@@ -376,7 +394,7 @@ snapshot 2026-10-09 -> 2026-10-15
 wrote /etc/archix/archix.lock
 ```
 
-`+` is a new package, `~` a changed version and `-` a package that's no longer needed. Changed AUR build recipes are shown as a diff for review in between.
+`+` is a new package, `~` a changed version and `-` a package that's no longer needed. Changed AUR build recipes are shown as a diff for review in between. Flatpak apps move to their remote's current commit, one line each, such as `flatpak com.spotify.Client at 81c2d4e6f0a3`.
 
 | Flag | Description |
 | --- | --- |
@@ -423,6 +441,19 @@ packages
 | --- | --- |
 | `--json` | Print a JSON array of `{ path, type, default, description, declared_in }` objects instead. |
 
+### `prefetch`
+
+Download a file and print the [`archix.fetchurl`](/docs/reference/lua-api/#archixfetchurl) line to paste into the config, with the file's sha256 filled in.
+
+```console
+$ archix prefetch https://downloads.example.org/hello/1.2.0/hello-x86_64
+archix.fetchurl { url = "https://downloads.example.org/hello/1.2.0/hello-x86_64", sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" }
+```
+
+Paste it as the value of a [`files`](/docs/reference/options/#files) or [`home.files`](/docs/reference/options/#homefiles) entry, or take the `url` and `sha256` for an [`appimages`](/docs/reference/options/#appimages) entry. `prefetch` doesn't evaluate the config. A URL that isn't there is an error: `https://... doesn't exist`.
+
+Run as root, it also keeps the download in archix's store, so the next switch doesn't fetch it again. As a normal user, it deletes the file once it has printed the hash.
+
 ## Internal commands
 
 Two hidden commands are run by files archix installs, not by you: `archix hook-record`, from the pacman hook, and `archix boot-check`, from `archix-boot.service` at boot.
@@ -431,7 +462,7 @@ Two hidden commands are run by files archix installs, not by you: `archix hook-r
 
 - `0` when the command succeeded.
 - `1` on errors, with each error printed to stderr as `error: ...`. That includes config errors (every one is reported, not just the first), resolution failures, a declined prompt and failures before apply starts, which leave the system untouched.
-- Non-zero after a switch or rollback with soft failures: the new generation is current, and the services and reloads that failed are listed. See [Safety](/docs/concepts/safety/#hard-and-soft-failures).
+- Non-zero after a switch or rollback with soft failures: the new generation is current, and the services, reloads and Flatpak steps that failed are listed. See [Safety](/docs/concepts/safety/#hard-and-soft-failures).
 - Non-zero when a hard failure stopped a switch. The journal stays open until you run `archix recover`.
 - While a switch is unfinished, `switch`, `upgrade`, `install`, `remove`, `rollback`, `lock`, `update` and `gc` refuse to run and exit `1`, naming the interrupted switch and pointing to `archix recover`.
 

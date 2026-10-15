@@ -24,7 +24,7 @@ archix runs as root, but files it writes in the home, and the directories it cre
 
 ## Home files
 
-`home.files` is keyed by a path relative to the home; a leading `~/` is allowed. Each entry gives exactly one of `text`, `source` or `link`:
+`home.files` is keyed by a path relative to the home; a leading `~/` is allowed. Each entry gives exactly one of `text`, `source`, `link` or `url`:
 
 ```lua
 home = {
@@ -40,8 +40,9 @@ home = {
 | --- | --- |
 | `text` | The file's contents, written as given. |
 | `source` | A file in the config directory, copied in. The path is relative to the config directory and can't leave it. |
-| `live` | With `source`: link to the file or directory in the config instead of copying it. With `text` or `link` it's an error. |
+| `live` | With `source`: link to the file or directory in the config instead of copying it. With `text`, `link` or `url` it's an error. |
 | `link` | Make the path a symlink to this target. |
+| `url`, `sha256` | Download the file, and refuse it unless it has this sha256. See [Files from a URL](#files-from-a-url). |
 | `executable` | Mode `0755` instead of `0644`. |
 
 Copies are real files, not links into a store, so apps see ordinary files they can read and watch. archix stores their contents with the generation and knows exactly what it wrote. If you, or an app, edit a managed file, `archix diff` flags it before the next switch:
@@ -53,6 +54,43 @@ update     /home/me/.config/kitty/kitty.conf (edited outside archix; your versio
 The switch then writes the declared version, and saves yours under `/var/lib/archix/edited/` so nothing is lost. Move the change into your config to keep it.
 
 When archix first takes over a path that already exists, it backs up the original to `/var/lib/archix/backups`. If the entry later leaves the config, archix deletes the file, or puts that original back. See [Safety](/docs/concepts/safety/).
+
+## Files from a URL
+
+Some files don't belong in your repo: a font, a prebuilt tool, a theme someone else publishes. Declare them by URL and sha256 instead, with `archix.fetchurl`. It works in `home.files` and in the system-wide `files` alike:
+
+```lua title="lua/modules/common.lua"
+return {
+  users = { me = { groups = { "wheel" } } },
+  home = {
+    user = "me",
+    files = {
+      [".local/share/fonts/Inter.ttf"] = archix.fetchurl {
+        url = "https://downloads.example.org/fonts/Inter-4.1.ttf",
+        sha256 = "9f0c6a3d1b7e24c58a6d0e3f9b1c47a2e8d5f06b3c9a1e7d4f2b8c0a6e3d9f15",
+      },
+    },
+  },
+  files = {
+    ["/usr/local/bin/hello"] = archix.fetchurl {
+      url = "https://downloads.example.org/hello/1.2.0/hello-x86_64",
+      sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03",
+      mode = "0755",
+    },
+  },
+}
+```
+
+You don't work out the hash yourself. `archix prefetch` downloads the file and prints the line to paste:
+
+```console
+$ archix prefetch https://downloads.example.org/hello/1.2.0/hello-x86_64
+archix.fetchurl { url = "https://downloads.example.org/hello/1.2.0/hello-x86_64", sha256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03" }
+```
+
+The hash is what's locked. `archix diff` compares the file on disk with it and downloads nothing. `archix switch` downloads the file after you confirm, before it changes anything, and refuses it if the hash differs, so a URL that starts serving something else can't slip into your system. The contents are kept in archix's store with the generation, so a rollback brings the file back even after the URL is gone. To move to a new version, change the URL, run `archix prefetch` on it, and paste the new line.
+
+For apps shipped as AppImages, the [`appimages`](/docs/guides/flatpak-and-appimages/#appimages) option does this for you, with a command on your `PATH` and a menu entry.
 
 ## Live links for app-written configs
 
@@ -69,7 +107,9 @@ home = {
 },
 ```
 
-A `source` that's a directory has to be live; archix only copies single files. `live` needs a `source` to link to, so `live = true` with `text` or `link` makes `diff` and `switch` stop:
+If the path is already a directory, such as the `~/.config/nvim` you had before you moved it into the config, the switch moves that directory to `/var/lib/archix/backups`, contents and all, and puts the link in its place. When the entry leaves the config, the link goes and the directory comes back. archix only does this once per path: if an earlier backup of it still exists, the switch stops with `/home/me/.config/nvim is a directory and an earlier backup of it exists; move one of them away`. See [Safety](/docs/concepts/safety/#managed-files-backups-and-hand-edits).
+
+A `source` that's a directory has to be live; archix only copies single files. `live` needs a `source` to link to, so `live = true` with `text`, `link` or `url` makes `diff` and `switch` stop:
 
 ```console
 error: home.files..config/nvim: live = true needs source, the file in the config to link to
@@ -236,7 +276,7 @@ return {
 }
 ```
 
-The first switch backs up the originals and replaces them with links into the config, so from then on editing a dotfile edits your repo. That makes imported dotfiles the one thing the first switch after `init` changes. init's Result section lists them:
+The first switch moves the originals, directories included, to `/var/lib/archix/backups` and replaces them with links into the config, so from then on editing a dotfile edits your repo. That makes imported dotfiles the one thing the first switch after `init` changes. init's Result section lists them:
 
 ```
 ── Result ──────────────────────────────────────

@@ -83,10 +83,10 @@ Compare it with `archix update`, which moves the lock to the newest archive snap
 
 ### `installed.lua`
 
-`archix install` declares before it installs. The package name goes into `lua/hosts/<host>/installed.lua`, a file archix owns:
+`archix install` declares before it installs. The package name goes into `lua/hosts/<host>/installed.lua`, a plain Lua file that's yours as much as archix's:
 
 ```lua title="lua/hosts/desktop/installed.lua"
--- Managed by `archix install` and `archix remove`.
+-- This host's packages. Edit freely; `archix install` and `archix remove` add and remove names here too.
 return {
   packages = {
     "htop",

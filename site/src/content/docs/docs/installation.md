@@ -56,7 +56,7 @@ Don't update it with `makepkg` again.
 
 Both AUR packages also install a statically linked archix at `/usr/lib/archix/archix-static`. When archix manages booting, it adds an mkinitcpio hook that copies that binary into the initramfs, and gives the newest two generations an `archix rescue` boot entry. That entry repairs a system pacman can't repair, without a live USB.
 
-Rescue entries are only built when `/usr/lib/archix/archix-static` exists. If you installed archix some other way, build the static binary from the source tree yourself:
+Rescue entries are only built when `/usr/lib/archix/archix-static` exists. If you installed archix some other way, build the static binary from the source tree yourself. With Arch's `rust` package, the musl target comes from `rust-musl`:
 
 ```console
 $ cargo build --release --target x86_64-unknown-linux-musl

@@ -12,7 +12,8 @@ Every `archix switch` that changes something creates a generation: a numbered, c
 Generations live in `/var/lib/archix/generations/<n>/generation.json`, and `/var/lib/archix/current` points at the current one. Each one records:
 
 - **The packages.** The snapshot date and every package's exact version, file and sha256, including the sha256 of each AUR package it built.
-- **The managed files, users, groups and services.** File contents are stored once by sha256 in `/var/lib/archix/blobs`, so identical files across generations cost nothing extra.
+- **The managed files, users, groups and services.** File contents are stored once by sha256 in `/var/lib/archix/blobs`, so identical files across generations cost nothing extra. Files downloaded with [`archix.fetchurl`](/docs/reference/lua-api/#archixfetchurl), AppImages included, are stored the same way. Every switch that records a generation stores the contents it needs, including one with nothing else to apply, so rolling back to any kept generation finds its files.
+- **The Flatpak apps.** The remote, ref and commit each declared app was pinned to.
 - **The settings it was applied with.** `undeclared_packages`, `ignored_packages`, the generation limits and the boot settings, so rollback and `gc` work without evaluating your config.
 - **The config's git commit**, if your config directory is a git repo, and whether the tree had uncommitted changes.
 - **Its btrfs snapshot**, on a btrfs root.
@@ -41,7 +42,16 @@ roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n]
 rolled back to generation 41 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-This makes the system match the previous generation: its exact package versions are reinstalled, from the cache when they're there and from the Arch Linux Archive otherwise, and its files, users, groups and services are applied again. It goes through the same journal as a switch, so an interrupted rollback is as recoverable as an interrupted switch. See [Safety](/docs/concepts/safety/).
+This makes the system match the previous generation: its exact package versions are reinstalled, from the cache when they're there and from the Arch Linux Archive otherwise, and its files, users, groups and services are applied again. Files come from the store, so a file declared with a `url` comes back even when the URL is gone. It goes through the same journal as a switch, so an interrupted rollback is as recoverable as an interrupted switch. See [Safety](/docs/concepts/safety/).
+
+Flatpak apps follow last, once the generation is current. Each app is pinned back to the commit the generation recorded, and apps the newer generation added are uninstalled:
+
+```console
+flatpak    com.spotify.Client 81c2d4e6f0a3 -> 5f8806197a2b
+flatpak    remove org.gimp.GIMP
+```
+
+Old commits are downloaded from their remote, so this part needs the network and a remote that still has the commit. If it fails, the failure is listed like a service that didn't start, and the rest of the rollback stands. Apps archix never managed, and `--user` apps, are never touched.
 
 To go to a specific generation, name it. That works forwards too:
 
@@ -75,6 +85,8 @@ archix: booted generation 41, but 42 is current; rolling back to 41
 ```
 
 You land in generation 41, and it stays current until your next switch. This works the same on every filesystem.
+
+Flatpak commits come from their remote, which usually isn't reachable that early in boot. If the boot service couldn't pin them, run `sudo archix rollback 41` once you're logged in; naming the current generation puts back whatever still differs, Flatpak apps included.
 
 ### Older kernels keep booting
 
@@ -118,7 +130,7 @@ Generations cost disk space, mostly in the package cache. archix cleans up after
 | Generations kept | The current one, the newest 10, and every one younger than 30 days |
 | Boot entries | The newest 5, and fewer if the ESP runs out of space |
 | Rescue entries | The newest 2 |
-| Package cache, managed-file contents, snapshot databases | Only what kept generations need |
+| Package cache, managed-file contents (downloads included), snapshot databases | Only what kept generations need |
 | Preserved kernel modules | Only the kernels of kept boot entries |
 | btrfs snapshots | Deleted with their generation |
 | When | `gc` runs after every switch |

@@ -35,7 +35,7 @@ Search covers the locked snapshot's repos and the AUR's package list, most popul
 
 ## Where `archix install` writes
 
-`archix install` doesn't just install. It declares. The package name goes into `lua/hosts/<host>/installed.lua`, a file archix owns and imports automatically, and then archix switches. The next switch, on this machine or a fresh one, installs it again. If you abort or the switch fails, the file is put back as it was.
+`archix install` doesn't just install. It declares. The package name goes into `lua/hosts/<host>/installed.lua`, a plain Lua file archix imports automatically and you can edit too, and then archix switches. The next switch, on this machine or a fresh one, installs it again. If you abort or the switch fails, the file is put back as it was.
 
 To put a package somewhere shared instead, pass a directory under the config's `lua/`:
 

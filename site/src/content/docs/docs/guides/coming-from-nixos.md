@@ -2,7 +2,7 @@
 title: Coming from NixOS
 description: Map NixOS concepts to archix, understand what works differently, and port an existing NixOS and Home Manager config.
 sidebar:
-  order: 4
+  order: 5
 ---
 
 You already know the ideas behind archix: a declarative config, a lockfile, generations and rollback, a typed module system with priorities. This page maps what you know onto archix, then covers what's different and how to port a config.
@@ -28,6 +28,9 @@ You already know the ideas behind archix: a declarative config, a lockfile, gene
 | `lib.mkOption { type = ...; }` | `archix.option { type = ... }` |
 | `types.listOf`, `attrsOf`, `nullOr`, `enum`, `submodule` | `archix.types.list_of`, `attrs_of`, `nullable`, `enum`, `submodule` |
 | `builtins.readFile ./x` | `archix.read_file("x")` |
+| `pkgs.fetchurl { url; sha256; }` | `archix.fetchurl { url = ..., sha256 = ... }`, as a file in `files` or `home.files` |
+| `nix-prefetch-url` | `archix prefetch` |
+| `services.flatpak` with nix-flatpak's `packages` | `flatpak.apps`, locked to commits in `archix.lock` |
 | `networking.hostName` per host | `archix.hostname`, from the machine |
 | Home Manager `programs.*` | `programs.*`, ported from Home Manager |
 | `home.file` | `home.files` |
