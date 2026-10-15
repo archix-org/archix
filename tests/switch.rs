@@ -206,7 +206,7 @@ fn warn_mode_keeps_undeclared_packages() {
 
     setup.set_body(&[], "ignored_packages = { \"tree\" }");
     let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("nothing to do"), "{out}");
+    assert!(out.contains("no package changes"), "a settings change is a new generation:\n{out}");
     assert!(installed("tree").is_some());
     pacman(&["-R", "tree"]);
 }
@@ -326,6 +326,76 @@ fn declining_adoption_reverts_to_the_lock() {
     assert!(out.contains("downgrade  lemon 3.54.0-1 -> 3.53.4-1"), "{out}");
     assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
     assert!(setup.lock().pinned.is_empty());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+fn current_generation() -> Option<u32> {
+    archix::generations::Store::new(&Paths::system()).current().unwrap()
+}
+
+#[test]
+#[ignore]
+fn every_switch_is_a_generation_and_rollback_returns_to_one() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let with_tree = current_generation().unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let without_tree = current_generation().unwrap();
+    assert!(without_tree > with_tree);
+    assert!(installed("tree").is_none());
+
+    let listing = setup.ok(&["generations"]);
+    assert!(listing.contains(&format!("* {without_tree:>4}")), "{listing}");
+    assert!(
+        setup
+            .ok(&["status"])
+            .contains(&format!("current generation: {without_tree}"))
+    );
+
+    setup.ok(&["rollback", "--noconfirm"]);
+    assert_eq!(
+        current_generation(),
+        Some(with_tree),
+        "rollback goes to the previous generation"
+    );
+    assert!(installed("tree").is_some());
+    setup.ok(&["rollback", &without_tree.to_string(), "--noconfirm"]);
+    assert_eq!(current_generation(), Some(without_tree));
+    assert!(installed("tree").is_none());
+    assert!(
+        setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"),
+        "the system already matches the config"
+    );
+}
+
+#[test]
+#[ignore]
+fn gc_keeps_only_what_the_limits_allow() {
+    let _system = lock_system();
+    let limits = "generations = { keep = 1, keep_days = 0 }";
+    let setup = Setup::new(&["tree"], limits);
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], limits);
+    setup.ok(&["switch", "--noconfirm"]);
+    let store = archix::generations::Store::new(&setup.paths);
+    let numbers: Vec<u32> = store.list().unwrap().iter().map(|g| g.number).collect();
+    assert_eq!(
+        numbers,
+        [current_generation().unwrap()],
+        "the switch's automatic gc keeps only the current one"
+    );
+    let tree_cached = fs::read_dir(setup.paths.packages())
+        .unwrap()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("tree-"));
+    assert!(
+        !tree_cached,
+        "no kept generation uses tree, so its cached package is gone"
+    );
+    assert!(setup.ok(&["gc"]).contains("freed 0.0 MiB"));
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }

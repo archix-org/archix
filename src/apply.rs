@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::generations::Store;
 use crate::journal::{Journal, Step, Transaction};
 use crate::pacman::read_local_db;
 use crate::paths::Paths;
@@ -44,7 +45,7 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<()> 
     let path = paths.journal();
     while let Some(step) = journal.next_step() {
         eprintln!(":: {}", step.describe());
-        run_step(paths, &journal.transaction, step, reinstall).with_context(|| {
+        run_step(paths, &journal.transaction, journal.generation, step, reinstall).with_context(|| {
             format!(
                 "{} failed; the switch is unfinished, run `archix recover`",
                 step.describe()
@@ -56,8 +57,12 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<()> 
     Journal::delete(&path)
 }
 
-fn run_step(paths: &Paths, tx: &Transaction, step: Step, reinstall: bool) -> Result<()> {
+fn run_step(paths: &Paths, tx: &Transaction, generation: Option<u32>, step: Step, reinstall: bool) -> Result<()> {
     match step {
+        Step::Activate => match generation {
+            Some(number) => Store::new(paths).activate(number),
+            None => Ok(()),
+        },
         Step::Install if tx.install.is_empty() => Ok(()),
         Step::Install => {
             let mut args = vec![

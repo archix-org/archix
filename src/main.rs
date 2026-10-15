@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
-mod packages;
+mod commands;
 
 use archix::eval::{self, Evaluation, Input};
 use archix::options::{self, Def};
@@ -64,6 +64,18 @@ enum Command {
     },
     /// Show the lock, pending changes and any unfinished switch
     Status,
+    /// Put back the packages of an earlier generation (the previous one by default)
+    Rollback {
+        /// Generation number; `archix generations` lists them
+        generation: Option<u32>,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+    },
+    /// List generations; the current one is marked with *
+    Generations,
+    /// Delete old generations and cached files no kept generation needs
+    Gc,
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
@@ -92,9 +104,24 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    if let Command::HookRecord = cli.command {
-        packages::hook_record();
-        return Ok(ExitCode::SUCCESS);
+    match cli.command {
+        Command::HookRecord => {
+            commands::hook_record();
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Rollback { generation, noconfirm } => {
+            commands::rollback(generation, noconfirm)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Generations => {
+            commands::generations()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Gc => {
+            commands::gc()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
     }
     if let Command::Recover {
         cont,
@@ -103,12 +130,12 @@ fn run() -> Result<ExitCode> {
     } = cli.command
     {
         let mode = match (cont, rollback, abandon) {
-            (true, _, _) => Some(packages::RecoverMode::Continue),
-            (_, true, _) => Some(packages::RecoverMode::Rollback),
-            (_, _, true) => Some(packages::RecoverMode::Abandon),
+            (true, _, _) => Some(commands::RecoverMode::Continue),
+            (_, true, _) => Some(commands::RecoverMode::Rollback),
+            (_, _, true) => Some(commands::RecoverMode::Abandon),
             _ => None,
         };
-        packages::recover(mode)?;
+        commands::recover(mode)?;
         return Ok(ExitCode::SUCCESS);
     }
     let hostname = match cli.host {
@@ -125,7 +152,7 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::FAILURE);
         }
     };
-    let target = packages::Target {
+    let target = commands::Target {
         config_dir: &cli.config,
         host: &hostname,
         config: &evaluation.config,
@@ -133,13 +160,19 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
-        Command::Lock => packages::lock(&target, packages::Snapshot::Locked)?,
-        Command::Update { to: None } => packages::lock(&target, packages::Snapshot::Latest)?,
-        Command::Update { to: Some(date) } => packages::lock(&target, packages::Snapshot::On(date))?,
-        Command::Diff => packages::diff(&target)?,
-        Command::Switch { noconfirm } => packages::switch(&target, noconfirm)?,
-        Command::Status => packages::status(&target)?,
-        Command::Recover { .. } | Command::HookRecord => unreachable!("handled before the config is evaluated"),
+        Command::Lock => commands::lock(&target, commands::Snapshot::Locked)?,
+        Command::Update { to: None } => commands::lock(&target, commands::Snapshot::Latest)?,
+        Command::Update { to: Some(date) } => commands::lock(&target, commands::Snapshot::On(date))?,
+        Command::Diff => commands::diff(&target)?,
+        Command::Switch { noconfirm } => commands::switch(&target, noconfirm)?,
+        Command::Status => commands::status(&target)?,
+        Command::Recover { .. }
+        | Command::HookRecord
+        | Command::Rollback { .. }
+        | Command::Generations
+        | Command::Gc => {
+            unreachable!("handled before the config is evaluated")
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

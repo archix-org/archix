@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::date::Date;
 
@@ -31,7 +31,7 @@ pub struct HostLock {
     pub packages: BTreeMap<String, Locked>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Locked {
     pub version: String,
     pub repo: String,

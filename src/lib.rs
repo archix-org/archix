@@ -4,6 +4,8 @@ pub mod archive;
 pub mod date;
 pub mod eval;
 pub mod fetch;
+pub mod gc;
+pub mod generations;
 pub mod integration;
 pub mod journal;
 pub mod lock;

@@ -26,9 +26,10 @@ pub enum Step {
     Remove,
     Reasons,
     Verify,
+    Activate,
 }
 
-pub const STEPS: [Step; 4] = [Step::Install, Step::Remove, Step::Reasons, Step::Verify];
+pub const STEPS: [Step; 5] = [Step::Install, Step::Remove, Step::Reasons, Step::Verify, Step::Activate];
 
 impl Step {
     pub fn describe(self) -> &'static str {
@@ -37,6 +38,7 @@ impl Step {
             Step::Remove => "removing packages",
             Step::Reasons => "setting install reasons",
             Step::Verify => "verifying the result",
+            Step::Activate => "making the new generation current",
         }
     }
 }
@@ -61,6 +63,9 @@ pub struct Journal {
     pub started: u64,
     pub before: BTreeMap<String, LocalPkg>,
     pub transaction: Transaction,
+    /// The generation that becomes current in the last step; None for recovery rollbacks.
+    #[serde(default)]
+    pub generation: Option<u32>,
     pub done: Vec<Step>,
 }
 
@@ -81,6 +86,7 @@ impl Journal {
             started,
             before,
             transaction,
+            generation: None,
             done: Vec::new(),
         }
     }

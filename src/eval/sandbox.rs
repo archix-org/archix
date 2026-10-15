@@ -17,7 +17,10 @@ pub struct Markers {
 }
 
 /// Modules shipped inside the binary, loaded before init.lua and reachable as `archix.<name>`.
-pub const BUILTIN_MODULES: &[(&str, &str)] = &[("packages", include_str!("modules/packages.lua"))];
+pub const BUILTIN_MODULES: &[(&str, &str)] = &[
+    ("packages", include_str!("modules/packages.lua")),
+    ("generations", include_str!("modules/generations.lua")),
+];
 
 pub struct Sandbox {
     pub lua: Lua,
