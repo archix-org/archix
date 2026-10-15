@@ -16,6 +16,14 @@ export default defineConfig({
 			},
 			favicon: '/favicon.svg',
 			customCss: ['./src/styles/fonts.css', './src/styles/starlight.css'],
+			expressiveCode: {
+				defaultProps: { wrap: true },
+				styleOverrides: {
+					codeFontFamily: "'Martian Mono Variable', ui-monospace, monospace",
+					codeFontSize: '0.78rem',
+					codeLineHeight: '1.7',
+				},
+			},
 			social: [
 				{ icon: 'github', label: 'GitHub', href: 'https://github.com/archix-org/archix' },
 				{ icon: 'discord', label: 'Discord', href: 'https://discord.gg/dejSeEHzpV' },

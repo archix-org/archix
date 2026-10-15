@@ -88,7 +88,7 @@ All of them are locked against the Arch Linux Archive snapshot in `archix.lock`.
 
 The default only applies when no module sets `repos`. As soon as one does, the default is dropped, so always list every repo you want. `repos = { "multilib" }` on its own would leave you without `core` and `extra`:
 
-```lua title="lua/hosts/desktop.lua"
+```lua title="lua/hosts/desktop/init.lua"
 return {
   repos = { "core", "extra", "multilib" },
 }
@@ -112,7 +112,7 @@ With `"remove"`, the next switch offers to declare explicit packages you install
 
 `"warn"` is a good setting while you move an existing system into your config. Switch back to the default once nothing is listed any more. See [pacman and yay](/docs/concepts/pacman-and-yay/).
 
-```lua title="lua/hosts/desktop.lua"
+```lua title="lua/hosts/desktop/init.lua"
 return {
   undeclared_packages = "warn",
 }

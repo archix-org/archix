@@ -50,6 +50,7 @@ One config can describe all your machines. archix picks the host by the machine'
 return {
   imports = {
     "modules.common",
+    "modules.gaming",
     "hosts." .. archix.hostname,
   },
 }

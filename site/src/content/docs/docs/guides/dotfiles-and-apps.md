@@ -151,13 +151,15 @@ return archix.program "fuzzel" { file = ".config/fuzzel/fuzzel.ini", format = "i
 
 Import it, and every host gets `programs.fuzzel`:
 
-```lua title="lua/hosts/laptop.lua"
+```lua title="lua/hosts/laptop/init.lua"
 return {
   imports = { "modules.fuzzel" },
-  programs = {
-    fuzzel = {
-      enable = true,
-      settings = { main = { font = "JetBrains Mono:size=10", terminal = "foot" } },
+  config = {
+    programs = {
+      fuzzel = {
+        enable = true,
+        settings = { main = { font = "JetBrains Mono:size=10", terminal = "foot" } },
+      },
     },
   },
 }
@@ -183,6 +185,8 @@ Some apps need more than pass-through: options that interact, or files that depe
 
 ```lua title="lua/modules/common.lua"
 return {
+  users = { me = { groups = { "wheel" } } },
+  home = { user = "me" },
   programs = {
     kitty = { enable = true, font = { name = "JetBrainsMono Nerd Font", size = 12 } },
     git = { enable = true, settings = { user = { name = "Me", email = "me@example.com" } } },
@@ -214,7 +218,7 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 
 ## Bringing your existing dotfiles in
 
-`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it: after capturing the system, init asks `Bring some dotfiles into the config too?`, whose (one of the users it captured), and which ones. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
+`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it: after capturing the system, init asks `Bring some dotfiles into the config too?`, then `Whose?` (one of the users it captured) and `Which ones?`. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
 
 Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
 

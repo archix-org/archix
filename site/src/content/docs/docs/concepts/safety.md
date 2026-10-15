@@ -141,7 +141,7 @@ archix never acts on an unfinished switch automatically. Guessing wrong after a 
 $ archix status
 the switch to generation 43 (snapshot 2026-10-15) (started at unix time 1792051200) was interrupted while installing packages
 run `archix recover` to deal with it
-current generation: 42 (snapshot 2026-10-09)
+current generation: 42 (snapshot 2026-10-15)
 desktop is locked to snapshot 2026-10-15 (214 packages)
 12 changes pending; see `archix diff`
 ```
@@ -205,7 +205,9 @@ That's what makes a broken pacman repairable without a live USB. It works with b
 ```console
 $ cargo build --release --target x86_64-unknown-linux-musl
 $ sudo install -Dm755 target/x86_64-unknown-linux-musl/release/archix /usr/lib/archix/archix-static
-``` In CI, a QEMU VM with OVMF firmware deletes libalpm to break pacman, boots the rescue entry, and checks that pacman works again.
+```
+
+In CI, a QEMU VM with OVMF firmware deletes libalpm to break pacman, boots the rescue entry, and checks that pacman works again.
 
 ### From a live USB
 

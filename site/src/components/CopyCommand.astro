@@ -5,10 +5,16 @@ interface Props {
 }
 
 const { command, label } = Astro.props;
+const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Words never break inside; URLs may break after a slash.
+const html = command
+	.split(' ')
+	.map((word) => (word.includes('/') ? escape(word).replace(/\//g, '/<wbr>') : `<span class="word">${escape(word)}</span>`))
+	.join(' ');
 ---
 
 <div class="copy">
-	<pre aria-label={label}><code><span class="prompt" aria-hidden="true">$ </span>{command}</code></pre>
+	<pre aria-label={label}><code><span class="prompt" aria-hidden="true">$ </span><Fragment set:html={html} /></code></pre>
 	<button type="button" data-copy={command}>Copy</button>
 </div>
 
@@ -33,16 +39,19 @@ const { command, label } = Astro.props;
 	}
 	pre {
 		flex: 1;
+		min-width: 0;
 		margin: 0;
 		padding: 0.85rem 1rem;
-		white-space: pre-wrap;
-		overflow-wrap: break-word;
+		white-space: normal;
 		color: var(--term-text);
 		font-size: 0.78rem;
 		line-height: 1.5;
 	}
 	.prompt {
 		color: var(--term-mist);
+	}
+	pre :global(.word) {
+		white-space: nowrap;
 	}
 	button {
 		flex: none;

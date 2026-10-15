@@ -123,6 +123,10 @@ $ tree /etc/archix
 ├── files
 │   └── desktop
 │       └── etc
+│           ├── fstab
+│           ├── mkinitcpio.conf
+│           ├── pacman.d
+│           │   └── mirrorlist
 │           └── sysctl.d
 │               └── 80-swappiness.conf
 └── lua
@@ -250,7 +254,7 @@ resolving 87 declared packages against the 2026-10-15 snapshot
 snapshot 2026-10-09 -> 2026-10-15
 ~ linux 7.2.8.arch1-1 -> 7.2.9.arch1-1
 ~ mesa 1:25.3.0-1 -> 1:25.3.1-1
-214 packages locked
+213 packages locked
 wrote /etc/archix/archix.lock
 $ sudo archix switch
 ...

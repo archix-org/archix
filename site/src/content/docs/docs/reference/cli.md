@@ -368,11 +368,11 @@ Move the host's lock to the newest archive snapshot, or to a date you choose, mo
 $ archix update
 resolving 87 declared packages against the 2026-10-15 snapshot
 snapshot 2026-10-09 -> 2026-10-15
++ libdisplay-info 0.3.0-1
 ~ linux 7.2.8.arch1-1 -> 7.2.9.arch1-1
 ~ mesa 1:25.3.0-1 -> 1:25.3.1-1
-+ libdisplay-info 0.3.0-1
 - libnl-legacy 1.1.4-1
-214 packages locked
+213 packages locked
 wrote /etc/archix/archix.lock
 ```
 

@@ -18,20 +18,20 @@ const flags = [
 ];
 
 const manages = [
-	['Packages', 'Official repos, the AUR, local PKGBUILDs, CachyOS and other third-party repos'],
+	['Packages', 'Official repos and the AUR in one list, resolved from the repos first'],
+	['Repos', 'CachyOS, chaotic-aur and other third-party repos, with their pacman.conf blocks and keys'],
 	['/etc', 'Any file under /etc, written atomically and tracked by hash'],
 	['systemd', 'System and user units, enabled and started on switch'],
 	['Kernel', 'Kernel parameters, sysctl, modprobe and udev rules'],
 	['Users', 'Users and groups. Passwords stay yours: archix never touches them'],
 	['Dotfiles', 'Real files with recorded hashes, so edits made outside archix show up in diff'],
 	['Apps', 'programs.* modules ported from Home Manager and checked byte for byte against its tests, plus writers for toml, json, yaml, ini, kdl and more'],
-	['Hooks', 'Activation scripts that run on every switch'],
 ];
 
 const safety = [
 	['No reinstall', 'archix init takes over the system you already have. It locks to exactly what is installed, so the first diff is empty.'],
 	['Power cuts', 'Every switch is journaled. If one is interrupted, archix recover continues it, rolls it back or abandons it.'],
-	['No live USB', 'Each recent generation gets a rescue boot entry that restores pacman and the core packages from cache.'],
+	['No live USB', 'The newest two generations get a rescue boot entry that restores pacman and the core packages from cache.'],
 	['Tested booting', 'Every change boots in a QEMU VM with OVMF and Secure Boot enforcing: generations, rollback at boot, signed entries and rescue.'],
 ];
 
@@ -84,7 +84,7 @@ const nix = [
 					</p>
 					<Artifact title="archix diff">
 						<pre><span class="bad">error:</span> <span class="w">`programs.kity`</span>: option does not exist
-       (set in hosts.desktop); did you mean
+       (set in lua/hosts/desktop/init.lua); did you mean
        <span class="w">`programs.kitty`</span>?</pre>
 					</Artifact>
 				</article>
@@ -107,14 +107,15 @@ mesa = {'{'} version = <span class="s">"1:25.3.0-1"</span>, repo = <span class="
 				<article>
 					<h3>Reversible</h3>
 					<p>
-						Every switch is a generation with its own signed boot entry. Roll back from the terminal or pick an older one at
-						boot: archix reinstalls its exact packages from cache. Any filesystem, no snapshots required.
+						Every switch that changes something is a generation with its own boot entry, signed when Secure Boot is set up.
+						Roll back from the terminal or pick an older one at boot: archix reinstalls its exact packages from cache.
 					</p>
 					<Artifact title="systemd-boot">
 						<pre><span class="w">› Arch Linux (archix, generation 42)</span>
   Arch Linux (archix, generation 41)
   Arch Linux (archix, generation 40)
-  <span class="m">Arch Linux (archix rescue, generation 42)</span></pre>
+  <span class="m">Arch Linux (archix rescue, generation 42)</span>
+  <span class="m">Arch Linux (archix rescue, generation 41)</span></pre>
 					</Artifact>
 				</article>
 			</div>
@@ -134,7 +135,7 @@ mesa = {'{'} version = <span class="s">"1:25.3.0-1"</span>, repo = <span class="
 <span class="m">:: Starting full system upgrade...</span>
 <span class="m">$</span> <span class="w">sudo archix switch</span>
 the system is newer than the lock for 3 packages
-(firefox, mesa, linux), probably from pacman or an AUR helper
+(firefox, linux, mesa), probably from pacman or an AUR helper
 adopt them into the lock? (no reverts them to the lock) [Y/n] <span class="w">y</span>
 <span class="ok">switched to generation 43 (snapshot 2026-10-15)</span></pre>
 			</Artifact>
@@ -346,6 +347,7 @@ adopt them into the lock? (no reverts them to the lock) [Y/n] <span class="w">y<
 		margin-top: 2.75rem;
 	}
 	.grid3 article {
+		min-width: 0;
 		display: grid;
 		grid-row: span 3;
 		grid-template-rows: subgrid;
@@ -504,6 +506,13 @@ adopt them into the lock? (no reverts them to the lock) [Y/n] <span class="w">y<
 		.install ol {
 			grid-template-columns: 1fr;
 		}
+		.grid3 {
+			gap: 2.5rem;
+		}
+		.grid3 article {
+			display: block;
+			grid-row: auto;
+		}
 		.manages dl {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
@@ -512,8 +521,17 @@ adopt them into the lock? (no reverts them to the lock) [Y/n] <span class="w">y<
 		.manages dl {
 			grid-template-columns: 1fr;
 		}
-		.flags th {
-			white-space: normal;
+		.flags tr {
+			display: grid;
+			gap: 0.25rem;
+			padding-block: 0.8rem;
+			border-bottom: 1px solid var(--line);
+		}
+		.flags th,
+		.flags td {
+			width: auto;
+			padding: 0;
+			border: 0;
 		}
 		footer p {
 			margin-left: 0;

@@ -3,8 +3,6 @@ import { Code } from 'astro:components';
 import { archixTheme } from '../lib/code-theme';
 
 const config = `return {
-  imports = { "modules.common", "modules.gaming" },
-
   repos = { "core", "extra", "multilib" },
   packages = { "steam", "mangohud", "obs-studio", "protonup-qt" },
 
@@ -31,7 +29,7 @@ const generations = [
 <div class="demo" data-demo>
 	<div class="panes">
 		<figure class="pane">
-			<figcaption><span>lua/hosts/desktop.lua</span></figcaption>
+			<figcaption><span>lua/hosts/desktop/init.lua</span></figcaption>
 			<Code code={config} lang="lua" theme={archixTheme as any} />
 		</figure>
 		<figure class="pane term">
@@ -90,7 +88,7 @@ const generations = [
 		['roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n] y'],
 		['rolled back to generation 41 (snapshot 2026-10-09)', 'ok'],
 		['steam', 'cmd'],
-		['# launches fine. generation 42 stays until you gc it', 'note'],
+		['# launches fine. generation 42 is kept until gc ages it out', 'note'],
 	];
 
 	const root = document.querySelector<HTMLElement>('[data-demo]')!;

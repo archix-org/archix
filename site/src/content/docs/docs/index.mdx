@@ -3,7 +3,7 @@ title: What is archix?
 description: archix turns an Arch-based system into one declared, locked and reversible configuration written in Lua.
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 archix is a system configuration tool for Arch Linux and Arch-based distros. CachyOS is the first-class target, and EndeavourOS works too. You describe the whole machine in Lua: packages from the official repos, the AUR and third-party repos like CachyOS, plus `/etc` files, systemd units, users, kernel parameters and dotfiles. archix makes the system match that description, records exactly what it installed in a lockfile, and keeps every switch as a generation you can roll back to.
 
@@ -26,21 +26,6 @@ $ sudo archix switch
 That's the loop: edit Lua, switch, and roll back if you don't like the result. You don't start from an empty file, either: `sudo archix init` captures the machine you already have into a config and a lock that match it exactly.
 
 ## Three pillars
-
-<CardGrid>
-	<Card title="Declared" icon="document">
-		One Lua config describes every machine you own. Modules declare typed options, so a typo is an error with a
-		suggestion, not a setting that silently does nothing.
-	</Card>
-	<Card title="Locked" icon="approve-check">
-		`archix.lock` records the exact version of every package: official ones against a dated Arch Linux Archive
-		snapshot, AUR ones by commit. Commit the lock and every machine gets the same versions.
-	</Card>
-	<Card title="Reversible" icon="random">
-		Every switch becomes a generation with its own boot entry. Roll back from a terminal, or pick an older
-		entry at boot. It works the same on any filesystem, and a rescue entry repairs what pacman can't.
-	</Card>
-</CardGrid>
 
 ### Declared
 

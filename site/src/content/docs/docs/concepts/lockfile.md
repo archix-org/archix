@@ -91,8 +91,8 @@ An AUR package is a git repo of build files, so archix locks it by commit:
 
 ```toml
 [hosts.desktop.packages]
-zen-browser-bin = { version = "1.16.3b-1", repo = "aur", file = "zen-browser-bin-1.16.3b-1-x86_64.pkg.tar.zst", base = "zen-browser-bin", commit = "cd6266c6847e61c71facdd7dbf869b5cf64359be", explicit = true }
 nodejs-lts-iron = { version = "20.19.5-1", repo = "aur", file = "nodejs-lts-iron-20.19.5-1-x86_64.pkg.tar.zst", base = "nodejs-lts-iron", commit = "5e1a7c93b0d24f68e1c3a5b7d9f0e2c4a6b8d0f1", explicit = false, build_only = true }
+zen-browser-bin = { version = "1.16.3b-1", repo = "aur", file = "zen-browser-bin-1.16.3b-1-x86_64.pkg.tar.zst", base = "zen-browser-bin", commit = "cd6266c6847e61c71facdd7dbf869b5cf64359be", explicit = true }
 ```
 
 `version` comes from that commit's `.SRCINFO`. There's no `sha256`: AUR builds aren't bit-for-bit reproducible, so the commit is what's locked. Each generation records the sha256 of the file it actually built, so rollback reuses that exact file.
