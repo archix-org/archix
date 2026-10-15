@@ -1,0 +1,52 @@
+# Maintainer: archix contributors <https://github.com/archix-org/archix>
+pkgname=archix
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Declarative, lockable, rollback-able system configuration for Arch Linux"
+arch=('x86_64')
+url="https://archix.dev"
+license=('MIT OR Apache-2.0')
+depends=('pacman' 'gcc-libs' 'glibc')
+makedepends=('rust' 'rust-musl' 'musl')
+optdepends=(
+  'git: AUR packages and recording the config commit'
+  'devtools: building AUR packages in a clean chroot'
+  'mkinitcpio: boot entries'
+  'systemd-ukify: boot entries'
+  'sbctl: signing boot entries for Secure Boot'
+  'btrfs-progs: snapshots before each switch'
+  'flatpak: Flatpak apps'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/archix-org/archix/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+# makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
+options=('!lto')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # With rustup instead of pacman's rust, the musl target comes from rustup rather than rust-musl.
+  if command -v rustup >/dev/null; then
+    rustup target add x86_64-unknown-linux-musl
+  fi
+  cargo fetch --locked
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+  # The rescue initramfs runs archix before the root filesystem's libraries are usable, so it needs a static build.
+  CFLAGS= CXXFLAGS= LDFLAGS= cargo build --frozen --release --target x86_64-unknown-linux-musl
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --frozen --release --lib
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/archix "$pkgdir/usr/bin/archix"
+  install -Dm755 target/x86_64-unknown-linux-musl/release/archix "$pkgdir/usr/lib/archix/archix-static"
+  install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
+}

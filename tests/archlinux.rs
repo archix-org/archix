@@ -1,0 +1,100 @@
+//! Needs pacman and network access; run inside Arch with `tests/arch/run.sh`.
+
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+
+use archix::lock::{LOCK_FILE, Lockfile};
+use tempfile::TempDir;
+
+fn config(packages: &[&str]) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("init.lua"), host_file(packages)).unwrap();
+    dir
+}
+
+fn host_file(packages: &[&str]) -> String {
+    let quoted: Vec<String> = packages.iter().map(|p| format!("{p:?}")).collect();
+    format!("return {{ packages = {{ {} }} }}", quoted.join(", "))
+}
+
+fn archix(dir: &Path, args: &[&str]) -> Output {
+    let cache = dir.join(".cache");
+    Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["--config", dir.to_str().unwrap(), "--host", "box"])
+        .args(args)
+        .env("XDG_CACHE_HOME", cache)
+        .output()
+        .unwrap()
+}
+
+fn stdout(output: &Output) -> String {
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+#[ignore]
+fn lock_records_the_full_closure_with_declared_providers() {
+    let dir = config(&["base", "pipewire-jack", "obs-studio"]);
+    stdout(&archix(dir.path(), &["lock"]));
+    let lock = Lockfile::load(&dir.path().join(LOCK_FILE)).unwrap();
+    let host = &lock.hosts["box"];
+    assert!(host.packages.len() > 100, "only {} packages", host.packages.len());
+    assert!(host.packages["glibc"].sha256.len() == 64);
+    assert!(host.packages["pipewire-jack"].explicit);
+    assert!(!host.packages["glibc"].explicit);
+    assert!(
+        !host.packages.contains_key("jack2"),
+        "the declared provider should win over jack2"
+    );
+
+    let again = stdout(&archix(dir.path(), &["lock"]));
+    assert!(again.contains("is up to date"), "{again}");
+}
+
+#[test]
+#[ignore]
+fn lock_keeps_the_date_until_update() {
+    let dir = config(&["base"]);
+    stdout(&archix(dir.path(), &["lock"]));
+    let path = dir.path().join(LOCK_FILE);
+    let mut lock = Lockfile::load(&path).unwrap();
+    lock.hosts.get_mut("box").unwrap().date = "2026-06-01".parse().unwrap();
+    lock.save(&path).unwrap();
+    fs::write(dir.path().join("init.lua"), host_file(&["base", "htop"])).unwrap();
+    stdout(&archix(dir.path(), &["lock"]));
+    let relocked = Lockfile::load(&path).unwrap();
+    assert_eq!(relocked.hosts["box"].date.to_string(), "2026-06-01");
+    assert!(relocked.hosts["box"].packages.contains_key("htop"));
+
+    let updated = stdout(&archix(dir.path(), &["update"]));
+    assert!(updated.contains("snapshot 2026-06-01 -> "), "{updated}");
+}
+
+#[test]
+#[ignore]
+fn unknown_packages_fail_to_lock() {
+    let dir = config(&["base", "definitely-not-a-package"]);
+    let output = archix(dir.path(), &["lock"]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("`definitely-not-a-package` is neither in the configured repos nor in the AUR"),
+        "{stderr}"
+    );
+    assert!(!dir.path().join(LOCK_FILE).exists());
+}
+
+#[test]
+#[ignore]
+fn diff_lists_installs_and_removals() {
+    let dir = config(&["base", "htop"]);
+    stdout(&archix(dir.path(), &["lock"]));
+    let diff = stdout(&archix(dir.path(), &["diff"]));
+    assert!(diff.contains("install    htop "), "{diff}");
+    assert!(
+        diff.contains("remove     rust "),
+        "the test image's rust is not declared:\n{diff}"
+    );
+}

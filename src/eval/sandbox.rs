@@ -16,6 +16,26 @@ pub struct Markers {
     pub null: Table,
 }
 
+/// Modules shipped inside the binary, loaded before init.lua and reachable as `archix.<name>`.
+pub const BUILTIN_MODULES: &[(&str, &str)] = &[
+    ("packages", include_str!("modules/packages.lua")),
+    ("generations", include_str!("modules/generations.lua")),
+    ("aur", include_str!("modules/aur.lua")),
+    ("system", include_str!("modules/system.lua")),
+    ("boot", include_str!("modules/boot.lua")),
+    ("appimages", include_str!("modules/appimages.lua")),
+    ("flatpak", include_str!("modules/flatpak.lua")),
+    ("home", include_str!("modules/home.lua")),
+    ("home_systemd", include_str!("modules/home_systemd.lua")),
+    ("mime_apps", include_str!("modules/programs/mime_apps.lua")),
+    ("programs.fastfetch", include_str!("modules/programs/fastfetch.lua")),
+    ("programs.git", include_str!("modules/programs/git.lua")),
+    ("programs.kitty", include_str!("modules/programs/kitty.lua")),
+    ("programs.starship", include_str!("modules/programs/starship.lua")),
+    ("programs.thin", include_str!("modules/programs/thin.lua")),
+    ("programs.zsh", include_str!("modules/programs/zsh.lua")),
+];
+
 pub struct Sandbox {
     pub lua: Lua,
     pub markers: Markers,
@@ -62,6 +82,9 @@ impl Sandbox {
             null: markers.raw_get("null")?,
         };
 
+        lua.load(include_str!("formats.lua"))
+            .set_name("@archix/formats.lua")
+            .exec()?;
         let archix: Table = globals.raw_get("archix")?;
         archix.raw_set("hostname", hostname)?;
         archix.raw_set("read_file", lua.create_function(read_file)?)?;
@@ -77,7 +100,9 @@ impl Sandbox {
 
     pub fn load_init(&self) -> mlua::Result<(LuaValue, Rc<str>)> {
         let root = self.lua.app_data_ref::<Modules>().expect("modules state").root.clone();
-        let value = run_file(&self.lua, &root.join("init.lua"), "init.lua")?;
+        let code = fs::read_to_string(root.join("init.lua"))
+            .map_err(|e| mlua::Error::runtime(format!("reading init.lua: {e}")))?;
+        let value = run_chunk(&self.lua, code, "init.lua")?;
         Ok((value, "init.lua".into()))
     }
 
@@ -116,20 +141,31 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
         }
         modules.root.clone()
     };
-    let rel = name.replace('.', "/");
-    let candidates = [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")];
-    let Some(source) = candidates.iter().find(|c| root.join(c).is_file()) else {
-        return Err(mlua::Error::runtime(format!(
-            "module {name:?} not found (looked for {} and {})",
-            candidates[0], candidates[1]
-        )));
+    let (source, code) = match name.strip_prefix("archix.") {
+        Some(builtin) => match BUILTIN_MODULES.iter().find(|(n, _)| *n == builtin) {
+            Some((n, code)) => (format!("<archix>/{n}.lua"), code.to_string()),
+            None => return Err(mlua::Error::runtime(format!("archix has no built-in module {name:?}"))),
+        },
+        None => {
+            let rel = name.replace('.', "/");
+            let candidates = [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")];
+            let Some(source) = candidates.iter().find(|c| root.join(c).is_file()) else {
+                return Err(mlua::Error::runtime(format!(
+                    "module {name:?} not found (looked for {} and {})",
+                    candidates[0], candidates[1]
+                )));
+            };
+            let code = fs::read_to_string(root.join(source))
+                .map_err(|e| mlua::Error::runtime(format!("reading {source}: {e}")))?;
+            (source.clone(), code)
+        }
     };
 
     lua.app_data_mut::<Modules>()
         .expect("modules state")
         .loading
         .push(name.to_string());
-    let result = run_file(lua, &root.join(source), source);
+    let result = run_chunk(lua, code, &source);
     lua.app_data_mut::<Modules>().expect("modules state").loading.pop();
 
     let entry = (result?, Rc::from(source.as_str()));
@@ -140,8 +176,7 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
     Ok(entry)
 }
 
-fn run_file(lua: &Lua, path: &Path, display: &str) -> mlua::Result<LuaValue> {
-    let code = fs::read_to_string(path).map_err(|e| mlua::Error::runtime(format!("reading {display}: {e}")))?;
+fn run_chunk(lua: &Lua, code: String, display: &str) -> mlua::Result<LuaValue> {
     lua.load(code)
         .set_name(format!("@{display}"))
         .set_mode(ChunkMode::Text)
@@ -166,7 +201,7 @@ fn caller_location(traceback: &str) -> Option<&str> {
     traceback
         .lines()
         .map(str::trim)
-        .filter(|line| !line.starts_with("[C]") && !line.starts_with("archix/"))
+        .filter(|line| !line.starts_with("[C]") && !line.starts_with("archix/") && !line.starts_with("<archix>/"))
         .find_map(|line| {
             let (file, rest) = line.split_once(':')?;
             let (number, _) = rest.split_once(':')?;

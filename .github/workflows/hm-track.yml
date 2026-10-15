@@ -1,0 +1,22 @@
+name: Track Home Manager
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  track:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: gh label create home-manager --color 5277C3 --description "Upstream Home Manager changes to port" || true
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: scripts/hm-track.py
+        env:
+          GH_TOKEN: ${{ github.token }}

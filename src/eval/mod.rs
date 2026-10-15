@@ -10,7 +10,7 @@ use mlua::{Function, Table, Value as LuaValue};
 
 use crate::options::{self, Children, Def, Diagnostic};
 use crate::value::{Raw, Value};
-use sandbox::{Sandbox, UnsetReads, lua_message};
+use sandbox::{BUILTIN_MODULES, Sandbox, UnsetReads, lua_message};
 
 const MAX_ROUNDS: usize = 32;
 const MODULE_KEYS: [&str; 3] = ["imports", "options", "config"];
@@ -54,9 +54,18 @@ pub fn evaluate(input: &Input) -> Result<Evaluation, EvalError> {
     let sandbox = Sandbox::new(&root, &input.hostname).map_err(|e| EvalError::one(lua_message(&e)))?;
 
     let mut loader = Loader::new(&sandbox);
+    for (name, _) in BUILTIN_MODULES {
+        loader.import(&format!("archix.{name}"), "<archix>");
+    }
     match sandbox.load_init() {
         Ok((value, source)) => loader.add(value, source),
         Err(e) => loader.fail(lua_message(&e)),
+    }
+    if crate::installed::default_dir(&root, &input.hostname)
+        .join(crate::installed::FILE)
+        .is_file()
+    {
+        loader.import(&format!("hosts.{}.installed", input.hostname), "<archix>");
     }
     if !loader.diags.is_empty() {
         return Err(EvalError(loader.diags));
