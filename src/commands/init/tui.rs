@@ -630,7 +630,7 @@ impl<'a> App<'a> {
                 }
                 if !facts.flatpak_gone.is_empty() {
                     lines.push(warn(format!(
-                        "Flatpak apps whose remote is gone, left alone: {}",
+                        "their remote is gone, so archix leaves these Flatpak apps alone: {}",
                         some_of(&facts.flatpak_gone, 4)
                     )));
                 }

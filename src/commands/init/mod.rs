@@ -714,7 +714,7 @@ fn report(facts: &Facts, answers: &Answers) {
     section("Config files");
     if facts.secrets > 0 {
         note(format!(
-            "{} that hold secrets stay out of the config",
+            "{} that hold secrets stay out of the config and aren't listed",
             count(facts.secrets, "file", "files")
         ));
     }
@@ -723,6 +723,13 @@ fn report(facts: &Facts, answers: &Answers) {
     }
     if answers.files.is_empty() {
         note("none");
+    }
+    let left = facts.files.len() - answers.files.len();
+    if left > 0 {
+        note(format!(
+            "{} left unmanaged; the wizard (`archix init` without --defaults) lets you pick them",
+            count(left, "more file", "more files")
+        ));
     }
     section("Boot");
     match &facts.boot {
@@ -733,6 +740,12 @@ fn report(facts: &Facts, answers: &Answers) {
     if facts.btrfs {
         done("a snapshot of / before every switch");
     }
+    section("Generations");
+    done(format!(
+        "gc keeps the newest {} generations and any younger than {} days",
+        answers.keep.trim(),
+        answers.keep_days.trim()
+    ));
 }
 
 fn summary(dir: &Path, host: &str, config: &Host, git: bool) {
