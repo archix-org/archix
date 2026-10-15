@@ -47,14 +47,14 @@ Focus moves one line at a time, over every option, setting, text field, checklis
 | --- | --- |
 | `↑` `↓`, `tab`, `shift-tab` | Move the focus to the next or previous line. |
 | `enter`, `space` | Act on the focused line: pick an option, switch a setting or checklist entry, start editing a text field, or press a button. |
-| `End`, `←` `→` | Jump to the `Next` button, or move between `‹ Back` and `Next: <step> ›`. |
+| `←` `→` | Previous or next step, like the buttons; `→` is refused while a text field is invalid, and on Review it only focuses `Write the config ›`. |
+| `End` | Focus the `Next` button. |
 | `esc` | Previous step (while editing a text field, put the old value back instead). |
-| `1`–`9` | Jump to a step. |
 | `a`, `n` | Select all or none in a checklist. |
 | `r` | Reset the config files to the recommended ones. |
 | `q`, `ctrl-c` | Quit without writing anything. |
 
-Text fields are edited in place: `enter` starts editing, `enter` keeps the value and `esc` puts the old one back, and only while editing do `q` and digits go into the field. The config location must be an absolute path and the generation limits whole numbers, or `Next` refuses to leave the step. Steps with nothing to answer start on `Next`, and `↑` `↓` scroll them. Quitting prints `init was cancelled; nothing was written`.
+Text fields are edited in place: `enter` starts editing, `enter` keeps the value and `esc` puts the old one back, and only while editing do typed keys go into the field. The config location must be an absolute path and the generation limits whole numbers, or `Next` and `→` refuse to leave the step. Steps with nothing to answer start on `Next`, and `↑` `↓` scroll them. Quitting prints `init was cancelled; nothing was written`.
 
 Nothing is written until `Write the config ›` on Review. Then the wizard closes, and init writes the config and the lock and shows what the first switch would change:
 

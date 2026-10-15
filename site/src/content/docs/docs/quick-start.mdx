@@ -24,15 +24,15 @@ It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, 
 ```text wrap=false
  archix init                                                  host desktop  ·  step 3 of 9
 
- ✓ 1 Welcome         │   Packages
- ✓ 2 Config          │   What's installed, and what happens to what isn't declared.
- › 3 Packages        │
-   4 System          │   ✓ repos core, extra, multilib
-   5 Config files    │   ✓ 86 packages declared, 3 from the AUR
-   6 Boot            │   ✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox
-   7 Generations     │   · 2 dependencies that nothing needs any more: python-pip, rust
-   8 Dotfiles        │
-   9 Review          │     Dependencies nothing needs any more
+ ✓ Welcome           │   Packages
+ ✓ Config            │   What's installed, and what happens to what isn't declared.
+ › Packages          │
+   System            │   ✓ repos core, extra, multilib
+   Config files      │   ✓ 86 packages declared, 3 from the AUR
+   Boot              │   ✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox
+   Generations       │   · 2 dependencies that nothing needs any more: python-pip, rust
+   Dotfiles          │
+   Review            │     Dependencies nothing needs any more
                      │     › ● keep them (listed in ignored_packages)
                      │       ○ let the first switch remove them
                      │
@@ -49,23 +49,23 @@ It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, 
                      │
                      │      ‹ Back     Next: System ›
 
- ↑↓ move  ·  enter choose  ·  esc back  ·  1-9 jump  ·  q quit
+ ↑↓ move  ·  enter choose  ·  esc back  ·  ←→ step  ·  q quit
 ```
 
 The sidebar marks the steps you've seen with `✓` and the current one with `›`, and the header shows the host and the step. Focus moves one line at a time: every option of a choice, each `[x]` setting, each text field, each checklist entry, then the buttons. `›` marks the focused line, and the bottom line says what `enter` does there.
 
 | Key | What it does |
 | --- | --- |
-| `↑` `↓`, `tab`, `shift-tab` | Move the focus to the next or previous line. |
+| `↑` `↓`, `tab`, `shift-tab` | Move the focus to the next or previous line. From `Next`, `↓` reaches `‹ Back`. |
 | `enter`, `space` | Act on the focused line: pick an option, switch a setting or checklist entry on or off, or start editing a text field. On a button, press it. |
-| `‹ Back`, `Next: <step> ›` | The buttons that end every step. On Review, Next is `Write the config ›`. `End` jumps to Next, and `←` `→` move between the two. |
+| `←` `→` | Go to the previous or next step, like the buttons. On Review, `→` only focuses `Write the config ›`; it never writes. |
+| `End` | Focus the `Next` button. |
 | `esc` | Go back a step. |
-| `1`–`9` | Jump to that step. |
 | `a`, `n` | In a checklist, select all or none. |
 | `r` | In Config files, go back to the recommended files. |
 | `q`, `ctrl-c` | Quit without writing anything: `init was cancelled; nothing was written`. |
 
-Text fields (the config location and the generation limits) are edited in place: press `enter` on one, type, then `enter` keeps the value and `esc` puts the old one back. Only while you're editing do letters and digits go into the field. Next refuses to leave a step whose text fields are invalid, and shows the problem above the key hints, such as `! the config directory must be an absolute path`. Steps with nothing to answer (Welcome, System and Review) start on Next, and `↑` `↓` scroll their content. Answers stay as you left them when you move between steps.
+Text fields (the config location and the generation limits) are edited in place: press `enter` on one, type, then `enter` keeps the value and `esc` puts the old one back. Only while you're editing do letters and digits go into the field, and the bottom line reads `type to edit  ·  enter done  ·  esc cancel`. Next and `→` refuse to leave a step whose text fields are invalid, and shows the problem above the key hints, such as `! the config directory must be an absolute path`. Steps with nothing to answer (Welcome, System and Review) start on Next, and `↑` `↓` scroll their content. Answers stay as you left them when you move between steps.
 
 What each step decides:
 
