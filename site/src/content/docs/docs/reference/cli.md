@@ -82,7 +82,7 @@ System-wide Flatpak apps are declared too, each locked to the commit it's instal
 
 | Flag | Description |
 | --- | --- |
-| `--defaults` | Take every recommended answer without opening the wizard: everything in System, the recommended config files, and a git repository (`git init`, `git add -A`) when git is installed. It needs no terminal, and prints what it captured in Packages, System, Config files, Boot and Generations sections before Lock and Result. Config files lists the recommended files it chose, then `· N more files left unmanaged; the wizard (archix init without --defaults) lets you pick them`. Its output includes `! their remote is gone, so archix leaves these Flatpak apps alone: ...` when that applies. Without it, `init` needs a terminal: `` `archix init` asks questions; run it in a terminal, or pass --defaults to take every default ``. |
+| `--defaults` | Take every recommended answer without opening the wizard: everything in System, the recommended config files, no dotfiles (it writes no `home` section and touches nothing in your home), and a git repository (`git init`, `git add -A`) when git is installed. It needs no terminal, and prints what it captured in Packages, System, Config files, Boot and Generations sections before Lock and Result. Config files lists the recommended files it chose, then `· N more files left unmanaged; the wizard (archix init without --defaults) lets you pick them`. Its output includes `! their remote is gone, so archix leaves these Flatpak apps alone: ...` when that applies. Without it, `init` needs a terminal: `` `archix init` asks questions; run it in a terminal, or pass --defaults to take every default ``. |
 
 `init` refuses to run if the config directory already has an `init.lua`.
 

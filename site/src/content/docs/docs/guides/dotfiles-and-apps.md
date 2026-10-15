@@ -258,7 +258,7 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 
 ## Bringing your existing dotfiles in
 
-`archix init` can import the dotfiles you already have. In the wizard's Dotfiles step, pick the user under `Whose dotfiles` if init captured more than one, then choose entries in `Dotfiles to bring in`. It looks at each entry in `~/.config` and the top-level dotfiles in the home:
+`archix init` can import the dotfiles you already have, but only in the interactive wizard, where you see every pre-ticked entry and can untick it. `archix init --defaults` never imports dotfiles: it writes no `home` section and leaves your home untouched. In the wizard's Dotfiles step, pick the user under `Whose dotfiles` if init captured more than one, then choose entries in `Dotfiles to bring in`. It looks at each entry in `~/.config` and the top-level dotfiles in the home:
 
 - **Recommended** entries start ticked and are tagged `recommended`: shell rc files such as `.bashrc` and `.zshrc`, `.gitconfig` and `.config/git`, editors such as `nvim` and `helix`, terminals (`kitty`, `alacritty`, `foot`, `wezterm`, `ghostty`), window managers, bars and launchers (`hypr`, `sway`, `i3`, `niri`, `waybar`, `rofi` and similar), tools such as `btop` and `fastfetch`, and `mimeapps.list` and `user-dirs.dirs`.
 - **Everything else** is offered unticked, such as most KDE `*rc` files.
