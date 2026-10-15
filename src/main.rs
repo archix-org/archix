@@ -80,6 +80,9 @@ enum Command {
         /// Close the journal without changing anything, after showing what state the system is in
         #[arg(long, group = "mode")]
         abandon: bool,
+        /// With --rollback, go back across versions that may not read newer data without asking
+        #[arg(long)]
+        allow_unsafe_downgrade: bool,
     },
     /// Show the lock, pending changes and any unfinished switch
     Status,
@@ -280,6 +283,7 @@ fn run() -> Result<ExitCode> {
         cont,
         rollback,
         abandon,
+        allow_unsafe_downgrade,
     } = command
     {
         let mode = match (cont, rollback, abandon) {
@@ -288,7 +292,7 @@ fn run() -> Result<ExitCode> {
             (_, _, true) => Some(commands::RecoverMode::Abandon),
             _ => None,
         };
-        commands::recover(mode)?;
+        commands::recover(mode, allow_unsafe_downgrade)?;
         return Ok(ExitCode::SUCCESS);
     }
     let hostname = match cli.host {

@@ -45,6 +45,22 @@ pub fn crossing(name: &str, from: &str, to: &str, configured: &BTreeMap<String, 
         .then(|| format!("goes back from major version {old} to {new}, and {name} migrates its data between them"))
 }
 
+/// Both generations' configured boundaries, per package.
+pub fn merged(a: &BTreeMap<String, Vec<String>>, b: &BTreeMap<String, Vec<String>>) -> BTreeMap<String, Vec<String>> {
+    let mut all = a.clone();
+    for (name, versions) in b {
+        let list = all.entry(name.clone()).or_default();
+        list.extend(
+            versions
+                .iter()
+                .filter(|v| !list.contains(v))
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+    }
+    all
+}
+
 /// One line per unsafe downgrade among `changes`.
 pub fn unsafe_downgrades(changes: &[Change], configured: &BTreeMap<String, Vec<String>>) -> Vec<String> {
     changes
@@ -85,6 +101,13 @@ mod tests {
         assert!(crossing("myapp", "2.1-1", "1.9-1", &configured).is_some());
         assert!(crossing("myapp", "2.1-1", "2.0.5-1", &configured).is_none());
         assert!(crossing("myapp", "1.9-1", "1.8-1", &configured).is_none());
+    }
+
+    #[test]
+    fn both_generations_boundaries_count() {
+        let a = BTreeMap::from([("app".to_string(), vec!["2.0".to_string()])]);
+        let b = BTreeMap::from([("app".to_string(), vec!["3.0".to_string(), "2.0".to_string()])]);
+        assert_eq!(merged(&a, &b)["app"], ["2.0", "3.0"]);
     }
 
     #[test]

@@ -370,11 +370,7 @@ fn bare_terms_search_and_install_the_picks_like_yay() {
     assert!(installed("tree").is_none(), "an empty answer installs nothing");
 
     let out = setup.answering("1\n", &["tree", "--noconfirm"]);
-    let last_result = out
-        .lines()
-        .filter(|line| line.starts_with("1 "))
-        .next_back()
-        .unwrap_or_default();
+    let last_result = out.lines().rfind(|line| line.starts_with("1 ")).unwrap_or_default();
     assert!(
         last_result.starts_with("1 extra/tree "),
         "the best match is 1, printed last:\n{out}"

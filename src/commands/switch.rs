@@ -14,7 +14,7 @@ use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
-use archix::downgrade::unsafe_downgrades;
+use archix::downgrade::{merged, unsafe_downgrades};
 use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
 use archix::flatpak::{self, LockedApp};
@@ -365,7 +365,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
 }
 
 /// Lists unsafe downgrades and asks, defaulting to no; `--noconfirm` refuses them unless `allow` is set.
-fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -> Result<()> {
+pub(super) fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -> Result<()> {
     if risky.is_empty() {
         return Ok(());
     }
@@ -377,7 +377,9 @@ fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -> Result<()
         return Ok(());
     }
     if noconfirm {
-        bail!("refusing unsafe downgrades with --noconfirm; pass --allow-unsafe-downgrade to go ahead");
+        bail!(
+            "refusing unsafe downgrades with --noconfirm; to go ahead, run `archix switch` or `archix rollback` with --allow-unsafe-downgrade"
+        );
     }
     if !confirm_no("downgrade anyway?")? {
         bail!("aborted; nothing was changed");
@@ -818,6 +820,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
             print_hooks(&system_change);
         }
         store.activate(number)?;
+        if online {
+            let _ = fs::remove_file(paths.notes());
+        }
         println!("{name} is current; no package changes were needed");
         return report_soft_failures(&hooks_at_end(&BTreeSet::new()), &format!("{name} is current"));
     }
@@ -827,8 +832,10 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     if online {
         print_hooks(&system_change);
     }
-    let mut configured = system_change.from.unsafe_downgrades.clone();
-    configured.extend(generation.system.unsafe_downgrades.clone());
+    let configured = merged(
+        &system_change.from.unsafe_downgrades,
+        &generation.system.unsafe_downgrades,
+    );
     let risky = unsafe_downgrades(&changes, &configured);
     match allow_unsafe {
         Some(allow) => guard_downgrades(&risky, noconfirm, allow)?,

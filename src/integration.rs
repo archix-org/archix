@@ -39,7 +39,9 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     );
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
-         Exec=sh -c '[ -e {journal} ] && command -v notify-send >/dev/null && notify-send -u critical archix \"A switch was interrupted. Run: sudo archix recover\"'\n"
+         Exec=sh -c 'command -v notify-send >/dev/null || exit 0; \
+         [ -e {journal} ] && notify-send -u critical archix \"A switch was interrupted. Run: sudo archix recover\"; \
+         [ -s {notes} ] && notify-send -u critical archix \"$(cat {notes})\"; exit 0'\n"
     );
     vec![
         (paths.pacman_hooks.join("archix.hook"), hook),

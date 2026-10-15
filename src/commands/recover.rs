@@ -14,10 +14,13 @@ use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::system::apply::SystemChange;
 
-use super::switch::{reboot_notice, report_soft_failures, run_hooks};
+use archix::downgrade::{merged, unsafe_downgrades};
+use archix::plan::Change;
+
+use super::switch::{guard_downgrades, reboot_notice, report_soft_failures, run_hooks};
 use super::{RecoverMode, count, describe_unfinished, kind_name, require_root};
 
-pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
+pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
     require_root("recover")?;
     let paths = Paths::system();
     let Some(mut journal) = Journal::load(&paths.journal())? else {
@@ -48,6 +51,25 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
         RecoverMode::Rollback => {
             let archive = Archive::new(ARCHIVE_URL);
             let installed = read_local_db(&paths.local_db())?;
+            let changes: Vec<Change> = journal
+                .before
+                .iter()
+                .filter_map(|(name, before)| {
+                    let now = installed.get(name)?;
+                    (now.version != before.version).then(|| Change::Downgrade {
+                        name: name.clone(),
+                        from: now.version.clone(),
+                        to: before.version.clone(),
+                    })
+                })
+                .collect();
+            let configured = journal
+                .transaction
+                .system
+                .as_ref()
+                .map(|change| merged(&change.from.unsafe_downgrades, &change.to.unsafe_downgrades))
+                .unwrap_or_default();
+            guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
             let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
