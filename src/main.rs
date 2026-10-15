@@ -21,7 +21,7 @@ struct Cli {
     #[arg(long, global = true)]
     host: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -86,9 +86,96 @@ enum Command {
     Generations,
     /// Delete old generations and cached files no kept generation needs
     Gc,
+    /// Declare packages in installed.lua and install them (pacman-style: archix -S <packages>)
+    Install {
+        #[arg(required = true)]
+        packages: Vec<String>,
+        /// Directory under the config's lua/ whose installed.lua to edit, instead of lua/hosts/<host>/
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Install without declaring anything; the next switch removes it again unless it gets declared
+        #[arg(long)]
+        temp: bool,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+        #[arg(skip)]
+        upgrade_first: bool,
+    },
+    /// Remove packages from installed.lua and uninstall them (pacman-style: archix -R <packages>)
+    #[command(short_flag = 'R')]
+    Remove {
+        #[arg(required = true)]
+        packages: Vec<String>,
+        /// Directory under the config's lua/ whose installed.lua to edit
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+    },
+    /// Search the repositories and the AUR (pacman-style: archix -Ss <terms>)
+    Search {
+        #[arg(required = true)]
+        terms: Vec<String>,
+    },
+    /// pacman -Syu, adopt the result, move AUR packages to their newest recipes and switch (also: archix, archix -Syu)
+    Upgrade {
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+    },
+    /// pacman-style operations: -S <packages>, -Ss <terms>, -Syu [packages]
+    #[command(short_flag = 'S', hide = true)]
+    Sync {
+        #[arg(short = 's')]
+        search: bool,
+        #[arg(short = 'y', action = clap::ArgAction::Count)]
+        refresh: u8,
+        #[arg(short = 'u', action = clap::ArgAction::Count)]
+        upgrade: u8,
+        #[arg(long)]
+        noconfirm: bool,
+        #[arg(long)]
+        needed: bool,
+        targets: Vec<String>,
+    },
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+}
+
+/// Turns pacman-style `-S` operations into the native command they mean.
+fn from_sync(command: Command) -> Result<Command> {
+    let Command::Sync {
+        search,
+        refresh,
+        upgrade,
+        noconfirm,
+        targets,
+        ..
+    } = command
+    else {
+        return Ok(command);
+    };
+    Ok(match (search, upgrade > 0, targets.is_empty()) {
+        (true, _, false) => Command::Search { terms: targets },
+        (true, _, true) => anyhow::bail!("-Ss needs search terms"),
+        (false, true, true) => Command::Upgrade { noconfirm },
+        (false, upgrade_first, false) => Command::Install {
+            packages: targets,
+            path: None,
+            temp: false,
+            noconfirm,
+            upgrade_first,
+        },
+        (false, false, true) if refresh > 0 => {
+            anyhow::bail!(
+                "archix doesn't sync databases on their own; use -Syu to upgrade, or `archix update` to move the lock"
+            )
+        }
+        (false, false, true) => anyhow::bail!("-S needs packages to install"),
+    })
 }
 
 #[derive(Serialize)]
@@ -114,7 +201,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    match cli.command {
+    let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
+    match command {
         Command::HookRecord => {
             commands::hook_record();
             return Ok(ExitCode::SUCCESS);
@@ -137,7 +225,7 @@ fn run() -> Result<ExitCode> {
         cont,
         rollback,
         abandon,
-    } = cli.command
+    } = command
     {
         let mode = match (cont, rollback, abandon) {
             (true, _, _) => Some(commands::RecoverMode::Continue),
@@ -152,12 +240,40 @@ fn run() -> Result<ExitCode> {
         Some(host) => host,
         None => system_hostname()?,
     };
+    let edit = match &command {
+        Command::Install {
+            packages,
+            path,
+            temp: false,
+            ..
+        } => Some(commands::edit_installed(
+            &cli.config,
+            &hostname,
+            path.as_deref(),
+            packages,
+            &[],
+        )?),
+        Command::Remove { packages, path, .. } => Some(commands::edit_installed(
+            &cli.config,
+            &hostname,
+            path.as_deref(),
+            &[],
+            packages,
+        )?),
+        _ => None,
+    };
+    let undo = || {
+        if let Some(edit) = &edit {
+            edit.restore();
+        }
+    };
     let evaluation = match eval::evaluate(&Input {
         config_dir: cli.config.clone(),
         hostname: hostname.clone(),
     }) {
         Ok(evaluation) => evaluation,
         Err(errors) => {
+            undo();
             eprintln!("{errors}");
             return Ok(ExitCode::FAILURE);
         }
@@ -167,7 +283,36 @@ fn run() -> Result<ExitCode> {
         host: &hostname,
         config: &evaluation.config,
     };
-    match cli.command {
+    match command {
+        Command::Install {
+            packages,
+            temp: true,
+            noconfirm,
+            ..
+        } => commands::install_temporarily(&target, &packages, noconfirm)?,
+        Command::Install {
+            noconfirm,
+            upgrade_first,
+            ..
+        } => {
+            let result = if upgrade_first {
+                commands::upgrade(&target, noconfirm)
+            } else {
+                commands::switch(&target, noconfirm, None)
+            };
+            if let Err(e) = result {
+                undo();
+                return Err(e.context("installed.lua was restored"));
+            }
+        }
+        Command::Remove { noconfirm, .. } => {
+            if let Err(e) = commands::switch(&target, noconfirm, None) {
+                undo();
+                return Err(e.context("installed.lua was restored"));
+            }
+        }
+        Command::Search { terms } => commands::search(&target, &terms)?,
+        Command::Upgrade { noconfirm } => commands::upgrade(&target, noconfirm)?,
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
         Command::Lock { noconfirm } => commands::lock(&target, commands::Snapshot::Locked, noconfirm)?,
@@ -186,7 +331,8 @@ fn run() -> Result<ExitCode> {
         | Command::HookRecord
         | Command::Rollback { .. }
         | Command::Generations
-        | Command::Gc => {
+        | Command::Gc
+        | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }
     }

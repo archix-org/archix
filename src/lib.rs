@@ -7,6 +7,7 @@ pub mod eval;
 pub mod fetch;
 pub mod gc;
 pub mod generations;
+pub mod installed;
 pub mod integration;
 pub mod journal;
 pub mod lock;

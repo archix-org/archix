@@ -1,3 +1,4 @@
+mod helper;
 mod lock;
 mod recover;
 mod switch;
@@ -25,6 +26,7 @@ use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
+pub use helper::{edit_installed, install_temporarily, search, upgrade};
 pub use lock::{diff, lock, status};
 pub use recover::recover;
 pub use switch::{gc, generations, hook_record, rollback, switch};

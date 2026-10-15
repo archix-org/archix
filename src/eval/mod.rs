@@ -61,6 +61,12 @@ pub fn evaluate(input: &Input) -> Result<Evaluation, EvalError> {
         Ok((value, source)) => loader.add(value, source),
         Err(e) => loader.fail(lua_message(&e)),
     }
+    if crate::installed::default_dir(&root, &input.hostname)
+        .join(crate::installed::FILE)
+        .is_file()
+    {
+        loader.import(&format!("hosts.{}.installed", input.hostname), "<archix>");
+    }
     if !loader.diags.is_empty() {
         return Err(EvalError(loader.diags));
     }

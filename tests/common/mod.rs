@@ -59,6 +59,19 @@ impl Setup {
             .unwrap()
     }
 
+    pub fn answering_raw(&self, input: &str, args: &[&str]) -> Output {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    }
+
     pub fn answering(&self, input: &str, args: &[&str]) -> String {
         let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
             .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
