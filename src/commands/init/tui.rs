@@ -317,8 +317,9 @@ impl<'a> App<'a> {
             KeyCode::Up | KeyCode::Char('k') if self.only_buttons() => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => self.move_focus(1),
             KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => self.move_focus(-1),
-            KeyCode::Left | KeyCode::Char('h') if row == Row::Next && self.step > 0 => self.focus_row(Row::Back),
-            KeyCode::Right | KeyCode::Char('l') if row == Row::Back => self.focus_row(Row::Next),
+            KeyCode::Left | KeyCode::Char('h') => self.back(),
+            KeyCode::Right | KeyCode::Char('l') if self.current() == Step::Review => self.focus_row(Row::Next),
+            KeyCode::Right | KeyCode::Char('l') => return self.forward(),
             KeyCode::PageDown if self.only_buttons() => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageUp if self.only_buttons() => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::PageDown => self.move_focus(10),
@@ -331,12 +332,6 @@ impl<'a> App<'a> {
                 self.select(|facts, i| facts.files[i].recommended);
             }
             KeyCode::Char('q') => return Flow::Quit,
-            KeyCode::Char(digit @ '1'..='9') => {
-                let target = digit as usize - '1' as usize;
-                if target < STEPS.len() {
-                    self.go(target);
-                }
-            }
             _ => {}
         }
         Flow::Stay
@@ -539,7 +534,6 @@ impl<'a> App<'a> {
                 };
                 Line::from(vec![
                     Span::styled(format!(" {mark} "), style),
-                    Span::styled(format!("{} ", i + 1), Style::new().fg(QUIET)),
                     Span::styled(step.title(), text_style),
                 ])
             })
@@ -647,8 +641,8 @@ impl<'a> App<'a> {
                 key("esc"),
                 label(" back"),
                 gap(),
-                key("1-9"),
-                label(" jump"),
+                key("←→"),
+                label(" step"),
                 gap(),
                 key("q"),
                 label(" quit"),
@@ -1244,12 +1238,18 @@ mod tests {
         assert!(!app.answers.aur_review, "enter switches a toggle");
 
         press(&mut app, KeyCode::End);
-        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Down);
         assert_eq!(app.focused(), Row::Back);
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.current(), Step::Config, "the Back button goes back");
         press(&mut app, KeyCode::Char('3'));
+        assert_eq!(app.current(), Step::Config, "number keys don't jump");
+        press(&mut app, KeyCode::Right);
+        assert_eq!(app.current(), Step::Packages, "→ is the next step");
         assert!(!app.answers.strict && !app.answers.aur_review, "answers survive");
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.current(), Step::Config, "← is the previous step");
+        press(&mut app, KeyCode::Right);
         let screen = render(&mut app);
         assert!(screen.contains("‹ Back     Next: System ›"), "{screen}");
     }
@@ -1258,7 +1258,10 @@ mod tests {
     fn enter_ticks_checklist_items() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
-        press(&mut app, KeyCode::Char('5'));
+        for _ in 0..4 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.current(), Step::Files);
         assert_eq!(app.answers.files, [0].into());
         press(&mut app, KeyCode::Enter);
         assert!(app.answers.files.is_empty());
@@ -1314,6 +1317,8 @@ mod tests {
             assert!(screen.contains(step.blurb()), "{screen}");
             if step == Step::Review {
                 assert!(screen.contains("Write the config ›"), "{screen}");
+                assert_eq!(press(&mut app, KeyCode::Right), Flow::Stay, "→ never writes the config");
+                assert_eq!(app.focused(), Row::Next);
                 assert_eq!(next(&mut app), Flow::Done);
             } else {
                 next(&mut app);
