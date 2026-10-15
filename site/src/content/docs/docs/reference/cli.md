@@ -41,21 +41,22 @@ $ sudo archix init
 
 `init` opens a full-screen wizard with nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which config files to manage (a checklist, each file tagged `recommended`, `changed from its package's version` or `not from any package`), whether to write boot entries, how many generations to keep, and which dotfiles to bring in. Every answer starts at the recommended one.
 
+Focus moves one line at a time, over every option, setting, text field, checklist entry and button; `›` marks it.
+
 | Key | What it does |
 | --- | --- |
-| `enter` | Next step; on Review, write the config. |
-| `esc` | Previous step. |
+| `↑` `↓`, `tab`, `shift-tab` | Move the focus to the next or previous line. |
+| `enter`, `space` | Act on the focused line: pick an option, switch a setting or checklist entry, start editing a text field, or press a button. |
+| `End`, `←` `→` | Jump to the `Next` button, or move between `‹ Back` and `Next: <step> ›`. |
+| `esc` | Previous step (while editing a text field, put the old value back instead). |
 | `1`–`9` | Jump to a step. |
-| `↑` `↓`, `tab` | Move between fields, or through a checklist. |
-| `←` `→` | Change a choice. |
-| `space` | Toggle the entry under the cursor. |
 | `a`, `n` | Select all or none in a checklist. |
 | `r` | Reset the config files to the recommended ones. |
 | `q`, `ctrl-c` | Quit without writing anything. |
 
-Text fields take typing directly, so in one, `q` and `1`–`9` are typed too; `ctrl-c` still quits. The config location must be an absolute path and the generation limits whole numbers, or the step won't advance. Quitting prints `init was cancelled; nothing was written`.
+Text fields are edited in place: `enter` starts editing, `enter` keeps the value and `esc` puts the old one back, and only while editing do `q` and digits go into the field. The config location must be an absolute path and the generation limits whole numbers, or `Next` refuses to leave the step. Steps with nothing to answer start on `Next`, and `↑` `↓` scroll them. Quitting prints `init was cancelled; nothing was written`.
 
-Nothing is written until `enter` on Review. Then the wizard closes, and init writes the config and the lock and shows what the first switch would change:
+Nothing is written until `Write the config ›` on Review. Then the wizard closes, and init writes the config and the lock and shows what the first switch would change:
 
 ```
 ── Lock ────────────────────────────────────────

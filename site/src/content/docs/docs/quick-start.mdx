@@ -19,7 +19,7 @@ You don't write your first config by hand. `archix init` reads your running syst
 $ sudo archix init
 ```
 
-It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. Each step shows what init found and asks what it can't decide for you, with the recommended answer already chosen. You can go back and change any answer, and nothing is written until you press `enter` on Review. Here's the Packages step:
+It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. Each step shows what init found and asks what it can't decide for you, with the recommended answer already chosen. You can go back and change any answer, and nothing is written until you choose `Write the config ›` on Review. Here's the Packages step:
 
 ```text wrap=false
  archix init                                                  host desktop  ·  step 3 of 9
@@ -31,10 +31,9 @@ It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, 
    5 Config files    │   ✓ 86 packages declared, 3 from the AUR
    6 Boot            │   ✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox
    7 Generations     │   · 2 dependencies that nothing needs any more: python-pip, rust
-   8 Dotfiles        │   · Everything installed now is declared, so the first switch removes nothing.
-   9 Review          │
-                     │   ▌ Dependencies nothing needs any more
-                     │       ● keep them (listed in ignored_packages)
+   8 Dotfiles        │
+   9 Review          │     Dependencies nothing needs any more
+                     │     › ● keep them (listed in ignored_packages)
                      │       ○ let the first switch remove them
                      │
                      │     Later, when you install something with plain pacman or yay
@@ -47,25 +46,26 @@ It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, 
                      │       ● ask, defaulting to the nearest newer version (recommended)
                      │       ○ take the nearest newer version
                      │       ○ take the nearest older version
+                     │
+                     │      ‹ Back     Next: System ›
 
- enter next  ·  esc back  ·  ↑↓ field  ·  ←→ choose  ·  1-9 jump  ·  q quit
+ ↑↓ move  ·  enter choose  ·  esc back  ·  1-9 jump  ·  q quit
 ```
 
-The sidebar marks the steps you've seen with `✓` and the current one with `›`, and the header shows the host and the step. `▌` marks the field you're on. The bottom line lists the keys that work right now:
+The sidebar marks the steps you've seen with `✓` and the current one with `›`, and the header shows the host and the step. Focus moves one line at a time: every option of a choice, each `[x]` setting, each text field, each checklist entry, then the buttons. `›` marks the focused line, and the bottom line says what `enter` does there.
 
 | Key | What it does |
 | --- | --- |
-| `enter` | Go to the next step. On Review, write the config. |
+| `↑` `↓`, `tab`, `shift-tab` | Move the focus to the next or previous line. |
+| `enter`, `space` | Act on the focused line: pick an option, switch a setting or checklist entry on or off, or start editing a text field. On a button, press it. |
+| `‹ Back`, `Next: <step> ›` | The buttons that end every step. On Review, Next is `Write the config ›`. `End` jumps to Next, and `←` `→` move between the two. |
 | `esc` | Go back a step. |
 | `1`–`9` | Jump to that step. |
-| `↑` `↓`, `tab` | Move between fields, or through a checklist. |
-| `←` `→` | Change a choice, or flip a `[x]` setting. |
-| `space` | Tick or untick the checklist entry under the cursor. |
 | `a`, `n` | In a checklist, select all or none. |
 | `r` | In Config files, go back to the recommended files. |
 | `q`, `ctrl-c` | Quit without writing anything: `init was cancelled; nothing was written`. |
 
-Answers stay as you left them when you move between steps. Text fields, the config location and the generation limits, take typing directly, so while you're in one, letters and digits (`q` and `1`–`9` included) go into the field; `tab` or `↑` `↓` moves on, and `ctrl-c` still quits. A step with a text field won't advance until the value is valid, and the problem shows above the key hints, such as `! the config directory must be an absolute path`.
+Text fields (the config location and the generation limits) are edited in place: press `enter` on one, type, then `enter` keeps the value and `esc` puts the old one back. Only while you're editing do letters and digits go into the field. Next refuses to leave a step whose text fields are invalid, and shows the problem above the key hints, such as `! the config directory must be an absolute path`. Steps with nothing to answer (Welcome, System and Review) start on Next, and `↑` `↓` scroll their content. Answers stay as you left them when you move between steps.
 
 What each step decides:
 
@@ -87,7 +87,7 @@ What each step decides:
 
 8. **Dotfiles.** Opt-in. Pick a user if there's more than one, then tick entries from `~/.config` and top-level dotfiles; nothing is ticked by default. They're copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
 
-9. **Review.** Everything init will write, one line each: the config location, packages, undeclared and unused packages, Flatpak apps, accounts, services, config files, boot, snapshots, generations and dotfiles. `enter` writes it.
+9. **Review.** Everything init will write, one line each: the config location, packages, undeclared and unused packages, Flatpak apps, accounts, services, config files, boot, snapshots, generations and dotfiles. `Write the config ›` writes it.
 
 </Steps>
 
