@@ -454,13 +454,20 @@ fn render_environment(b: &mut Builder, environment: Option<&Value>) {
         other => other.to_string(),
     };
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    // Double quotes let $VAR expand in shells the way environment.d expands it, so both mean the same.
+    let expanding = |s: &str| {
+        format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`")
+        )
+    };
     if let Some(Value::Map(variables)) = environment.and_then(|e| get(e, "variables"))
         && !variables.is_empty()
     {
         let (mut shell, mut session) = (String::new(), String::new());
         for (name, value) in variables {
             let value = as_text(value);
-            shell.push_str(&format!("export {name}={}\n", quote(&value)));
+            shell.push_str(&format!("export {name}={}\n", expanding(&value)));
             session.push_str(&format!("{name}={value}\n"));
         }
         b.text("/etc/profile.d/archix-environment.sh", &shell);

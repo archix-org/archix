@@ -251,7 +251,7 @@ fn the_firewall_and_environment_come_from_the_config() {
     );
     assert_eq!(
         read("/etc/profile.d/archix-environment.sh"),
-        "export EDITOR='nvim'\nexport PATHS='/a:/b'\n"
+        "export EDITOR=\"nvim\"\nexport PATHS=\"/a:/b\"\n"
     );
     assert_eq!(read("/etc/environment.d/90-archix.conf"), "EDITOR=nvim\nPATHS=/a:/b\n");
     assert_eq!(read("/etc/profile.d/archix-aliases.sh"), "alias ll='ls -l'\n");
@@ -262,6 +262,17 @@ fn the_firewall_and_environment_come_from_the_config() {
     assert!(
         table.contains("tcp dport 2223 accept") && !table.contains("2222"),
         "changed rules are reloaded:\n{table}"
+    );
+
+    setup.set_body(
+        &[],
+        r#"firewall = { enable = true, allowed_tcp_ports = { 2223 }, extra_input_rules = "tcp dportt 9 accept" }"#,
+    );
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("the firewall rules don't load"), "{err}");
+    assert!(
+        nft_table().unwrap().contains("tcp dport 2223 accept"),
+        "a bad rule changes nothing"
     );
 
     setup.set_body(&[], "");

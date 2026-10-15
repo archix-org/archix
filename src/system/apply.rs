@@ -261,7 +261,7 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-fn is_enabled(unit: &str, user: bool) -> bool {
+pub fn is_enabled(unit: &str, user: bool) -> bool {
     let mut cmd = Command::new("systemctl");
     if user {
         cmd.arg("--global");

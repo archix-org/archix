@@ -61,6 +61,25 @@ fn text(value: Option<&Value>) -> &str {
     }
 }
 
+/// Checks a ruleset with `nft -c` before a switch changes anything; skipped until nft is installed.
+pub fn validate(rules: &str) -> Result<()> {
+    if !std::path::Path::new("/usr/bin/nft").exists() {
+        return Ok(());
+    }
+    let tmp = std::env::temp_dir().join(format!("archix-firewall-{}.nft", std::process::id()));
+    std::fs::write(&tmp, rules)?;
+    let output = std::process::Command::new("nft").arg("-c").arg("-f").arg(&tmp).output();
+    let _ = std::fs::remove_file(&tmp);
+    let output = output?;
+    if !output.status.success() {
+        bail!(
+            "the firewall rules don't load (check extra_input_rules and extra_rules); nothing was changed:\n{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
 /// The nftables file for the `firewall` options, or None when it's off.
 pub fn ruleset(firewall: &Value) -> Result<Option<String>> {
     if get(firewall, "enable") != Some(&Value::Bool(true)) {

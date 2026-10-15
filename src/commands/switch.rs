@@ -189,6 +189,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     };
     let system_lines = system::apply::describe(&system_change)?;
     system::apply::check(&paths, &system_change)?;
+    if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
+        system::firewall::validate(&String::from_utf8_lossy(&rendered.blobs[&rules.sha256]))?;
+        if system::apply::is_enabled("nftables.service", false)
+            && rendered.state.services.get("nftables.service") != Some(&false)
+        {
+            eprintln!(
+                "warning: nftables.service is enabled too, so /etc/nftables.conf (on Arch: drop everything but SSH) still applies on top of the archix firewall; set services[\"nftables.service\"] = false"
+            );
+        }
+    }
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
