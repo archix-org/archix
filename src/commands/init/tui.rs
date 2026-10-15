@@ -1123,32 +1123,26 @@ impl<'a> App<'a> {
                         KEEP_DAYS.to_string(),
                     ),
                 };
-                let placeholder = Span::styled(format!("{placeholder} (default)"), Style::new().fg(QUIET));
-                lines.push(heading(title));
                 let row = Row::Edit(control);
                 let editing = focused == row && self.editing.is_some();
+                lines.push(Line::from(vec![
+                    heading(title).spans.remove(0),
+                    Span::styled(format!("   default {placeholder}"), Style::new().fg(QUIET)),
+                ]));
                 let pointer = pointer(row, cursor_line, lines.len());
-                let mut spans = vec![pointer];
-                if editing {
-                    spans.push(Span::styled(
-                        format!("{value}▏"),
-                        Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED),
-                    ));
-                    if value.is_empty() {
-                        spans.push(placeholder);
-                    }
+                let width = 32usize.max(value.chars().count() + 2);
+                let shown = if editing { format!("{value}▏") } else { value.clone() };
+                let style = if editing {
+                    Style::new().fg(ACCENT)
                 } else {
-                    if value.is_empty() {
-                        spans.push(placeholder);
-                    } else {
-                        spans.push(Span::styled(
-                            value.clone(),
-                            label_style(row).add_modifier(Modifier::UNDERLINED),
-                        ));
-                    }
-                    if focused == row {
-                        spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
-                    }
+                    label_style(row)
+                };
+                let mut spans = vec![
+                    pointer,
+                    Span::styled(format!("{shown:<width$}"), style.add_modifier(Modifier::UNDERLINED)),
+                ];
+                if focused == row && !editing {
+                    spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
                 }
                 lines.push(Line::from(spans));
                 lines.push(Line::default());
@@ -1412,9 +1406,10 @@ mod tests {
         assert_eq!(app.current(), Step::Generations);
         let screen = render(&mut app);
         assert!(
-            screen.contains("10 (default)") && screen.contains("30 (default)"),
+            screen.contains("default 10") && screen.contains("default 30"),
             "{screen}"
         );
+        assert!(!screen.contains("› 10"), "the field itself stays empty:\n{screen}");
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('5'));
         press(&mut app, KeyCode::Enter);
