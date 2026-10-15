@@ -17,6 +17,8 @@ optdepends=(
   'btrfs-progs: snapshots before each switch'
   'flatpak: Flatpak apps'
 )
+# Other AUR packages ship their own /usr/bin/ax.
+conflicts=('ax')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/archix-org/archix/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 # makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
@@ -47,6 +49,7 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/archix "$pkgdir/usr/bin/archix"
+  ln -s archix "$pkgdir/usr/bin/ax"
   install -Dm755 target/x86_64-unknown-linux-musl/release/archix "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
 }

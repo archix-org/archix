@@ -17,13 +17,14 @@ optdepends=(
   'flatpak: Flatpak apps'
 )
 provides=('archix')
-conflicts=('archix')
+conflicts=('archix' 'ax')
 source=("archix-$pkgver-x86_64-linux.tar.gz::https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-x86_64-linux.tar.gz")
 sha256sums=('SKIP')
 
 package() {
   cd "archix-$pkgver-x86_64-linux"
   install -Dm755 archix "$pkgdir/usr/bin/archix"
+  ln -s archix "$pkgdir/usr/bin/ax"
   install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/archix"
 }
