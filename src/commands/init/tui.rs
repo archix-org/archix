@@ -1120,29 +1120,39 @@ impl<'a> App<'a> {
                         KEEP_DAYS.to_string(),
                     ),
                 };
+                const LABEL: usize = 38;
+                const FIELD: usize = 24;
                 let row = Row::Edit(control);
                 let editing = focused == row && self.editing.is_some();
-                lines.push(Line::from(vec![
-                    heading(title).spans.remove(0),
-                    Span::styled(format!("   default {placeholder}"), Style::new().fg(QUIET)),
-                ]));
                 let pointer = pointer(row, cursor_line, lines.len());
-                let width = 32usize.max(value.chars().count() + 2);
-                let shown = if editing { format!("{value}▏") } else { value.clone() };
-                let style = if editing {
-                    Style::new().fg(ACCENT)
+                let mut spans = vec![pointer, Span::styled(format!("{title:<LABEL$}"), label_style(row))];
+                let typed = if editing { format!("{value}▏") } else { value.clone() };
+                let underline = Modifier::UNDERLINED;
+                if value.is_empty() {
+                    let caret = if editing { "▏" } else { "" };
+                    let pad = FIELD.saturating_sub(caret.chars().count() + placeholder.chars().count());
+                    spans.push(Span::styled(caret, Style::new().fg(ACCENT).add_modifier(underline)));
+                    spans.push(Span::styled(
+                        placeholder,
+                        Style::new().fg(QUIET).add_modifier(underline),
+                    ));
+                    spans.push(Span::styled(" ".repeat(pad), Style::new().add_modifier(underline)));
                 } else {
-                    label_style(row)
-                };
-                let mut spans = vec![
-                    pointer,
-                    Span::styled(format!("{shown:<width$}"), style.add_modifier(Modifier::UNDERLINED)),
-                ];
+                    let style = if editing {
+                        Style::new().fg(ACCENT)
+                    } else {
+                        label_style(row)
+                    };
+                    let width = FIELD.max(typed.chars().count() + 1);
+                    spans.push(Span::styled(format!("{typed:<width$}"), style.add_modifier(underline)));
+                }
                 if focused == row && !editing {
                     spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
                 }
                 lines.push(Line::from(spans));
-                lines.push(Line::default());
+                if control != Control::Keep {
+                    lines.push(Line::default());
+                }
             }
             Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => {
                 let (title, on) = match control {
@@ -1405,10 +1415,10 @@ mod tests {
         assert_eq!(app.current(), Step::Generations);
         let screen = render(&mut app);
         assert!(
-            screen.contains("default 10") && screen.contains("default 30"),
+            screen.contains("Generations gc always keeps") && screen.contains(" 10 ") && screen.contains(" 30 "),
             "{screen}"
         );
-        assert!(!screen.contains("› 10"), "the field itself stays empty:\n{screen}");
+        assert!(app.answers.keep.is_empty(), "the 10 is a placeholder, not a value");
         press(&mut app, KeyCode::Home);
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('5'));
