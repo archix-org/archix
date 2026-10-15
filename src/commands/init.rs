@@ -674,21 +674,39 @@ fn files(
         return Ok(());
     }
     let recommended: Vec<usize> = (0..found.len()).filter(|i| found[*i].recommended).collect();
-    let paths = |indexes: &[usize]| -> Vec<String> { indexes.iter().map(|i| found[*i].path.clone()).collect() };
     let others: Vec<usize> = (0..found.len()).filter(|i| !found[*i].recommended).collect();
+    let label = |file: &FoundFile| {
+        let why = if file.edited {
+            "changed from its package's version"
+        } else {
+            "not from any package"
+        };
+        format!("{}  {}", file.path, style(format!("({why})")).dim())
+    };
     if !recommended.is_empty() {
         done(format!(
-            "{} worth managing: {}",
-            count(recommended.len(), "config file", "config files"),
-            some_of(&paths(&recommended), 5)
+            "{} worth managing:",
+            count(recommended.len(), "config file", "config files")
         ));
+        for i in &recommended {
+            println!("      {}", label(&found[*i]));
+        }
     }
     if !others.is_empty() {
+        const SHOWN: usize = 12;
         note(format!(
-            "{} more, mostly edited by package scripts: {}",
-            count(others.len(), "file", "files"),
-            some_of(&paths(&others), 4)
+            "{} more, mostly changed by package install scripts:",
+            count(others.len(), "file", "files")
         ));
+        for i in others.iter().take(SHOWN) {
+            println!("      {}", style(label(&found[*i])).dim());
+        }
+        if others.len() > SHOWN {
+            note(format!(
+                "and {} more; \"let me pick\" lists them all",
+                others.len() - SHOWN
+            ));
+        }
     }
     let mut options = Vec::new();
     if !recommended.is_empty() {
@@ -701,13 +719,7 @@ fn files(
     let chosen: Vec<usize> = match (recommended.is_empty(), choice) {
         (false, 0) => recommended,
         (false, 1) | (true, 0) => {
-            let labels: Vec<String> = found
-                .iter()
-                .map(|file| {
-                    let why = if file.edited { "edited" } else { "written by hand" };
-                    format!("{}  {}", file.path, style(format!("({why})")).dim())
-                })
-                .collect();
+            let labels: Vec<String> = found.iter().map(label).collect();
             let checked: Vec<bool> = found.iter().map(|file| file.recommended).collect();
             note("space toggles, enter confirms");
             ask.several("Pick the files", &labels, &checked)?
