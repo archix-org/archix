@@ -1,0 +1,90 @@
+---
+title: What is archix?
+description: archix turns an Arch-based system into one declared, locked and reversible configuration written in Lua.
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+archix is a system configuration tool for Arch Linux and Arch-based distros. CachyOS is the first-class target, and EndeavourOS works too. You describe the whole machine in Lua: packages from the official repos, the AUR and third-party repos like CachyOS, plus `/etc` files, systemd units, users, kernel parameters and dotfiles. archix makes the system match that description, records exactly what it installed in a lockfile, and keeps every switch as a generation you can roll back to.
+
+If you know NixOS, the idea is familiar: a declarative config, a lockfile and rollback. The difference is that archix runs on Arch's real packages and the AUR. There is no Nix store, no derivations and no second package ecosystem to learn.
+
+```lua title="/etc/archix/lua/hosts/desktop.lua"
+return {
+  repos = { "core", "extra", "multilib" },
+  packages = { "firefox", "steam", "neovim" },
+  programs = { kitty = { enable = true, settings = { font_size = 11 } } },
+}
+```
+
+```console
+$ sudo archix switch
+```
+
+That's the loop: edit Lua, switch, and roll back if you don't like the result.
+
+## Three pillars
+
+<CardGrid>
+	<Card title="Declared" icon="document">
+		One Lua config describes every machine you own. Modules declare typed options, so a typo is an error with a
+		suggestion, not a setting that silently does nothing.
+	</Card>
+	<Card title="Locked" icon="approve-check">
+		`archix.lock` records the exact version of every package: official ones against a dated Arch Linux Archive
+		snapshot, AUR ones by commit. Commit the lock and every machine gets the same versions.
+	</Card>
+	<Card title="Reversible" icon="random">
+		Every switch becomes a generation with its own boot entry. Roll back from a terminal, or pick an older entry at
+		boot. btrfs makes it instant; ext4 works too.
+	</Card>
+</CardGrid>
+
+### Declared
+
+Your config lives in `/etc/archix` by default and is laid out like a neovim config: an `init.lua`, one file per host, and modules you share between hosts. Options have types, defaults and descriptions, and archix rejects anything it doesn't know:
+
+```console
+$ archix diff
+error: `programs.kity`: option does not exist (set in lua/hosts/desktop.lua); did you mean `programs.kitty`?
+```
+
+Evaluation is pure. Your Lua can't run commands or read random files, so the same config and lock give the same system on every run. Read more in [Configuration](/docs/concepts/configuration/).
+
+### Locked
+
+Arch is a rolling release. "Install git" means something different every day. archix pins your official packages to one day of the [Arch Linux Archive](https://archive.archlinux.org), so "install git" means "install git as it was on 2026-10-14", for as long as you want it to:
+
+```toml title="archix.lock"
+[hosts.desktop]
+date = "2026-10-14"
+repos = ["core", "extra", "multilib"]
+
+[hosts.desktop.packages.git]
+version = "2.51.0-1"
+repo = "extra"
+file = "git-2.51.0-1-x86_64.pkg.tar.zst"
+```
+
+You move forward when you choose to, with `archix update`. Read more in [The lockfile](/docs/concepts/lockfile/).
+
+### Reversible
+
+A switch first prepares everything (downloads, AUR builds, rendered files, dependency checks) without touching the system. Only then does it apply. The result is a generation: the lock, the rendered files, the package files and the git commit of your config. If a generation turns out bad, `archix rollback` takes you back. If it won't boot, pick the previous entry in systemd-boot. Read more in [Generations and rollback](/docs/concepts/generations/) and [Safety](/docs/concepts/safety/).
+
+## How it relates to pacman, yay and NixOS
+
+**pacman** still does the installing. archix reads package state through libalpm and runs transactions through the `pacman` binary. You can keep using `pacman -Syu` whenever you like. A pacman hook notices, and the next switch asks whether to adopt the change into the lock or revert to it. See [pacman and yay](/docs/concepts/pacman-and-yay/).
+
+**yay and paru** are replaced. archix is an AUR helper with the flags you already type: `archix -S`, `archix -Ss`, `archix -Syu`, `archix -R`, and bare `archix` for a full update. The difference is that AUR packages are built in a clean chroot, cached, locked by commit and added to your config. See [The AUR](/docs/guides/aur/).
+
+**NixOS** is the inspiration. Priorities, the module system and the generation model will feel familiar, and archix's priorities even use the same numbers. See [Coming from NixOS](/docs/guides/coming-from-nixos/).
+
+## Where to go next
+
+<CardGrid>
+	<LinkCard title="Installation" href="/docs/installation/" description="Bootstrap archix from the AUR." />
+	<LinkCard title="Quick start" href="/docs/quick-start/" description="Capture your system with archix init and make your first switch." />
+	<LinkCard title="Third-party repos" href="/docs/guides/third-party-repos/" description="How archix locks CachyOS, chaotic-aur and other repos." />
+	<LinkCard title="CLI reference" href="/docs/reference/cli/" description="Every subcommand and flag." />
+</CardGrid>

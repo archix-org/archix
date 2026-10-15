@@ -1,0 +1,107 @@
+---
+import lockupDark from '../assets/archix-lockup-dark.svg';
+import lockupLight from '../assets/archix-lockup-light.svg';
+---
+
+<div class="banner">
+	<p class="wrap">
+		<strong>Pre-alpha.</strong> archix is being built in the open, and this site describes v1.{' '}
+		<a href="https://github.com/archix-org/archix">Follow along on GitHub</a>
+	</p>
+</div>
+
+<header class="wrap nav">
+	<a class="brand" href="/" aria-label="archix home">
+		<img class="on-dark" src={lockupDark.src} alt="" width="107" height="32" />
+		<img class="on-light" src={lockupLight.src} alt="" width="107" height="32" />
+	</a>
+	<nav aria-label="Main">
+		<a href="/docs/">Docs</a>
+		<a href="https://github.com/archix-org/archix">GitHub</a>
+		<a href="https://discord.gg/dejSeEHzpV">Discord</a>
+		<button class="theme" type="button" aria-label="Switch to light theme" data-theme-toggle>
+			<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z" fill="currentColor" /></svg>
+		</button>
+	</nav>
+</header>
+
+<script>
+	const button = document.querySelector<HTMLButtonElement>('[data-theme-toggle]')!;
+	const label = () => {
+		const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+		button.setAttribute('aria-label', `Switch to ${next} theme`);
+		return next;
+	};
+	label();
+	button.addEventListener('click', () => {
+		const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+		document.documentElement.dataset.theme = next;
+		localStorage.setItem('starlight-theme', next);
+		label();
+	});
+</script>
+
+<style>
+	.banner {
+		background: var(--ink-2);
+		border-bottom: 1px solid var(--line);
+		font-size: 0.875rem;
+		color: var(--mist);
+	}
+	.banner p {
+		margin-block: 0;
+		padding-block: 0.55rem;
+	}
+	.banner strong {
+		color: var(--text);
+		font-weight: 650;
+	}
+	.banner a {
+		white-space: nowrap;
+	}
+	.nav {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		padding-block: 1.25rem;
+	}
+	.brand {
+		display: block;
+		line-height: 0;
+	}
+	.on-light,
+	:global([data-theme='light']) .on-dark {
+		display: none;
+	}
+	:global([data-theme='light']) .on-light {
+		display: block;
+	}
+	nav {
+		display: flex;
+		align-items: center;
+		gap: clamp(0.75rem, 2.5vw, 1.75rem);
+		font-weight: 550;
+	}
+	nav a {
+		color: var(--text);
+		text-decoration: none;
+	}
+	nav a:hover {
+		color: var(--ring);
+	}
+	.theme {
+		display: grid;
+		place-items: center;
+		width: 2.25rem;
+		height: 2.25rem;
+		border: 1px solid var(--line);
+		border-radius: 50%;
+		background: transparent;
+		color: var(--mist);
+		cursor: pointer;
+	}
+	.theme:hover {
+		color: var(--text);
+	}
+</style>

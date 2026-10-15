@@ -1,0 +1,41 @@
+:root {
+	--sl-font: 'Archivo Variable', system-ui, sans-serif;
+	--sl-font-mono: 'Martian Mono Variable', ui-monospace, monospace;
+	--sl-color-accent-low: #0c2a42;
+	--sl-color-accent: #1793d1;
+	--sl-color-accent-high: #b9dcf2;
+	--sl-color-white: #eef4fa;
+	--sl-color-gray-1: #d3dfeb;
+	--sl-color-gray-2: #a9b9cb;
+	--sl-color-gray-3: #7a8ca2;
+	--sl-color-gray-4: #4a5b70;
+	--sl-color-gray-5: #263446;
+	--sl-color-gray-6: #142134;
+	--sl-color-black: #0a1220;
+}
+
+:root[data-theme='light'] {
+	--sl-color-accent-low: #d6e8f7;
+	--sl-color-accent: #2f68b5;
+	--sl-color-accent-high: #12345e;
+	--sl-color-white: #0f1b2d;
+	--sl-color-gray-1: #1d2b40;
+	--sl-color-gray-2: #34445b;
+	--sl-color-gray-3: #5b6c83;
+	--sl-color-gray-4: #8c9bb0;
+	--sl-color-gray-5: #c7d2df;
+	--sl-color-gray-6: #e7eef6;
+	--sl-color-gray-7: #f2f6fb;
+	--sl-color-black: #ffffff;
+}
+
+h1,
+h2,
+.site-title {
+	font-stretch: 112%;
+}
+
+code,
+pre {
+	font-stretch: 87.5%;
+}

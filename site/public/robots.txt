@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://archix.dev/sitemap-index.xml

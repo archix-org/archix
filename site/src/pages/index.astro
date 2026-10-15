@@ -1,0 +1,500 @@
+---
+import Site from '../layouts/Site.astro';
+import Header from '../components/Header.astro';
+import Demo from '../components/Demo.astro';
+import CopyCommand from '../components/CopyCommand.astro';
+import Artifact from '../components/Artifact.astro';
+import lockupDark from '../assets/archix-lockup-dark.svg';
+import lockupLight from '../assets/archix-lockup-light.svg';
+
+const install = 'git clone https://aur.archlinux.org/archix.git && cd archix && makepkg -si';
+
+const flags = [
+	['archix', 'Full update, like running yay with no arguments'],
+	['archix -S <pkg>', 'Install from the repos or the AUR, and add it to your config'],
+	['archix -Ss <query>', 'Search the repos and the AUR'],
+	['archix -Syu', 'Update from live mirrors and adopt the result into the lock'],
+	['archix -R <pkg>', 'Remove it from the system and from your config'],
+];
+
+const manages = [
+	['Packages', 'Official repos, the AUR, local PKGBUILDs, CachyOS and other third-party repos'],
+	['/etc', 'Any file under /etc, written atomically and tracked by hash'],
+	['systemd', 'System and user units, enabled and started on switch'],
+	['Kernel', 'Kernel parameters, sysctl, modprobe and udev rules'],
+	['Users', 'Users and groups. Passwords stay yours: archix never touches them'],
+	['Dotfiles', 'Real files with recorded hashes, so edits made outside archix show up in diff'],
+	['Apps', 'programs.* modules ported from Home Manager, plus writers for toml, json, yaml, ini, kdl and more'],
+	['Hooks', 'Activation scripts that run on every switch'],
+];
+
+const nix = [
+	['configuration.nix', 'init.lua'],
+	['flake.lock', 'archix.lock'],
+	['nixos-rebuild switch', 'archix switch'],
+	['nixos-rebuild switch --rollback', 'archix rollback'],
+	['lib.mkDefault / lib.mkForce', 'archix.default / archix.force'],
+	['Home Manager programs.*', 'programs.*, ported from Home Manager'],
+	['nix-collect-garbage', 'archix gc'],
+	['nixpkgs', 'Arch repos, the AUR, CachyOS'],
+];
+---
+
+<Site
+	title="archix: update Arch without fear"
+	description="Declare your whole Arch system in Lua. archix locks every package, turns every switch into a generation and rolls back in one command. Works on Arch, CachyOS and EndeavourOS."
+>
+	<Header />
+
+	<main>
+		<section class="hero wrap">
+			<h1>Update Arch <span>without fear.</span></h1>
+			<div class="lede">
+				<p>
+					Declare your whole system in one Lua config: packages, AUR, services, <code>/etc</code>, dotfiles.
+					archix locks every version, turns every switch into a generation, and rolls back in one command.
+					On Arch, CachyOS and EndeavourOS.
+				</p>
+				<div class="cta">
+					<CopyCommand command={install} label="Install archix from the AUR" />
+					<a class="button" href="https://github.com/archix-org/archix">
+						<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38v-1.33c-2.23.48-2.7-1.07-2.7-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.05-.49.05-.49.8.06 1.23.83 1.23.83.72 1.22 1.88.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.22 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48v2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+						Star on GitHub
+					</a>
+				</div>
+			</div>
+			<Demo />
+		</section>
+
+		<section class="pillars wrap" aria-labelledby="pillars">
+			<h2 id="pillars">Declared. Locked. Reversible.</h2>
+			<div class="grid3">
+				<article>
+					<h3>Declared</h3>
+					<p>
+						One config for every machine, laid out like a neovim config. Modules declare typed options, so a typo is an
+						error with a suggestion, not a setting that silently does nothing.
+					</p>
+					<Artifact title="archix diff">
+						<pre><span class="bad">error:</span> <span class="w">`programs.kity`</span>: option does not exist
+       (set in hosts.desktop); did you mean
+       <span class="w">`programs.kitty`</span>?</pre>
+					</Artifact>
+				</article>
+				<article>
+					<h3>Locked</h3>
+					<p>
+						Official packages are pinned to a dated Arch Linux Archive snapshot, AUR packages to a commit. Commit the lock
+						and every machine gets exactly the same versions.
+					</p>
+					<Artifact title="archix.lock">
+						<pre><span class="k">[hosts.desktop]</span>
+date = <span class="s">2026-10-15</span>
+repos = [<span class="s">"core"</span>, <span class="s">"extra"</span>, <span class="s">"multilib"</span>]
+
+<span class="k">[hosts.desktop.packages.mesa]</span>
+version = <span class="s">"1:25.3.0-1"</span>
+repo = <span class="s">"extra"</span></pre>
+					</Artifact>
+				</article>
+				<article>
+					<h3>Reversible</h3>
+					<p>
+						Every switch is a generation with its own boot entry. Roll back from the terminal or pick an older one at boot.
+						btrfs makes it instant; on ext4 it still works.
+					</p>
+					<Artifact title="systemd-boot">
+						<pre><span class="w">› archix · generation 42 · Oct 15</span>
+  archix · generation 41 · Oct 09
+  archix · generation 40 · Oct 02
+  <span class="m">archix rescue · generation 42</span></pre>
+					</Artifact>
+				</article>
+			</div>
+		</section>
+
+		<section class="split wrap" aria-labelledby="pacman">
+			<div>
+				<h2 id="pacman">pacman and yay keep working.</h2>
+				<p>
+					No lockdown. Run <code>pacman -Syu</code> when you feel like it. A pacman hook records what changed, and the next
+					switch asks whether to keep it. Say yes and the lock moves forward; say no and the system goes back to the lock.
+				</p>
+				<p>Or skip the question: <code>archix -Syu</code> updates and adopts in one go.</p>
+			</div>
+			<Artifact title="terminal">
+				<pre><span class="m">$</span> <span class="w">sudo pacman -Syu</span>
+<span class="m">:: Starting full system upgrade...</span>
+<span class="m">$</span> <span class="w">archix switch</span>
+System is newer than the lock: adopt? [Y/n] <span class="w">y</span>
+  lock      2026-10-09 → 2026-10-15
+  <span class="ok">apply     ✓ generation 43 is live</span></pre>
+			</Artifact>
+		</section>
+
+		<section class="split wrap" aria-labelledby="aur">
+			<div>
+				<h2 id="aur">Your AUR helper, too.</h2>
+				<p>
+					Keep the flags you already type. Every AUR build runs in a clean chroot at the locked snapshot date and gets
+					cached. You read the whole PKGBUILD on first install and only the diff on updates.
+				</p>
+			</div>
+			<table class="flags">
+				<caption class="visually-hidden">pacman-style commands</caption>
+				<tbody>
+					{
+						flags.map(([cmd, what]) => (
+							<tr>
+								<th scope="row"><code>{cmd}</code></th>
+								<td>{what}</td>
+							</tr>
+						))
+					}
+				</tbody>
+			</table>
+		</section>
+
+		<section class="manages wrap" aria-labelledby="manages">
+			<h2 id="manages">Everything on the machine, in one place.</h2>
+			<dl>
+				{
+					manages.map(([term, desc]) => (
+						<div>
+							<dt>{term}</dt>
+							<dd>{desc}</dd>
+						</div>
+					))
+				}
+			</dl>
+		</section>
+
+		<section class="nix wrap" aria-labelledby="nix">
+			<div>
+				<h2 id="nix">Coming from NixOS?</h2>
+				<p>
+					You already know the ideas. Keep the declarative config, the lockfile and the rollback. Drop the derivations, the
+					wait for nixpkgs to catch up, and the update that breaks the build for reasons nobody can explain.
+				</p>
+				<p><a href="/docs/guides/coming-from-nixos/">Read the migration guide</a></p>
+			</div>
+			<table>
+				<thead>
+					<tr><th scope="col">NixOS</th><th scope="col">archix</th></tr>
+				</thead>
+				<tbody>
+					{
+						nix.map(([from, to]) => (
+							<tr>
+								<td><code>{from}</code></td>
+								<td><code>{to}</code></td>
+							</tr>
+						))
+					}
+				</tbody>
+			</table>
+		</section>
+
+		<section class="install wrap" aria-labelledby="install">
+			<h2 id="install">Three commands from here.</h2>
+			<ol>
+				<li>
+					<h3>Bootstrap from the AUR</h3>
+					<CopyCommand command={install} label="Install archix from the AUR" />
+					<p>After the first switch, archix updates itself through its own lock.</p>
+				</li>
+				<li>
+					<h3>Capture your system</h3>
+					<CopyCommand command="sudo archix init" label="Run archix init" />
+					<p>
+						Reads your installed packages, enabled services, changed <code>/etc</code> files and users into a config. Nothing
+						changes until the diff against your system is empty.
+					</p>
+				</li>
+				<li>
+					<h3>Switch</h3>
+					<CopyCommand command="sudo archix switch" label="Run archix switch" />
+					<p>Generation 1. From here on, every change is one you can undo.</p>
+				</li>
+			</ol>
+		</section>
+	</main>
+
+	<footer class="wrap">
+		<img src={lockupDark.src} alt="archix" width="94" height="28" class="footer-logo on-dark" />
+		<img src={lockupLight.src} alt="archix" width="94" height="28" class="footer-logo on-light" />
+		<nav aria-label="Footer">
+			<a href="/docs/">Docs</a>
+			<a href="https://github.com/archix-org/archix">GitHub</a>
+			<a href="https://discord.gg/dejSeEHzpV">Discord</a>
+		</nav>
+		<p>MIT OR Apache-2.0. Not affiliated with Arch Linux or CachyOS.</p>
+	</footer>
+</Site>
+
+<style>
+	main > section {
+		padding-block: clamp(3.5rem, 7vw, 6rem);
+	}
+	main > section + section {
+		border-top: 1px solid var(--line);
+	}
+	h1,
+	h2,
+	h3 {
+		margin: 0;
+		font-family: var(--display);
+		letter-spacing: -0.02em;
+	}
+	h2 {
+		font-size: clamp(1.9rem, 3.6vw, 2.9rem);
+		font-weight: 780;
+		font-stretch: 118%;
+		line-height: 1.05;
+		max-width: 22ch;
+	}
+	h3 {
+		font-size: 1.15rem;
+		font-weight: 680;
+		font-stretch: 112%;
+	}
+	p {
+		color: var(--mist);
+		max-width: 60ch;
+	}
+	p code,
+	dd code {
+		color: var(--text);
+		font-size: 0.82em;
+	}
+
+	.hero {
+		padding-block: clamp(2.5rem, 6vw, 4.5rem) clamp(4rem, 8vw, 6rem) !important;
+	}
+	.hero h1 {
+		font-size: clamp(2.9rem, 8.4vw, 7rem);
+		font-weight: 850;
+		font-stretch: 125%;
+		line-height: 0.92;
+		letter-spacing: -0.035em;
+		text-wrap: balance;
+	}
+	.hero h1 span {
+		display: block;
+		color: var(--hull);
+	}
+	.lede {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+		gap: clamp(1.5rem, 4vw, 3.5rem);
+		align-items: end;
+		margin-block: clamp(1.75rem, 3.5vw, 2.75rem) clamp(2.5rem, 5vw, 3.5rem);
+	}
+	.lede p {
+		margin: 0;
+		font-size: 1.15rem;
+		color: var(--text);
+		opacity: 0.86;
+	}
+	.cta {
+		display: grid;
+		gap: 0.75rem;
+	}
+	.button {
+		display: inline-flex;
+		align-items: center;
+		justify-self: start;
+		gap: 0.6rem;
+		padding: 0.7rem 1.15rem;
+		border-radius: 10px;
+		background: var(--action);
+		color: var(--on-action);
+		font-weight: 680;
+		text-decoration: none;
+		transition: filter 0.15s;
+	}
+	.button:hover {
+		filter: brightness(1.12);
+	}
+
+	.grid3 {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0 clamp(1.5rem, 3vw, 2.5rem);
+		margin-top: 2.75rem;
+	}
+	.grid3 article {
+		display: grid;
+		grid-row: span 3;
+		grid-template-rows: subgrid;
+		align-content: start;
+	}
+	.grid3 p {
+		margin-block: 0.6rem 1.4rem;
+	}
+
+	.split {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+		gap: clamp(2rem, 5vw, 4.5rem);
+		align-items: center;
+	}
+	.split h2 + p {
+		margin-top: 1.1rem;
+	}
+
+	table {
+		width: 100%;
+		border-collapse: collapse;
+		font-size: 0.95rem;
+	}
+	th,
+	td {
+		padding: 0.8rem 0.25rem;
+		border-bottom: 1px solid var(--line);
+		text-align: left;
+		vertical-align: top;
+	}
+	.flags th {
+		width: 1%;
+		padding-right: 1.5rem;
+		white-space: nowrap;
+	}
+	.flags td {
+		color: var(--mist);
+	}
+	td code,
+	th code {
+		font-size: 0.76rem;
+		color: var(--text);
+	}
+
+	.manages dl {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 0;
+		margin: 2.75rem 0 0;
+		border-top: 1px solid var(--line);
+		border-left: 1px solid var(--line);
+	}
+	.manages dl > div {
+		padding: 1.25rem 1.25rem 1.5rem;
+		border-right: 1px solid var(--line);
+		border-bottom: 1px solid var(--line);
+	}
+	dt {
+		font-weight: 700;
+		font-stretch: 112%;
+	}
+	dd {
+		margin: 0.4rem 0 0;
+		color: var(--mist);
+		font-size: 0.92rem;
+		line-height: 1.5;
+	}
+
+	.nix {
+		display: grid;
+		grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+		gap: clamp(2rem, 5vw, 4.5rem);
+	}
+	.nix thead th {
+		color: var(--mist);
+		font-size: 0.8rem;
+		font-weight: 600;
+	}
+	.nix td:first-child code {
+		color: var(--mist);
+	}
+
+	.install ol {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: clamp(1.5rem, 3vw, 2.5rem);
+		margin: 2.75rem 0 0;
+		padding: 0;
+		list-style: none;
+		counter-reset: step;
+	}
+	.install li {
+		counter-increment: step;
+		min-width: 0;
+	}
+	.install h3::before {
+		content: counter(step);
+		display: inline-grid;
+		place-items: center;
+		width: 1.8rem;
+		height: 1.8rem;
+		margin-right: 0.6rem;
+		border-radius: 50%;
+		background: var(--hull);
+		color: #0a1220;
+		font-size: 0.85rem;
+	}
+	.install h3 {
+		margin-bottom: 1rem;
+	}
+	.install p {
+		font-size: 0.95rem;
+	}
+
+	footer {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 1rem 2rem;
+		padding-block: 2.5rem 3.5rem;
+		border-top: 1px solid var(--line);
+	}
+	.footer-logo {
+		height: 28px;
+		width: auto;
+	}
+	.on-light,
+	:global([data-theme='light']) .on-dark {
+		display: none;
+	}
+	:global([data-theme='light']) .on-light {
+		display: block;
+	}
+	footer nav {
+		display: flex;
+		gap: 1.5rem;
+	}
+	footer nav a {
+		color: var(--text);
+		text-decoration: none;
+		font-weight: 550;
+	}
+	footer p {
+		margin: 0 0 0 auto;
+		font-size: 0.85rem;
+	}
+
+	@media (max-width: 960px) {
+		.lede,
+		.split,
+		.nix {
+			grid-template-columns: 1fr;
+		}
+		.grid3,
+		.install ol {
+			grid-template-columns: 1fr;
+		}
+		.manages dl {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+	}
+	@media (max-width: 560px) {
+		.manages dl {
+			grid-template-columns: 1fr;
+		}
+		.flags th {
+			white-space: normal;
+		}
+		footer p {
+			margin-left: 0;
+		}
+	}
+</style>
