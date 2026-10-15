@@ -193,6 +193,9 @@ pub fn with_custom_repos(conf: &str, repos: &[Repo]) -> String {
 
 /// Keeps /etc/pacman.conf's archix-managed repo sections in step with the config.
 pub fn sync_pacman_conf(paths: &Paths, repos: &[Repo]) -> Result<()> {
+    if !paths.pacman_conf.exists() && repos.iter().all(|repo| repo.custom.is_none()) {
+        return Ok(());
+    }
     let current =
         fs::read_to_string(&paths.pacman_conf).with_context(|| format!("reading {}", paths.pacman_conf.display()))?;
     let wanted = with_custom_repos(&current, repos);

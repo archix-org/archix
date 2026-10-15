@@ -5,6 +5,7 @@ RUN retry() { for attempt in 1 2 3; do "$@" && return 0; sleep 15; done; return 
  && sed -i '/^\[options\]/a DisableDownloadTimeout' /etc/pacman.conf \
  && retry pacman -Syyuu --noconfirm \
  && retry pacman -S --noconfirm --needed rust gcc devtools git base-devel linux mkinitcpio systemd-ukify sbctl btrfs-progs \
+    qemu-base edk2-ovmf arch-install-scripts dosfstools rust-musl musl \
  && pacman -Scc --noconfirm
 ENV CARGO_TARGET_DIR=/target
 WORKDIR /src

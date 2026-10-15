@@ -428,8 +428,19 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
             std::os::unix::fs::chown(&tmp, Some(u), Some(g))?;
         }
     }
-    fs::rename(&tmp, target)?;
-    Ok(())
+    match fs::rename(&tmp, target) {
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) && want.link.is_none() => {
+            // A bind-mounted file (like /etc/resolv.conf inside arch-chroot) can't be replaced, only rewritten.
+            fs::copy(&tmp, target)?;
+            fs::remove_file(&tmp)?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e.into())
+        }
+        Ok(()) => Ok(()),
+    }
 }
 
 /// Reloads what changed files feed (systemd, sysctl, udev, locales); returns what failed without failing.

@@ -126,7 +126,7 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
     let mut files: Vec<String> = Vec::new();
     let mut archive = tar::Archive::new(decoder(file)?);
     archive.set_preserve_permissions(true);
-    archive.set_preserve_ownerships(true);
+    archive.set_preserve_ownerships(unsafe { libc::geteuid() } == 0);
     archive.set_overwrite(true);
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -147,6 +147,9 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
         let is_dir = entry.header().entry_type().is_dir();
         let backup = info.get("backup").is_some_and(|backups| backups.contains(&path));
         let target = root.join(&path);
+        if !is_dir && !backup && fs::symlink_metadata(&target).is_ok_and(|meta| !meta.is_dir()) {
+            fs::remove_file(&target).with_context(|| format!("replacing {}", target.display()))?;
+        }
         if backup && target.exists() {
             let pacnew = PathBuf::from(format!("{}.pacnew", target.display()));
             entry.unpack(&pacnew)?;
@@ -226,4 +229,80 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
     fs::write(dir.join("desc"), desc)?;
     fs::write(dir.join("files"), list)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tiny package: .PKGINFO, a binary, a hard link to it and a backup-listed config file.
+    fn package(dir: &Path) -> PathBuf {
+        let path = dir.join("demo-1.0-1-any.pkg.tar.zst");
+        let mut builder = tar::Builder::new(
+            zstd::Encoder::new(File::create(&path).unwrap(), 3)
+                .unwrap()
+                .auto_finish(),
+        );
+        let mut add = |name: &str, data: &[u8]| {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder.append_data(&mut header, name, data).unwrap();
+        };
+        add(
+            ".PKGINFO",
+            b"pkgname = demo\npkgver = 1.0-1\npkgdesc = a demo\narch = any\nbackup = etc/demo.conf\n",
+        );
+        add("usr/bin/demo", b"#!/bin/sh\n");
+        add("etc/demo.conf", b"packaged\n");
+        let mut link = tar::Header::new_gnu();
+        link.set_entry_type(tar::EntryType::Link);
+        link.set_size(0);
+        link.set_uid(0);
+        link.set_gid(0);
+        link.set_mtime(0);
+        link.set_mode(0o755);
+        builder
+            .append_link(&mut link, "usr/bin/demo-alias", "usr/bin/demo")
+            .unwrap();
+        builder.into_inner().unwrap();
+        path
+    }
+
+    #[test]
+    fn installs_over_existing_files_and_keeps_edited_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let file = package(dir.path());
+        let paths = Paths::under(&root);
+        install(&root, &paths, &file, true).unwrap();
+        fs::write(root.join("etc/demo.conf"), "edited\n").unwrap();
+        install(&root, &paths, &file, true).expect("a second install replaces files and hard links");
+        assert_eq!(fs::read_to_string(root.join("etc/demo.conf")).unwrap(), "edited\n");
+        assert_eq!(
+            fs::read_to_string(root.join("etc/demo.conf.pacnew")).unwrap(),
+            "packaged\n"
+        );
+        assert!(root.join("usr/bin/demo-alias").exists());
+        let desc = fs::read_to_string(paths.local_db().join("demo-1.0-1/desc")).unwrap();
+        assert!(
+            desc.contains("%NAME%\ndemo\n") && desc.contains("%VERSION%\n1.0-1\n"),
+            "{desc}"
+        );
+        let files = fs::read_to_string(paths.local_db().join("demo-1.0-1/files")).unwrap();
+        assert!(
+            files.contains("usr/bin/demo-alias") && files.contains("%BACKUP%\netc/demo.conf\t"),
+            "{files}"
+        );
+        assert_eq!(
+            fs::read_dir(paths.local_db()).unwrap().count(),
+            2,
+            "one entry plus ALPM_DB_VERSION"
+        );
+    }
 }
