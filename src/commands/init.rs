@@ -528,11 +528,23 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
 
 /// System-wide Flatpak apps, declared as they are and locked to their installed commits.
 fn flatpaks(config: &mut Host) -> Result<BTreeMap<String, LockedApp>> {
-    let apps = flatpak::installed()?;
+    let mut apps = flatpak::installed()?;
+    let remotes = flatpak::remotes()?;
+    let orphaned: Vec<String> = apps
+        .iter()
+        .filter(|(_, app)| app.origin != "flathub" && !remotes.contains_key(&app.origin))
+        .map(|(id, _)| id.clone())
+        .collect();
+    if !orphaned.is_empty() {
+        warn(format!(
+            "their remote is gone, so archix leaves these Flatpak apps alone: {}",
+            some_of(&orphaned, 6)
+        ));
+        apps.retain(|id, _| !orphaned.contains(id));
+    }
     if apps.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let remotes = flatpak::remotes()?;
     let mut ids = Vec::new();
     let mut used = BTreeMap::new();
     for (id, app) in &apps {

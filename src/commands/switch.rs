@@ -131,7 +131,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         }
     }
 
-    let unresolved_flatpak = settle_flatpak(target, &declared, &mut lock, true)?;
+    let unresolved_flatpak = settle_flatpak(target, &declared, &mut lock, true, false)?;
     let commit = config_commit(target.config_dir);
     if let Some((_, true)) = &commit {
         eprintln!("warning: {} has uncommitted changes", target.config_dir.display());
@@ -172,6 +172,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         to: rendered.state.clone(),
     };
     let system_lines = system::apply::describe(&system_change)?;
+    system::apply::check(&paths, &system_change)?;
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
@@ -341,7 +342,7 @@ fn finish_flatpak(
         return Ok(Vec::new());
     }
     ensure_flatpak_remotes(declared)?;
-    let mut failures = settle_flatpak(target, declared, lock, true)?;
+    let mut failures = settle_flatpak(target, declared, lock, true, false)?;
     let mut generation = store.get(number)?;
     if generation.flatpak != lock.flatpak {
         generation.flatpak = lock.flatpak.clone();
@@ -454,7 +455,7 @@ fn report_soft_failures(failures: &[String]) -> Result<()> {
     }
     bail!(
         "the new generation is current, but {} (listed above)",
-        count(failures.len(), "service or reload failed", "services or reloads failed")
+        count(failures.len(), "step failed", "steps failed")
     )
 }
 
@@ -639,6 +640,11 @@ fn print_gc(report: &gc::Report, always: bool) {
 
 /// Puts the packages of an earlier generation back; archix.lock stays as it is.
 pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
+    roll_back(to, noconfirm, true)
+}
+
+/// A rollback; at boot there's no network yet, so Flatpak apps are left for a later `archix rollback N`.
+fn roll_back(to: Option<u32>, noconfirm: bool, pin_flatpak: bool) -> Result<()> {
     require_root("rollback")?;
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
@@ -677,6 +683,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
         to: generation.system.clone(),
     };
     let system_lines = system::apply::describe(&system_change)?;
+    system::apply::check(&paths, &system_change)?;
     let previous_flatpak = current_generation.flatpak;
     let (flatpak_lines, _) = flatpak::describe(&generation.flatpak, &previous_flatpak, &flatpak::installed()?);
     for line in system_lines.iter().chain(&flatpak_lines) {
@@ -693,7 +700,11 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     if !noconfirm
         && !confirm(&format!(
             "roll back to {name} with {}?",
-            count(changes.len(), "change", "changes")
+            count(
+                changes.len() + system_lines.len() + flatpak_lines.len(),
+                "change",
+                "changes"
+            )
         ))?
     {
         bail!("aborted; nothing was changed");
@@ -713,8 +724,14 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     journal.generation = Some(number);
     journal.save(&paths.journal())?;
     let mut soft_failures = apply::run(&paths, &mut journal, false)?;
-    if !generation.flatpak.is_empty() || !previous_flatpak.is_empty() {
-        soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
+    if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
+        if pin_flatpak {
+            soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
+        } else {
+            println!(
+                "archix: Flatpak apps aren't pinned at boot; run `sudo archix rollback {number}` once you're online"
+            );
+        }
     }
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
     report_soft_failures(&soft_failures)
@@ -804,7 +821,7 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         Some(current) if current == booted => Ok(()),
         Some(current) => {
             println!("archix: booted generation {booted}, but {current} is current; rolling back to {booted}");
-            rollback(Some(booted), true)
+            roll_back(Some(booted), true, false)
         }
         None => Ok(()),
     }

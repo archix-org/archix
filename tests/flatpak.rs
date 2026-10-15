@@ -69,20 +69,27 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
         "flatpak = {{ apps = {{ \"local:org.archix.Hello\" }}, remotes = {{ [\"local\"] = {{ url = \"file://{REPO}/repo\", gpg_verify = false }} }} }}"
     );
     setup.set_body(&[], &body);
-    assert_eq!(
-        setup.lock().flatpak["org.archix.Hello"].commit,
-        first,
-        "lock records the commit"
+    assert!(
+        setup.lock().flatpak.is_empty(),
+        "lock doesn't add remotes, so the commit waits for switch"
     );
-    let second = publish_hello(2);
-    assert_ne!(first, second);
-
+    assert!(setup.ok(&["diff"]).contains("flatpak    install org.archix.Hello"));
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(out.contains("flatpak    install org.archix.Hello"), "{out}");
     assert_eq!(
+        setup.lock().flatpak["org.archix.Hello"].commit,
+        first,
+        "switch records the commit"
+    );
+    assert_eq!(installed_commit().as_deref(), Some(first.as_str()));
+
+    let second = publish_hello(2);
+    assert_ne!(first, second);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
         installed_commit().as_deref(),
         Some(first.as_str()),
-        "switch installs the locked commit, not the newest"
+        "switch keeps the locked commit, not the newest"
     );
     assert!(
         setup

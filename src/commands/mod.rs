@@ -517,8 +517,14 @@ fn aur_source<'a>(
     })
 }
 
-/// Drops locked Flatpak apps the config no longer declares and locks new ones to their remote's commit; returns the ones it couldn't lock yet.
-fn settle_flatpak(target: &Target, declared: &Declared, lock: &mut HostLock, save: bool) -> Result<Vec<String>> {
+/// Drops locked Flatpak apps the config no longer declares and locks new ones (all, with `refresh`) to their remote's commit; returns what it couldn't lock.
+fn settle_flatpak(
+    target: &Target,
+    declared: &Declared,
+    lock: &mut HostLock,
+    save: bool,
+    refresh: bool,
+) -> Result<Vec<String>> {
     let wanted: BTreeMap<&str, &str> = declared
         .flatpak_apps
         .iter()
@@ -531,14 +537,16 @@ fn settle_flatpak(target: &Target, declared: &Declared, lock: &mut HostLock, sav
     let missing: Vec<&(String, String)> = declared
         .flatpak_apps
         .iter()
-        .filter(|(_, id)| !lock.flatpak.contains_key(id))
+        .filter(|(_, id)| refresh || !lock.flatpak.contains_key(id))
         .collect();
     if !missing.is_empty() && flatpak::available() {
-        ensure_flatpak_remotes(declared)?;
         for (remote, id) in &missing {
             match flatpak::latest(remote, id) {
                 Ok(app) => {
                     lock.flatpak.insert(id.clone(), app);
+                }
+                Err(_) if lock.flatpak.contains_key(id) => {
+                    eprintln!("warning: couldn't check {id} on {remote}; keeping its locked commit")
                 }
                 Err(e) => unresolved.push(format!("{id}: {e:#}")),
             }

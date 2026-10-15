@@ -367,6 +367,60 @@ fn usermod(name: &str, user: &User) -> Command {
     cmd
 }
 
+/// Refuses, before anything changes, managed files that would replace something archix can't safely back up.
+pub fn check(paths: &Paths, change: &SystemChange) -> Result<()> {
+    let backups = paths.state.join("backups");
+    for path in change.to.files.keys() {
+        let target = Path::new(path);
+        if on_disk(target)? != OnDisk::Other {
+            continue;
+        }
+        let directory = fs::symlink_metadata(target).is_ok_and(|meta| meta.is_dir());
+        if !directory || change.from.files.contains_key(path) {
+            bail!("{path} exists and is not a file or symlink; archix won't replace it");
+        }
+        if fs::symlink_metadata(under(&backups, path)).is_ok() {
+            bail!("{path} is a directory and an earlier backup of it exists; move one of them away");
+        }
+    }
+    Ok(())
+}
+
+/// Renames, or copies and deletes when `from` and `to` are on different filesystems (a separate /home, a btrfs subvolume).
+fn move_path(from: &Path, to: &Path) -> Result<()> {
+    match fs::rename(from, to) {
+        Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
+            copy_preserving(from, to)?;
+            if fs::symlink_metadata(from)?.is_dir() {
+                fs::remove_dir_all(from)?;
+            } else {
+                fs::remove_file(from)?;
+            }
+            Ok(())
+        }
+        result => Ok(result?),
+    }
+}
+
+/// A copy of a file, symlink or directory tree that keeps modes and owners.
+fn copy_preserving(from: &Path, to: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(from)?;
+    if meta.file_type().is_symlink() {
+        symlink(fs::read_link(from)?, to)?;
+    } else if meta.is_dir() {
+        fs::create_dir(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_preserving(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        fs::set_permissions(to, meta.permissions())?;
+    } else {
+        fs::copy(from, to)?;
+    }
+    std::os::unix::fs::lchown(to, Some(meta.uid()), Some(meta.gid()))?;
+    Ok(())
+}
+
 /// Writes, replaces and unmanages files, backing up originals and hand edits instead of losing them.
 pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
     let backups = paths.state.join("backups");
@@ -380,24 +434,13 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
             }
             continue;
         }
-        if disk == OnDisk::Other {
-            let directory = fs::symlink_metadata(target).is_ok_and(|meta| meta.is_dir());
-            if !directory || change.from.files.contains_key(path) {
-                bail!("{path} exists and is not a file or symlink; archix won't replace it");
-            }
-            if fs::symlink_metadata(under(&backups, path)).is_ok() {
-                bail!("{path} is a directory and an earlier backup of it exists; move one of them away");
-            }
-        }
         if disk != OnDisk::Missing {
             match change.from.files.get(path) {
                 None => {
                     let backup = under(&backups, path);
                     if fs::symlink_metadata(&backup).is_err() {
                         fs::create_dir_all(backup.parent().expect("absolute path"))?;
-                        fs::rename(target, &backup)
-                            .or_else(|_| fs::copy(target, &backup).map(|_| ()))
-                            .with_context(|| format!("backing up {path}"))?;
+                        move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
                     }
                 }
                 Some(previous) if !matches(&disk, previous) => {
@@ -435,7 +478,7 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
             {
                 fs::remove_file(target).with_context(|| format!("removing {path}"))?;
             }
-            fs::rename(&backup, target).with_context(|| format!("restoring {path}"))?;
+            move_path(&backup, target).with_context(|| format!("restoring {path}"))?;
         } else if matches(&disk, previous) {
             fs::remove_file(target).with_context(|| format!("removing {path}"))?;
         }

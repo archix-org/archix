@@ -61,9 +61,7 @@ pub(super) fn current_lock(
     )?;
     if let Some(old) = &old {
         new.keep_pins(old);
-        if !updating {
-            new.flatpak = old.flatpak.clone();
-        }
+        new.flatpak = old.flatpak.clone();
     }
     if !save {
         eprintln!(
@@ -96,9 +94,14 @@ pub(super) fn save_lock(
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
     refuse_if_unfinished(&Paths::system())?;
     let declared = declared(target.config)?;
+    let refresh = !matches!(snapshot, Snapshot::Locked);
+    let before = Lockfile::load(&target.config_dir.join(LOCK_FILE))?
+        .hosts
+        .get(target.host)
+        .map(|lock| lock.flatpak.clone())
+        .unwrap_or_default();
     let (mut lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm)?;
-    let before = lock.flatpak.clone();
-    for app in settle_flatpak(target, &declared, &mut lock, true)? {
+    for app in settle_flatpak(target, &declared, &mut lock, true, refresh)? {
         println!("note: {app}; the next `archix switch` locks it");
     }
     for (id, app) in &lock.flatpak {
@@ -133,7 +136,7 @@ pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> 
     let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
     lines.extend(system::apply::describe(&change)?);
     let mut lock = lock.clone();
-    let unresolved = settle_flatpak(target, declared, &mut lock, false)?;
+    let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     lines.extend(flatpak_lines);
     lines.extend(unresolved.iter().map(|app| format!("flatpak    install {app}")));

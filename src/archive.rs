@@ -20,7 +20,10 @@ pub struct Archive {
 impl Archive {
     pub fn new(base: &str) -> Archive {
         let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(300)))
+            .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(Duration::from_secs(120)))
+            // ureq has no idle timeout, so the body gets an hour: a 200 MB AppImage at 60 kB/s still makes it.
+            .timeout_recv_body(Some(Duration::from_secs(3600)))
             .user_agent(concat!("archix/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
