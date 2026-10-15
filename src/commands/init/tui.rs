@@ -89,6 +89,26 @@ enum Control {
     Dotfiles,
 }
 
+/// One focusable line: a choice's option, a toggle, a text field, a checklist item or a button.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Row {
+    Pick(Control, usize),
+    Flip(Control),
+    Edit(Control),
+    Item(Control, usize),
+    Next,
+    Back,
+}
+
+impl Row {
+    fn control(self) -> Option<Control> {
+        match self {
+            Row::Pick(c, _) | Row::Flip(c) | Row::Edit(c) | Row::Item(c, _) => Some(c),
+            Row::Next | Row::Back => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub(super) enum Flow {
     Stay,
@@ -112,7 +132,8 @@ pub(super) struct App<'a> {
     step: usize,
     seen: usize,
     focus: usize,
-    cursor: usize,
+    /// The value a text field had before editing started, while it's being edited.
+    editing: Option<String>,
     scroll: u16,
     error: Option<String>,
 }
@@ -141,17 +162,19 @@ pub(super) fn run(facts: &Facts, host: &str, answers: Answers) -> Result<Option<
 
 impl<'a> App<'a> {
     pub(super) fn new(facts: &'a Facts, host: &'a str, answers: Answers) -> App<'a> {
-        App {
+        let mut app = App {
             facts,
             host,
             answers,
             step: 0,
             seen: 0,
             focus: 0,
-            cursor: 0,
+            editing: None,
             scroll: 0,
             error: None,
-        }
+        };
+        app.go(0);
+        app
     }
 
     fn current(&self) -> Step {
@@ -215,16 +238,54 @@ impl<'a> App<'a> {
         controls
     }
 
-    fn focused(&self) -> Option<Control> {
-        self.controls().get(self.focus).copied()
+    fn options(&self, control: Control) -> Vec<String> {
+        match control {
+            Control::Fallback => FALLBACK.iter().map(|(_, label)| label.to_string()).collect(),
+            Control::MissingVersions => MISSING_VERSIONS.iter().map(|(_, label)| label.to_string()).collect(),
+            Control::Orphans => ORPHANS.map(str::to_string).to_vec(),
+            Control::Strict => STRICT.map(str::to_string).to_vec(),
+            Control::DotUser => self.users().into_iter().cloned().collect(),
+            _ => Vec::new(),
+        }
     }
 
-    fn list_len(&self, control: Control) -> usize {
+    fn picked(&self, control: Control) -> usize {
+        let answers = &self.answers;
         match control {
-            Control::Files => self.facts.files.len(),
-            Control::Dotfiles => self.dotfile_candidates().len(),
+            Control::Fallback => answers.fallback,
+            Control::MissingVersions => answers.missing_versions,
+            Control::Orphans => usize::from(!answers.keep_orphans),
+            Control::Strict => usize::from(!answers.strict),
+            Control::DotUser => answers.dotfiles_user,
             _ => 0,
         }
+    }
+
+    fn rows(&self) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for control in self.controls() {
+            match control {
+                Control::Location | Control::Keep | Control::KeepDays => rows.push(Row::Edit(control)),
+                Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => rows.push(Row::Flip(control)),
+                Control::Files => rows.extend((0..self.facts.files.len()).map(|i| Row::Item(control, i))),
+                Control::Dotfiles => rows.extend((0..self.dotfile_candidates().len()).map(|i| Row::Item(control, i))),
+                _ => rows.extend((0..self.options(control).len()).map(|i| Row::Pick(control, i))),
+            }
+        }
+        rows.push(Row::Next);
+        if self.step > 0 {
+            rows.push(Row::Back);
+        }
+        rows
+    }
+
+    fn focused(&self) -> Row {
+        let rows = self.rows();
+        rows[self.focus.min(rows.len() - 1)]
+    }
+
+    fn only_buttons(&self) -> bool {
+        self.controls().is_empty()
     }
 
     fn text(&mut self, control: Control) -> Option<&mut String> {
@@ -241,57 +302,32 @@ impl<'a> App<'a> {
             return Flow::Quit;
         }
         self.error = None;
-        let focused = self.focused();
-        if let Some(control) = focused
-            && let Some(text) = self.text(control)
-        {
-            match key.code {
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    text.push(c);
-                    return Flow::Stay;
-                }
-                KeyCode::Backspace => {
-                    text.pop();
-                    return Flow::Stay;
-                }
-                _ => {}
-            }
+        if self.editing.is_some() {
+            self.edit(key);
+            return Flow::Stay;
         }
-        let in_list = focused.is_some_and(|c| self.list_len(c) > 0);
+        let row = self.focused();
+        let in_list = matches!(row, Row::Item(..));
         match key.code {
-            KeyCode::Enter => return self.forward(),
-            KeyCode::Esc | KeyCode::BackTab => self.back(),
-            KeyCode::Tab => self.move_focus(1),
-            KeyCode::Down | KeyCode::Char('j') => {
-                if in_list && self.cursor + 1 < self.list_len(focused.unwrap()) {
-                    self.cursor += 1;
-                } else if self.controls().is_empty() {
-                    self.scroll = self.scroll.saturating_add(1);
-                } else {
-                    self.move_focus(1);
-                }
+            KeyCode::Enter | KeyCode::Char(' ') => return self.activate(row),
+            KeyCode::Esc => self.back(),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab if self.only_buttons() && key.code != KeyCode::Tab => {
+                self.scroll = self.scroll.saturating_add(1);
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if in_list && self.cursor > 0 {
-                    self.cursor -= 1;
-                } else if self.controls().is_empty() {
-                    self.scroll = self.scroll.saturating_sub(1);
-                } else {
-                    self.move_focus(-1);
-                }
-            }
-            KeyCode::PageDown if in_list => {
-                self.cursor = (self.cursor + 10).min(self.list_len(focused.unwrap()) - 1);
-            }
-            KeyCode::PageUp if in_list => self.cursor = self.cursor.saturating_sub(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Left | KeyCode::Char('h') => self.change(-1),
-            KeyCode::Right | KeyCode::Char('l') => self.change(1),
-            KeyCode::Char(' ') => self.toggle(),
+            KeyCode::Up | KeyCode::Char('k') if self.only_buttons() => self.scroll = self.scroll.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') | KeyCode::Tab => self.move_focus(1),
+            KeyCode::Up | KeyCode::Char('k') | KeyCode::BackTab => self.move_focus(-1),
+            KeyCode::Left | KeyCode::Char('h') if row == Row::Next && self.step > 0 => self.focus_row(Row::Back),
+            KeyCode::Right | KeyCode::Char('l') if row == Row::Back => self.focus_row(Row::Next),
+            KeyCode::PageDown if self.only_buttons() => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::PageUp if self.only_buttons() => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.move_focus(10),
+            KeyCode::PageUp => self.move_focus(-10),
+            KeyCode::Home => self.focus = 0,
+            KeyCode::End => self.focus_row(Row::Next),
             KeyCode::Char('a') if in_list => self.select(|_, _| true),
             KeyCode::Char('n') if in_list => self.select(|_, _| false),
-            KeyCode::Char('r') if focused == Some(Control::Files) => {
+            KeyCode::Char('r') if row.control() == Some(Control::Files) => {
                 self.select(|facts, i| facts.files[i].recommended);
             }
             KeyCode::Char('q') => return Flow::Quit,
@@ -306,12 +342,89 @@ impl<'a> App<'a> {
         Flow::Stay
     }
 
+    /// Keys while a text field is being edited: they type, enter keeps the value and esc puts the old one back.
+    fn edit(&mut self, key: KeyEvent) {
+        let Some(control) = self.focused().control() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Enter => self.editing = None,
+            KeyCode::Esc => {
+                if let Some(before) = self.editing.take()
+                    && let Some(text) = self.text(control)
+                {
+                    *text = before;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(text) = self.text(control) {
+                    text.pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(text) = self.text(control) {
+                    text.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn activate(&mut self, row: Row) -> Flow {
+        let answers = &mut self.answers;
+        match row {
+            Row::Next => return self.forward(),
+            Row::Back => self.back(),
+            Row::Pick(control, i) => match control {
+                Control::Fallback => answers.fallback = i,
+                Control::MissingVersions => answers.missing_versions = i,
+                Control::Orphans => answers.keep_orphans = i == 0,
+                Control::Strict => answers.strict = i == 0,
+                Control::DotUser if answers.dotfiles_user != i => {
+                    answers.dotfiles_user = i;
+                    answers.dotfiles.clear();
+                }
+                _ => {}
+            },
+            Row::Flip(control) => match control {
+                Control::Git => answers.git = !answers.git,
+                Control::AurReview => answers.aur_review = !answers.aur_review,
+                Control::Snapshots => answers.snapshots = !answers.snapshots,
+                Control::Boot => answers.boot = !answers.boot,
+                _ => {}
+            },
+            Row::Edit(control) => {
+                let before = self.text(control).map(|text| text.clone());
+                self.editing = before;
+            }
+            Row::Item(Control::Files, i) => {
+                if !answers.files.remove(&i) {
+                    answers.files.insert(i);
+                }
+            }
+            Row::Item(_, i) => {
+                if let Some(name) = self.dotfile_candidates().get(i).cloned()
+                    && !self.answers.dotfiles.remove(&name)
+                {
+                    self.answers.dotfiles.insert(name);
+                }
+            }
+        }
+        Flow::Stay
+    }
+
     fn go(&mut self, step: usize) {
         self.step = step;
         self.seen = self.seen.max(step);
-        self.focus = 0;
-        self.cursor = 0;
+        self.editing = None;
         self.scroll = 0;
+        self.focus = 0;
+    }
+
+    fn focus_row(&mut self, target: Row) {
+        if let Some(i) = self.rows().iter().position(|row| *row == target) {
+            self.focus = i;
+        }
     }
 
     fn forward(&mut self) -> Flow {
@@ -354,58 +467,12 @@ impl<'a> App<'a> {
     }
 
     fn move_focus(&mut self, delta: isize) {
-        let len = self.controls().len();
-        if len == 0 {
-            return;
-        }
-        self.focus = (self.focus as isize + delta).rem_euclid(len as isize) as usize;
-        self.cursor = 0;
-    }
-
-    fn change(&mut self, delta: isize) {
-        let cycle = |value: usize, len: usize| (value as isize + delta).rem_euclid(len as isize) as usize;
-        let focused = self.focused();
-        let users = self.facts.dotfiles.len();
-        let answers = &mut self.answers;
-        match focused {
-            Some(Control::Fallback) => answers.fallback = cycle(answers.fallback, FALLBACK.len()),
-            Some(Control::MissingVersions) => {
-                answers.missing_versions = cycle(answers.missing_versions, MISSING_VERSIONS.len());
-            }
-            Some(Control::Orphans) => answers.keep_orphans = !answers.keep_orphans,
-            Some(Control::Strict) => answers.strict = !answers.strict,
-            Some(Control::Git) => answers.git = !answers.git,
-            Some(Control::AurReview) => answers.aur_review = !answers.aur_review,
-            Some(Control::Snapshots) => answers.snapshots = !answers.snapshots,
-            Some(Control::Boot) => answers.boot = !answers.boot,
-            Some(Control::DotUser) => {
-                answers.dotfiles_user = cycle(answers.dotfiles_user, users);
-                answers.dotfiles.clear();
-            }
-            _ => {}
-        }
-    }
-
-    fn toggle(&mut self) {
-        match self.focused() {
-            Some(Control::Files) => {
-                if !self.answers.files.remove(&self.cursor) {
-                    self.answers.files.insert(self.cursor);
-                }
-            }
-            Some(Control::Dotfiles) => {
-                if let Some(name) = self.dotfile_candidates().get(self.cursor).cloned()
-                    && !self.answers.dotfiles.remove(&name)
-                {
-                    self.answers.dotfiles.insert(name);
-                }
-            }
-            _ => self.change(1),
-        }
+        let last = self.rows().len() as isize - 1;
+        self.focus = (self.focus as isize + delta).clamp(0, last) as usize;
     }
 
     fn select(&mut self, keep: impl Fn(&Facts, usize) -> bool) {
-        match self.focused() {
+        match self.focused().control() {
             Some(Control::Files) => {
                 self.answers.files = (0..self.facts.files.len()).filter(|i| keep(self.facts, *i)).collect();
             }
@@ -493,10 +560,11 @@ impl<'a> App<'a> {
         ];
         let mut cursor_line = None;
         self.content(&mut lines, &mut cursor_line);
+        lines.push(Line::default());
+        self.buttons(&mut lines, &mut cursor_line);
         let block = Block::new().padding(Padding::new(3, 2, 1, 0));
-        let inner = block.inner(area);
-        let height = inner.height;
-        if let Some(line) = cursor_line {
+        let height = block.inner(area).height;
+        if let Some(line) = cursor_line.filter(|_| !self.only_buttons()) {
             let line = line as u16;
             if line < self.scroll {
                 self.scroll = line.saturating_sub(1);
@@ -515,50 +583,82 @@ impl<'a> App<'a> {
         );
     }
 
+    fn buttons(&self, lines: &mut Vec<Line<'static>>, cursor_line: &mut Option<usize>) {
+        let focused = self.focused();
+        if matches!(focused, Row::Next | Row::Back) {
+            *cursor_line = Some(lines.len());
+        }
+        let button = |label: String, row: Row, primary: bool| {
+            let style = if focused == row {
+                Style::new().fg(Color::Black).bg(ACCENT).bold()
+            } else if primary {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new().fg(QUIET)
+            };
+            Span::styled(format!(" {label} "), style)
+        };
+        let next = if self.current() == Step::Review {
+            "Write the config ›".to_string()
+        } else {
+            format!("Next: {} ›", STEPS[self.step + 1].title())
+        };
+        let mut spans = vec![Span::raw("  ")];
+        if self.step > 0 {
+            spans.push(button("‹ Back".into(), Row::Back, false));
+            spans.push(Span::raw("   "));
+        }
+        spans.push(button(next, Row::Next, true));
+        lines.push(Line::from(spans));
+    }
+
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let key = |k: &'static str| Span::styled(k, Style::new().bold());
         let gap = || Span::styled("  ·  ", Style::new().fg(QUIET));
         let label = |t: &'static str| Span::styled(t, Style::new().fg(QUIET));
         let mut hints = vec![Span::raw(" ")];
-        if self.current() == Step::Review {
-            hints.extend([key("enter"), label(" write the config"), gap()]);
+        if self.editing.is_some() {
+            hints.extend([
+                key("type"),
+                label(" to edit"),
+                gap(),
+                key("enter"),
+                label(" done"),
+                gap(),
+                key("esc"),
+                label(" cancel"),
+            ]);
         } else {
-            hints.extend([key("enter"), label(" next"), gap()]);
-        }
-        hints.extend([key("esc"), label(" back"), gap()]);
-        match self.focused() {
-            Some(Control::Files | Control::Dotfiles) => hints.extend([
-                key("↑↓"),
-                label(" move"),
-                gap(),
-                key("space"),
-                label(" toggle"),
-                gap(),
-                key("a/n"),
-                label(" all/none"),
-                gap(),
-            ]),
-            Some(Control::Location | Control::Keep | Control::KeepDays) => {
-                hints.extend([
-                    key("type"),
-                    label(" to edit"),
-                    gap(),
-                    key("tab"),
-                    label(" next field"),
-                    gap(),
-                ]);
+            let row = self.focused();
+            let action = match row {
+                Row::Next if self.current() == Step::Review => " write the config",
+                Row::Next => " next step",
+                Row::Back => " previous step",
+                Row::Edit(_) => " edit",
+                Row::Pick(..) => " choose",
+                Row::Flip(_) | Row::Item(..) => " switch on/off",
+            };
+            let moves = if self.only_buttons() { " scroll" } else { " move" };
+            hints.extend([key("↑↓"), label(moves), gap(), key("enter"), label(action), gap()]);
+            if matches!(row, Row::Item(..)) {
+                hints.extend([key("a/n"), label(" all/none"), gap()]);
             }
-            Some(_) => hints.extend([key("↑↓"), label(" field"), gap(), key("←→"), label(" choose"), gap()]),
-            None => hints.extend([key("↑↓"), label(" scroll"), gap()]),
+            hints.extend([
+                key("esc"),
+                label(" back"),
+                gap(),
+                key("1-9"),
+                label(" jump"),
+                gap(),
+                key("q"),
+                label(" quit"),
+            ]);
         }
-        hints.extend([key("1-9"), label(" jump"), gap(), key("q"), label(" quit")]);
-        let mut lines = vec![Line::from(hints)];
-        if let Some(error) = &self.error {
-            lines.insert(0, Line::styled(format!(" ! {error}"), Style::new().fg(WARN).bold()));
-        } else {
-            lines.insert(0, Line::default());
-        }
-        frame.render_widget(Paragraph::new(lines), area);
+        let first = match &self.error {
+            Some(error) => Line::styled(format!(" ! {error}"), Style::new().fg(WARN).bold()),
+            None => Line::default(),
+        };
+        frame.render_widget(Paragraph::new(vec![first, Line::from(hints)]), area);
     }
 
     fn content(&self, lines: &mut Vec<Line<'static>>, cursor_line: &mut Option<usize>) {
@@ -719,8 +819,8 @@ impl<'a> App<'a> {
                     lines.push(note(
                         "/ isn't btrfs, so no snapshots; packages, config and boot entries still roll back".into(),
                     ));
+                    lines.push(Line::default());
                 }
-                lines.push(Line::default());
                 match &facts.boot {
                     BootFacts::NoLoader => {
                         lines.push(note("no systemd-boot found, so archix leaves booting alone".into()));
@@ -858,187 +958,174 @@ impl<'a> App<'a> {
                 format!("{} of {user}'s", answers.dotfiles.len())
             },
         ));
-        lines.push(Line::default());
-        lines.push(Line::from(vec![
-            Span::raw("Press "),
-            Span::styled("enter", Style::new().fg(ACCENT).bold()),
-            Span::raw(" to write the config and lock it to what's installed. "),
-            Span::styled("esc", Style::new().fg(ACCENT).bold()),
-            Span::raw(" goes back."),
-        ]));
     }
 
     fn control(&self, control: Control, lines: &mut Vec<Line<'static>>, cursor_line: &mut Option<usize>) {
-        let focused = self.focused() == Some(control);
+        let focused = self.focused();
         let answers = &self.answers;
-        let label_style = if focused {
-            Style::new().fg(ACCENT).bold()
-        } else {
-            Style::new().bold()
-        };
-        let bar = if focused { "▌ " } else { "  " };
+        let active = focused.control() == Some(control);
         let heading = |text: &str| {
-            Line::from(vec![
-                Span::styled(bar, Style::new().fg(ACCENT)),
-                Span::styled(text.to_string(), label_style),
-            ])
-        };
-        let choice = |lines: &mut Vec<Line<'static>>, title: &str, options: &[&str], selected: usize| {
-            lines.push(heading(title));
-            for (i, option) in options.iter().enumerate() {
-                let (mark, style) = if i == selected {
-                    ("●", if focused { Style::new().fg(ACCENT) } else { Style::new() })
-                } else {
-                    ("○", Style::new().fg(QUIET))
-                };
-                lines.push(Line::styled(format!("    {mark} {option}"), style));
-            }
-            lines.push(Line::default());
-        };
-        let toggle = |lines: &mut Vec<Line<'static>>, title: &str, on: bool| {
-            let mark = if on { "[x]" } else { "[ ]" };
-            let mark_style = if on {
-                Style::new().fg(GOOD)
+            let style = if active {
+                Style::new().fg(ACCENT).bold()
             } else {
-                Style::new().fg(QUIET)
+                Style::new().bold()
             };
-            lines.push(Line::from(vec![
-                Span::styled(bar, Style::new().fg(ACCENT)),
-                Span::styled(format!("{mark} "), mark_style),
-                Span::styled(title.to_string(), label_style),
-            ]));
-            lines.push(Line::default());
+            Line::styled(format!("  {text}"), style)
         };
-        let text = |lines: &mut Vec<Line<'static>>, title: &str, value: &str| {
-            lines.push(heading(title));
-            let caret = if focused { "▏" } else { "" };
-            let style = if focused { Style::new().fg(ACCENT) } else { Style::new() };
-            lines.push(Line::from(vec![
-                Span::raw("    "),
-                Span::styled(format!("{value}{caret}"), style.add_modifier(Modifier::UNDERLINED)),
-            ]));
-            lines.push(Line::default());
+        let pointer = |row: Row, cursor_line: &mut Option<usize>, at: usize| {
+            if focused == row {
+                *cursor_line = Some(at);
+                Span::styled("  › ", Style::new().fg(ACCENT).bold())
+            } else {
+                Span::raw("    ")
+            }
+        };
+        let label_style = |row: Row| {
+            if focused == row {
+                Style::new().fg(ACCENT).bold()
+            } else {
+                Style::new()
+            }
         };
         match control {
-            Control::Location => text(lines, "Where should the config live?", &answers.location),
-            Control::Git => toggle(lines, "Make it a git repository", answers.git),
-            Control::Fallback => {
-                let labels = FALLBACK.map(|(_, label)| label);
-                choice(
-                    lines,
-                    "If a locked package disappears from a third-party repo",
-                    &labels,
-                    answers.fallback,
-                );
-            }
-            Control::Orphans => choice(
-                lines,
-                "Dependencies nothing needs any more",
-                &ORPHANS,
-                usize::from(!answers.keep_orphans),
-            ),
-            Control::Strict => choice(
-                lines,
-                "Later, when you install something with plain pacman or yay",
-                &STRICT,
-                usize::from(!answers.strict),
-            ),
-            Control::AurReview => toggle(
-                lines,
-                "Show each AUR build recipe and ask before trusting it",
-                answers.aur_review,
-            ),
-            Control::MissingVersions => {
-                let labels = MISSING_VERSIONS.map(|(_, label)| label);
-                choice(
-                    lines,
-                    "If a locked AUR version can't be built any more",
-                    &labels,
-                    answers.missing_versions,
-                );
-            }
-            Control::Snapshots => toggle(
-                lines,
-                "Snapshot / before every switch, as an extra recovery point",
-                answers.snapshots,
-            ),
-            Control::Boot => toggle(lines, "Write a boot entry for each generation", answers.boot),
-            Control::Keep => text(lines, "Generations gc always keeps", &answers.keep),
-            Control::KeepDays => text(lines, "…and any younger than this many days", &answers.keep_days),
-            Control::DotUser => {
-                let users: Vec<String> = self.users().into_iter().cloned().collect();
-                let labels: Vec<&str> = users.iter().map(String::as_str).collect();
-                choice(lines, "Whose dotfiles", &labels, answers.dotfiles_user);
-            }
-            Control::Files => {
-                lines.push(heading("Config files archix manages"));
-                for (i, file) in self.facts.files.iter().enumerate() {
-                    let checked = answers.files.contains(&i);
-                    let why = if file.edited {
-                        "changed from its package's version"
-                    } else {
-                        "not from any package"
-                    };
-                    let tag = if file.recommended { "recommended · " } else { "" };
-                    self.item(
-                        lines,
-                        cursor_line,
-                        focused && i == self.cursor,
-                        checked,
-                        &file.path,
-                        &format!("{tag}{why}"),
-                    );
-                }
-                lines.push(Line::default());
-            }
-            Control::Dotfiles => {
-                lines.push(heading("Dotfiles to bring in"));
-                for (i, name) in self.dotfile_candidates().iter().enumerate() {
-                    let checked = answers.dotfiles.contains(name);
-                    self.item(lines, cursor_line, focused && i == self.cursor, checked, name, "");
-                }
-                lines.push(Line::default());
-            }
-        }
-    }
-
-    fn item(
-        &self,
-        lines: &mut Vec<Line<'static>>,
-        cursor_line: &mut Option<usize>,
-        under_cursor: bool,
-        checked: bool,
-        name: &str,
-        detail: &str,
-    ) {
-        if under_cursor {
-            *cursor_line = Some(lines.len());
-        }
-        let mark = if checked { "[x]" } else { "[ ]" };
-        let pointer = if under_cursor { "  › " } else { "    " };
-        let mark_style = if checked {
-            Style::new().fg(GOOD)
-        } else {
-            Style::new().fg(QUIET)
-        };
-        let name_style = if under_cursor {
-            Style::new().fg(ACCENT).bold()
-        } else {
-            Style::new()
-        };
-        lines.push(Line::from(vec![
-            Span::styled(pointer, Style::new().fg(ACCENT)),
-            Span::styled(format!("{mark} "), mark_style),
-            Span::styled(name.to_string(), name_style),
-            Span::styled(
-                if detail.is_empty() {
-                    String::new()
+            Control::Location | Control::Keep | Control::KeepDays => {
+                let (title, value) = match control {
+                    Control::Location => ("Where should the config live?", &answers.location),
+                    Control::Keep => ("Generations gc always keeps", &answers.keep),
+                    _ => ("…and any younger than this many days", &answers.keep_days),
+                };
+                lines.push(heading(title));
+                let row = Row::Edit(control);
+                let editing = focused == row && self.editing.is_some();
+                let pointer = pointer(row, cursor_line, lines.len());
+                let mut spans = vec![pointer];
+                if editing {
+                    spans.push(Span::styled(
+                        format!("{value}▏"),
+                        Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED),
+                    ));
                 } else {
-                    format!("  {detail}")
-                },
-                Style::new().fg(QUIET),
-            ),
-        ]));
+                    spans.push(Span::styled(
+                        value.clone(),
+                        label_style(row).add_modifier(Modifier::UNDERLINED),
+                    ));
+                    if focused == row {
+                        spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
+                    }
+                }
+                lines.push(Line::from(spans));
+                lines.push(Line::default());
+            }
+            Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => {
+                let (title, on) = match control {
+                    Control::Git => ("Make it a git repository", answers.git),
+                    Control::AurReview => (
+                        "Show each AUR build recipe and ask before trusting it",
+                        answers.aur_review,
+                    ),
+                    Control::Snapshots => (
+                        "Snapshot / before every switch, as an extra recovery point",
+                        answers.snapshots,
+                    ),
+                    _ => ("Write a boot entry for each generation", answers.boot),
+                };
+                let row = Row::Flip(control);
+                let mark = if on { "[x] " } else { "[ ] " };
+                let mark_style = if on {
+                    Style::new().fg(GOOD)
+                } else {
+                    Style::new().fg(QUIET)
+                };
+                let pointer = pointer(row, cursor_line, lines.len());
+                lines.push(Line::from(vec![
+                    pointer,
+                    Span::styled(mark, mark_style),
+                    Span::styled(title, label_style(row)),
+                ]));
+                lines.push(Line::default());
+            }
+            Control::Files | Control::Dotfiles => {
+                let title = if control == Control::Files {
+                    "Config files archix manages"
+                } else {
+                    "Dotfiles to bring in"
+                };
+                lines.push(heading(title));
+                let items: Vec<(String, bool, String)> = if control == Control::Files {
+                    self.facts
+                        .files
+                        .iter()
+                        .enumerate()
+                        .map(|(i, file)| {
+                            let why = if file.edited {
+                                "changed from its package's version"
+                            } else {
+                                "not from any package"
+                            };
+                            let tag = if file.recommended { "recommended · " } else { "" };
+                            (file.path.clone(), answers.files.contains(&i), format!("{tag}{why}"))
+                        })
+                        .collect()
+                } else {
+                    self.dotfile_candidates()
+                        .iter()
+                        .map(|name| (name.clone(), answers.dotfiles.contains(name), String::new()))
+                        .collect()
+                };
+                for (i, (name, checked, detail)) in items.into_iter().enumerate() {
+                    let row = Row::Item(control, i);
+                    let pointer = pointer(row, cursor_line, lines.len());
+                    let (mark, mark_style) = if checked {
+                        ("[x] ", Style::new().fg(GOOD))
+                    } else {
+                        ("[ ] ", Style::new().fg(QUIET))
+                    };
+                    let mut spans = vec![
+                        pointer,
+                        Span::styled(mark, mark_style),
+                        Span::styled(name, label_style(row)),
+                    ];
+                    if !detail.is_empty() {
+                        spans.push(Span::styled(format!("  {detail}"), Style::new().fg(QUIET)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+                lines.push(Line::default());
+            }
+            _ => {
+                let title = match control {
+                    Control::Fallback => "If a locked package disappears from a third-party repo",
+                    Control::Orphans => "Dependencies nothing needs any more",
+                    Control::Strict => "Later, when you install something with plain pacman or yay",
+                    Control::MissingVersions => "If a locked AUR version can't be built any more",
+                    _ => "Whose dotfiles",
+                };
+                lines.push(heading(title));
+                let picked = self.picked(control);
+                for (i, option) in self.options(control).into_iter().enumerate() {
+                    let row = Row::Pick(control, i);
+                    let pointer = pointer(row, cursor_line, lines.len());
+                    let (mark, mark_style) = if i == picked {
+                        ("● ", Style::new().fg(ACCENT))
+                    } else {
+                        ("○ ", Style::new().fg(QUIET))
+                    };
+                    let text_style = if focused == row {
+                        Style::new().fg(ACCENT).bold()
+                    } else if i == picked {
+                        Style::new()
+                    } else {
+                        Style::new().fg(QUIET)
+                    };
+                    lines.push(Line::from(vec![
+                        pointer,
+                        Span::styled(mark, mark_style),
+                        Span::styled(option, text_style),
+                    ]));
+                }
+                lines.push(Line::default());
+            }
+        }
     }
 }
 
@@ -1115,8 +1202,14 @@ mod tests {
         app.handle(KeyEvent::from(code))
     }
 
+    /// Moves focus to the Next button and presses it.
+    fn next(app: &mut App) -> Flow {
+        press(app, KeyCode::End);
+        press(app, KeyCode::Enter)
+    }
+
     fn render(app: &mut App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         (0..buffer.area.height)
@@ -1130,37 +1223,47 @@ mod tests {
     }
 
     #[test]
-    fn answers_survive_going_back_and_forth() {
+    fn enter_picks_options_and_the_buttons_move_between_steps() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
+        assert_eq!(app.focused(), Row::Next, "a step without fields starts on Next");
         press(&mut app, KeyCode::Enter);
-        press(&mut app, KeyCode::Enter);
+        next(&mut app);
         assert_eq!(app.current(), Step::Packages);
+        assert_eq!(app.focused(), Row::Pick(Control::Orphans, 0));
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.focused(), Some(Control::Strict));
-        press(&mut app, KeyCode::Right);
-        assert!(!app.answers.strict);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.focused(), Row::Pick(Control::Strict, 1));
+        assert!(app.answers.strict, "moving onto an option doesn't pick it");
         press(&mut app, KeyCode::Enter);
-        assert_eq!(app.current(), Step::System);
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Esc);
-        press(&mut app, KeyCode::Esc);
-        assert_eq!(app.current(), Step::Welcome);
+        assert!(!app.answers.strict);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.focused(), Row::Flip(Control::AurReview));
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.answers.aur_review, "enter switches a toggle");
+
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(app.focused(), Row::Back);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.current(), Step::Config, "the Back button goes back");
         press(&mut app, KeyCode::Char('3'));
-        assert_eq!(app.current(), Step::Packages);
-        assert!(!app.answers.strict, "the answer is still there");
+        assert!(!app.answers.strict && !app.answers.aur_review, "answers survive");
+        let screen = render(&mut app);
+        assert!(screen.contains("‹ Back     Next: System ›"), "{screen}");
     }
 
     #[test]
-    fn the_file_checklist_toggles_and_resets() {
+    fn enter_ticks_checklist_items() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
         press(&mut app, KeyCode::Char('5'));
         assert_eq!(app.answers.files, [0].into());
-        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
         assert!(app.answers.files.is_empty());
         press(&mut app, KeyCode::Down);
-        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Enter);
         assert_eq!(app.answers.files, [1].into());
         press(&mut app, KeyCode::Char('a'));
         assert_eq!(app.answers.files, [0, 1].into());
@@ -1172,27 +1275,37 @@ mod tests {
     }
 
     #[test]
-    fn text_fields_are_checked_before_moving_on() {
+    fn enter_edits_a_field_and_esc_cancels() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.focused(), Row::Edit(Control::Location));
+        press(&mut app, KeyCode::Char('q'));
+        assert_eq!(
+            app.answers.location, "/etc/archix",
+            "keys aren't typed until editing starts"
+        );
         press(&mut app, KeyCode::Enter);
         for _ in 0.."/etc/archix".len() {
             press(&mut app, KeyCode::Backspace);
         }
-        for c in "relative".chars() {
-            press(&mut app, KeyCode::Char(c));
+        for c in "rel q1".chars() {
+            assert_eq!(press(&mut app, KeyCode::Char(c)), Flow::Stay);
         }
-        assert_eq!(
-            app.answers.location, "relative",
-            "letters edit the field instead of acting as keys"
-        );
         press(&mut app, KeyCode::Enter);
+        assert_eq!(app.answers.location, "rel q1", "while editing, q and digits are text");
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(app.answers.location, "rel q1", "esc puts the old value back");
+        assert_eq!(app.current(), Step::Config, "esc while editing doesn't leave the step");
+        next(&mut app);
         assert_eq!(app.current(), Step::Config);
         assert!(render(&mut app).contains("must be an absolute path"));
     }
 
     #[test]
-    fn every_step_renders_and_review_finishes() {
+    fn every_step_renders_and_the_last_button_writes() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
         for step in STEPS {
@@ -1200,10 +1313,10 @@ mod tests {
             let screen = render(&mut app);
             assert!(screen.contains(step.blurb()), "{screen}");
             if step == Step::Review {
-                assert!(screen.contains("1 file"), "{screen}");
-                assert_eq!(press(&mut app, KeyCode::Enter), Flow::Done);
+                assert!(screen.contains("Write the config ›"), "{screen}");
+                assert_eq!(next(&mut app), Flow::Done);
             } else {
-                press(&mut app, KeyCode::Enter);
+                next(&mut app);
             }
         }
         assert_eq!(press(&mut app, KeyCode::Char('q')), Flow::Quit);
