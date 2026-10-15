@@ -103,6 +103,10 @@ struct Facts {
     aur_packages: Vec<String>,
     unknown: Vec<String>,
     orphans: Vec<String>,
+    /// Installed as dependencies that only something's optional dependencies want; kept as dependencies via `prefer`.
+    optional: Vec<String>,
+    /// Enabled or disabled units whose files no package or /etc provides, so a config can't reproduce them.
+    unreproducible: Vec<String>,
     settings: Vec<(String, Lua)>,
     settings_summary: Vec<String>,
     accounts: Accounts,
@@ -246,6 +250,25 @@ impl Host {
     fn set(&mut self, key: &str, value: Lua) {
         self.fields.push((key.to_string(), value));
     }
+
+    /// Adds packages to the host's `prefer` list, creating it if needed.
+    fn prefer(&mut self, names: &[String]) {
+        let mut all: Vec<String> = match self.fields.iter().find(|(key, _)| key == "prefer") {
+            Some((_, Lua::List(items))) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Lua::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        all.extend(names.iter().cloned());
+        all.sort();
+        all.dedup();
+        self.fields.retain(|(key, _)| key != "prefer");
+        self.set("prefer", Lua::strings(&all));
+    }
 }
 
 pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
@@ -282,29 +305,50 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
         report(&facts, &answers);
     }
 
-    let dir = settle_location(config_dir, &answers.location(config_dir))?;
-    let config = build(&facts, &answers, &dir, host);
+    let chosen = answers.location(config_dir);
+    let fresh = !chosen.exists();
+    let result = write_and_lock(&facts, &answers, &paths, config_dir, &chosen, host, interactive);
+    if result.is_err() && fresh {
+        let _ = fs::remove_dir_all(&chosen);
+        if chosen != config_dir && fs::symlink_metadata(config_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+            let _ = fs::remove_file(config_dir);
+        }
+    }
+    result
+}
+
+/// Everything after the questions: writing the config, locking it and showing what the first switch would do.
+fn write_and_lock(
+    facts: &Facts,
+    answers: &Answers,
+    paths: &Paths,
+    config_dir: &Path,
+    chosen: &Path,
+    host: &str,
+    interactive: bool,
+) -> Result<()> {
+    let dir = settle_location(config_dir, chosen)?;
+    let config = build(facts, answers, &dir, host);
 
     section("Lock");
     write_config(&dir, host, &config)?;
     let mut config = config;
     let evaluation = evaluate(&dir, host)?;
     let mut declared = declared(&evaluation.config)?;
-    let mut lock = lock_as_installed(&declared, &facts, &paths)?;
-    let swapped = swapped_providers(&lock, &facts, &declared);
+    let mut lock = lock_as_installed(&declared, facts, paths)?;
+    let swapped = swapped_providers(&lock, facts, &declared);
     let evaluation = if swapped.is_empty() {
         evaluation
     } else {
         note(format!(
-            "declaring {} too, so the lock keeps the providers this machine has",
+            "preferring {}, so the lock keeps the providers this machine has",
             some_of(&swapped, 6)
         ));
-        config.packages.extend(swapped);
-        config.packages.sort();
-        write_installed(&dir, host, &config.packages)?;
+        config.prefer(&swapped);
+        write_host(&dir, host, &config)?;
         let evaluation = evaluate(&dir, host)?;
         declared = super::declared(&evaluation.config)?;
-        lock = lock_as_installed(&declared, &facts, &paths)?;
+        lock = lock_as_installed(&declared, facts, paths)?;
         evaluation
     };
     let target = Target {
@@ -378,7 +422,8 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     };
     let explicit = capture::pacman_query("en")?;
     let foreign_explicit = capture::pacman_query("em")?;
-    let all_orphans = capture::pacman_query("dt")?;
+    let true_orphans: BTreeSet<String> = capture::pacman_query("dt")?.into_iter().collect();
+    let all_orphans = capture::pacman_query("dtt")?;
 
     let conf = fs::read_to_string("/etc/pacman.conf").context("reading /etc/pacman.conf")?;
     let (official, custom) = capture::parse_pacman_conf(&conf, |path| fs::read_to_string(path).ok());
@@ -406,7 +451,10 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).cloned().collect();
     packages.sort();
     packages.dedup();
-    let orphans = all_orphans.into_iter().filter(|name| !unknown.contains(name)).collect();
+    let (orphans, optional): (Vec<String>, Vec<String>) = all_orphans
+        .into_iter()
+        .filter(|name| !unknown.contains(name))
+        .partition(|name| true_orphans.contains(name));
 
     let exe = std::env::current_exe()?;
     let mut skip: BTreeSet<String> = integration::files(paths, &exe)
@@ -471,6 +519,20 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .filter(|(name, _)| name != "flathub" && flatpak_apps.values().any(|app| app.origin == *name))
         .collect();
 
+    let owned: BTreeSet<String> = machine
+        .details
+        .values()
+        .flat_map(|pkg| pkg.files.iter().map(|f| format!("/{f}")))
+        .collect();
+    let mut services = capture::changed_services()?;
+    let unreproducible: Vec<String> = services
+        .keys()
+        .filter(|unit| {
+            capture::unit_path(unit).is_some_and(|path| !path.starts_with("/etc/") && !owned.contains(&path))
+        })
+        .cloned()
+        .collect();
+    services.retain(|unit, _| !unreproducible.contains(unit));
     Ok(Facts {
         machine,
         default_dir: default_dir.to_path_buf(),
@@ -481,10 +543,12 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         aur_packages,
         unknown,
         orphans,
+        optional,
         settings,
         settings_summary,
         accounts,
-        services: capture::changed_services()?,
+        services,
+        unreproducible,
         files: found.files,
         secrets: found.secrets.len(),
         btrfs: capture::is_btrfs(Path::new("/")),
@@ -542,6 +606,9 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     ignored.dedup();
     if !ignored.is_empty() {
         config.set("ignored_packages", Lua::strings(&ignored));
+    }
+    if !facts.optional.is_empty() {
+        config.prefer(&facts.optional);
     }
     if !facts.aur_packages.is_empty() {
         if !answers.aur_review {
@@ -773,6 +840,12 @@ fn report(facts: &Facts, answers: &Answers) {
             some_of(&users, 6)
         ));
     }
+    if !facts.unreproducible.is_empty() {
+        warn(format!(
+            "left out, since no package or /etc file provides their unit: {}",
+            some_of(&facts.unreproducible, 6)
+        ));
+    }
     if !facts.services.is_empty() {
         done(format!(
             "{} that differ from their preset",
@@ -965,11 +1038,7 @@ fn write_config(dir: &Path, host: &str, config: &Host) -> Result<()> {
         dir.join("init.lua"),
         "return { imports = { \"hosts.\" .. archix.hostname } }\n",
     )?;
-    let body = Lua::Table(config.fields.clone()).render(0);
-    fs::write(
-        host_dir.join("init.lua"),
-        format!("-- Written by `archix init` from this machine; edit it freely.\nreturn {body}\n"),
-    )?;
+    write_host(dir, host, config)?;
     write_installed(dir, host, &config.packages)?;
     for (from, to) in &config.copies {
         copy_tree(from, to)?;
@@ -978,6 +1047,16 @@ fn write_config(dir: &Path, host: &str, config: &Host) -> Result<()> {
         own_tree(&dir.join("home"), home)?;
     }
     Ok(())
+}
+
+fn write_host(dir: &Path, host: &str, config: &Host) -> Result<()> {
+    let body = Lua::Table(config.fields.clone()).render(0);
+    let path = installed::default_dir(dir, host).join("init.lua");
+    fs::write(
+        &path,
+        format!("-- Written by `archix init` from this machine; edit it freely.\nreturn {body}\n"),
+    )
+    .with_context(|| format!("writing {}", path.display()))
 }
 
 fn write_installed(dir: &Path, host: &str, packages: &[String]) -> Result<()> {
@@ -1043,6 +1122,7 @@ fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths) -> Resul
         &user_cache()?,
         paths,
         &declared.packages,
+        &declared.prefer,
         &Candidates { dates, day },
         None,
         &machine.local,

@@ -874,6 +874,13 @@ impl<'a> App<'a> {
                         some_of(&facts.orphans, 6)
                     )));
                 }
+                if !facts.optional.is_empty() {
+                    lines.push(note(format!(
+                        "{} that something optionally uses, kept as dependencies (prefer): {}",
+                        count(facts.optional.len(), "package", "packages"),
+                        some_of(&facts.optional, 6)
+                    )));
+                }
                 lines.push(note(
                     "Everything installed now is declared, so the first switch removes nothing.".into(),
                 ));
@@ -902,6 +909,12 @@ impl<'a> App<'a> {
                 }
                 if facts.services.is_empty() {
                     lines.push(note("no services differ from their preset".into()));
+                }
+                if !facts.unreproducible.is_empty() {
+                    lines.push(warn(format!(
+                        "left out, since no package or /etc file provides their unit: {}",
+                        some_of(&facts.unreproducible, 6)
+                    )));
                 }
             }
             Step::Files => {
@@ -1285,6 +1298,8 @@ mod tests {
             aur_packages: vec!["yay-bin".into()],
             unknown: Vec::new(),
             orphans: vec!["old-dep".into()],
+            optional: vec!["libfido2".into()],
+            unreproducible: vec!["zapret-list-update.timer".into()],
             settings: vec![("hostname".into(), archix::luagen::Lua::str("box"))],
             settings_summary: vec!["hostname box".into()],
             accounts: Accounts {

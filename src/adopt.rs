@@ -60,6 +60,7 @@ pub fn adopt(
         cache,
         paths,
         &lock.declared,
+        &lock.prefer,
         &candidates,
         Some(lock),
         installed,
@@ -151,6 +152,7 @@ pub fn fit(
     cache: &Path,
     paths: &Paths,
     declared: &[String],
+    prefer: &[String],
     candidates: &Candidates,
     previous: Option<&HostLock>,
     installed: &BTreeMap<String, LocalPkg>,
@@ -160,7 +162,7 @@ pub fn fit(
 ) -> Result<HostLock> {
     let mut best: Option<(usize, HostLock)> = None;
     for date in &candidates.dates {
-        let mut resolved = match resolve(archive, cache, *date, repos, declared, aur) {
+        let mut resolved = match resolve(archive, cache, *date, repos, declared, prefer, aur) {
             Ok(resolved) => resolved,
             Err(e) => {
                 eprintln!("skipping snapshot {date}: {e:#}");
@@ -187,38 +189,40 @@ pub fn fit(
         Fit::Newer => vercmp(installed, locked) == Ordering::Greater,
         Fit::Exact => vercmp(installed, locked) != Ordering::Equal,
     };
-    let mut pins = Vec::new();
-    let mut aur_bases = BTreeMap::new();
-    for (name, locked) in &adopted.packages {
-        let Some(pkg) = installed.get(name) else { continue };
-        if !differs(&pkg.version, &locked.version) {
-            continue;
-        }
-        match &locked.base {
-            Some(base) if locked.repo == AUR_REPO => {
+    let mut moved = false;
+    if let Some(aur) = aur {
+        let mut aur_bases = BTreeMap::new();
+        for (name, locked) in &adopted.packages {
+            if let (Some(pkg), Some(base)) = (installed.get(name), &locked.base)
+                && locked.repo == AUR_REPO
+                && differs(&pkg.version, &locked.version)
+            {
                 aur_bases.insert(base.clone(), pkg.version.clone());
             }
-            _ => pins.push((name.clone(), pkg.clone(), locked.clone())),
         }
-    }
-    if let Some(aur) = aur {
         for (base, version) in aur_bases {
             match commit_for_version(aur.git, &base, &version)? {
-                Some((commit, info)) => {
-                    for (name, locked) in adopted.packages.iter_mut() {
-                        if locked.base.as_deref() == Some(base.as_str())
-                            && let Some(pkg) = info.package(name)
-                        {
-                            locked.version = info.version.clone();
-                            locked.file = info.file(pkg);
-                            locked.commit = Some(commit.clone());
-                        }
-                    }
+                Some((commit, _)) => {
+                    aur.commits.borrow_mut().insert(base, commit);
+                    moved = true;
                 }
                 None => eprintln!(
                     "warning: no {base} commit in the AUR builds {version}; switch will rebuild the locked one"
                 ),
             }
+        }
+    }
+    if moved {
+        adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur)?;
+        if let Some(previous) = previous {
+            adopted.keep_pins(previous);
+        }
+    }
+    let mut pins = Vec::new();
+    for (name, locked) in &adopted.packages {
+        let Some(pkg) = installed.get(name) else { continue };
+        if locked.repo != AUR_REPO && differs(&pkg.version, &locked.version) {
+            pins.push((name.clone(), pkg.clone(), locked.clone()));
         }
     }
     for (name, pkg, locked) in pins {
@@ -268,18 +272,90 @@ pub fn fit(
     Ok(adopted)
 }
 
-/// The newest commit in a base's history whose .SRCINFO builds exactly `version`.
+/// The newest commit whose .SRCINFO says `version`, skipping one whose PKGBUILD had moved on before its .SRCINFO caught up.
 pub fn commit_for_version(git: &AurGit, base: &str, version: &str) -> Result<Option<(String, SrcInfo)>> {
     git.sync(base)?;
+    let mut newer: Option<(String, String)> = None;
     for commit in git.history(base)?.into_iter().take(500) {
-        let Ok(text) = git.show(base, &commit, ".SRCINFO") else {
+        let Some(info) = git
+            .show(base, &commit, ".SRCINFO")
+            .ok()
+            .and_then(|text| srcinfo::parse(&text).ok())
+        else {
+            newer = None;
             continue;
         };
-        if let Ok(info) = srcinfo::parse(&text)
-            && info.version == version
-        {
+        let pkgbuild = git.show(base, &commit, "PKGBUILD").unwrap_or_default();
+        let stale = newer
+            .as_ref()
+            .is_some_and(|(next_version, next_pkgbuild)| next_version != version && *next_pkgbuild == pkgbuild);
+        if info.version == version && !stale {
             return Ok(Some((commit, info)));
         }
+        newer = Some((info.version.clone(), pkgbuild));
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    fn commit(repo: &Path, pkgbuild_version: &str, srcinfo_version: &str, message: &str) {
+        std::fs::write(
+            repo.join("PKGBUILD"),
+            format!("pkgname=demo\npkgver={pkgbuild_version}\npkgrel=1\narch=(any)\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join(".SRCINFO"),
+            format!("pkgbase = demo\n\tpkgver = {srcinfo_version}\n\tpkgrel = 1\n\tarch = any\n\npkgname = demo\n"),
+        )
+        .unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git")
+                    .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                    .arg("-C")
+                    .arg(repo)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            )
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", message]);
+    }
+
+    #[test]
+    fn skips_a_commit_whose_pkgbuild_ran_ahead_of_its_srcinfo() {
+        let dir = tempfile::tempdir().unwrap();
+        let upstream = dir.path().join("aur");
+        let repo = upstream.join("demo.git");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .arg(&repo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        commit(&repo, "1.0", "1.0", "1.0");
+        commit(&repo, "2.0", "1.0", "bump the PKGBUILD, forget .SRCINFO");
+        commit(&repo, "2.0", "2.0", "up .SRCINFO");
+
+        let git = AurGit::new(&format!("file://{}", upstream.display()), &dir.path().join("cache"));
+        let (found, info) = commit_for_version(&git, "demo", "1.0-1").unwrap().unwrap();
+        assert_eq!(info.version, "1.0-1");
+        assert_eq!(
+            git.show("demo", &found, "PKGBUILD").unwrap().lines().nth(1),
+            Some("pkgver=1.0"),
+            "the commit that really builds 1.0, not the one with a stale .SRCINFO"
+        );
+        let (_, newest) = commit_for_version(&git, "demo", "2.0-1").unwrap().unwrap();
+        assert_eq!(newest.version, "2.0-1");
+    }
 }

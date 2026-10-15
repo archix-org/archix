@@ -19,6 +19,8 @@ pub struct SyncPkg {
     pub filename: String,
     pub sha256: String,
     pub description: String,
+    /// `%PROVIDES%`: virtual names this package satisfies, possibly with `=version`.
+    pub provides: Vec<String>,
 }
 
 /// A package installed on the system, from pacman's local database.
@@ -104,6 +106,7 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
                 filename,
                 sha256,
                 description: first(&fields, "DESC").unwrap_or_default(),
+                provides: fields.get("PROVIDES").cloned().unwrap_or_default(),
             },
         );
     }
@@ -178,6 +181,7 @@ mod tests {
                 filename: "acl-2.3.2-1-x86_64.pkg.tar.zst".into(),
                 sha256: "abc123".into(),
                 description: String::new(),
+                provides: Vec::new(),
             }
         );
     }

@@ -59,6 +59,7 @@ pub enum RecoverMode {
 /// The package-related settings from the evaluated config.
 struct Declared {
     packages: Vec<String>,
+    prefer: Vec<String>,
     repos: Vec<Repo>,
     third_party_fallback: ThirdPartyFallback,
     remove_undeclared: bool,
@@ -182,6 +183,7 @@ fn declared(config: &Value) -> Result<Declared> {
     };
     let mut declared = Declared {
         packages,
+        prefer: strings("prefer"),
         repos,
         third_party_fallback: match map.get("third_party_fallback") {
             Some(Value::Str(policy)) if policy == "fallback" => ThirdPartyFallback::Fallback,
@@ -312,9 +314,11 @@ fn declared(config: &Value) -> Result<Declared> {
         if boot.secure_boot == Some(true) {
             needed.push("sbctl".to_string());
         }
-        declared.packages.extend(needed);
-        declared.packages.sort();
-        declared.packages.dedup();
+        declared
+            .prefer
+            .extend(needed.into_iter().filter(|name| !declared.packages.contains(name)));
+        declared.prefer.sort();
+        declared.prefer.dedup();
     }
     Ok(declared)
 }

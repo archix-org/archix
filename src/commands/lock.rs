@@ -40,7 +40,7 @@ pub(super) fn current_lock(
     if let Some(old) = &old
         && !updating
         && old.date == date
-        && old.matches(&declared.packages, &declared.repo_names())
+        && old.matches(&declared.packages, &declared.prefer, &declared.repo_names())
     {
         return Ok((old.clone(), false));
     }
@@ -57,6 +57,7 @@ pub(super) fn current_lock(
         date,
         &declared.repos,
         &declared.packages,
+        &declared.prefer,
         Some(&aur),
     )?;
     if let Some(old) = &old {
@@ -212,7 +213,7 @@ pub fn status(target: &Target) -> Result<()> {
         count(lock.packages.len(), "package", "packages")
     );
     let declared = declared(target.config)?;
-    if !lock.matches(&declared.packages, &declared.repo_names()) {
+    if !lock.matches(&declared.packages, &declared.prefer, &declared.repo_names()) {
         println!("the config changed since the lock was written; `archix lock` or `archix switch` will re-resolve");
     }
     if paths.local_db().is_dir() {

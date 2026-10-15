@@ -348,6 +348,16 @@ pub fn changed_services() -> Result<BTreeMap<String, bool>> {
     Ok(parse_unit_files(&String::from_utf8_lossy(&output.stdout)))
 }
 
+/// Where a unit's file lives, per systemd.
+pub fn unit_path(unit: &str) -> Option<String> {
+    let output = Command::new("systemctl")
+        .args(["show", "--property=FragmentPath", "--value", unit])
+        .output()
+        .ok()?;
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !path.is_empty()).then_some(path)
+}
+
 /// The kernel command line minus what the boot loader and archix add themselves.
 pub fn kernel_params(cmdline: &str) -> Vec<String> {
     cmdline

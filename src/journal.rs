@@ -24,8 +24,8 @@ pub enum Kind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Step {
-    Install,
     Remove,
+    Install,
     Reasons,
     Users,
     StopServices,
@@ -37,9 +37,10 @@ pub enum Step {
     Activate,
 }
 
+/// Removals come first: the lock is a complete set, so dropping what it leaves out can't strand anything it installs.
 pub const STEPS: [Step; 11] = [
-    Step::Install,
     Step::Remove,
+    Step::Install,
     Step::Reasons,
     Step::Users,
     Step::StopServices,
@@ -185,12 +186,12 @@ mod tests {
             BTreeMap::new(),
             Transaction::default(),
         );
-        assert_eq!(journal.next_step(), Some(Step::Install));
-        journal.done.push(Step::Install);
+        assert_eq!(journal.next_step(), Some(Step::Remove));
+        journal.done.push(Step::Remove);
         journal.save(&path).unwrap();
         let loaded = Journal::load(&path).unwrap().unwrap();
         assert_eq!(loaded, journal);
-        assert_eq!(loaded.next_step(), Some(Step::Remove));
+        assert_eq!(loaded.next_step(), Some(Step::Install));
         Journal::delete(&path).unwrap();
         assert!(Journal::load(&path).unwrap().is_none());
     }

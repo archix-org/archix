@@ -45,11 +45,10 @@ impl Archive {
         let mut date = Date::today_utc();
         for _ in 0..SEARCH_DAYS {
             let url = format!("{}/core.db", self.repo_url(date, "core"));
-            match self.agent.head(&url).call() {
-                Ok(_) => return Ok(date),
-                Err(ureq::Error::StatusCode(404)) => date = date.previous(),
-                Err(e) => return Err(e).with_context(|| format!("checking {url}")),
+            if self.exists(&url)? {
+                return Ok(date);
             }
+            date = date.previous();
         }
         bail!(
             "no archive snapshot found in the last {SEARCH_DAYS} days at {}",
@@ -89,8 +88,39 @@ impl Archive {
         format!("{}/packages/{first}/{name}/{file}", self.base)
     }
 
+    /// Whether `url` exists, retrying a flaky connection a few times.
+    fn exists(&self, url: &str) -> Result<bool> {
+        let mut attempt = 1;
+        loop {
+            match self.agent.head(url).call() {
+                Ok(_) => return Ok(true),
+                Err(ureq::Error::StatusCode(404)) => return Ok(false),
+                Err(e) if attempt < ATTEMPTS => {
+                    eprintln!("warning: checking {url}: {e}; trying again");
+                    pause(attempt);
+                }
+                Err(e) => return Err(e).with_context(|| format!("checking {url}")),
+            }
+            attempt += 1;
+        }
+    }
+
     /// Downloads via a per-process `.part` file so partial downloads never look complete; false if missing.
     pub fn fetch(&self, url: &str, dest: &Path) -> Result<bool> {
+        let mut attempt = 1;
+        loop {
+            match self.fetch_once(url, dest) {
+                Err(e) if attempt < ATTEMPTS && !url.starts_with("file://") => {
+                    eprintln!("warning: {e:#}; trying again");
+                    pause(attempt);
+                }
+                result => return result,
+            }
+            attempt += 1;
+        }
+    }
+
+    fn fetch_once(&self, url: &str, dest: &Path) -> Result<bool> {
         let part = dest.with_extension(format!("part.{}", std::process::id()));
         if let Some(path) = url.strip_prefix("file://") {
             match fs::copy(path, &part) {
@@ -107,9 +137,19 @@ impl Archive {
             Err(e) => return Err(e).with_context(|| format!("downloading {url}")),
         };
         let mut file = File::create(&part).with_context(|| format!("creating {}", part.display()))?;
-        io::copy(&mut response.body_mut().as_reader(), &mut file).with_context(|| format!("downloading {url}"))?;
+        if let Err(e) = io::copy(&mut response.body_mut().as_reader(), &mut file) {
+            let _ = fs::remove_file(&part);
+            return Err(e).with_context(|| format!("downloading {url}"));
+        }
         file.sync_all()?;
         fs::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
         Ok(true)
     }
+}
+
+const ATTEMPTS: u32 = 3;
+
+/// Waits before another attempt: 4 seconds, then 8.
+fn pause(attempt: u32) {
+    std::thread::sleep(Duration::from_secs(2u64 << attempt));
 }

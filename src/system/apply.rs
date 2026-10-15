@@ -398,6 +398,14 @@ fn move_path(from: &Path, to: &Path) -> Result<()> {
             }
             Ok(())
         }
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) && !fs::symlink_metadata(from)?.is_dir() => {
+            // A bind-mounted file (Docker's /etc/hosts, arch-chroot's resolv.conf) can't be renamed, only copied.
+            fs::copy(from, to)?;
+            match fs::remove_file(from) {
+                Err(e) if e.raw_os_error() == Some(libc::EBUSY) => Ok(()),
+                result => Ok(result?),
+            }
+        }
         result => Ok(result?),
     }
 }

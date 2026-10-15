@@ -25,6 +25,9 @@ pub struct HostLock {
     pub date: Date,
     pub repos: Vec<String>,
     pub declared: Vec<String>,
+    /// Packages that satisfy dependencies with several possible providers, installed as dependencies.
+    #[serde(default)]
+    pub prefer: Vec<String>,
     /// Packages held at a version other than the snapshot's, e.g. after adopting a manual upgrade.
     #[serde(default)]
     pub pinned: Vec<String>,
@@ -63,9 +66,9 @@ struct OnDisk {
 }
 
 impl HostLock {
-    /// Whether this lock was resolved for the same declared packages and repos.
-    pub fn matches(&self, declared: &[String], repos: &[String]) -> bool {
-        self.declared == declared && self.repos == repos
+    /// Whether this lock was resolved for the same declared packages, preferred providers and repos.
+    pub fn matches(&self, declared: &[String], prefer: &[String], repos: &[String]) -> bool {
+        self.declared == declared && self.prefer == prefer && self.repos == repos
     }
 
     pub fn pin(&mut self, name: &str, locked: Locked) {
@@ -127,6 +130,9 @@ impl Lockfile {
             let _ = writeln!(out, "date = \"{}\"", lock.date);
             let _ = writeln!(out, "repos = {}", array(&lock.repos));
             let _ = writeln!(out, "declared = {}", array(&lock.declared));
+            if !lock.prefer.is_empty() {
+                let _ = writeln!(out, "prefer = {}", array(&lock.prefer));
+            }
             if !lock.pinned.is_empty() {
                 let _ = writeln!(out, "pinned = {}", array(&lock.pinned));
             }
@@ -238,6 +244,7 @@ mod tests {
             date: "2026-10-14".parse().unwrap(),
             repos: vec!["core".into(), "extra".into()],
             declared: vec!["gtk+".into()],
+            prefer: vec!["noto-fonts".into()],
             pinned: vec!["zlib".into()],
             packages,
             flatpak: BTreeMap::from([(

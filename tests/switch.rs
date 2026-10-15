@@ -104,7 +104,7 @@ fn interrupted_switch_blocks_until_recovered() {
     assert!(
         setup
             .fails(&["switch", "--noconfirm"])
-            .contains("was interrupted while installing packages")
+            .contains("was interrupted while removing packages")
     );
     assert!(setup.fails(&["lock"]).contains("run `archix recover`"));
     assert!(setup.ok(&["status"]).contains("run `archix recover`"));

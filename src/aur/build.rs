@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -98,12 +99,23 @@ impl Builder<'_> {
             info.version,
             if on_host { "on the host" } else { "in a clean chroot" }
         );
-        let built = if on_host {
-            self.build_on_host(&dir, info, date, repos, inputs)
-        } else {
-            self.ensure_chroot(date, repos)
-                .and_then(|()| self.build_in_chroot(&dir, inputs))
-        };
+        let setup = self
+            .import_keys(&info.validpgpkeys)
+            .and_then(|()| {
+                if on_host {
+                    Ok(())
+                } else {
+                    self.ensure_chroot(date, repos)
+                }
+            })
+            .map_err(|e| anyhow::Error::new(SetupFailed(format!("{e:#}"))));
+        let built = setup.and_then(|()| {
+            if on_host {
+                self.build_on_host(&dir, info, date, repos, inputs)
+            } else {
+                self.build_in_chroot(&dir, inputs)
+            }
+        });
         let result = built.and_then(|()| {
             fs::create_dir_all(self.paths.packages())?;
             let mut files = Vec::new();
@@ -141,28 +153,81 @@ impl Builder<'_> {
                 fs::remove_dir_all(&root)?;
             }
             eprintln!(":: creating the build chroot at the {date} snapshot");
-            run(
-                devtools("mkarchroot").arg("-C").arg(&conf).arg(&root).arg("base-devel"),
-                "mkarchroot",
-            )?;
+            with_retries("creating the build chroot", || {
+                if root.exists() {
+                    fs::remove_dir_all(&root)?;
+                }
+                run(
+                    devtools("mkarchroot").arg("-C").arg(&conf).arg(&root).arg("base-devel"),
+                    "mkarchroot",
+                )
+            })?;
         } else if fs::read_to_string(&marker).ok().as_deref() != Some(&date.to_string()) {
             eprintln!(":: moving the build chroot to the {date} snapshot");
-            run(
-                devtools("arch-nspawn")
-                    .arg("-C")
-                    .arg(&conf)
-                    .arg(&root)
-                    .args(["pacman", "-Syyuu", "--noconfirm"]),
-                "arch-nspawn",
-            )?;
+            with_retries("moving the build chroot", || {
+                run(
+                    devtools("arch-nspawn")
+                        .arg("-C")
+                        .arg(&conf)
+                        .arg(&root)
+                        .args(["pacman", "-Syyuu", "--noconfirm"]),
+                    "arch-nspawn",
+                )
+            })?;
         }
         fs::write(&marker, date.to_string())?;
         Ok(())
     }
 
+    /// The keyring makepkg checks source signatures against, owned by the build user.
+    fn keyring(&self) -> PathBuf {
+        self.paths.state.join("aur-gnupg")
+    }
+
+    /// Fetches the recipe's `validpgpkeys` the keyring doesn't have yet, the way AUR helpers do.
+    fn import_keys(&self, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let keyring = self.keyring();
+        fs::create_dir_all(&keyring)?;
+        fs::set_permissions(&keyring, fs::Permissions::from_mode(0o700))?;
+        chown(&keyring)?;
+        let gpg = |args: &[&str]| {
+            let mut cmd = Command::new("runuser");
+            cmd.args(["-u", BUILD_USER, "--", "env"])
+                .arg(format!("GNUPGHOME={}", keyring.display()))
+                .args(["gpg", "--batch", "--quiet"])
+                .args(args);
+            cmd
+        };
+        let missing: Vec<&String> = keys
+            .iter()
+            .filter(|key| !gpg(&["--list-keys", key]).output().is_ok_and(|o| o.status.success()))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        eprintln!(
+            ":: importing the source signing keys {}",
+            missing.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(" ")
+        );
+        let mut last = None;
+        for server in ["hkps://keyserver.ubuntu.com", "hkps://keys.openpgp.org"] {
+            let mut args = vec!["--keyserver", server, "--recv-keys"];
+            args.extend(missing.iter().map(|k| k.as_str()));
+            match run(&mut gpg(&args), "gpg --recv-keys") {
+                Ok(()) => return Ok(()),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.expect("tried at least one keyserver"))
+    }
+
     fn build_in_chroot(&self, dir: &Path, inputs: &[PathBuf]) -> Result<()> {
         let mut cmd = devtools("makechrootpkg");
         cmd.current_dir(dir)
+            .env("GNUPGHOME", self.keyring())
             .arg("-c")
             .arg("-r")
             .arg(self.chroot())
@@ -198,7 +263,7 @@ impl Builder<'_> {
         let mut files: Vec<PathBuf> = inputs.to_vec();
         if !missing.is_empty() {
             let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, &official(repos))?;
-            let needed: Vec<(String, String, String)> = print_targets(&conf, &db, &missing, false)?
+            let needed: Vec<(String, String, String)> = print_targets(&conf, &db, &missing, false, &[])?
                 .into_iter()
                 .filter(|(name, _, _)| !installed_before.contains_key(name))
                 .collect();
@@ -231,6 +296,7 @@ impl Builder<'_> {
             Command::new("runuser")
                 .args(["-u", BUILD_USER, "--", "env"])
                 .arg(format!("HOME={}", dir.display()))
+                .arg(format!("GNUPGHOME={}", self.keyring().display()))
                 .args(["makepkg", "--noconfirm", "--clean"])
                 .current_dir(dir),
             "makepkg",
@@ -307,4 +373,30 @@ fn chown(dir: &Path) -> Result<()> {
         Command::new("chown").arg("-R").arg(format!("{BUILD_USER}:")).arg(dir),
         "chown",
     )
+}
+
+/// Preparing the build (the chroot, the signing keys) failed, which says nothing about the recipe, so no other version is offered.
+#[derive(Debug)]
+pub struct SetupFailed(pub String);
+
+impl std::fmt::Display for SetupFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "couldn't prepare the AUR build (is the network up?): {}", self.0)
+    }
+}
+
+impl std::error::Error for SetupFailed {}
+
+/// Runs `attempt` up to three times, since chroot setup downloads from the archive and can hit a slow mirror.
+fn with_retries(what: &str, mut attempt: impl FnMut() -> Result<()>) -> Result<()> {
+    for wait in [5, 20] {
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!(":: {what} failed ({e:#}); trying again in {wait} seconds");
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+            }
+        }
+    }
+    attempt()
 }

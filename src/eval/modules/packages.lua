@@ -7,6 +7,11 @@ return {
       default = {},
       description = "Packages to install: from the configured repositories, else from the AUR. Their dependencies are installed too and recorded in archix.lock.",
     },
+    prefer = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "Packages to use when a dependency could be met by several, such as which font satisfies ttf-font. They're installed as dependencies, not declared.",
+    },
     repos = archix.option {
       type = t.list_of(t.enum { "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing" }),
       default = { "core", "extra" },

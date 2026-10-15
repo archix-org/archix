@@ -9,6 +9,8 @@ pub struct SrcInfo {
     pub version: String,
     pub makedepends: Vec<String>,
     pub checkdepends: Vec<String>,
+    /// Fingerprints of the keys allowed to sign the sources.
+    pub validpgpkeys: Vec<String>,
     pub packages: Vec<SrcPkg>,
 }
 
@@ -56,7 +58,7 @@ impl Fields {
 /// Parses `.SRCINFO`: a pkgbase section of defaults, then pkgname sections whose arrays replace the defaults.
 pub fn parse(text: &str) -> Result<SrcInfo> {
     let (mut base, mut pkgver, mut pkgrel, mut epoch) = (None, None, None, None);
-    let (mut makedepends, mut checkdepends) = (Vec::new(), Vec::new());
+    let (mut makedepends, mut checkdepends, mut validpgpkeys) = (Vec::new(), Vec::new(), Vec::new());
     let mut defaults = Fields::default();
     let mut packages: Vec<(String, Fields)> = Vec::new();
     for line in text.lines() {
@@ -73,6 +75,7 @@ pub fn parse(text: &str) -> Result<SrcInfo> {
             ("epoch", None) => epoch = Some(value),
             ("makedepends", None) => makedepends.push(value.to_string()),
             ("checkdepends", None) => checkdepends.push(value.to_string()),
+            ("validpgpkeys", None) => validpgpkeys.push(value.to_string()),
             (k, None) if k == format!("makedepends{arch_specific}") => makedepends.push(value.to_string()),
             (k, None) if k == format!("checkdepends{arch_specific}") => checkdepends.push(value.to_string()),
             (key, None) => defaults.add(key, value),
@@ -109,6 +112,7 @@ pub fn parse(text: &str) -> Result<SrcInfo> {
         version,
         makedepends,
         checkdepends,
+        validpgpkeys,
         packages,
     })
 }
@@ -125,7 +129,7 @@ mod tests {
 
     const SPLIT: &str = "pkgbase = foo\n\tpkgdesc = d\n\tpkgver = 1.2\n\tpkgrel = 3\n\tepoch = 2\n\
         \tarch = x86_64\n\tmakedepends = cmake\n\tmakedepends_x86_64 = nasm\n\tcheckdepends = python\n\
-        \tdepends = glibc\n\tdepends_x86_64 = lib32-glibc\n\tdepends_aarch64 = nope\n\n\
+        \tdepends = glibc\n\tdepends_x86_64 = lib32-glibc\n\tdepends_aarch64 = nope\n\tvalidpgpkeys = 7C20ADCD35D9797789B6BCC046D62DD9F1DE636E\n\n\
         pkgname = foo\n\tprovides = foo-bin=1.2\n\n\
         pkgname = foo-docs\n\tarch = any\n\tdepends = foo>=1.2\n";
 
@@ -136,6 +140,7 @@ mod tests {
         assert_eq!(info.version, "2:1.2-3");
         assert_eq!(info.makedepends, ["cmake", "nasm"]);
         assert_eq!(info.checkdepends, ["python"]);
+        assert_eq!(info.validpgpkeys, ["7C20ADCD35D9797789B6BCC046D62DD9F1DE636E"]);
         let foo = info.package("foo").unwrap();
         assert_eq!(foo.depends, ["glibc", "lib32-glibc"]);
         assert_eq!(foo.provides, ["foo-bin=1.2"]);

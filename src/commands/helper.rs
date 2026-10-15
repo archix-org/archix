@@ -95,7 +95,15 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     let git = aur_git(&declared)?;
     let aur = aur_source(&git, &declared, &archive, Some(&lock), false);
     let cache = user_cache()?;
-    let temp = resolve(&archive, &cache, lock.date, &declared.repos, names, Some(&aur))?;
+    let temp = resolve(
+        &archive,
+        &cache,
+        lock.date,
+        &declared.repos,
+        names,
+        &declared.prefer,
+        Some(&aur),
+    )?;
     review(&git, Some(&lock), &temp, declared.aur_review && !noconfirm, &confirm)?;
 
     let installed = read_local_db(&paths.local_db())?;
@@ -281,6 +289,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
             lock.date,
             &declared.repos,
             &declared.packages,
+            &declared.prefer,
             Some(&aur),
         )?;
         fresh.keep_pins(&lock);

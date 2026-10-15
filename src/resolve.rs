@@ -1,4 +1,4 @@
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::fs;
@@ -13,13 +13,15 @@ use crate::aur::index::Index;
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
 use crate::lock::{AUR_REPO, HostLock, Locked};
-use crate::pacman::read_sync_db;
+use crate::pacman::{SyncPkg, read_sync_db};
 use crate::repos::{Repo, fetch_db};
 
 /// Where AUR packages come from while resolving, and the previous lock whose AUR commits are kept.
 pub struct Aur<'a> {
     pub git: &'a AurGit,
     pub previous: Option<&'a HostLock>,
+    /// Commits to lock bases at, overriding the previous lock and the AUR's newest.
+    pub commits: RefCell<BTreeMap<String, String>>,
     index: OnceCell<Index>,
     load_index: Box<dyn Fn() -> Result<Index> + 'a>,
 }
@@ -30,6 +32,7 @@ impl<'a> Aur<'a> {
         Aur {
             git,
             previous,
+            commits: RefCell::new(BTreeMap::new()),
             index: OnceCell::new(),
             load_index: Box::new(load_index),
         }
@@ -83,12 +86,14 @@ pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
 }
 
 /// Resolves declared packages against one snapshot into the exact closure, taking from the AUR what the repos lack.
+/// Locks `declared` and everything it depends on at `date`; `prefer` picks providers and is installed as dependencies.
 pub fn resolve(
     archive: &Archive,
     cache: &Path,
     date: Date,
     repos: &[Repo],
     declared: &[String],
+    prefer: &[String],
     aur: Option<&Aur>,
 ) -> Result<HostLock> {
     let invalid: Vec<&String> = declared.iter().filter(|name| !valid_name(name)).collect();
@@ -99,6 +104,7 @@ pub fn resolve(
         date,
         repos: repos.iter().map(|r| r.name.clone()).collect(),
         declared: declared.to_vec(),
+        prefer: prefer.to_vec(),
         pinned: Vec::new(),
         packages: BTreeMap::new(),
         flatpak: BTreeMap::new(),
@@ -123,23 +129,30 @@ pub fn resolve(
         from_aur = aur_closure(aur, &conf, &db, &not_in_repos)?;
     }
 
+    let mut sync = BTreeMap::new();
+    for repo in repos {
+        let path = db.join("sync").join(format!("{}.db", repo.name));
+        sync.insert(repo.name.clone(), read_sync_db(&path)?);
+    }
     let mut targets: Vec<String> = official.clone();
-    targets.extend(from_aur.repo_deps.iter().cloned());
+    targets.extend(from_aur.repo_deps.iter().map(|dep| provider(&sync, dep, prefer)));
+    targets.extend(
+        prefer
+            .iter()
+            .filter(|name| !targets.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
     if !targets.is_empty() {
-        let closure = print_targets(&conf, &db, &targets, false)?;
+        let closure = print_targets(&conf, &db, &targets, false, &from_aur.provides)?;
         let explicit: BTreeSet<String> = if official.is_empty() {
             BTreeSet::new()
         } else {
-            print_targets(&conf, &db, &official, true)?
+            print_targets(&conf, &db, &official, true, &[])?
                 .into_iter()
                 .map(|t| t.0)
                 .collect()
         };
-        let mut sync = BTreeMap::new();
-        for repo in repos {
-            let path = db.join("sync").join(format!("{}.db", repo.name));
-            sync.insert(repo.name.clone(), read_sync_db(&path)?);
-        }
         for (name, version, repo) in closure {
             let Some(pkg) = sync.get(&repo).and_then(|packages| packages.get(&name)) else {
                 bail!("pacman picked {name} {version} from {repo}, but it is missing from that snapshot's database");
@@ -168,10 +181,32 @@ pub fn resolve(
     Ok(lock)
 }
 
+/// A concrete package for a dependency that may be a virtual name: the one listed in `prefer`, if any.
+fn provider(sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>, dep: &str, prefer: &[String]) -> String {
+    let wanted = dep.split(['<', '>', '=']).next().unwrap_or(dep);
+    if sync.values().any(|packages| packages.contains_key(wanted)) {
+        return dep.to_string();
+    }
+    let provides = |pkg: &SyncPkg| pkg.provides.iter().any(|p| p.split('=').next() == Some(wanted));
+    let candidates: Vec<&String> = sync
+        .values()
+        .flat_map(|packages| packages.values())
+        .filter(|pkg| provides(pkg))
+        .map(|pkg| &pkg.name)
+        .collect();
+    prefer
+        .iter()
+        .find(|name| candidates.contains(name))
+        .cloned()
+        .unwrap_or_else(|| dep.to_string())
+}
+
 #[derive(Default)]
 struct AurClosure {
     packages: BTreeMap<String, Locked>,
     repo_deps: BTreeSet<String>,
+    /// `name=version` for every AUR package and what it provides, so pacman treats those dependencies as met.
+    provides: Vec<String>,
 }
 
 /// Walks AUR packages and their dependencies; runtime ones get installed, make/check-only ones are just built.
@@ -227,6 +262,27 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
         }
     }
 
+    for (name, base) in &runtime {
+        let (_, info) = &bases[base];
+        let pkg = info.package(name).expect("checked while walking");
+        closure.provides.push(format!("{name}={}", info.version));
+        for provided in &pkg.provides {
+            closure.provides.push(match provided.split_once('=') {
+                Some(_) => provided.clone(),
+                None => format!("{provided}={}", info.version),
+            });
+        }
+    }
+    let satisfied_by_aur = |dep: &str| {
+        let wanted = dep.split(['<', '>', '=']).next().unwrap_or(dep);
+        closure.provides.iter().any(|p| p.split('=').next() == Some(wanted))
+    };
+    closure.repo_deps = closure
+        .repo_deps
+        .iter()
+        .filter(|dep| !satisfied_by_aur(dep))
+        .cloned()
+        .collect();
     for (name, base, build_only) in runtime
         .into_iter()
         .map(|(n, b)| (n, b, false))
@@ -250,8 +306,12 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
     Ok(closure)
 }
 
-/// The commit a base stays locked at: the previous lock's, if the repo still has it, else the AUR's newest.
+/// The commit a base is locked at: one set in `commits`, else the previous lock's if the repo still has it, else the AUR's newest.
 fn locked_commit(aur: &Aur, base: &str) -> Result<String> {
+    if let Some(commit) = aur.commits.borrow().get(base) {
+        aur.git.sync(base)?;
+        return Ok(commit.clone());
+    }
     let previous = aur.previous.and_then(|lock| {
         lock.packages
             .values()
@@ -270,7 +330,7 @@ fn unsatisfied(conf: &Path, db: &Path, deps: &[String]) -> Result<BTreeSet<Strin
     if deps.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let output = pacman_print(conf, db, deps, true)?;
+    let output = pacman_print(conf, db, deps, true, &[])?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let mut missing = BTreeSet::new();
     let mut other = Vec::new();
@@ -288,10 +348,19 @@ fn unsatisfied(conf: &Path, db: &Path, deps: &[String]) -> Result<BTreeSet<Strin
     Ok(missing)
 }
 
-fn pacman_print(conf: &Path, db: &Path, targets: &[String], targets_only: bool) -> Result<std::process::Output> {
+fn pacman_print(
+    conf: &Path,
+    db: &Path,
+    targets: &[String],
+    targets_only: bool,
+    assume: &[String],
+) -> Result<std::process::Output> {
     let mut cmd = Command::new("pacman");
     cmd.arg("--config").arg(conf).arg("--dbpath").arg(db);
     cmd.args(["-Sp", "--noconfirm", "--print-format", "%n %v %r"]);
+    for provided in assume {
+        cmd.arg("--assume-installed").arg(provided);
+    }
     if targets_only {
         cmd.args(["--nodeps", "--nodeps"]);
     }
@@ -302,14 +371,15 @@ fn pacman_print(conf: &Path, db: &Path, targets: &[String], targets_only: bool) 
     }
 }
 
-/// Runs `pacman -Sp` against a snapshot db; with `targets_only`, dependencies are skipped (`-dd`).
+/// Runs `pacman -Sp` against a snapshot db; with `targets_only`, dependencies are skipped (`-dd`); `assume` counts as installed.
 pub fn print_targets(
     conf: &Path,
     db: &Path,
     targets: &[String],
     targets_only: bool,
+    assume: &[String],
 ) -> Result<Vec<(String, String, String)>> {
-    let output = pacman_print(conf, db, targets, targets_only)?;
+    let output = pacman_print(conf, db, targets, targets_only, assume)?;
     let stderr = String::from_utf8_lossy(&output.stderr);
     let errors: Vec<String> = stderr
         .lines()

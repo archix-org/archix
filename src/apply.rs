@@ -126,7 +126,8 @@ fn run_package_step(
             if remove.is_empty() {
                 return Ok(());
             }
-            let mut args = vec!["-R", "--noconfirm"];
+            // -dd: what still depends on these is either removed too or replaced by the Install step that follows.
+            let mut args = vec!["-Rdd", "--noconfirm"];
             args.extend(remove);
             pacman(&args)
         }
