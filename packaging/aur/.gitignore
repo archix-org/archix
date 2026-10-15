@@ -1,0 +1,5 @@
+*/src/
+*/pkg/
+archix-git/archix/
+*.pkg.tar.zst
+*.tar.gz
