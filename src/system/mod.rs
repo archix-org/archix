@@ -89,12 +89,16 @@ impl Builder {
     }
 
     fn link(&mut self, path: &str, target: &str) {
+        self.owned_link(path, target, "root", "root");
+    }
+
+    fn owned_link(&mut self, path: &str, target: &str, owner: &str, group: &str) {
         let file = ManagedFile {
             sha256: String::new(),
             link: Some(target.to_string()),
             mode: 0o777,
-            owner: "root".into(),
-            group: "root".into(),
+            owner: owner.to_string(),
+            group: group.to_string(),
         };
         self.state.files.insert(path.to_string(), file);
     }
@@ -267,6 +271,8 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         b.text("/etc/vconsole.conf", &format!("KEYMAP={keymap}\n"));
     }
 
+    render_home(&mut b, config, config_dir)?;
+
     for (name, spec) in map(config, "groups").into_iter().flatten() {
         let gid = match get(spec, "gid") {
             Some(Value::Int(gid)) => Some(u32::try_from(*gid).context("groups: gid out of range")?),
@@ -308,6 +314,79 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         state: b.state,
         blobs: b.blobs,
     })
+}
+
+/// Home files of `home.user`, owned by them, keyed by absolute path.
+fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()> {
+    let Some(home) = config_get(config, "home") else {
+        return Ok(());
+    };
+    let files = match get(home, "files") {
+        Some(Value::Map(files)) => files.clone(),
+        _ => BTreeMap::new(),
+    };
+    let Some(user) = str_of(home, "user") else {
+        if !files.is_empty() {
+            bail!("home.files needs home.user, the user whose home it is");
+        }
+        return Ok(());
+    };
+    let declared = map(config, "users").and_then(|users| users.get(user));
+    let dir = str_of(home, "directory")
+        .map(str::to_string)
+        .or_else(|| declared.and_then(|u| str_of(u, "home")).map(str::to_string))
+        .unwrap_or_else(|| format!("/home/{user}"));
+    let group = declared.and_then(|u| str_of(u, "group")).unwrap_or(user).to_string();
+    let root = config_dir.canonicalize()?;
+    for (relative, spec) in &files {
+        let relative = relative.strip_prefix("~/").unwrap_or(relative);
+        if relative.is_empty() || relative.starts_with('/') || relative.split('/').any(|part| part == "..") {
+            bail!("home.files: {relative:?} must be a path inside the home directory");
+        }
+        let path = format!("{}/{relative}", dir.trim_end_matches('/'));
+        let mode = if get(spec, "executable") == Some(&Value::Bool(true)) {
+            0o755
+        } else {
+            0o644
+        };
+        let live = get(spec, "live") == Some(&Value::Bool(true));
+        let sources = [
+            str_of(spec, "text").is_some(),
+            str_of(spec, "source").is_some(),
+            str_of(spec, "link").is_some(),
+        ];
+        if sources.iter().filter(|set| **set).count() != 1 {
+            bail!("home.files.{relative}: give exactly one of text, source or link");
+        }
+        if let Some(text) = str_of(spec, "text") {
+            b.content(&path, text.as_bytes().to_vec(), mode, user, &group);
+        } else if let Some(link) = str_of(spec, "link") {
+            b.owned_link(&path, link, user, &group);
+        } else if let Some(source) = str_of(spec, "source") {
+            let full = root
+                .join(source)
+                .canonicalize()
+                .with_context(|| format!("home.files.{relative}.source {source:?}"))?;
+            if !full.starts_with(&root) {
+                bail!("home.files.{relative}.source {source:?} leaves the config directory");
+            }
+            if live {
+                b.owned_link(&path, &full.to_string_lossy(), user, &group);
+            } else {
+                let content = fs::read(&full)
+                    .with_context(|| format!("reading {}; directories need live = true", full.display()))?;
+                b.content(&path, content, mode, user, &group);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn config_get<'a>(config: &'a Value, key: &str) -> Option<&'a Value> {
+    match config {
+        Value::Map(root) => root.get(key),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

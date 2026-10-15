@@ -22,6 +22,15 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("generations", include_str!("modules/generations.lua")),
     ("aur", include_str!("modules/aur.lua")),
     ("system", include_str!("modules/system.lua")),
+    ("home", include_str!("modules/home.lua")),
+    ("home_systemd", include_str!("modules/home_systemd.lua")),
+    ("mime_apps", include_str!("modules/programs/mime_apps.lua")),
+    ("programs.fastfetch", include_str!("modules/programs/fastfetch.lua")),
+    ("programs.git", include_str!("modules/programs/git.lua")),
+    ("programs.kitty", include_str!("modules/programs/kitty.lua")),
+    ("programs.starship", include_str!("modules/programs/starship.lua")),
+    ("programs.thin", include_str!("modules/programs/thin.lua")),
+    ("programs.zsh", include_str!("modules/programs/zsh.lua")),
 ];
 
 pub struct Sandbox {
@@ -70,6 +79,9 @@ impl Sandbox {
             null: markers.raw_get("null")?,
         };
 
+        lua.load(include_str!("formats.lua"))
+            .set_name("@archix/formats.lua")
+            .exec()?;
         let archix: Table = globals.raw_get("archix")?;
         archix.raw_set("hostname", hostname)?;
         archix.raw_set("read_file", lua.create_function(read_file)?)?;

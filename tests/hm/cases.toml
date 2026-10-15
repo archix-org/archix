@@ -1,0 +1,70 @@
+# Each case renders an archix config ported from a Home Manager test and compares the file with Home Manager's expected output.
+home_manager = "https://github.com/nix-community/home-manager"
+commit = "5a9d300bd619c03857521b50c8877a19dbad7078"
+
+[modules]
+kitty = ["modules/programs/kitty.nix", "tests/modules/programs/kitty"]
+git = ["modules/programs/git.nix", "modules/lib/generators.nix", "tests/modules/programs/git"]
+starship = ["modules/programs/starship.nix", "tests/modules/programs/starship"]
+fastfetch = ["modules/programs/fastfetch.nix", "tests/modules/programs/fastfetch"]
+mime_apps = ["modules/misc/xdg-mime-apps.nix", "tests/modules/misc/xdg"]
+systemd = ["modules/systemd.nix", "tests/modules/systemd"]
+zsh = ["modules/programs/zsh", "modules/lib/zsh.nix", "modules/lib/shell.nix", "tests/modules/programs/zsh"]
+
+[[case]]
+module = "kitty"
+input = "kitty/example-settings.lua"
+file = ".config/kitty/kitty.conf"
+expected = "kitty/example-settings-expected.conf"
+
+[[case]]
+module = "kitty"
+input = "kitty/null-shell-integration.lua"
+file = ".config/kitty/kitty.conf"
+expected = "kitty/null-shellIntegration-expected.conf"
+
+[[case]]
+module = "git"
+input = "git/signing-key-id.lua"
+file = ".config/git/config"
+expected = "git/git-with-signing-key-id-expected.conf"
+
+[[case]]
+module = "git"
+input = "git/with-lfs.lua"
+file = ".config/git/config"
+expected = "git/git-with-lfs-expected.conf"
+replace = [["@git-lfs@/bin/git-lfs", "git-lfs"], ["@gnupg@/bin/gpg", "/usr/bin/gpg"]]
+
+[[case]]
+module = "starship"
+input = "starship/settings.lua"
+file = ".config/starship.toml"
+expected = "starship/settings-expected.toml"
+
+[[case]]
+module = "fastfetch"
+input = "fastfetch/basic-configuration.lua"
+file = ".config/fastfetch/config.jsonc"
+expected = "fastfetch/basic-configuration.jsonc"
+
+[[case]]
+module = "mime_apps"
+input = "mime_apps/basics.lua"
+file = ".config/mimeapps.list"
+expected = "mime_apps/mime-apps-basics-expected.ini"
+
+[[case]]
+module = "systemd"
+input = "systemd/timers.lua"
+file = ".config/systemd/user/test-timer.timer"
+expected = "systemd/timers-expected.conf"
+also_exists = [".config/systemd/user/timers.target.wants/test-timer.timer"]
+
+[[case]]
+module = "zsh"
+input = "zsh/smart-formatting.lua"
+file = ".zshrc"
+expected = "zsh/smart-formatting-expected.zshrc"
+# archix leaves out Home Manager's Nix-only preamble (NIX_PROFILES fpath, HELPDIR in the store), so both sides compare from here.
+from_line = "autoload -U compinit && compinit"

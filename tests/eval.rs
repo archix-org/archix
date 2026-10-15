@@ -6,18 +6,18 @@ use archix::value::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const KITTY: &str = r#"
+const TERMY: &str = r#"
 local t = archix.types
 return {
   options = {
-    programs = { kitty = {
-      enable = archix.option { type = t.bool, default = false, description = "Install and configure kitty" },
+    programs = { termy = {
+      enable = archix.option { type = t.bool, default = false, description = "Install and configure termy" },
       font = { size = archix.option { type = t.int, default = 12 } },
     } },
   },
   config = function(cfg)
-    if not cfg.programs.kitty.enable then return {} end
-    return { packages = { "kitty" } }
+    if not cfg.programs.termy.enable then return {} end
+    return { packages = { "termy" } }
   end,
 }
 "#;
@@ -63,23 +63,23 @@ fn host_file_force_overrides_shared_module() {
     let out = eval_ok(&[
         (
             "init.lua",
-            r#"return { imports = { "modules.kitty", "modules.common", "hosts." .. archix.hostname } }"#,
+            r#"return { imports = { "modules.termy", "modules.common", "hosts." .. archix.hostname } }"#,
         ),
-        ("lua/modules/kitty.lua", KITTY),
+        ("lua/modules/termy.lua", TERMY),
         (
             "lua/modules/common.lua",
-            r#"return { programs = { kitty = { enable = true, font = { size = 14 } } } }"#,
+            r#"return { programs = { termy = { enable = true, font = { size = 14 } } } }"#,
         ),
         (
             "lua/hosts/desktop.lua",
-            r#"return { programs = { kitty = { font = { size = archix.force(11) } } }, packages = { "git" } }"#,
+            r#"return { programs = { termy = { font = { size = archix.force(11) } } }, packages = { "git" } }"#,
         ),
     ]);
     assert_eq!(
-        out["programs"]["kitty"],
+        out["programs"]["termy"],
         json!({ "enable": true, "font": { "size": 11 } })
     );
-    assert_eq!(out["packages"], json!(["kitty", "git"]));
+    assert_eq!(out["packages"], json!(["termy", "git"]));
 }
 
 #[test]
@@ -87,9 +87,9 @@ fn hostname_selects_the_host_file() {
     let dir = config(&[
         (
             "init.lua",
-            r#"return { imports = { "modules.kitty", "hosts." .. archix.hostname } }"#,
+            r#"return { imports = { "modules.termy", "hosts." .. archix.hostname } }"#,
         ),
-        ("lua/modules/kitty.lua", KITTY),
+        ("lua/modules/termy.lua", TERMY),
         ("lua/hosts/desktop.lua", r#"return { packages = { "steam" } }"#),
         ("lua/hosts/laptop.lua", r#"return { packages = { "tlp" } }"#),
     ]);
@@ -103,9 +103,9 @@ fn function_modules_settle_even_when_read_before_defined() {
     let out = eval_ok(&[
         (
             "init.lua",
-            r#"return { imports = { "modules.kitty", "modules.desktop", "modules.reader" } }"#,
+            r#"return { imports = { "modules.termy", "modules.desktop", "modules.reader" } }"#,
         ),
-        ("lua/modules/kitty.lua", KITTY),
+        ("lua/modules/termy.lua", TERMY),
         (
             "lua/modules/reader.lua",
             r#"
@@ -116,10 +116,10 @@ fn function_modules_settle_even_when_read_before_defined() {
         ),
         (
             "lua/modules/desktop.lua",
-            r#"return function(cfg) return { programs = { kitty = { enable = true } } } end"#,
+            r#"return function(cfg) return { programs = { termy = { enable = true } } } end"#,
         ),
     ]);
-    assert_eq!(out["summary"], json!("kitty"));
+    assert_eq!(out["summary"], json!("termy"));
 }
 
 #[test]
@@ -127,12 +127,12 @@ fn typo_in_config_suggests_the_real_option() {
     let err = eval_err(&[
         (
             "init.lua",
-            r#"return { imports = { "modules.kitty" }, config = { programs = { kity = { enable = true } } } }"#,
+            r#"return { imports = { "modules.termy" }, config = { programs = { termi = { enable = true } } } }"#,
         ),
-        ("lua/modules/kitty.lua", KITTY),
+        ("lua/modules/termy.lua", TERMY),
     ]);
     assert!(
-        err.contains("`programs.kity`: option does not exist (set in init.lua); did you mean `programs.kitty`?"),
+        err.contains("`programs.termi`: option does not exist (set in init.lua); did you mean `programs.termy`?"),
         "{err}"
     );
 }
@@ -140,15 +140,15 @@ fn typo_in_config_suggests_the_real_option() {
 #[test]
 fn typo_when_reading_cfg_is_an_error() {
     let err = eval_err(&[
-        ("init.lua", r#"return { imports = { "modules.kitty", "modules.bad" } }"#),
-        ("lua/modules/kitty.lua", KITTY),
+        ("init.lua", r#"return { imports = { "modules.termy", "modules.bad" } }"#),
+        ("lua/modules/termy.lua", TERMY),
         (
             "lua/modules/bad.lua",
-            r#"return function(cfg) local _ = cfg.programs.kity.enable end"#,
+            r#"return function(cfg) local _ = cfg.programs.termi.enable end"#,
         ),
     ]);
     assert!(
-        err.contains("option `programs.kity` does not exist; did you mean `programs.kitty`?"),
+        err.contains("option `programs.termi` does not exist; did you mean `programs.termy`?"),
         "{err}"
     );
 }
@@ -173,9 +173,9 @@ fn type_errors_point_at_the_list_item() {
     let err = eval_err(&[
         (
             "init.lua",
-            r#"return { imports = { "modules.kitty" }, config = { packages = { "git", 3 } } }"#,
+            r#"return { imports = { "modules.termy" }, config = { packages = { "git", 3 } } }"#,
         ),
-        ("lua/modules/kitty.lua", KITTY),
+        ("lua/modules/termy.lua", TERMY),
     ]);
     assert!(
         err.contains("`packages[2]`: expected str, got integer 3 in init.lua"),
@@ -276,8 +276,8 @@ fn self_feeding_config_fails_to_settle() {
 #[test]
 fn cfg_is_read_only() {
     let err = eval_err(&[
-        ("init.lua", r#"return { imports = { "modules.kitty", "modules.bad" } }"#),
-        ("lua/modules/kitty.lua", KITTY),
+        ("init.lua", r#"return { imports = { "modules.termy", "modules.bad" } }"#),
+        ("lua/modules/termy.lua", TERMY),
         (
             "lua/modules/bad.lua",
             r#"return function(cfg) cfg.programs.newthing = 1 end"#,

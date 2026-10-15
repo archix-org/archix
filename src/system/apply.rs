@@ -380,14 +380,44 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
     Ok(())
 }
 
+/// Creates missing parent directories; ones archix creates for a user's file belong to that user.
+fn create_parents(dir: &Path, want: &ManagedFile) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(path) = current {
+        if path.exists() {
+            break;
+        }
+        missing.push(path.to_path_buf());
+        current = path.parent();
+    }
+    fs::create_dir_all(dir)?;
+    if want.owner != "root" {
+        let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
+            bail!("owner {}:{} doesn't exist", want.owner, want.group);
+        };
+        for path in missing {
+            std::os::unix::fs::chown(&path, Some(u), Some(g))?;
+        }
+    }
+    Ok(())
+}
+
 fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
     let dir = target.parent().context("file has no parent directory")?;
-    fs::create_dir_all(dir)?;
+    create_parents(dir, want)?;
     let name = target.file_name().context("file has no name")?.to_string_lossy();
     let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
     match &want.link {
-        Some(link) => symlink(link, &tmp)?,
+        Some(link) => {
+            symlink(link, &tmp)?;
+            if want.owner != "root" {
+                if let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) {
+                    std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
+                }
+            }
+        }
         None => {
             fs::write(&tmp, blobs::read(paths, &want.sha256)?)?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(want.mode))?;
