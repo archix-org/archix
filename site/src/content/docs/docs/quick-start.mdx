@@ -155,7 +155,7 @@ return {
 }
 ```
 
-Your explicitly installed packages, from the repos and the AUR, are in `installed.lua`, which `archix install` and `archix remove` edit. Dependencies aren't listed; the lock records them.
+Your explicitly installed packages, from the repos and the AUR, are in `installed.lua`. The file is yours to edit freely; `archix install` and `archix remove` add and remove names there too. Dependencies aren't listed; the lock records them.
 
 `archix.lock` holds the snapshot date and every package's exact version. Packages that didn't match the snapshot are listed under `pinned`:
 

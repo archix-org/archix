@@ -56,7 +56,7 @@ Types on this page are written the way `archix options` prints them. `null or st
 
 Packages to install: from the configured repositories, else from the AUR. Their dependencies are installed too and recorded in `archix.lock`.
 
-List only what you want; dependencies are resolved and locked for you, and marked as dependencies in pacman's database. Names are checked offline against the sync databases and the AUR metadata, so a misspelled name fails before anything is downloaded. `archix install` adds names here through its own `installed.lua` file.
+List only what you want; dependencies are resolved and locked for you, and marked as dependencies in pacman's database. Names are checked offline against the sync databases and the AUR metadata, so a misspelled name fails before anything is downloaded. `archix install` adds names here through your host's `installed.lua`, a plain Lua file you can also edit by hand.
 
 AUR package names go in the same list. archix looks each name up in your configured repos first, third-party repos included, and only then in the AUR. See [AUR packages](/docs/guides/aur/).
 
