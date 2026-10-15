@@ -92,7 +92,7 @@ impl Machine {
         lines.push((
             false,
             if cmdline.contains("archix.generation=") {
-                "the kernel is signed with a well-known key (archix signs with your own key; Arch has no well-known-signed kernel yet)"
+                "the kernel is signed with a well-known key (archix signs with your own key, and Arch has no well-known-signed kernel)"
             } else {
                 "the kernel is signed with a well-known key (not booted from an archix entry, so archix can't tell)"
             }

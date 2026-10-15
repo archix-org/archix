@@ -393,7 +393,13 @@ fn refuse_unsigned(plan: &BootPlan, built: &[(Variant, PathBuf)]) -> Result<()> 
     let Some(state) = super::secureboot::Machine::new().state() else {
         return Ok(());
     };
-    if !state.enabled || state.setup_mode || super::secureboot::in_chroot() {
+    if !state.enabled || state.setup_mode {
+        return Ok(());
+    }
+    if super::secureboot::in_chroot() {
+        eprintln!(
+            "warning: not checking the new boot entry's signature against this host's Secure Boot, since this runs in a chroot"
+        );
         return Ok(());
     }
     let loaders = ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"]
