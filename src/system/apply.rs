@@ -108,6 +108,55 @@ fn matches(disk: &OnDisk, want: &ManagedFile) -> bool {
     }
 }
 
+fn c_text(ptr: *const libc::c_char) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+}
+
+/// Whether the existing account `name` differs from `want` in anything usermod would change.
+fn account_differs(name: &str, want: &User) -> bool {
+    let Ok(c_name) = CString::new(name) else { return true };
+    let entry = unsafe { libc::getpwnam(c_name.as_ptr()) };
+    if entry.is_null() {
+        return true;
+    }
+    let (uid, gid, home, shell, gecos) = unsafe {
+        (
+            (*entry).pw_uid,
+            (*entry).pw_gid,
+            c_text((*entry).pw_dir),
+            c_text((*entry).pw_shell),
+            c_text((*entry).pw_gecos),
+        )
+    };
+    let group = unsafe { libc::getgrgid(gid) };
+    let group = if group.is_null() {
+        String::new()
+    } else {
+        c_text(unsafe { (*group).gr_name })
+    };
+    let mut groups: Vec<String> = fs::read_to_string("/etc/group")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            (fields.len() == 4 && fields[3].split(',').any(|member| member == name)).then(|| fields[0].to_string())
+        })
+        .collect();
+    groups.sort();
+    let mut wanted_groups = want.groups.clone();
+    wanted_groups.sort();
+    wanted_groups.dedup();
+    want.uid.is_some_and(|id| id != uid)
+        || group != want.group.as_deref().unwrap_or(name)
+        || want.home.as_ref().is_some_and(|dir| *dir != home)
+        || shell != want.shell
+        || gecos != want.description
+        || groups != wanted_groups
+}
+
 fn under(root: &Path, path: &str) -> PathBuf {
     root.join(path.trim_start_matches('/'))
 }
@@ -148,7 +197,7 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
     for (name, user) in &change.to.users {
         if uid(name).is_none() {
             lines.push(format!("add user   {name}"));
-        } else if change.from.users.get(name) != Some(user) {
+        } else if account_differs(name, user) {
             lines.push(format!("modify     user {name}"));
         }
     }
@@ -161,7 +210,7 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
         lines.push(format!("remove     user {name} (home kept)"));
     }
     for (name, group) in &change.to.groups {
-        if gid(name).is_none() || change.from.groups.get(name) != Some(group) {
+        if gid(name).is_none() || group.gid.is_some_and(|id| Some(id) != gid(name)) {
             lines.push(format!("group      {name}"));
         }
     }
@@ -244,7 +293,7 @@ pub fn users(change: &SystemChange) -> Result<()> {
         if uid(name).is_none() {
             run(&mut useradd(name, user), &format!("useradd {name}"))?;
             eprintln!("created user {name}; set a password with `passwd {name}`");
-        } else if change.from.users.get(name) != Some(user) {
+        } else if change.from.users.get(name) != Some(user) && account_differs(name, user) {
             run(&mut usermod(name, user), &format!("usermod {name}"))?;
         }
     }
@@ -326,6 +375,9 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
         let target = Path::new(path);
         let disk = on_disk(target)?;
         if matches(&disk, want) {
+            if disk != OnDisk::Missing && !change.from.files.contains_key(path) {
+                keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
+            }
             continue;
         }
         if disk == OnDisk::Other {
@@ -377,6 +429,22 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
             fs::remove_file(target).with_context(|| format!("removing {path}"))?;
         }
     }
+    Ok(())
+}
+
+/// Copies a file archix takes over as it is, so unmanaging it later puts it back instead of deleting it.
+fn keep_original(target: &Path, backup: &Path) -> Result<()> {
+    if fs::symlink_metadata(backup).is_ok() {
+        return Ok(());
+    }
+    fs::create_dir_all(backup.parent().expect("absolute path"))?;
+    let meta = fs::symlink_metadata(target)?;
+    if meta.file_type().is_symlink() {
+        symlink(fs::read_link(target)?, backup)?;
+    } else {
+        fs::copy(target, backup)?;
+    }
+    std::os::unix::fs::lchown(backup, Some(meta.uid()), Some(meta.gid()))?;
     Ok(())
 }
 

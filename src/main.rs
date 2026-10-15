@@ -26,6 +26,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Write a config describing this machine as it is, locked to exactly what's installed
+    Init {
+        /// Take every question's default without asking
+        #[arg(long)]
+        defaults: bool,
+    },
     /// Print the evaluated configuration as JSON
     Eval,
     /// List every declared option
@@ -270,6 +276,10 @@ fn run() -> Result<ExitCode> {
         Some(host) => host,
         None => system_hostname()?,
     };
+    if let Command::Init { defaults } = command {
+        commands::init(&cli.config, &hostname, defaults)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let edit = match &command {
         Command::Install {
             packages,
@@ -358,6 +368,7 @@ fn run() -> Result<ExitCode> {
         } => commands::switch(&target, noconfirm, accept_nearest)?,
         Command::Status => commands::status(&target)?,
         Command::Recover { .. }
+        | Command::Init { .. }
         | Command::HookRecord
         | Command::Rollback { .. }
         | Command::Generations

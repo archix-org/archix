@@ -4,7 +4,6 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use md5::{Digest, Md5};
 
 use crate::fetch::sha256;
 use crate::generations::{Generation, now};
@@ -106,20 +105,6 @@ fn decoder(path: &Path) -> Result<Box<dyn Read>> {
     })
 }
 
-fn md5_of(path: &Path) -> Result<String> {
-    let mut hasher = Md5::new();
-    let mut file = File::open(path)?;
-    let mut buf = vec![0; 1 << 16];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
 /// Installs one package file the way pacman would, minus hooks and install scripts.
 fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()> {
     let mut info: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -217,7 +202,7 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
         .into_iter()
         .flatten()
         .map(|path| {
-            let hash = md5_of(&root.join(path)).unwrap_or_default();
+            let hash = crate::capture::md5(&root.join(path)).unwrap_or_default();
             format!("{path}\t{hash}")
         })
         .collect();

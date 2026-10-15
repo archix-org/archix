@@ -134,12 +134,17 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
 pub fn with_custom_repos(conf: &str, repos: &[Repo]) -> String {
     let mut lines: Vec<&str> = Vec::new();
     let mut skipping = false;
+    let mut taken_over = false;
     for line in conf.lines() {
+        if let Some(section) = line.trim().strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            taken_over = repos.iter().any(|repo| repo.custom.is_some() && repo.name == section);
+        }
         if line == BEFORE_BEGIN || line == AFTER_BEGIN {
             skipping = true;
         } else if line == BEFORE_END || line == AFTER_END {
             skipping = false;
-        } else if !skipping {
+            taken_over = false;
+        } else if !skipping && !taken_over {
             lines.push(line);
         }
     }
@@ -298,6 +303,11 @@ mod tests {
             conf.trim_end(),
             "removing repos removes blocks"
         );
+        let handwritten =
+            "[options]\n\n[cachyos]\nServer = https://old/$repo\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        let taken = with_custom_repos(handwritten, &repos);
+        assert_eq!(taken.matches("[cachyos]").count(), 1, "{taken}");
+        assert!(!taken.contains("https://old"), "{taken}");
     }
 
     #[test]

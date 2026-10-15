@@ -1,4 +1,5 @@
 mod helper;
+mod init;
 mod lock;
 mod recover;
 mod switch;
@@ -27,6 +28,7 @@ use archix::resolve::Aur;
 use archix::value::Value;
 
 pub use helper::{edit_installed, install_temporarily, search, upgrade};
+pub use init::init;
 pub use lock::{diff, lock, status};
 pub use recover::recover;
 pub use switch::{boot_check, gc, generations, hook_record, rescue, rollback, switch};
