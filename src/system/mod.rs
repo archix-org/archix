@@ -3,6 +3,7 @@ pub mod blobs;
 pub mod boot;
 pub mod hooks;
 pub mod rescue;
+pub mod running;
 pub mod snapshot;
 
 use std::collections::BTreeMap;

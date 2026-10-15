@@ -14,7 +14,7 @@ use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::system::apply::SystemChange;
 
-use super::switch::{report_soft_failures, run_hooks};
+use super::switch::{reboot_notice, report_soft_failures, run_hooks};
 use super::{RecoverMode, count, describe_unfinished, kind_name, require_root};
 
 pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
@@ -82,6 +82,7 @@ fn finish_with_hooks(paths: &Paths, journal: &Journal, mut failures: Vec<String>
         let every_file: BTreeSet<String> = change.to.on_change.keys().cloned().collect();
         failures.extend(run_hooks(paths, change, &every_file));
     }
+    reboot_notice();
     report_soft_failures(&failures, state)
 }
 

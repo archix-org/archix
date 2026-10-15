@@ -28,6 +28,7 @@ use archix::plan::{Change, rebuilds};
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
 use archix::system::boot::BootPlan;
+use archix::system::running::Running;
 use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 
 use super::lock::{current_lock, save_lock};
@@ -68,6 +69,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
+    clean_up_kept_modules(&paths);
     let declared = declared(target.config)?;
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm)?;
     let installed = read_local_db(&paths.local_db())?;
@@ -346,7 +348,22 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     )?);
     soft_failures.extend(run_hooks(&paths, &system_change, &rewritten));
     println!("switched to {name}");
+    reboot_notice();
     report_soft_failures(&soft_failures, "the new generation is current")
+}
+
+/// Says so when the switch replaced the running kernel, which only a reboot finishes.
+pub(super) fn reboot_notice() {
+    if Running::new().replaced() {
+        println!("the running kernel was replaced: reboot to finish (its modules stay loadable until then)");
+    }
+}
+
+/// Removes kernel modules archix kept for a kernel that's no longer running.
+pub(super) fn clean_up_kept_modules(paths: &Paths) {
+    if let Err(e) = Running::new().clean_up(paths) {
+        eprintln!("warning: couldn't remove kernel modules kept for an earlier boot: {e:#}");
+    }
 }
 
 /// The preview line naming the hooks a switch or rollback runs, in order.
@@ -697,6 +714,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
+    if online {
+        clean_up_kept_modules(&paths);
+    }
     let store = Store::new(&paths);
     let current = store
         .current()?
@@ -805,6 +825,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     }
     soft_failures.extend(hooks_at_end(&rewritten));
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
+    if online {
+        reboot_notice();
+    }
     report_soft_failures(&soft_failures, &format!("{name} is current"))
 }
 
@@ -876,6 +899,7 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         return Ok(());
     };
     let paths = Paths::system();
+    clean_up_kept_modules(&paths);
     let release = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     if system::boot::restore_modules(&paths, release.trim())? {
         println!("archix: restored the modules of kernel {}", release.trim());

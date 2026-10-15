@@ -116,3 +116,63 @@ fn patched_packages_rebuild_archs_recipe_with_the_patches() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+/// A stand-in kernel package: its modules directory for `release`, with a pkgbase file like pacman's kernels.
+fn kernel_recipe(release: &str, version: &str) -> String {
+    format!(
+        "pkgname=archix-test-kernel\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
+         package() {{\n  mkdir -p \"$pkgdir/usr/lib/modules/{release}\"\n  \
+         echo archix-test-kernel > \"$pkgdir/usr/lib/modules/{release}/pkgbase\"\n  \
+         echo {version} > \"$pkgdir/usr/lib/modules/{release}/modules.order\"\n}}\n"
+    )
+}
+
+#[test]
+#[ignore]
+fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
+    let _system = lock_system();
+    let running = fs::read_to_string("/proc/sys/kernel/osrelease")
+        .unwrap()
+        .trim()
+        .to_string();
+    let modules = std::path::Path::new("/usr/lib/modules").join(&running);
+    assert!(!modules.exists(), "the container has no modules for the host's kernel");
+    let setup = Setup::with_files(
+        &["archix-test-kernel"],
+        "",
+        &[("pkgbuilds/archix-test-kernel/PKGBUILD", &kernel_recipe(&running, "1"))],
+    );
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(!out.contains("reboot to finish"), "{out}");
+    assert!(modules.join("pkgbase").is_file());
+
+    fs::write(
+        setup.dir.path().join("pkgbuilds/archix-test-kernel/PKGBUILD"),
+        kernel_recipe(&format!("{running}-next"), "2"),
+    )
+    .unwrap();
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("reboot to finish"), "{out}");
+    assert_eq!(
+        fs::read_to_string(modules.join("modules.order")).unwrap(),
+        "1\n",
+        "the running kernel's modules are still there after pacman replaced its package"
+    );
+    assert!(
+        std::path::Path::new("/usr/lib/modules")
+            .join(format!("{running}-next"))
+            .is_dir()
+    );
+    assert!(
+        fs::read_to_string("/var/lib/archix/restored-modules")
+            .unwrap()
+            .contains(&running),
+        "they're recorded for cleanup after the reboot"
+    );
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("archix-test-kernel").is_none());
+    fs::remove_dir_all(&modules).unwrap();
+    let _ = fs::remove_file("/var/lib/archix/restored-modules");
+}

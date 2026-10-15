@@ -8,6 +8,7 @@ use crate::generations::Store;
 use crate::journal::{Journal, Step, Transaction};
 use crate::pacman::read_local_db;
 use crate::paths::Paths;
+use crate::system::running::Running;
 
 /// Set for every pacman run archix starts, so archix's own pacman hook can tell them apart from manual ones.
 pub const TRANSACTION_ENV: &str = "ARCHIX_TRANSACTION";
@@ -100,8 +101,10 @@ fn run_package_step(
             Some(number) => Store::new(paths).activate(number),
             None => Ok(()),
         },
-        Step::Install if tx.install.is_empty() => Ok(()),
+        Step::Install if tx.install.is_empty() => restore_running_modules(paths),
         Step::Install => {
+            let installed = read_local_db(&paths.local_db())?;
+            Running::new().keep(paths, tx, &installed)?;
             let mut args = vec![
                 OsStr::new("-U"),
                 OsStr::new("--noconfirm"),
@@ -113,7 +116,8 @@ fn run_package_step(
                 args.push(OsStr::new("--needed"));
             }
             args.extend(tx.install.iter().map(|path| path.as_os_str()));
-            pacman(&args)
+            pacman(&args)?;
+            restore_running_modules(paths)
         }
         Step::Remove => {
             let installed = read_local_db(&paths.local_db())?;
@@ -126,6 +130,7 @@ fn run_package_step(
             if remove.is_empty() {
                 return Ok(());
             }
+            Running::new().keep(paths, tx, &installed)?;
             // -dd: what still depends on these is either removed too or replaced by the Install step that follows.
             let mut args = vec!["-Rdd", "--noconfirm"];
             args.extend(remove);
@@ -159,6 +164,13 @@ fn run_package_step(
             }
         }
     }
+}
+
+fn restore_running_modules(paths: &Paths) -> Result<()> {
+    if Running::new().restore(paths)? {
+        eprintln!(":: kept the running kernel's modules, so they still load until you reboot");
+    }
+    Ok(())
 }
 
 /// Every way the installed packages differ from the transaction's end state.

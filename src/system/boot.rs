@@ -21,7 +21,7 @@ pub struct BootPlan {
     pub secure_boot: Option<bool>,
 }
 
-const MODULES: &str = "/usr/lib/modules";
+pub const MODULES: &str = "/usr/lib/modules";
 const MARGIN: u64 = 16 * 1024 * 1024;
 
 /// The installed version of a kernel package, from the pkgbase file pacman's kernels leave in their modules dir.
@@ -45,6 +45,10 @@ fn kernels(paths: &Paths) -> PathBuf {
 
 /// Keeps a hardlinked copy of a kernel's modules, so older boot entries still find them after pacman removes them.
 pub fn preserve_modules(paths: &Paths, version: &str) -> Result<()> {
+    preserve_from(Path::new(MODULES), paths, version)
+}
+
+pub(crate) fn preserve_from(modules: &Path, paths: &Paths, version: &str) -> Result<()> {
     let dest = kernels(paths).join(version);
     if dest.exists() {
         return Ok(());
@@ -53,7 +57,7 @@ pub fn preserve_modules(paths: &Paths, version: &str) -> Result<()> {
     let tmp = kernels(paths).join(format!(".{version}.{}", std::process::id()));
     let status = Command::new("cp")
         .arg("-al")
-        .arg(Path::new(MODULES).join(version))
+        .arg(modules.join(version))
         .arg(&tmp)
         .status()?;
     if !status.success() {
@@ -66,7 +70,11 @@ pub fn preserve_modules(paths: &Paths, version: &str) -> Result<()> {
 
 /// Puts a preserved kernel's modules back when the running kernel's are gone; true if it had to.
 pub fn restore_modules(paths: &Paths, version: &str) -> Result<bool> {
-    let target = Path::new(MODULES).join(version);
+    restore_into(Path::new(MODULES), paths, version)
+}
+
+pub(crate) fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool> {
+    let target = modules.join(version);
     let source = kernels(paths).join(version);
     if target.exists() || !source.exists() {
         return Ok(false);
