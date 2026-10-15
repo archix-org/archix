@@ -1,0 +1,224 @@
+//! Changes the installed packages; run only inside the throwaway Arch container via `tests/arch/run.sh`.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::Mutex;
+
+use archix::journal::{Journal, Kind, Transaction};
+use archix::pacman::read_local_db;
+use archix::paths::Paths;
+use tempfile::TempDir;
+
+/// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
+const IMAGE_SNAPSHOT: &str = "2026-10-10";
+static SYSTEM: Mutex<()> = Mutex::new(());
+
+struct Setup {
+    dir: TempDir,
+    paths: Paths,
+}
+
+impl Setup {
+    /// A config declaring everything explicitly installed in the image plus `extra`, locked at the image's snapshot.
+    fn new(extra: &[&str], body: &str) -> Setup {
+        let paths = Paths::system();
+        let mut packages: Vec<String> = read_local_db(&paths.local_db())
+            .unwrap()
+            .into_values()
+            .filter(|pkg| pkg.explicit)
+            .map(|pkg| pkg.name)
+            .filter(|name| name != "tree")
+            .collect();
+        packages.extend(extra.iter().map(|p| p.to_string()));
+        let quoted: Vec<String> = packages.iter().map(|p| format!("{p:?}")).collect();
+        let dir = TempDir::new().unwrap();
+        let init = format!("return {{ packages = {{ {} }}, {body} }}", quoted.join(", "));
+        fs::write(dir.path().join("init.lua"), init).unwrap();
+        let setup = Setup { dir, paths };
+        setup.ok(&["update", "--to", IMAGE_SNAPSHOT]);
+        setup
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_archix"))
+            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let output = self.run(args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "archix {args:?} failed:\n{text}");
+        text
+    }
+
+    fn fails(&self, args: &[&str]) -> String {
+        let output = self.run(args);
+        assert!(!output.status.success(), "archix {args:?} should have failed");
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    }
+
+    fn set_body(&self, extra: &[&str], body: &str) {
+        let replacement = Setup::new(extra, body);
+        fs::copy(
+            replacement.dir.path().join("init.lua"),
+            self.dir.path().join("init.lua"),
+        )
+        .unwrap();
+        fs::copy(
+            replacement.dir.path().join("archix.lock"),
+            self.dir.path().join("archix.lock"),
+        )
+        .unwrap();
+    }
+}
+
+fn installed(name: &str) -> Option<String> {
+    read_local_db(&Paths::system().local_db())
+        .unwrap()
+        .remove(name)
+        .map(|pkg| pkg.version)
+}
+
+fn pacman(args: &[&str]) {
+    let status = Command::new("pacman").args(args).arg("--noconfirm").status().unwrap();
+    assert!(status.success(), "pacman {args:?}");
+}
+
+fn cached_file(dir: &Path, name: &str) -> PathBuf {
+    fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            file.starts_with(&format!("{name}-")) && file.ends_with(".pkg.tar.zst")
+        })
+        .unwrap_or_else(|| panic!("no cached {name} package in {}", dir.display()))
+}
+
+/// Writes the journal a crash during "install tree" would leave behind, as if pacman had died mid-transaction.
+fn fake_interrupted_switch(paths: &Paths) {
+    let before = read_local_db(&paths.local_db()).unwrap();
+    let tree = cached_file(&paths.packages(), "tree");
+    let version = tree
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .trim_start_matches("tree-")
+        .to_string();
+    let version = version.trim_end_matches("-x86_64.pkg.tar.zst").to_string();
+    let mut versions: std::collections::BTreeMap<String, String> = before
+        .iter()
+        .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
+        .collect();
+    versions.insert("tree".into(), version);
+    let mut reasons: std::collections::BTreeMap<String, bool> =
+        before.iter().map(|(name, pkg)| (name.clone(), pkg.explicit)).collect();
+    reasons.insert("tree".into(), true);
+    let transaction = Transaction {
+        install: vec![tree],
+        remove: vec![],
+        versions,
+        reasons,
+    };
+    Journal::new(Kind::Switch, "box", "snapshot 2026-10-10".into(), before, transaction)
+        .save(&paths.journal())
+        .unwrap();
+}
+
+/// The lock file a pacman killed mid-transaction leaves behind.
+fn stale_pacman_lock(paths: &Paths) {
+    fs::write(paths.pacman_lock(), "").unwrap();
+}
+
+fn lock_system() -> std::sync::MutexGuard<'static, ()> {
+    SYSTEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[test]
+#[ignore]
+fn switch_installs_then_removes_and_is_idempotent() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("tree").is_some());
+    assert!(!setup.paths.journal().exists(), "a finished switch leaves no journal");
+    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
+    assert!(setup.ok(&["status"]).contains("the system matches the lock"));
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        installed("tree").is_none(),
+        "undeclared packages are removed by default"
+    );
+}
+
+#[test]
+#[ignore]
+fn warn_mode_keeps_undeclared_packages() {
+    let _system = lock_system();
+    pacman(&["-S", "--needed", "tree"]);
+    let setup = Setup::new(&[], "undeclared_packages = \"warn\"");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("kept because undeclared_packages = \"warn\": tree"),
+        "{out}"
+    );
+    assert!(installed("tree").is_some());
+
+    setup.set_body(&[], "ignored_packages = { \"tree\" }");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("nothing to do"), "{out}");
+    assert!(installed("tree").is_some());
+    pacman(&["-R", "tree"]);
+}
+
+#[test]
+#[ignore]
+fn interrupted_switch_blocks_until_recovered() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let paths = &setup.paths;
+
+    fake_interrupted_switch(paths);
+    stale_pacman_lock(paths);
+    assert!(
+        setup
+            .fails(&["switch", "--noconfirm"])
+            .contains("was interrupted while installing packages")
+    );
+    assert!(setup.fails(&["lock"]).contains("run `archix recover`"));
+    assert!(setup.ok(&["status"]).contains("run `archix recover`"));
+    setup.ok(&["recover", "--continue"]);
+    assert!(installed("tree").is_some(), "continue finishes the install");
+    assert!(!paths.journal().exists() && !paths.pacman_lock().exists());
+
+    pacman(&["-R", "tree"]);
+    fake_interrupted_switch(paths);
+    pacman(&["-U", cached_file(&paths.packages(), "tree").to_str().unwrap()]);
+    stale_pacman_lock(paths);
+    setup.ok(&["recover", "--rollback"]);
+    assert!(
+        installed("tree").is_none(),
+        "rollback removes what the interrupted switch added"
+    );
+    assert!(!paths.journal().exists());
+
+    fake_interrupted_switch(paths);
+    let out = setup.ok(&["recover", "--abandon"]);
+    assert!(out.contains("tree") && out.contains("is not installed"), "{out}");
+    assert!(installed("tree").is_none(), "abandon changes nothing");
+    assert!(!paths.journal().exists());
+}

@@ -35,10 +35,35 @@ enum Command {
     },
     /// Resolve the declared packages into archix.lock, keeping the locked snapshot date
     Lock,
-    /// Move archix.lock to the newest archive snapshot and re-resolve
-    Update,
+    /// Move archix.lock to the newest archive snapshot (or --to a date) and re-resolve
+    Update {
+        /// Snapshot date to move to, as YYYY-MM-DD
+        #[arg(long)]
+        to: Option<archix::date::Date>,
+    },
     /// Show what a switch would change to make this machine match the lock
     Diff,
+    /// Make this machine's packages match the lock
+    Switch {
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+    },
+    /// Deal with a switch that was interrupted: continue it, roll it back or abandon it
+    #[command(group = clap::ArgGroup::new("mode"))]
+    Recover {
+        /// Finish the interrupted switch
+        #[arg(long = "continue", group = "mode")]
+        cont: bool,
+        /// Return to the packages from before the interrupted switch
+        #[arg(long, group = "mode")]
+        rollback: bool,
+        /// Close the journal without changing anything, after showing what state the system is in
+        #[arg(long, group = "mode")]
+        abandon: bool,
+    },
+    /// Show the lock, pending changes and any unfinished switch
+    Status,
 }
 
 #[derive(Serialize)]
@@ -64,6 +89,21 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if let Command::Recover {
+        cont,
+        rollback,
+        abandon,
+    } = cli.command
+    {
+        let mode = match (cont, rollback, abandon) {
+            (true, _, _) => Some(packages::RecoverMode::Continue),
+            (_, true, _) => Some(packages::RecoverMode::Rollback),
+            (_, _, true) => Some(packages::RecoverMode::Abandon),
+            _ => None,
+        };
+        packages::recover(mode)?;
+        return Ok(ExitCode::SUCCESS);
+    }
     let hostname = match cli.host {
         Some(host) => host,
         None => system_hostname()?,
@@ -86,9 +126,13 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
-        Command::Lock => packages::lock(&target, false)?,
-        Command::Update => packages::lock(&target, true)?,
+        Command::Lock => packages::lock(&target, packages::Snapshot::Locked)?,
+        Command::Update { to: None } => packages::lock(&target, packages::Snapshot::Latest)?,
+        Command::Update { to: Some(date) } => packages::lock(&target, packages::Snapshot::On(date))?,
         Command::Diff => packages::diff(&target)?,
+        Command::Switch { noconfirm } => packages::switch(&target, noconfirm)?,
+        Command::Status => packages::status(&target)?,
+        Command::Recover { .. } => unreachable!("recover runs before the config is evaluated"),
     }
     Ok(ExitCode::SUCCESS)
 }

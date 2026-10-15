@@ -1,9 +1,13 @@
+pub mod apply;
 pub mod archive;
 pub mod date;
 pub mod eval;
+pub mod fetch;
+pub mod journal;
 pub mod lock;
 pub mod options;
 pub mod pacman;
+pub mod paths;
 pub mod plan;
 pub mod resolve;
 pub mod value;

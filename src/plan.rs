@@ -114,6 +114,7 @@ mod tests {
                 let pkg = LocalPkg {
                     name: name.to_string(),
                     version: version.to_string(),
+                    arch: "x86_64".into(),
                     explicit: *explicit,
                 };
                 (name.to_string(), pkg)

@@ -12,5 +12,15 @@ return {
       default = { "core", "extra" },
       description = "Official repositories packages are resolved from, in priority order.",
     },
+    undeclared_packages = archix.option {
+      type = t.enum { "remove", "warn" },
+      default = "remove",
+      description = "What switch does with installed packages that aren't in the lock: remove them, or only list them.",
+    },
+    ignored_packages = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "Installed packages archix leaves alone and never reports as undeclared.",
+    },
   },
 }

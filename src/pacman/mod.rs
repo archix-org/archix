@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
+use serde::{Deserialize, Serialize};
 
 pub use vercmp::vercmp;
 
@@ -20,10 +21,11 @@ pub struct SyncPkg {
 }
 
 /// A package installed on the system, from pacman's local database.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalPkg {
     pub name: String,
     pub version: String,
+    pub arch: String,
     pub explicit: bool,
 }
 
@@ -110,11 +112,13 @@ pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
             bail!("{} is missing NAME or VERSION", desc.display());
         };
         let explicit = first(&fields, "REASON").is_none_or(|reason| reason == "0");
+        let arch = first(&fields, "ARCH").unwrap_or_else(|| "x86_64".to_string());
         packages.insert(
             name.clone(),
             LocalPkg {
                 name,
                 version,
+                arch,
                 explicit,
             },
         );

@@ -64,17 +64,25 @@ impl Archive {
             let path = sync.join(format!("{repo}.db"));
             if !path.is_file() {
                 let url = format!("{}/{repo}.db", self.repo_url(date, repo));
-                self.download(&url, &path)?;
+                if !self.fetch(&url, &path)? {
+                    bail!("{url} does not exist in the archive");
+                }
             }
         }
         Ok(dir)
     }
 
-    /// Downloads to a per-process `.part` file, so an interrupted or concurrent download never looks complete.
-    fn download(&self, url: &str, dest: &Path) -> Result<()> {
+    /// The archive's permanent copy of one package version, kept long after it leaves the repos.
+    pub fn package_url(&self, name: &str, file: &str) -> String {
+        let first = name.chars().next().unwrap_or('_');
+        format!("{}/packages/{first}/{name}/{file}", self.base)
+    }
+
+    /// Downloads via a per-process `.part` file so partial downloads never look complete; false if missing.
+    pub fn fetch(&self, url: &str, dest: &Path) -> Result<bool> {
         let mut response = match self.agent.get(url).call() {
             Ok(response) => response,
-            Err(ureq::Error::StatusCode(404)) => bail!("{url} does not exist in the archive"),
+            Err(ureq::Error::StatusCode(404)) => return Ok(false),
             Err(e) => return Err(e).with_context(|| format!("downloading {url}")),
         };
         let part = dest.with_extension(format!("part.{}", std::process::id()));
@@ -82,6 +90,6 @@ impl Archive {
         io::copy(&mut response.body_mut().as_reader(), &mut file).with_context(|| format!("downloading {url}"))?;
         file.sync_all()?;
         fs::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
-        Ok(())
+        Ok(true)
     }
 }
