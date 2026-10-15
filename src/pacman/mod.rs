@@ -21,6 +21,8 @@ pub struct SyncPkg {
     pub description: String,
     /// `%PROVIDES%`: virtual names this package satisfies, possibly with `=version`.
     pub provides: Vec<String>,
+    /// `%BASE%`: the pkgbase whose recipe builds it; the name itself when the entry has none.
+    pub base: String,
 }
 
 /// A package installed on the system, from pacman's local database.
@@ -101,12 +103,13 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
         packages.insert(
             name.clone(),
             SyncPkg {
-                name,
                 version,
                 filename,
                 sha256,
                 description: first(&fields, "DESC").unwrap_or_default(),
                 provides: fields.get("PROVIDES").cloned().unwrap_or_default(),
+                base: first(&fields, "BASE").unwrap_or_else(|| name.clone()),
+                name,
             },
         );
     }
@@ -182,6 +185,7 @@ mod tests {
                 sha256: "abc123".into(),
                 description: String::new(),
                 provides: Vec::new(),
+                base: "acl".into(),
             }
         );
     }

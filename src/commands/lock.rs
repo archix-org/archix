@@ -12,12 +12,13 @@ use archix::journal::Journal;
 use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
+use archix::plan::rebuilds;
 use archix::resolve::resolve;
 use archix::system::{self, apply::SystemChange};
 
 use super::{
     Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, describe_unfinished, print_warned,
-    refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
+    recipes, refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
 };
 
 /// The host's lock, re-resolved at the locked date (or `snapshot`) if the config changed; saved when `save`.
@@ -37,10 +38,16 @@ pub(super) fn current_lock(
         (Snapshot::Locked, Some(old)) => old.date,
         (Snapshot::Locked | Snapshot::Latest, _) => archive.latest()?,
     };
+    let recipes = recipes(target, declared)?;
     if let Some(old) = &old
         && !updating
         && old.date == date
-        && old.matches(&declared.packages, &declared.prefer, &declared.repo_names())
+        && old.matches(
+            &declared.packages,
+            &declared.prefer,
+            &declared.repo_names(),
+            &recipes.fingerprints()?,
+        )
     {
         return Ok((old.clone(), false));
     }
@@ -50,7 +57,7 @@ pub(super) fn current_lock(
     );
     let git = aur_git(declared)?;
     let keep_commits = if updating { None } else { old.as_ref() };
-    let aur = aur_source(&git, declared, &archive, keep_commits, updating);
+    let aur = aur_source(&git, declared, &archive, keep_commits, updating, &recipes);
     let mut new = resolve(
         &archive,
         &user_cache()?,
@@ -131,10 +138,16 @@ pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> 
     let rendered = system::render(target.config, target.config_dir)?;
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let change = SystemChange {
-        from: current.map(|g| g.system).unwrap_or_default(),
+        from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
         to: rendered.state,
     };
     let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
+    let built_from = current.as_ref().map(|g| &g.packages);
+    lines.extend(
+        rebuilds(&lock.packages, &installed, built_from)
+            .iter()
+            .map(ToString::to_string),
+    );
     lines.extend(system::apply::describe(&change)?);
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
@@ -213,7 +226,13 @@ pub fn status(target: &Target) -> Result<()> {
         count(lock.packages.len(), "package", "packages")
     );
     let declared = declared(target.config)?;
-    if !lock.matches(&declared.packages, &declared.prefer, &declared.repo_names()) {
+    let fingerprints = recipes(target, &declared)?.fingerprints()?;
+    if !lock.matches(
+        &declared.packages,
+        &declared.prefer,
+        &declared.repo_names(),
+        &fingerprints,
+    ) {
         println!("the config changed since the lock was written; `archix lock` or `archix switch` will re-resolve");
     }
     if paths.local_db().is_dir() {

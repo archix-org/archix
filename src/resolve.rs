@@ -12,8 +12,9 @@ use crate::aur::git::AurGit;
 use crate::aur::index::Index;
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
-use crate::lock::{AUR_REPO, HostLock, Locked};
+use crate::lock::{AUR_REPO, HostLock, LOCAL_REPO, Locked};
 use crate::pacman::{SyncPkg, read_sync_db};
+use crate::recipes::Recipes;
 use crate::repos::{Repo, fetch_db};
 
 /// Where AUR packages come from while resolving, and the previous lock whose AUR commits are kept.
@@ -22,6 +23,8 @@ pub struct Aur<'a> {
     pub previous: Option<&'a HostLock>,
     /// Commits to lock bases at, overriding the previous lock and the AUR's newest.
     pub commits: RefCell<BTreeMap<String, String>>,
+    /// The config's own recipes, which win over the AUR and, for names they build, over the repos.
+    pub recipes: Option<&'a Recipes>,
     index: OnceCell<Index>,
     load_index: Box<dyn Fn() -> Result<Index> + 'a>,
 }
@@ -33,9 +36,15 @@ impl<'a> Aur<'a> {
             git,
             previous,
             commits: RefCell::new(BTreeMap::new()),
+            recipes: None,
             index: OnceCell::new(),
             load_index: Box::new(load_index),
         }
+    }
+
+    pub fn with_recipes(mut self, recipes: &'a Recipes) -> Self {
+        self.recipes = Some(recipes);
+        self
     }
 
     pub fn index(&self) -> Result<&Index> {
@@ -108,13 +117,25 @@ pub fn resolve(
         pinned: Vec::new(),
         packages: BTreeMap::new(),
         flatpak: BTreeMap::new(),
+        recipes: match aur.and_then(|aur| aur.recipes) {
+            Some(recipes) => recipes.fingerprints()?,
+            None => BTreeMap::new(),
+        },
     };
     if declared.is_empty() {
         return Ok(lock);
     }
     let (conf, db) = snapshot_conf(archive, cache, date, repos)?;
 
-    let not_in_repos = unsatisfied(&conf, &db, declared)?;
+    let mut not_in_repos = unsatisfied(&conf, &db, declared)?;
+    if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
+        not_in_repos.extend(
+            declared
+                .iter()
+                .filter(|name| recipes.satisfier(name).is_some_and(|(_, pkg)| pkg.name == **name))
+                .cloned(),
+        );
+    }
     let official: Vec<String> = declared
         .iter()
         .filter(|name| !not_in_repos.contains(*name))
@@ -178,7 +199,58 @@ pub fn resolve(
         locked.explicit = not_in_repos.contains(&name);
         lock.packages.insert(name, locked);
     }
+    if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
+        apply_patches(recipes, &sync, &mut lock)?;
+    }
     Ok(lock)
+}
+
+/// Swaps each patched package, and the rest of its base in the lock, for a build of Arch's recipe with the config's patches.
+fn apply_patches(
+    recipes: &Recipes,
+    sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
+    lock: &mut HostLock,
+) -> Result<()> {
+    let base_of = |name: &str, locked: &Locked| {
+        sync.get(&locked.repo)
+            .and_then(|packages| packages.get(name))
+            .map(|pkg| pkg.base.clone())
+    };
+    for name in recipes.patched_packages() {
+        let Some(locked) = lock.packages.get(name) else {
+            bail!("patches.{name}: {name} isn't among this config's packages or their dependencies");
+        };
+        let Some(base) = base_of(name, locked) else {
+            bail!(
+                "patches.{name}: {name} comes from {}, but only packages from the official repos can be patched",
+                locked.repo
+            );
+        };
+        let recipe = recipes.patched(name, &base, &locked.version)?;
+        let members: Vec<String> = lock
+            .packages
+            .iter()
+            .filter(|(member, locked)| base_of(member, locked).as_deref() == Some(base.as_str()))
+            .map(|(member, _)| member.clone())
+            .collect();
+        for member in members {
+            let Some(pkg) = recipe.info.package(&member) else {
+                bail!("the patched recipe for {base} doesn't build {member}");
+            };
+            let old = &lock.packages[&member];
+            let patched = Locked {
+                version: recipe.info.version.clone(),
+                repo: LOCAL_REPO.to_string(),
+                file: recipe.info.file(pkg),
+                explicit: old.explicit,
+                base: Some(recipe.id.clone()),
+                commit: Some(recipe.commit.clone()),
+                ..Default::default()
+            };
+            lock.packages.insert(member, patched);
+        }
+    }
+    Ok(())
 }
 
 /// A concrete package for a dependency that may be a virtual name: the one listed in `prefer`, if any.
@@ -218,11 +290,21 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
     let mut closure = AurClosure::default();
 
     while let Some((dep, needed_at_runtime)) = queue.pop_front() {
-        let Some(entry) = aur.index()?.satisfier(&dep) else {
-            bail!("`{dep}` is neither in the configured repos nor in the AUR");
+        let local = aur.recipes.and_then(|recipes| recipes.satisfier(&dep));
+        let (name, base) = match local {
+            Some((recipe, pkg)) => {
+                bases
+                    .entry(recipe.id.clone())
+                    .or_insert_with(|| (recipe.commit.clone(), recipe.info.clone()));
+                (pkg.name.clone(), recipe.id.clone())
+            }
+            None => {
+                let Some(entry) = aur.index()?.satisfier(&dep) else {
+                    bail!("`{dep}` is in none of the configured repos, pkgbuilds/ or the AUR");
+                };
+                (entry.name.clone(), entry.package_base.clone())
+            }
         };
-        let name = entry.name.clone();
-        let base = entry.package_base.clone();
         let fresh = if needed_at_runtime {
             build.remove(&name);
             runtime.insert(name.clone(), base.clone()).is_none()
@@ -294,7 +376,11 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
             name,
             Locked {
                 version: info.version.clone(),
-                repo: AUR_REPO.to_string(),
+                repo: if aur.recipes.is_some_and(|r| r.is_local(&base)) {
+                    LOCAL_REPO.to_string()
+                } else {
+                    AUR_REPO.to_string()
+                },
                 file: info.file(pkg),
                 base: Some(base.clone()),
                 commit: Some(commit.clone()),

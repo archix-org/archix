@@ -7,7 +7,8 @@ use anyhow::{Result, bail};
 use super::build::{Builder, Job, SetupFailed};
 use super::git::AurGit;
 use super::srcinfo::{self, SrcInfo, dep_name};
-use crate::lock::{AUR_REPO, HostLock};
+use crate::lock::{AUR_REPO, HostLock, LOCAL_REPO};
+use crate::recipes::Recipes;
 
 /// One AUR base couldn't be built at its locked commit; switch offers the nearest version instead.
 #[derive(Debug)]
@@ -32,20 +33,41 @@ pub struct Installer<'a> {
     lock: &'a HostLock,
     on_host: &'a BTreeSet<String>,
     infos: HashMap<String, (String, SrcInfo)>,
+    /// Recipe directories of the config's own bases, which build from there instead of an AUR export.
+    dirs: HashMap<String, PathBuf>,
     satisfiers: HashMap<String, String>,
     built: HashMap<String, Vec<(String, PathBuf)>>,
     building: BTreeSet<String>,
 }
 
 impl<'a> Installer<'a> {
-    pub fn new(builder: &'a Builder<'a>, lock: &'a HostLock, on_host: &'a BTreeSet<String>) -> Result<Self> {
+    pub fn new(
+        builder: &'a Builder<'a>,
+        lock: &'a HostLock,
+        on_host: &'a BTreeSet<String>,
+        recipes: Option<&Recipes>,
+    ) -> Result<Self> {
         let mut infos = HashMap::new();
+        let mut dirs = HashMap::new();
         let mut satisfiers = HashMap::new();
-        for (name, pkg) in lock.packages.iter().filter(|(_, pkg)| pkg.repo == AUR_REPO) {
+        for (name, pkg) in lock.packages.iter().filter(|(_, pkg)| pkg.is_built()) {
             let (Some(base), Some(commit)) = (&pkg.base, &pkg.commit) else {
-                bail!("{name} is locked from the AUR without a base and commit");
+                bail!("{name} is locked as built without a base and commit");
             };
-            if !infos.contains_key(base) {
+            if pkg.repo == LOCAL_REPO && !infos.contains_key(base) {
+                let Some(recipes) = recipes else {
+                    bail!("{name} is built from the config's recipes, which aren't available here");
+                };
+                let names: Vec<String> = lock
+                    .packages
+                    .iter()
+                    .filter(|(_, other)| other.base.as_deref() == Some(base.as_str()))
+                    .map(|(other, _)| other.clone())
+                    .collect();
+                let recipe = recipes.locked(base, commit, &pkg.version, &names)?;
+                dirs.insert(base.clone(), recipe.dir);
+                infos.insert(base.clone(), (commit.clone(), recipe.info));
+            } else if pkg.repo == AUR_REPO && !infos.contains_key(base) {
                 let info = read_srcinfo(builder.git, base, commit).map_err(|error| BuildFailed {
                     base: base.clone(),
                     commit: commit.clone(),
@@ -68,6 +90,7 @@ impl<'a> Installer<'a> {
             lock,
             on_host,
             infos,
+            dirs,
             satisfiers,
             built: HashMap::new(),
             building: BTreeSet::new(),
@@ -86,7 +109,7 @@ impl<'a> Installer<'a> {
     fn base_of(&self, name: &str) -> Result<String> {
         match self.lock.packages.get(name).and_then(|pkg| pkg.base.clone()) {
             Some(base) => Ok(base),
-            None => bail!("{name} is not an AUR package in the lock"),
+            None => bail!("{name} is not built from a recipe in the lock"),
         }
     }
 
@@ -129,6 +152,7 @@ impl<'a> Installer<'a> {
         let on_host = info.packages.iter().any(|pkg| self.on_host.contains(&pkg.name));
         let job = Job {
             base,
+            dir: self.dirs.get(base).map(PathBuf::as_path),
             commit: &commit,
             info: &info,
             date: self.lock.date,

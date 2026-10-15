@@ -136,6 +136,7 @@ fn rollback_transaction(
         &wanted,
     )?;
     Ok(Transaction {
+        reinstall: false,
         system: journal.transaction.system.as_ref().map(SystemChange::reversed),
         boot: None,
         install,

@@ -12,6 +12,8 @@ pub const LOCK_FILE: &str = "archix.lock";
 /// The `repo` of entries pinned to an exact version from the archive's per-package history.
 pub const ARCHIVE_REPO: &str = "archive";
 pub const AUR_REPO: &str = "aur";
+/// The `repo` of packages built from a recipe in the config: a local PKGBUILD or a patched Arch package.
+pub const LOCAL_REPO: &str = "local";
 const LOCK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -36,6 +38,9 @@ pub struct HostLock {
     /// Flatpak apps by id, each at an exact commit.
     #[serde(default)]
     pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
+    /// Hashes of the config's local recipes and patches the lock was resolved with.
+    #[serde(default)]
+    pub recipes: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -65,10 +70,23 @@ struct OnDisk {
     hosts: BTreeMap<String, HostLock>,
 }
 
+impl Locked {
+    /// Built by archix from a recipe (AUR or the config's own) rather than downloaded.
+    pub fn is_built(&self) -> bool {
+        self.repo == AUR_REPO || self.repo == LOCAL_REPO
+    }
+}
+
 impl HostLock {
-    /// Whether this lock was resolved for the same declared packages, preferred providers and repos.
-    pub fn matches(&self, declared: &[String], prefer: &[String], repos: &[String]) -> bool {
-        self.declared == declared && self.prefer == prefer && self.repos == repos
+    /// Whether this lock was resolved for the same declared packages, preferred providers, repos and recipes.
+    pub fn matches(
+        &self,
+        declared: &[String],
+        prefer: &[String],
+        repos: &[String],
+        recipes: &BTreeMap<String, String>,
+    ) -> bool {
+        self.declared == declared && self.prefer == prefer && self.repos == repos && self.recipes == *recipes
     }
 
     pub fn pin(&mut self, name: &str, locked: Locked) {
@@ -155,6 +173,12 @@ impl Lockfile {
                     fields.push("build_only = true".to_string());
                 }
                 let _ = writeln!(out, "{} = {{ {} }}", key(name), fields.join(", "));
+            }
+            if !lock.recipes.is_empty() {
+                let _ = writeln!(out, "\n[hosts.{host}.recipes]");
+                for (id, hash) in &lock.recipes {
+                    let _ = writeln!(out, "{} = {}", key(id), string(hash));
+                }
             }
             if !lock.flatpak.is_empty() {
                 let _ = writeln!(out, "\n[hosts.{host}.flatpak]");
@@ -255,6 +279,7 @@ mod tests {
                     commit: "0bb3a9e4".into(),
                 },
             )]),
+            recipes: BTreeMap::from([("local:hello".to_string(), "abc123".to_string())]),
         };
         Lockfile {
             hosts: BTreeMap::from([("my.laptop".to_string(), host)]),

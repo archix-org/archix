@@ -221,7 +221,7 @@ pub fn fit(
     let mut pins = Vec::new();
     for (name, locked) in &adopted.packages {
         let Some(pkg) = installed.get(name) else { continue };
-        if locked.repo != AUR_REPO && differs(&pkg.version, &locked.version) {
+        if !locked.is_built() && differs(&pkg.version, &locked.version) {
             pins.push((name.clone(), pkg.clone(), locked.clone()));
         }
     }

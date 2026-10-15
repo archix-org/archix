@@ -33,6 +33,11 @@ pub struct Setup {
 impl Setup {
     /// A config declaring everything explicitly installed in the image plus `extra`, locked at the image's snapshot.
     pub fn new(extra: &[&str], body: &str) -> Setup {
+        Setup::with_files(extra, body, &[])
+    }
+
+    /// Like `new`, with `files` (path relative to the config, content) written before the first lock.
+    pub fn with_files(extra: &[&str], body: &str, files: &[(&str, &str)]) -> Setup {
         let paths = Paths::system();
         let mut packages: Vec<String> = read_local_db(&paths.local_db())
             .unwrap()
@@ -46,6 +51,11 @@ impl Setup {
         let dir = TempDir::new().unwrap();
         let init = format!("return {{ packages = {{ {} }}, {body} }}", quoted.join(", "));
         fs::write(dir.path().join("init.lua"), init).unwrap();
+        for (path, content) in files {
+            let path = dir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
         let setup = Setup { dir, paths };
         setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
         setup

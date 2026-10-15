@@ -24,7 +24,7 @@ use archix::journal::{Journal, Kind};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
-use archix::plan::Change;
+use archix::plan::{Change, rebuilds};
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
 use archix::system::boot::BootPlan;
@@ -33,8 +33,8 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 use super::lock::{current_lock, save_lock};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, count,
-    declared, edit_installed, ensure_flatpak_remotes, print_warned, refuse_if_unfinished, require_root, select_changes,
-    settle_flatpak, transaction_for, user_cache,
+    declared, edit_installed, ensure_flatpak_remotes, print_warned, recipes, refuse_if_unfinished, require_root,
+    select_changes, settle_flatpak, transaction_for, user_cache,
 };
 
 /// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
@@ -88,7 +88,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         if noconfirm || confirm("adopt them into the lock? (no reverts them to the lock)")? {
             let git = aur_git(&declared)?;
             let previous = lock.clone();
-            let aur = aur_source(&git, &declared, &archive, Some(&previous), false);
+            let recipes = recipes(target, &declared)?;
+            let aur = aur_source(&git, &declared, &archive, Some(&previous), false, &recipes);
             let adopted = adopt(
                 &archive,
                 &user_cache()?,
@@ -177,12 +178,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
 
-    let (changes, warned) = select_changes(
+    let (mut changes, warned) = select_changes(
         &lock.packages,
         &installed,
         declared.remove_undeclared,
         &declared.ignored,
     );
+    changes.extend(rebuilds(
+        &lock.packages,
+        &installed,
+        current.as_ref().map(|g| &g.packages),
+    ));
     print_warned(&warned);
     let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
     if changes.is_empty()
@@ -230,7 +236,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     system::blobs::ensure(&paths, &archive, &rendered)?;
 
     import_keys(&declared.repos)?;
-    let mut changes = changes;
     if third_party_fallback(target, &declared, &paths, &archive, &mut lock, &changes, noconfirm)? {
         changes = select_changes(
             &lock.packages,
@@ -239,6 +244,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             &declared.ignored,
         )
         .0;
+        changes.extend(rebuilds(
+            &lock.packages,
+            &installed,
+            current.as_ref().map(|g| &g.packages),
+        ));
         generation.packages = lock.packages.clone();
         carry_aur_hashes(&mut generation.packages, current.as_ref());
     }
@@ -246,8 +256,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     let aur_names: Vec<String> = changes
         .iter()
         .filter_map(|change| match change {
-            Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. }
-                if lock.packages[name].repo == AUR_REPO =>
+            Change::Install { name, .. }
+            | Change::Upgrade { name, .. }
+            | Change::Downgrade { name, .. }
+            | Change::Rebuild { name, .. }
+                if lock.packages[name].is_built() =>
             {
                 Some(name.clone())
             }
@@ -280,7 +293,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         }
     }
     for (name, pkg) in &lock.packages {
-        if pkg.repo == AUR_REPO && !built.contains_key(name) {
+        if pkg.is_built() && !built.contains_key(name) {
             let mut pkg = pkg.clone();
             if let Some(previous) = generation.packages.get(name) {
                 pkg.sha256 = previous.sha256.clone();
@@ -387,7 +400,7 @@ fn carry_aur_hashes(packages: &mut BTreeMap<String, Locked>, current: Option<&Ge
     let Some(current) = current else { return };
     for (name, pkg) in packages
         .iter_mut()
-        .filter(|(_, pkg)| pkg.repo == AUR_REPO && pkg.sha256.is_empty())
+        .filter(|(_, pkg)| pkg.is_built() && pkg.sha256.is_empty())
     {
         if let Some(previous) = current.packages.get(name)
             && previous.commit == pkg.commit
@@ -419,15 +432,19 @@ fn build_aur(
         git: &git,
         snapshot_cache: &cache,
     };
+    let recipes = recipes(target, declared)?;
     let mut moved = BTreeSet::new();
     loop {
-        let result =
-            Installer::new(&builder, lock, &declared.build_on_host).and_then(|installer| installer.build(names));
+        let result = Installer::new(&builder, lock, &declared.build_on_host, Some(&recipes))
+            .and_then(|installer| installer.build(names));
         let error = match result {
             Ok(built) => return Ok(built),
             Err(error) => error,
         };
-        let Some(failed) = error.downcast_ref::<BuildFailed>() else {
+        let Some(failed) = error
+            .downcast_ref::<BuildFailed>()
+            .filter(|failed| !failed.base.contains(':'))
+        else {
             return Err(error);
         };
         if !moved.insert(failed.base.clone()) {

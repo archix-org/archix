@@ -3,12 +3,13 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail};
 
 use super::git::AurGit;
-use crate::lock::HostLock;
+use crate::lock::{AUR_REPO, HostLock};
 
-/// Each AUR base in a lock with the commit it's locked at.
+/// Each AUR base in a lock with the commit it's locked at; the config's own recipes need no review.
 pub fn commits(lock: Option<&HostLock>) -> BTreeMap<String, String> {
     lock.into_iter()
         .flat_map(|lock| lock.packages.values())
+        .filter(|pkg| pkg.repo == AUR_REPO)
         .filter_map(|pkg| Some((pkg.base.clone()?, pkg.commit.clone()?)))
         .collect()
 }

@@ -20,10 +20,11 @@ use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
 use archix::flatpak;
 use archix::journal::{Journal, Kind, Transaction};
-use archix::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
+use archix::lock::{ARCHIVE_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
+use archix::recipes::Recipes;
 use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
@@ -75,6 +76,8 @@ struct Declared {
     /// (remote, app id) pairs.
     flatpak_apps: Vec<(String, String)>,
     flatpak_remotes: BTreeMap<String, flatpak::Remote>,
+    /// Official packages to rebuild with these patch files, relative to the config directory.
+    patches: BTreeMap<String, Vec<String>>,
 }
 
 /// The boot.* settings, present when archix manages booting.
@@ -261,6 +264,25 @@ fn declared(config: &Value) -> Result<Declared> {
         },
         flatpak_apps: Vec::new(),
         flatpak_remotes: BTreeMap::new(),
+        patches: match map.get("patches") {
+            Some(Value::Map(patches)) => patches
+                .iter()
+                .map(|(name, files)| {
+                    let files = match files {
+                        Value::List(items) => items
+                            .iter()
+                            .filter_map(|item| match item {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (name.clone(), files)
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        },
     };
     if let Some(Value::Map(fp)) = map.get("flatpak") {
         let default_remote = match fp.get("remote") {
@@ -369,13 +391,16 @@ fn transaction_for(
     let mut install = Vec::new();
     for change in changes {
         match change {
-            Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. } => {
+            Change::Install { name, .. }
+            | Change::Upgrade { name, .. }
+            | Change::Downgrade { name, .. }
+            | Change::Rebuild { name, .. } => {
                 let pkg = &packages[name];
                 if let Some(path) = built.get(name) {
                     install.push(path.clone());
                     continue;
                 }
-                if pkg.repo == AUR_REPO {
+                if pkg.is_built() {
                     let sha256 = (!pkg.sha256.is_empty()).then(|| pkg.sha256.clone());
                     wanted.push(Wanted {
                         name: name.clone(),
@@ -412,6 +437,7 @@ fn transaction_for(
         &wanted,
     )?);
     Ok(Transaction {
+        reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
         install,
         remove,
         system: None,
@@ -508,17 +534,24 @@ fn aur_git(declared: &Declared) -> Result<AurGit> {
     Ok(AurGit::new(&declared.aur_url, &user_cache()?))
 }
 
-/// The AUR as the resolver sees it; the package list is downloaded only if a name isn't in the official repos.
+/// The config's local recipes and patched packages.
+fn recipes(target: &Target, declared: &Declared) -> Result<Recipes> {
+    Recipes::load(target.config_dir, &declared.patches, &user_cache()?)
+}
+
+/// The AUR and the config's recipes as the resolver sees them; the AUR's package list is downloaded only if a name is in neither the repos nor pkgbuilds/.
 fn aur_source<'a>(
     git: &'a AurGit,
     declared: &'a Declared,
     archive: &'a Archive,
     previous: Option<&'a HostLock>,
     refresh: bool,
+    recipes: &'a Recipes,
 ) -> Aur<'a> {
     Aur::new(git, previous, move || {
         Index::load(archive, &declared.aur_url, &user_cache()?, refresh)
     })
+    .with_recipes(recipes)
 }
 
 /// Drops locked Flatpak apps the config no longer declares and locks new ones (all, with `refresh`) to their remote's commit; returns what it couldn't lock.

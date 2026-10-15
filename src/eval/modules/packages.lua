@@ -12,6 +12,11 @@ return {
       default = {},
       description = "Packages to use when a dependency could be met by several, such as which font satisfies ttf-font. They're installed as dependencies, not declared.",
     },
+    patches = archix.option {
+      type = t.attrs_of(t.list_of(t.str)),
+      default = {},
+      description = "Patch files for official packages, keyed by package name and relative to the config directory. archix rebuilds Arch's own recipe for the locked version with them, applied with patch -p1 before the recipe's prepare(), and adds a sub-release to the pkgrel. Recipes in pkgbuilds/<dir>/ need no option: declaring a package they build is enough.",
+    },
     repos = archix.option {
       type = t.list_of(t.enum { "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing" }),
       default = { "core", "extra" },

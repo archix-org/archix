@@ -85,6 +85,9 @@ pub struct Transaction {
     /// The boot entry to write, when archix manages booting.
     #[serde(default)]
     pub boot: Option<BootPlan>,
+    /// Some install is a rebuild at the installed version, so pacman mustn't skip up-to-date packages.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reinstall: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

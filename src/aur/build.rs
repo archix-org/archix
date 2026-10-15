@@ -31,6 +31,8 @@ pub struct Builder<'a> {
 /// One AUR base to build at a commit, against a snapshot, with these already-built AUR packages installed first.
 pub struct Job<'a> {
     pub base: &'a str,
+    /// The config's own recipe directory; None exports the AUR commit.
+    pub dir: Option<&'a Path>,
     pub commit: &'a str,
     pub info: &'a SrcInfo,
     pub date: Date,
@@ -62,6 +64,7 @@ impl Builder<'_> {
     pub fn build(&self, job: Job) -> Result<Vec<(String, PathBuf)>> {
         let Job {
             base,
+            dir: recipe,
             commit,
             info,
             date,
@@ -88,11 +91,14 @@ impl Builder<'_> {
             .paths
             .cache
             .join("aur-build")
-            .join(format!("{base}-{}", std::process::id()));
+            .join(format!("{}-{}", base.replace(':', "-"), std::process::id()));
         if dir.exists() {
             fs::remove_dir_all(&dir)?;
         }
-        self.git.export(base, commit, &dir)?;
+        match recipe {
+            Some(recipe) => crate::recipes::copy_dir(recipe, &dir)?,
+            None => self.git.export(base, commit, &dir)?,
+        }
         chown(&dir)?;
         eprintln!(
             ":: building {base} {} ({})",
@@ -125,6 +131,11 @@ impl Builder<'_> {
                 if !produced.is_file() {
                     bail!("building {base} did not produce {file}");
                 }
+                // A changed local recipe can rebuild the same version, so its file name carries the recipe hash.
+                let file = match recipe {
+                    Some(_) => format!("{}-{file}", &crate::fetch::sha256_bytes(commit.as_bytes())[..12]),
+                    None => file,
+                };
                 let dest = self.paths.packages().join(&file);
                 fs::rename(&produced, &dest).or_else(|_| fs::copy(&produced, &dest).map(|_| ()))?;
                 files.push((pkg.name.clone(), file));
@@ -347,7 +358,7 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 }
 
 /// Creates the build user the first time a package is built.
-fn ensure_user() -> Result<()> {
+pub(crate) fn ensure_user() -> Result<()> {
     let exists = Command::new("id")
         .arg("-u")
         .arg(BUILD_USER)

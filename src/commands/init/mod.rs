@@ -25,6 +25,7 @@ use archix::luagen::Lua;
 use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
+use archix::recipes::Recipes;
 use archix::repos::Custom;
 
 use super::lock::pending;
@@ -1116,7 +1117,8 @@ fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths) -> Resul
     let date = best_snapshot(&archive, &user_cache()?, day, latest, &official, &machine.local)?;
     let dates = BTreeSet::from([date]);
     let git = aur_git(declared)?;
-    let aur = aur_source(&git, declared, &archive, None, false);
+    let recipes = Recipes::none();
+    let aur = aur_source(&git, declared, &archive, None, false, &recipes);
     fit(
         &archive,
         &user_cache()?,

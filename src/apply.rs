@@ -109,7 +109,7 @@ fn run_package_step(
                 OsStr::new("--overwrite"),
                 OsStr::new(KERNEL_MODULES),
             ];
-            if !reinstall {
+            if !reinstall && !tx.reinstall {
                 args.push(OsStr::new("--needed"));
             }
             args.extend(tx.install.iter().map(|path| path.as_os_str()));

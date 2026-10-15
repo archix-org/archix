@@ -31,6 +31,7 @@ fn fake_interrupted_switch(paths: &Paths) {
     let transaction = Transaction {
         system: None,
         boot: None,
+        reinstall: false,
         install: vec![tree],
         remove: vec![],
         versions,

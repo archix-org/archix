@@ -2,17 +2,39 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::lock::Locked;
+use crate::lock::{LOCAL_REPO, Locked};
 use crate::pacman::{LocalPkg, vercmp};
 
 /// One change needed to make the installed packages match a lock.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
-    Install { name: String, version: String },
-    Upgrade { name: String, from: String, to: String },
-    Downgrade { name: String, from: String, to: String },
-    Remove { name: String, version: String },
-    Reason { name: String, explicit: bool },
+    Install {
+        name: String,
+        version: String,
+    },
+    Upgrade {
+        name: String,
+        from: String,
+        to: String,
+    },
+    Downgrade {
+        name: String,
+        from: String,
+        to: String,
+    },
+    Remove {
+        name: String,
+        version: String,
+    },
+    Reason {
+        name: String,
+        explicit: bool,
+    },
+    /// Same version, but built from a recipe in the config that changed since.
+    Rebuild {
+        name: String,
+        version: String,
+    },
 }
 
 impl fmt::Display for Change {
@@ -24,6 +46,7 @@ impl fmt::Display for Change {
             Change::Remove { name, version } => write!(f, "remove     {name} {version} (not in the lock)"),
             Change::Reason { name, explicit: true } => write!(f, "mark       {name} as explicitly installed"),
             Change::Reason { name, explicit: false } => write!(f, "mark       {name} as a dependency"),
+            Change::Rebuild { name, version } => write!(f, "rebuild    {name} {version} (its recipe changed)"),
         }
     }
 }
@@ -83,8 +106,31 @@ fn change_name(change: &Change) -> &str {
         | Change::Upgrade { name, .. }
         | Change::Downgrade { name, .. }
         | Change::Remove { name, .. }
-        | Change::Reason { name, .. } => name,
+        | Change::Reason { name, .. }
+        | Change::Rebuild { name, .. } => name,
     }
+}
+
+/// Packages from the config's recipes installed at the locked version but last built by archix from another recipe, or never by archix.
+pub fn rebuilds(
+    locked: &BTreeMap<String, Locked>,
+    installed: &BTreeMap<String, LocalPkg>,
+    built_from: Option<&BTreeMap<String, Locked>>,
+) -> Vec<Change> {
+    locked
+        .iter()
+        .filter(|(_, want)| want.repo == LOCAL_REPO && !want.build_only)
+        .filter(|(name, want)| installed.get(*name).is_some_and(|have| have.version == want.version))
+        .filter(|(name, want)| {
+            built_from
+                .and_then(|was| was.get(*name))
+                .is_none_or(|was| was.commit != want.commit)
+        })
+        .map(|(name, want)| Change::Rebuild {
+            name: name.clone(),
+            version: want.version.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

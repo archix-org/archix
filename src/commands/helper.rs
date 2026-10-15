@@ -22,7 +22,7 @@ use archix::resolve::{resolve, snapshot_conf};
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, refuse_if_unfinished,
+    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, recipes, refuse_if_unfinished,
     require_root, transaction_for, user_cache,
 };
 
@@ -93,7 +93,8 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
     let archive = Archive::new(ARCHIVE_URL);
     let git = aur_git(&declared)?;
-    let aur = aur_source(&git, &declared, &archive, Some(&lock), false);
+    let recipes = recipes(target, &declared)?;
+    let aur = aur_source(&git, &declared, &archive, Some(&lock), false, &recipes);
     let cache = user_cache()?;
     let temp = resolve(
         &archive,
@@ -129,7 +130,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     let aur_names: Vec<String> = changes
         .iter()
         .filter_map(|change| match change {
-            Change::Install { name, .. } if temp.packages[name].repo == AUR_REPO => Some(name.clone()),
+            Change::Install { name, .. } if temp.packages[name].is_built() => Some(name.clone()),
             _ => None,
         })
         .collect();
@@ -142,7 +143,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             git: &git,
             snapshot_cache: &cache,
         };
-        Installer::new(&builder, &temp, &declared.build_on_host)?.build(&aur_names)?
+        Installer::new(&builder, &temp, &declared.build_on_host, Some(&recipes))?.build(&aur_names)?
     };
     let full = transaction_for(
         &archive,
@@ -161,6 +162,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         })
         .collect();
     let transaction = Transaction {
+        reinstall: false,
         system: None,
         boot: None,
         install: full.install,
@@ -266,7 +268,8 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
     let installed = read_local_db(&paths.local_db())?;
     if !newer_than_lock(&lock, &installed).is_empty() {
         let previous = lock.clone();
-        let aur = aur_source(&git, &declared, &archive, Some(&previous), false);
+        let recipes = recipes(target, &declared)?;
+        let aur = aur_source(&git, &declared, &archive, Some(&previous), false, &recipes);
         let adopted = adopt(
             &archive,
             &user_cache()?,
@@ -282,7 +285,8 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
         lock = adopted;
     }
     if lock.packages.values().any(|pkg| pkg.repo == AUR_REPO) {
-        let aur = aur_source(&git, &declared, &archive, None, true);
+        let recipes = recipes(target, &declared)?;
+        let aur = aur_source(&git, &declared, &archive, None, true, &recipes);
         let mut fresh = resolve(
             &archive,
             &user_cache()?,
