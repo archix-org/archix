@@ -24,8 +24,15 @@ const manages = [
 	['Kernel', 'Kernel parameters, sysctl, modprobe and udev rules'],
 	['Users', 'Users and groups. Passwords stay yours: archix never touches them'],
 	['Dotfiles', 'Real files with recorded hashes, so edits made outside archix show up in diff'],
-	['Apps', 'programs.* modules ported from Home Manager, plus writers for toml, json, yaml, ini, kdl and more'],
+	['Apps', 'programs.* modules ported from Home Manager and checked byte for byte against its tests, plus writers for toml, json, yaml, ini, kdl and more'],
 	['Hooks', 'Activation scripts that run on every switch'],
+];
+
+const safety = [
+	['No reinstall', 'archix init takes over the system you already have. It locks to exactly what is installed, so the first diff is empty.'],
+	['Power cuts', 'Every switch is journaled. If one is interrupted, archix recover continues it, rolls it back or abandons it.'],
+	['No live USB', 'Each recent generation gets a rescue boot entry that restores pacman and the core packages from cache.'],
+	['Tested booting', 'Every change boots in a QEMU VM with OVMF and Secure Boot enforcing: generations, rollback at boot, signed entries and rescue.'],
 ];
 
 const nix = [
@@ -100,14 +107,14 @@ mesa = {'{'} version = <span class="s">"1:25.3.0-1"</span>, repo = <span class="
 				<article>
 					<h3>Reversible</h3>
 					<p>
-						Every switch is a generation with its own boot entry. Roll back from the terminal or pick an older one at boot.
-						btrfs makes it instant; on ext4 it still works.
+						Every switch is a generation with its own signed boot entry. Roll back from the terminal or pick an older one at
+						boot: archix reinstalls its exact packages from cache. Any filesystem, no snapshots required.
 					</p>
 					<Artifact title="systemd-boot">
-						<pre><span class="w">› archix · generation 42 · Oct 15</span>
-  archix · generation 41 · Oct 09
-  archix · generation 40 · Oct 02
-  <span class="m">archix rescue · generation 42</span></pre>
+						<pre><span class="w">› Arch Linux (archix, generation 42)</span>
+  Arch Linux (archix, generation 41)
+  Arch Linux (archix, generation 40)
+  <span class="m">Arch Linux (archix rescue, generation 42)</span></pre>
 					</Artifact>
 				</article>
 			</div>
@@ -125,10 +132,11 @@ mesa = {'{'} version = <span class="s">"1:25.3.0-1"</span>, repo = <span class="
 			<Artifact title="terminal">
 				<pre><span class="m">$</span> <span class="w">sudo pacman -Syu</span>
 <span class="m">:: Starting full system upgrade...</span>
-<span class="m">$</span> <span class="w">archix switch</span>
-System is newer than the lock: adopt? [Y/n] <span class="w">y</span>
-  lock      2026-10-09 → 2026-10-15
-  <span class="ok">apply     ✓ generation 43 is live</span></pre>
+<span class="m">$</span> <span class="w">sudo archix switch</span>
+the system is newer than the lock for 3 packages
+(firefox, mesa, linux), probably from pacman or an AUR helper
+adopt them into the lock? (no reverts them to the lock) [Y/n] <span class="w">y</span>
+<span class="ok">switched to generation 43 (snapshot 2026-10-15)</span></pre>
 			</Artifact>
 		</section>
 
@@ -160,6 +168,20 @@ System is newer than the lock: adopt? [Y/n] <span class="w">y</span>
 			<dl>
 				{
 					manages.map(([term, desc]) => (
+						<div>
+							<dt>{term}</dt>
+							<dd>{desc}</dd>
+						</div>
+					))
+				}
+			</dl>
+		</section>
+
+		<section class="manages wrap" aria-labelledby="safety">
+			<h2 id="safety">Built not to brick your machine.</h2>
+			<dl>
+				{
+					safety.map(([term, desc]) => (
 						<div>
 							<dt>{term}</dt>
 							<dd>{desc}</dd>
@@ -207,8 +229,8 @@ System is newer than the lock: adopt? [Y/n] <span class="w">y</span>
 					<h3>Capture your system</h3>
 					<CopyCommand command="sudo archix init" label="Run archix init" />
 					<p>
-						Reads your installed packages, enabled services, changed <code>/etc</code> files and users into a config. Nothing
-						changes until the diff against your system is empty.
+						Reads your packages, services, changed <code>/etc</code> files and users into a config, locked to exactly what is
+						installed. No reinstall, and the first diff is empty.
 					</p>
 				</li>
 				<li>

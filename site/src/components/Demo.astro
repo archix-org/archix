@@ -8,6 +8,9 @@ const config = `return {
   repos = { "core", "extra", "multilib" },
   packages = { "steam", "mangohud", "obs-studio", "protonup-qt" },
 
+  users = { me = { groups = { "wheel" }, shell = "/usr/bin/zsh" } },
+  home = { user = "me" },
+
   programs = {
     kitty = {
       enable = true,
@@ -38,7 +41,8 @@ const generations = [
 			</figcaption>
 			<div class="screen" aria-live="polite" data-screen>
 				<p><span class="cmd">archix status</span></p>
-				<p class="out">generation 41 · locked to 2026-10-09 · clean</p>
+				<p class="out">current generation: 41 (snapshot 2026-10-09)</p>
+				<p class="out">the system matches the lock</p>
 			</div>
 			<div class="controls">
 				<button type="button" data-action="update"><kbd>U</kbd><span data-label>archix update</span></button>
@@ -69,21 +73,24 @@ const generations = [
 	type Line = [text: string, kind?: 'cmd' | 'out' | 'ok' | 'bad' | 'note'];
 
 	const update: Line[] = [
-		['archix update', 'cmd'],
-		['  lock      2026-10-09 → 2026-10-15'],
-		['  packages  212 upgraded · mesa 25.2.4 → 25.3.0'],
-		['  aur       3 rebuilt in a clean chroot'],
-		['  prepare   ✓ downloaded, built, checked', 'ok'],
-		['  apply     ✓ generation 42 is live', 'ok'],
+		['sudo archix update', 'cmd'],
+		['snapshot 2026-10-09 -> 2026-10-15'],
+		['~ mesa 1:25.2.4-1 -> 1:25.3.0-1'],
+		['~ lib32-mesa 1:25.2.4-1 -> 1:25.3.0-1'],
+		['212 packages locked'],
+		['sudo archix switch --noconfirm', 'cmd'],
+		[':: installing packages'],
+		[':: writing the boot entry'],
+		['switched to generation 42 (snapshot 2026-10-15)', 'ok'],
 		['steam', 'cmd'],
 		['Segmentation fault (core dumped)', 'bad'],
 	];
 	const rollback: Line[] = [
-		['archix rollback', 'cmd'],
-		['  btrfs     restored the snapshot of generation 41'],
-		['  ✓ back on generation 41 in 3.8s', 'ok'],
+		['sudo archix rollback', 'cmd'],
+		['roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n] y'],
+		['rolled back to generation 41 (snapshot 2026-10-09)', 'ok'],
 		['steam', 'cmd'],
-		['# launches fine. generation 42 stays around until you gc it', 'note'],
+		['# launches fine. generation 42 stays until you gc it', 'note'],
 	];
 
 	const root = document.querySelector<HTMLElement>('[data-demo]')!;
@@ -140,10 +147,10 @@ const generations = [
 			} else if (state !== 'idle') return;
 			state = 'busy';
 			updateButton.disabled = true;
-			await print(update.slice(0, 6));
+			await print(update.slice(0, 9));
 			gen42.classList.remove('future');
 			moveAnchor(4, 42);
-			await print(update.slice(6));
+			await print(update.slice(9));
 			state = 'updated';
 			rollbackButton.disabled = false;
 			rollbackButton.focus({ preventScroll: true });
@@ -151,10 +158,10 @@ const generations = [
 			if (state !== 'updated') return;
 			state = 'busy';
 			rollbackButton.disabled = true;
-			await print(rollback.slice(0, 2));
+			await print(rollback.slice(0, 3));
 			moveAnchor(3, 41);
 			gen42.classList.add('kept');
-			await print(rollback.slice(2));
+			await print(rollback.slice(3));
 			state = 'rolledBack';
 			updateLabel.textContent = 'replay';
 			updateButton.disabled = false;

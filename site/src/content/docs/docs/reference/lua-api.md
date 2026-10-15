@@ -29,6 +29,20 @@ return {
 | `options` | A nested table whose leaves are `archix.option { ... }` declarations. |
 | `config` | A table of definitions, or `function(cfg)` returning one. `cfg` is the final merged config, read-only. Returning `nil` contributes nothing. |
 
+Config functions run again until the merged config stops changing, so one function can read what another produced. A config that's still changing after 32 rounds is an error that names the options involved.
+
+Reading `cfg` is checked too. A path that isn't an option is an error with a did-you-mean suggestion, and so is reading an option that has no value and no default. A null option reads as `nil`.
+
+```lua
+return function(cfg)
+  if cfg.programs.zsh.enable then
+    return { programs = { zsh = { init_content = 'eval "$(zoxide init zsh)"' } } }
+  end
+end
+```
+
+archix's own modules, which declare every option in the [options reference](/docs/reference/options/), are loaded before `init.lua`. You never import them.
+
 See [Configuration](/docs/concepts/configuration/) for how modules merge.
 
 ## `archix.option`
@@ -146,57 +160,105 @@ archix.read_file("relative/path") -- returns a string
 
 Reads a file inside the config directory and returns its content. The path is relative to the directory containing `init.lua`. Absolute paths, and paths that resolve outside the config directory, are errors. This keeps evaluation pure: the config can only depend on files that are part of it.
 
+Use it when you want to process a file's content in Lua. To install a file as it is, `source` in `files` or `home.files` is simpler.
+
 ```lua
-files = { ["~/.config/nvim/init.lua"] = archix.read_file("dotfiles/nvim/init.lua") }
+local motd = archix.read_file("files/motd")
+
+return {
+  files = { ["/etc/motd"] = { text = motd .. "Host: " .. archix.hostname } },
+}
+```
+
+## `archix.home_directory`
+
+```lua
+archix.home_directory(cfg) -- returns a string
+```
+
+The home directory of `home.user`, for config functions that need an absolute path in it: `home.directory` if set, else `users.<user>.home`, else `/home/<user>`. It's an error when `home.user` isn't set.
+
+```lua
+return function(cfg)
+  return { programs = { zsh = { session_variables = { NOTES = archix.home_directory(cfg) .. "/notes" } } } }
+end
 ```
 
 ## `archix.program`
 
 ```lua
-archix.program "name" { package = "pkg", file = "~/path", format = "fmt" }
+archix.program "name" { file = ".config/name/config", format = "toml", package = "pkg" }
 ```
 
-Defines a thin app module in one line. The result is a module: return it from a file, or put it in `imports`.
+Defines a thin app module in one line. The result is a module: return it from a file, or put it in `imports`. archix's own alacritty, foot and mpv modules are built this way.
 
-| Field | Description |
-| --- | --- |
-| `package` | The package installed when the program is enabled. |
-| `file` | Where the config file is written. |
-| `format` | The writer used for `settings`: `toml`, `json`, `yaml`, `ini`, `kdl`, `key-value` or `kconfig`. |
+| Field | Required | Description |
+| --- | --- | --- |
+| `file` | yes | Where the config file is written, relative to `home.user`'s home. |
+| `format` | yes | The name of the [format writer](#format-writers) that renders `settings`, such as `toml`, `json`, `yaml`, `ini`, `key_value`, `kconfig` or `kdl`. An unknown name is an error. |
+| `package` | no | The package installed when the program is enabled. Defaults to the program's name. |
 
-```lua title="lua/modules/foot.lua"
-return archix.program "foot" { package = "foot", file = "~/.config/foot/foot.ini", format = "ini" }
+```lua title="lua/modules/fuzzel.lua"
+return archix.program "fuzzel" { file = ".config/fuzzel/fuzzel.ini", format = "ini" }
 ```
 
-It declares `programs.<name>.enable` and `programs.<name>.settings`:
+It declares four options under `programs.<name>`:
+
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enable` | `bool` | `false` | Install and configure the program. |
+| `package` | `null or str` | `package`, or the name | Set to `archix.null` to skip installing it. |
+| `settings` | `any` | `{}` | The file's contents, rendered by the writer. |
+| `extra_config` | `lines` | `""` | Text appended to the file. |
 
 ```lua
-programs = { foot = { enable = true, settings = { main = { pad = "8x8" } } } }
+programs = { fuzzel = { enable = true, settings = { main = { font = "Inter:size=11" } } } }
 ```
+
+Like every program module, it needs `home.user`. Defining a program archix already ships, or one another module defines, is an error, because each option can only be declared once.
 
 ## Format writers
 
-Writers turn a Lua table into the content of a config file. Use them as values in `files`, and archix uses them for `programs.<name>.settings`.
+Writers turn a Lua table into the text of a config file. They live in `archix.formats`, and each one mirrors the Nix generator Home Manager uses for the same format, so ported modules render the same bytes. Use them for `text` in `files` and `home.files`, or by name in `archix.program`.
 
-| Function | Format |
+| Function | Output |
 | --- | --- |
-| `archix.toml { ... }` | TOML |
-| `archix.json { ... }` | JSON |
-| `archix.yaml { ... }` | YAML |
-| `archix.ini { ... }` | INI, one section per top-level key |
-| `archix.kdl { ... }` | KDL |
-| `archix.kconfig { ... }` | KDE's kconfig, one group per top-level key |
+| `toml(t)` | TOML. Nested tables become `[a.b]` sections, lists of tables become `[[a]]`, null values are left out. |
+| `json(t)` | JSON as `jq .` prints it: two-space indent, sorted keys, final newline. |
+| `yaml(t)` | YAML, with keys and strings double-quoted. |
+| `ini(t, opts)` | INI like Home Manager's `toINI`: top-level scalars first, then one section per table. A list repeats its key. |
+| `systemd(t)` | A systemd unit: one section per table, like `ini`. |
+| `git_ini(t)` | git config: nested tables become `[section "sub"]`, keys are tab-indented and strings quoted. |
+| `key_value(t, opts)` | `key value` lines, as in kitty.conf. |
+| `kconfig(t)` | KDE's kconfig: one group per table, nested tables become `[Group][Subgroup]`. |
+| `kdl(t)` | KDL: tables become nodes with children, lists become arguments. |
 
-There's also a `key-value` format, for flat `key=value` files, available as `format = "key-value"` in `archix.program`.
+`ini` takes `separator` (default `"="`) and `list_separator`, which joins a list into one value instead of repeating the key. `key_value` takes `separator` (default `" "`) and `value`, a function that renders each value.
 
 ```lua
-files = {
-  ["~/.config/alacritty/alacritty.toml"] = archix.toml { window = { opacity = 0.9 } },
-  ["~/.config/kdeglobals"] = archix.kconfig { General = { ColorScheme = "BreezeDark" } },
+local f = archix.formats
+
+return {
+  home = {
+    files = {
+      [".config/kdeglobals"] = { text = f.kconfig { General = { ColorScheme = "BreezeDark" } } },
+      [".config/niri/config.kdl"] = { text = f.kdl { layout = { gaps = 16 }, ["spawn-at-startup"] = { "waybar" } } },
+      [".config/tool/tool.conf"] = { text = f.key_value({ theme = "dark", width = 80 }, { separator = " = " }) },
+    },
+  },
 }
 ```
 
-Keys are written in sorted order, so the same table always renders the same bytes.
+Keys are written in sorted order, so the same table always renders the same bytes. Numbers in `ini`, `systemd`, `key_value` and `git_ini` follow Nix's `toString`, as Home Manager does: `0.95` becomes `0.950000`. Write the value as a string, `"0.95"`, to keep it short.
+
+A few helpers used by the ported modules are there too:
+
+| Function | Returns |
+| --- | --- |
+| `nix_string(v)` | Nix's `toString`: integers as they are, floats with six decimals, `true` as `"1"` and `false` as `""`. |
+| `yes_no(b)` | `"yes"` or `"no"`. |
+| `shell_arg(s)` | `s` quoted for a shell, like Nix's `escapeShellArg`: bare when it's safe, single-quoted otherwise. |
+| `wrap_lines(items, width)` | A list of lines, packing `items` space-separated into lines no longer than `width`. |
 
 ## Config values
 
