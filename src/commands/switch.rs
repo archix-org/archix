@@ -197,7 +197,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
                 current.number, lock.date
             );
             print_hooks(&system_change);
-            let failures = run_hooks(&system_change, &BTreeSet::new());
+            let failures = run_hooks(&paths, &system_change, &BTreeSet::new());
             return report_soft_failures(&failures, "nothing was changed");
         }
         system::blobs::ensure(&paths, &archive, &rendered)?;
@@ -210,7 +210,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             created.number, lock.date
         );
         print_hooks(&system_change);
-        let failures = run_hooks(&system_change, &BTreeSet::new());
+        let failures = run_hooks(&paths, &system_change, &BTreeSet::new());
         return report_soft_failures(&failures, "the new generation is current");
     }
     for change in &changes {
@@ -331,7 +331,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         created.number,
         &previous_flatpak,
     )?);
-    soft_failures.extend(run_hooks(&system_change, &rewritten));
+    soft_failures.extend(run_hooks(&paths, &system_change, &rewritten));
     println!("switched to {name}");
     report_soft_failures(&soft_failures, "the new generation is current")
 }
@@ -346,12 +346,16 @@ fn print_hooks(change: &SystemChange) {
 }
 
 /// on_change scripts and hooks, last thing in every switch, rollback and recovery, like NixOS activation.
-pub(super) fn run_hooks(change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
+pub(super) fn run_hooks(paths: &Paths, change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
+    let pending = paths.pending_on_change();
+    let mut due = system::hooks::due(change, rewritten);
+    due.extend(system::hooks::deferred(&pending));
+    let _ = fs::remove_file(&pending);
     if change.to.hooks.is_empty() && change.to.on_change.is_empty() {
         return Vec::new();
     }
     eprintln!(":: running activation hooks");
-    system::hooks::run(change, rewritten)
+    system::hooks::run(change, &due)
 }
 
 /// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
@@ -715,24 +719,34 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     for line in system_lines.iter().chain(&flatpak_lines) {
         println!("{line}");
     }
-    print_hooks(&system_change);
     let hooks_at_end = |rewritten: &BTreeSet<String>| {
         if online {
-            run_hooks(&system_change, rewritten)
-        } else {
-            if !system_change.to.hooks.is_empty() || !system_change.to.on_change.is_empty() {
-                println!("archix: hooks don't run at boot; run `sudo archix rollback {number}` once you're online");
-            }
-            Vec::new()
+            return run_hooks(&paths, &system_change, rewritten);
         }
+        let due = system::hooks::due(&system_change, rewritten);
+        if let Err(e) = system::hooks::defer(&paths.pending_on_change(), &due) {
+            println!("archix: could not record the on_change scripts to run later: {e:#}");
+        }
+        if !system_change.to.hooks.is_empty() || !due.is_empty() {
+            println!(
+                "archix: hooks don't run at boot; the next switch or `sudo archix rollback {number}` runs them once you're online"
+            );
+        }
+        Vec::new()
     };
     if changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() {
+        if online {
+            print_hooks(&system_change);
+        }
         store.activate(number)?;
         println!("{name} is current; no package changes were needed");
         return report_soft_failures(&hooks_at_end(&BTreeSet::new()), &format!("{name} is current"));
     }
     for change in &changes {
         println!("{change}");
+    }
+    if online {
+        print_hooks(&system_change);
     }
     if !noconfirm
         && !confirm(&format!(

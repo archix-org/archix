@@ -41,9 +41,9 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
     match mode {
         RecoverMode::Continue => {
             let install_interrupted = !journal.done.contains(&Step::Install);
-            apply::run(&paths, &mut journal, install_interrupted)?;
+            let failures = apply::run(&paths, &mut journal, install_interrupted)?;
             println!("finished the interrupted {kind} to {}", journal.target);
-            return finish_with_hooks(&journal, &format!("{} is current", journal.target));
+            return finish_with_hooks(&paths, &journal, failures, &format!("{} is current", journal.target));
         }
         RecoverMode::Rollback => {
             let archive = Archive::new(ARCHIVE_URL);
@@ -52,10 +52,10 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
             rollback.save(&paths.journal())?;
-            apply::run(&paths, &mut rollback, true)?;
+            let failures = apply::run(&paths, &mut rollback, true)?;
             forget_unactivated(&paths, &journal);
             println!("rolled back to the packages from before the {kind}");
-            return finish_with_hooks(&rollback, "the rollback finished");
+            return finish_with_hooks(&paths, &rollback, failures, "the rollback finished");
         }
         RecoverMode::Abandon => {
             let problems = apply::mismatches(&paths, &journal.transaction)?;
@@ -76,13 +76,12 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
     Ok(())
 }
 
-/// Hooks run after a recovery too, since the interrupted switch never got to them.
-fn finish_with_hooks(journal: &Journal, state: &str) -> Result<()> {
-    let failures = journal
-        .transaction
-        .system
-        .as_ref()
-        .map_or_else(Vec::new, |change| run_hooks(change, &BTreeSet::new()));
+/// Runs the hooks the interrupted switch never got to, and every on_change script, since which files it rewrote is unknown.
+fn finish_with_hooks(paths: &Paths, journal: &Journal, mut failures: Vec<String>, state: &str) -> Result<()> {
+    if let Some(change) = &journal.transaction.system {
+        let every_file: BTreeSet<String> = change.to.on_change.keys().cloned().collect();
+        failures.extend(run_hooks(paths, change, &every_file));
+    }
     report_soft_failures(&failures, state)
 }
 

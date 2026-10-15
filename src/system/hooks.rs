@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::Hook;
 use super::apply::SystemChange;
@@ -62,16 +63,42 @@ fn cycle(hooks: &BTreeMap<String, Hook>, done: &BTreeSet<&str>) -> String {
     "hooks wait on each other in a cycle".to_string()
 }
 
-/// Runs the target's on_change scripts for files that differ from the previous generation or that the switch rewrote on disk, then every hook; failures are returned, not fatal.
-pub fn run(change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
-    let mut failures = Vec::new();
+/// Files whose on_change scripts are due: their entry differs from the previous generation, or the switch rewrote them on disk.
+pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeSet<String> {
     let changed = change.changed_paths();
-    for (path, hook) in change
+    change
         .to
         .on_change
-        .iter()
-        .filter(|(path, _)| changed.contains(path.as_str()) || rewritten.contains(*path))
-    {
+        .keys()
+        .filter(|path| changed.contains(path.as_str()) || rewritten.contains(*path))
+        .cloned()
+        .collect()
+}
+
+/// Remembers on_change scripts a boot-time rollback skipped, adding to any already waiting.
+pub fn defer(path: &Path, due: &BTreeSet<String>) -> Result<()> {
+    let mut pending = deferred(path);
+    pending.extend(due.iter().cloned());
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let text: String = pending.iter().map(|file| format!("{file}\n")).collect();
+    fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
+/// on_change scripts a boot-time rollback left for later.
+pub fn deferred(path: &Path) -> BTreeSet<String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Runs the target's on_change scripts for the files in `due`, then every hook; failures are returned, not fatal.
+pub fn run(change: &SystemChange, due: &BTreeSet<String>) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (path, hook) in change.to.on_change.iter().filter(|(path, _)| due.contains(*path)) {
         if let Err(e) = run_one(hook) {
             failures.push(format!("on_change of {path}: {e:#}"));
         }
@@ -162,6 +189,21 @@ mod tests {
             user: None,
             after: after.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn deferred_on_change_scripts_accumulate_until_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = dir.path().join("pending");
+        assert!(deferred(&pending).is_empty());
+        defer(&pending, &BTreeSet::from(["/etc/a".to_string()])).unwrap();
+        defer(&pending, &BTreeSet::from(["/etc/b".to_string()])).unwrap();
+        assert_eq!(
+            deferred(&pending),
+            BTreeSet::from(["/etc/a".to_string(), "/etc/b".to_string()])
+        );
+        defer(&dir.path().join("untouched"), &BTreeSet::new()).unwrap();
+        assert!(!dir.path().join("untouched").exists(), "nothing due writes nothing");
     }
 
     #[test]
