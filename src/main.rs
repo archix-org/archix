@@ -175,6 +175,9 @@ enum Command {
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+    /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
+    #[command(external_subcommand)]
+    Pick(Vec<String>),
 }
 
 /// Turns pacman-style `-S` operations into the native command they mean.
@@ -368,6 +371,18 @@ fn run() -> Result<ExitCode> {
             }
         }
         Command::Search { terms } => commands::search(&target, &terms)?,
+        Command::Pick(args) => {
+            let noconfirm = args.iter().any(|arg| arg == "--noconfirm");
+            let terms: Vec<String> = args.into_iter().filter(|arg| arg != "--noconfirm").collect();
+            let picked = commands::pick(&target, &terms)?;
+            if picked.is_empty() {
+                return Ok(ExitCode::SUCCESS);
+            }
+            if unsafe { libc::geteuid() } != 0 {
+                return install_with_sudo(&cli.config, &hostname, &picked, noconfirm);
+            }
+            commands::declare_and_switch(&target, &picked, noconfirm)?;
+        }
         Command::Upgrade { noconfirm } => commands::upgrade(&target, noconfirm)?,
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
@@ -398,6 +413,25 @@ fn run() -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Installing needs root, so a search run as a user hands its picks to `sudo archix install`, the way yay calls sudo.
+fn install_with_sudo(config: &std::path::Path, host: &str, packages: &[String], noconfirm: bool) -> Result<ExitCode> {
+    let exe = std::env::current_exe().context("finding archix's own path")?;
+    let mut cmd = std::process::Command::new("sudo");
+    cmd.arg(exe)
+        .arg("--config")
+        .arg(config)
+        .args(["--host", host, "install"]);
+    if noconfirm {
+        cmd.arg("--noconfirm");
+    }
+    let status = cmd.arg("--").args(packages).status().context("running sudo")?;
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }
 
 fn system_hostname() -> Result<String> {

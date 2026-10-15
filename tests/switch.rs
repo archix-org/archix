@@ -356,3 +356,41 @@ fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn bare_terms_search_and_install_the_picks_like_yay() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
+
+    let out = setup.answering("\n", &["tree"]);
+    assert!(out.contains("==> Packages to install (eg: 1 2 3, 1-3 or ^4):"), "{out}");
+    assert!(installed("tree").is_none(), "an empty answer installs nothing");
+
+    let out = setup.answering("1\n", &["tree", "--noconfirm"]);
+    let last_result = out
+        .lines()
+        .filter(|line| line.starts_with("1 "))
+        .next_back()
+        .unwrap_or_default();
+    assert!(
+        last_result.starts_with("1 extra/tree "),
+        "the best match is 1, printed last:\n{out}"
+    );
+    assert!(installed("tree").is_some());
+    assert_eq!(
+        archix::installed::read(&installed_lua).unwrap(),
+        ["tree"],
+        "picks are declared"
+    );
+
+    assert!(
+        setup.ok(&["status"]).contains("current generation"),
+        "subcommands still win over search terms"
+    );
+    fs::remove_file(&installed_lua).unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -187,7 +188,87 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
 }
 
 /// Searches the locked snapshot's repos and the AUR; every term has to match the name or description.
+/// One search result: where it's from, what it is, and how it's shown.
+struct Hit {
+    name: String,
+    line: String,
+    aur: bool,
+}
+
+/// How closely a name matches the terms: exact, prefix, contained, or only in the description.
+fn rank(name: &str, terms: &[String]) -> u8 {
+    let name = name.to_lowercase();
+    let terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    if terms.contains(&name) {
+        0
+    } else if terms.first().is_some_and(|t| name.starts_with(t.as_str())) {
+        1
+    } else if terms.iter().any(|t| name.contains(t.as_str())) {
+        2
+    } else {
+        3
+    }
+}
+
 pub fn search(target: &Target, terms: &[String]) -> Result<()> {
+    for hit in hits(target, terms)? {
+        println!("{}", hit.line);
+    }
+    Ok(())
+}
+
+/// `archix <terms>`, like `yay <terms>`: numbered results with the best match last, then the picks to install.
+pub fn pick(target: &Target, terms: &[String]) -> Result<Vec<String>> {
+    let hits = hits(target, terms)?;
+    if hits.is_empty() {
+        println!("no packages match {}", terms.join(" "));
+        return Ok(Vec::new());
+    }
+    for (number, hit) in hits.iter().enumerate().rev() {
+        println!("{} {}", number + 1, hit.line);
+    }
+    eprint!("==> Packages to install (eg: 1 2 3, 1-3 or ^4): ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let picked = selection(&answer, hits.len())?;
+    Ok(picked.into_iter().map(|number| hits[number - 1].name.clone()).collect())
+}
+
+/// Numbers picked from 1..=count: "1 2 3", "1-3", "^4" to leave one out (alone, it means all but that), commas allowed.
+fn selection(answer: &str, count: usize) -> Result<Vec<usize>> {
+    let mut picked = std::collections::BTreeSet::new();
+    let mut excluded = std::collections::BTreeSet::new();
+    let mut only_exclusions = true;
+    for word in answer.split([' ', ',', '\t', '\n']).filter(|w| !w.is_empty()) {
+        let (exclude, range) = match word.strip_prefix('^') {
+            Some(rest) => (true, rest),
+            None => (false, word),
+        };
+        let (from, to) = match range.split_once('-') {
+            Some((a, b)) => (a.parse::<usize>(), b.parse::<usize>()),
+            None => (range.parse::<usize>(), range.parse::<usize>()),
+        };
+        let (Ok(from), Ok(to)) = (from, to) else {
+            bail!("{word:?} isn't a number, a range like 1-3 or an exclusion like ^4");
+        };
+        if from == 0 || to > count || from > to {
+            bail!("{word} is outside 1-{count}");
+        }
+        if exclude {
+            excluded.extend(from..=to);
+        } else {
+            only_exclusions = false;
+            picked.extend(from..=to);
+        }
+    }
+    if only_exclusions && !excluded.is_empty() {
+        picked.extend(1..=count);
+    }
+    Ok(picked.difference(&excluded).copied().collect())
+}
+
+fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
     let declared = declared(target.config)?;
     let archive = Archive::new(ARCHIVE_URL);
     let date = match Lockfile::load(&target.config_dir.join(LOCK_FILE))?
@@ -212,11 +293,12 @@ pub fn search(target: &Target, terms: &[String]) -> Result<()> {
         }
     };
 
+    let mut hits = Vec::new();
     let (_, db) = snapshot_conf(&archive, &cache, date, &declared.repos)?;
     for repo in &declared.repos {
         for pkg in read_sync_db(&db.join("sync").join(format!("{}.db", repo.name)))?.into_values() {
             if matches(&pkg.name, &pkg.description) {
-                println!(
+                let line = format!(
                     "{}/{} {}{}\n    {}",
                     repo.name,
                     pkg.name,
@@ -224,6 +306,11 @@ pub fn search(target: &Target, terms: &[String]) -> Result<()> {
                     marker(&pkg.name),
                     pkg.description
                 );
+                hits.push(Hit {
+                    name: pkg.name,
+                    line,
+                    aur: false,
+                });
             }
         }
     }
@@ -234,7 +321,7 @@ pub fn search(target: &Target, terms: &[String]) -> Result<()> {
         } else {
             ""
         };
-        println!(
+        let line = format!(
             "aur/{} {} (+{} {:.2}){stale}{}\n    {}",
             entry.name,
             entry.version,
@@ -243,8 +330,14 @@ pub fn search(target: &Target, terms: &[String]) -> Result<()> {
             marker(&entry.name),
             entry.description.as_deref().unwrap_or("")
         );
+        hits.push(Hit {
+            name: entry.name.clone(),
+            line,
+            aur: true,
+        });
     }
-    Ok(())
+    hits.sort_by_key(|hit| (rank(&hit.name, terms), hit.aur, hit.name.clone()));
+    Ok(hits)
 }
 
 /// `archix -Syu`: pacman -Syu from live mirrors, adopt it, move AUR packages to their newest recipes, then switch.
@@ -331,4 +424,25 @@ pub fn prefetch(url: &str) -> Result<()> {
         archix::luagen::string(url)
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::selection;
+
+    #[test]
+    fn selections_read_like_yay() {
+        assert_eq!(selection("1 2 3\n", 5).unwrap(), [1, 2, 3]);
+        assert_eq!(selection("2-4", 5).unwrap(), [2, 3, 4]);
+        assert_eq!(selection("1,3", 5).unwrap(), [1, 3]);
+        assert_eq!(
+            selection("^4", 5).unwrap(),
+            [1, 2, 3, 5],
+            "only exclusions means all but those"
+        );
+        assert_eq!(selection("1-5 ^2-3", 5).unwrap(), [1, 4, 5]);
+        assert!(selection("\n", 5).unwrap().is_empty());
+        assert!(selection("6", 5).is_err());
+        assert!(selection("x", 5).is_err());
+    }
 }

@@ -39,6 +39,11 @@ use super::{
     require_root, select_changes, settle_flatpak, transaction_for, user_cache,
 };
 
+/// Declares packages in the host's installed.lua and switches, undoing the edit if that fails.
+pub fn declare_and_switch(target: &Target, names: &[String], noconfirm: bool) -> Result<()> {
+    switch_after_declaring(target, names, noconfirm, None, false)
+}
+
 /// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
 fn switch_after_declaring(
     target: &Target,
