@@ -20,7 +20,7 @@ use archix::flatpak::{self, LockedApp};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
-use archix::journal::{Journal, Kind};
+use archix::journal::{Journal, Kind, Step};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
@@ -196,7 +196,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
                 "nothing to do: the system matches generation {} (snapshot {})",
                 current.number, lock.date
             );
-            return Ok(());
+            return report_soft_failures(&run_hooks(&system_change));
         }
         system::blobs::ensure(&paths, &archive, &rendered)?;
         system::apply::keep_originals(&paths, &system_change)?;
@@ -207,7 +207,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             "switched to generation {} (snapshot {}); no package changes were needed",
             created.number, lock.date
         );
-        return Ok(());
+        return report_soft_failures(&run_hooks(&system_change));
     }
     for change in &changes {
         println!("{change}");
@@ -217,6 +217,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     }
     if declared.boot.is_some() {
         println!("boot entry for the new generation");
+    }
+    if let Ok(names) = system::hooks::order(&system_change.to.hooks)
+        && !names.is_empty()
+    {
+        println!("run hooks  {}", names.join(", "));
     }
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
     if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
@@ -327,6 +332,15 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     )?);
     println!("switched to {name}");
     report_soft_failures(&soft_failures)
+}
+
+/// Hooks for a switch that needed no journal; NixOS runs activation on every switch too.
+fn run_hooks(change: &SystemChange) -> Vec<String> {
+    if change.to.hooks.is_empty() && change.to.on_change.is_empty() {
+        return Vec::new();
+    }
+    eprintln!(":: {}", Step::Hooks.describe());
+    system::hooks::run(change)
 }
 
 /// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.

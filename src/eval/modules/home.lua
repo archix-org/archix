@@ -30,6 +30,11 @@ return {
           sha256 = archix.option { type = t.nullable(t.str), default = archix.null, description = "The sha256 the download from url must have; `archix prefetch <url>` prints it." },
           link = archix.option { type = t.nullable(t.str), default = archix.null, description = "Make the file a symlink to this target." },
           executable = archix.option { type = t.bool, default = false },
+          on_change = archix.option {
+            type = t.nullable(t.lines),
+            default = archix.null,
+            description = "A bash script run as home.user after a switch or rollback that changed this file, before the hooks.",
+          },
         }),
         default = {},
         description = "Files in the user's home, keyed by path relative to it (a leading ~/ is allowed).",

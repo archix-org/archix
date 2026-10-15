@@ -32,13 +32,14 @@ pub enum Step {
     Files,
     Reload,
     Services,
+    Hooks,
     Verify,
     Boot,
     Activate,
 }
 
 /// Removals come first: the lock is a complete set, so dropping what it leaves out can't strand anything it installs.
-pub const STEPS: [Step; 11] = [
+pub const STEPS: [Step; 12] = [
     Step::Remove,
     Step::Install,
     Step::Reasons,
@@ -47,6 +48,7 @@ pub const STEPS: [Step; 11] = [
     Step::Files,
     Step::Reload,
     Step::Services,
+    Step::Hooks,
     Step::Verify,
     Step::Boot,
     Step::Activate,
@@ -63,6 +65,7 @@ impl Step {
             Step::Files => "writing managed files",
             Step::Reload => "reloading systemd, sysctl, udev and locales",
             Step::Services => "enabling and starting services",
+            Step::Hooks => "running activation hooks",
             Step::Verify => "verifying the result",
             Step::Boot => "writing the boot entry",
             Step::Activate => "making the new generation current",

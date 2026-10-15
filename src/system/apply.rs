@@ -29,7 +29,7 @@ impl SystemChange {
     }
 
     /// Paths whose managed entry differs between the two states, including ones only in one of them.
-    fn changed_paths(&self) -> BTreeSet<&str> {
+    pub(crate) fn changed_paths(&self) -> BTreeSet<&str> {
         let mut changed = BTreeSet::new();
         for (path, file) in &self.to.files {
             if self.from.files.get(path) != Some(file) {

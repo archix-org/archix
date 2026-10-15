@@ -23,7 +23,7 @@ conflicts=('archix')
 source=("archix::git+https://github.com/archix-org/archix.git#branch=${ARCHIX_BRANCH:-main}")
 sha256sums=('SKIP')
 # makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
-options=('!lto')
+options=('!lto' '!debug')
 
 pkgver() {
   cd archix

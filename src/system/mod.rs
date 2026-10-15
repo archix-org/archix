@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod blobs;
 pub mod boot;
+pub mod hooks;
 pub mod rescue;
 pub mod snapshot;
 
@@ -27,6 +28,21 @@ pub struct SystemState {
     pub services: BTreeMap<String, bool>,
     #[serde(default)]
     pub user_services: BTreeMap<String, bool>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hooks: BTreeMap<String, Hook>,
+    /// Scripts for managed files, keyed by path, run when a switch changes that file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub on_change: BTreeMap<String, Hook>,
+}
+
+/// A script run after a switch; `user` None means root.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Hook {
+    pub run: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 /// A file archix writes: either content (by sha256 in the blob store) or a symlink.
@@ -109,6 +125,17 @@ impl Builder {
         };
         self.state.files.insert(path.to_string(), file);
         Ok(())
+    }
+
+    fn on_change(&mut self, path: &str, spec: &Value, user: Option<&str>) {
+        if let Some(run) = str_of(spec, "on_change") {
+            let hook = Hook {
+                run: run.to_string(),
+                user: user.map(str::to_string),
+                after: Vec::new(),
+            };
+            self.state.on_change.insert(path.to_string(), hook);
+        }
     }
 
     fn link(&mut self, path: &str, target: &str) {
@@ -237,6 +264,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         } else if let Some(link) = str_of(spec, "link") {
             b.link(path, link);
         }
+        b.on_change(path, spec, None);
     }
 
     for (key, dir) in [("units", "/etc/systemd/system"), ("user_units", "/etc/systemd/user")] {
@@ -338,6 +366,15 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             target.insert(unit_name(name)?.to_string(), *enabled == Value::Bool(true));
         }
     }
+    for (name, spec) in map(config, "hooks").into_iter().flatten() {
+        let hook = Hook {
+            run: str_of(spec, "run").unwrap_or_default().to_string(),
+            user: str_of(spec, "user").map(str::to_string),
+            after: strings(get(spec, "after")),
+        };
+        b.state.hooks.insert(name.clone(), hook);
+    }
+    hooks::order(&b.state.hooks)?;
     Ok(Rendered {
         state: b.state,
         blobs: b.blobs,
@@ -414,6 +451,7 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
                 b.content(&path, content, mode, user, &group);
             }
         }
+        b.on_change(&path, spec, Some(user));
     }
     Ok(())
 }
@@ -486,6 +524,26 @@ mod tests {
             Some("/usr/share/zoneinfo/Europe/Istanbul")
         );
         assert!(!rendered.state.services["cups.service"]);
+    }
+
+    #[test]
+    fn on_change_runs_as_the_file_owner_and_hooks_must_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = render(
+            &config(serde_json::json!({
+                "files": { "/etc/x": { "text": "x", "on_change": "systemctl restart x" } },
+                "home": { "user": "u", "files": { ".y": { "text": "y", "on_change": "echo y" } } },
+                "hooks": { "late": { "run": "true", "after": ["early"] }, "early": { "run": "true", "user": "u" } },
+            })),
+            dir.path(),
+        )
+        .unwrap();
+        let state = &rendered.state;
+        assert_eq!(state.on_change["/etc/x"].user, None);
+        assert_eq!(state.on_change["/home/u/.y"].user.as_deref(), Some("u"));
+        assert_eq!(hooks::order(&state.hooks).unwrap(), ["early", "late"]);
+        let cycle = serde_json::json!({ "hooks": { "a": { "run": "true", "after": ["a"] } } });
+        assert!(render(&config(cycle), dir.path()).is_err());
     }
 
     #[test]

@@ -130,6 +130,65 @@ fn a_failing_service_does_not_undo_the_switch() {
     setup.ok(&["switch", "--noconfirm"]);
 }
 
+fn hooks_body(conf: &str, extra_hook: &str) -> String {
+    format!(
+        r#"files = {{ ["/etc/archix-hook.conf"] = {{ text = {conf:?}, on_change = "echo changed >> /var/tmp/archix-on-change" }} }},
+        users = {{ archixhook = {{}} }},
+        hooks = {{
+          z = {{ run = "echo z $USER >> /var/tmp/archix-hooks" }},
+          a = {{ run = "echo a $USER $HOME >> /var/tmp/archix-hooks", user = "archixhook", after = {{ "z" }} }},
+          {extra_hook}
+        }}"#
+    )
+}
+
+#[test]
+#[ignore]
+fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
+    let _system = lock_system();
+    for log in ["/var/tmp/archix-hooks", "/var/tmp/archix-on-change"] {
+        let _ = fs::remove_file(log);
+    }
+    let setup = Setup::new(&[], &hooks_body("one", ""));
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("run hooks  z, a"), "{out}");
+    assert_eq!(
+        read("/var/tmp/archix-hooks"),
+        "z root\na archixhook /home/archixhook\n",
+        "after orders hooks, and user hooks run as that user"
+    );
+    assert_eq!(read("/var/tmp/archix-on-change"), "changed\n");
+
+    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
+    assert_eq!(
+        read("/var/tmp/archix-hooks").lines().count(),
+        4,
+        "hooks run on every switch, like NixOS activation"
+    );
+    assert_eq!(read("/var/tmp/archix-on-change"), "changed\n", "the file didn't change");
+
+    setup.set_body(&[], &hooks_body("two", ""));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(read("/var/tmp/archix-on-change"), "changed\nchanged\n");
+
+    setup.set_body(&[], &hooks_body("three", r#"broken = { run = "false" },"#));
+    let output = setup.run(&["switch", "--noconfirm"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a failing hook is reported");
+    assert!(stderr.contains("hook broken"), "{stderr}");
+    assert_eq!(read("/etc/archix-hook.conf"), "three\n", "the switch still finished");
+    assert!(!std::path::Path::new("/var/lib/archix/journal.json").exists());
+
+    setup.ok(&["rollback", "--noconfirm"]);
+    assert_eq!(
+        read("/var/tmp/archix-on-change").lines().count(),
+        4,
+        "a rollback runs the target generation's on_change too"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
 #[test]
 #[ignore]
 fn files_taken_over_unchanged_survive_being_unmanaged() {

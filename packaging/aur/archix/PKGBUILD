@@ -20,7 +20,7 @@ optdepends=(
 source=("$pkgname-$pkgver.tar.gz::https://github.com/archix-org/archix/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 # makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
-options=('!lto')
+options=('!lto' '!debug')
 
 prepare() {
   cd "$pkgname-$pkgver"

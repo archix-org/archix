@@ -13,6 +13,11 @@ local text_file = t.submodule {
   mode = archix.option { type = t.str, default = "0644" },
   owner = archix.option { type = t.str, default = "root" },
   group = archix.option { type = t.str, default = "root" },
+  on_change = archix.option {
+    type = t.nullable(t.lines),
+    default = archix.null,
+    description = "A bash script run as root after a switch or rollback that changed this file, before the hooks.",
+  },
 }
 
 return {

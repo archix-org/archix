@@ -22,6 +22,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("generations", include_str!("modules/generations.lua")),
     ("aur", include_str!("modules/aur.lua")),
     ("system", include_str!("modules/system.lua")),
+    ("hooks", include_str!("modules/hooks.lua")),
     ("boot", include_str!("modules/boot.lua")),
     ("appimages", include_str!("modules/appimages.lua")),
     ("flatpak", include_str!("modules/flatpak.lua")),
