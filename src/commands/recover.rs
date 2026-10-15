@@ -12,6 +12,7 @@ use archix::generations::Store;
 use archix::journal::{Journal, Kind, Step, Transaction};
 use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
+use archix::system::apply::SystemChange;
 
 use super::{RecoverMode, describe_unfinished, kind_name, require_root};
 
@@ -123,6 +124,7 @@ fn rollback_transaction(
         &wanted,
     )?;
     Ok(Transaction {
+        system: journal.transaction.system.as_ref().map(SystemChange::reversed),
         install,
         remove: installed
             .keys()

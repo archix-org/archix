@@ -29,6 +29,7 @@ fn fake_interrupted_switch(paths: &Paths) {
         before.iter().map(|(name, pkg)| (name.clone(), pkg.explicit)).collect();
     reasons.insert("tree".into(), true);
     let transaction = Transaction {
+        system: None,
         install: vec![tree],
         remove: vec![],
         versions,

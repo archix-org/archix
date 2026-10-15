@@ -56,6 +56,15 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         }
     }
 
+    let blobs: BTreeSet<&str> = kept_generations
+        .iter()
+        .flat_map(|g| g.system.files.values())
+        .map(|file| file.sha256.as_str())
+        .collect();
+    let (blob_count, blob_bytes) = crate::system::blobs::collect(paths, &blobs)?;
+    report.files += blob_count;
+    report.bytes += blob_bytes;
+
     let dates: BTreeSet<String> = kept_generations.iter().map(|g| g.date.to_string()).collect();
     if let Ok(entries) = fs::read_dir(snapshot_cache.join("snapshots")) {
         for entry in entries.flatten() {

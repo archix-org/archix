@@ -25,6 +25,7 @@ use archix::paths::Paths;
 use archix::plan::Change;
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
+use archix::system::{self, SystemState, apply::SystemChange};
 
 use super::lock::{current_lock, save_lock};
 use super::{
@@ -96,7 +97,15 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         },
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
+        system: SystemState::default(),
     };
+    let rendered = system::render(target.config, target.config_dir)?;
+    generation.system = rendered.state.clone();
+    let system_change = SystemChange {
+        from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
+        to: rendered.state.clone(),
+    };
+    let system_lines = system::apply::describe(&system_change)?;
 
     let (changes, warned) = select_changes(
         &lock.packages,
@@ -105,7 +114,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         &declared.ignored,
     );
     print_warned(&warned);
-    if changes.is_empty() {
+    if changes.is_empty() && system_lines.is_empty() {
         if let Some(current) = current.filter(|current| current.same_system(&generation)) {
             finish(&paths, &declared.repos)?;
             println!(
@@ -126,9 +135,14 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     for change in &changes {
         println!("{change}");
     }
-    if !noconfirm && !confirm(&format!("apply {} changes?", changes.len()))? {
+    for line in &system_lines {
+        println!("{line}");
+    }
+    let count = changes.len() + system_lines.len();
+    if !noconfirm && !confirm(&format!("apply {count} changes?"))? {
         bail!("aborted; nothing was changed");
     }
+    system::blobs::store(&paths, &rendered.blobs)?;
 
     import_keys(&declared.repos)?;
     let mut changes = changes;
@@ -191,7 +205,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     }
     generation.date = lock.date;
 
-    let transaction = transaction_for(
+    let mut transaction = transaction_for(
         &archive,
         &paths,
         lock.date,
@@ -200,15 +214,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         &built,
         &declared.repos,
     )?;
+    transaction.system = Some(system_change);
     let created = store.create(generation)?;
     let name = format!("generation {} (snapshot {})", created.number, lock.date);
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
     journal.save(&paths.journal())?;
-    apply::run(&paths, &mut journal, false)?;
+    let soft_failures = apply::run(&paths, &mut journal, false)?;
     finish(&paths, &declared.repos)?;
     println!("switched to {name}");
-    Ok(())
+    report_soft_failures(&soft_failures)
 }
 
 /// The current generation's built-file hashes for AUR packages still locked at the same commit.
@@ -302,6 +317,20 @@ fn build_aur(
         let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
         save_lock(target, &mut lockfile, Some(&old), lock)?;
     }
+}
+
+/// Lists what failed without undoing the switch, and makes the command fail so scripts notice.
+fn report_soft_failures(failures: &[String]) -> Result<()> {
+    if failures.is_empty() {
+        return Ok(());
+    }
+    for failure in failures {
+        eprintln!("failed: {failure}");
+    }
+    bail!(
+        "the new generation is current, but {} services or reloads failed (listed above)",
+        failures.len()
+    )
 }
 
 /// Imports and locally signs custom repos' signing keys that pacman's keyring doesn't have yet.
@@ -518,7 +547,15 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     );
     print_warned(&warned);
     let name = format!("generation {number} (snapshot {})", generation.date);
-    if changes.is_empty() {
+    let system_change = SystemChange {
+        from: store.get(current)?.system,
+        to: generation.system.clone(),
+    };
+    let system_lines = system::apply::describe(&system_change)?;
+    for line in &system_lines {
+        println!("{line}");
+    }
+    if changes.is_empty() && system_lines.is_empty() {
         store.activate(number)?;
         println!("{name} is current; no package changes were needed");
         return Ok(());
@@ -530,7 +567,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
         bail!("aborted; nothing was changed");
     }
     let archive = Archive::new(ARCHIVE_URL);
-    let transaction = transaction_for(
+    let mut transaction = transaction_for(
         &archive,
         &paths,
         generation.date,
@@ -539,12 +576,13 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
         &BTreeMap::new(),
         &[],
     )?;
+    transaction.system = Some(system_change);
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;
-    apply::run(&paths, &mut journal, false)?;
+    let soft_failures = apply::run(&paths, &mut journal, false)?;
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
-    Ok(())
+    report_soft_failures(&soft_failures)
 }
 
 pub fn generations() -> Result<()> {

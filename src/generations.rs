@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::date::Date;
 use crate::lock::Locked;
 use crate::paths::Paths;
+use crate::system::SystemState;
 
 const GENERATION_FILE: &str = "generation.json";
 
@@ -25,6 +26,8 @@ pub struct Generation {
     pub settings: Settings,
     pub config_commit: Option<String>,
     pub config_dirty: bool,
+    #[serde(default)]
+    pub system: SystemState,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -39,7 +42,10 @@ pub struct Settings {
 impl Generation {
     /// Whether applying `other` would leave the system exactly as this generation describes it.
     pub fn same_system(&self, other: &Generation) -> bool {
-        self.date == other.date && self.packages == other.packages && self.settings == other.settings
+        self.date == other.date
+            && self.packages == other.packages
+            && self.settings == other.settings
+            && self.system == other.system
     }
 }
 
@@ -191,6 +197,7 @@ mod tests {
             },
             config_commit: None,
             config_dirty: false,
+            system: SystemState::default(),
         }
     }
 

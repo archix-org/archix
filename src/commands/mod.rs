@@ -292,6 +292,7 @@ fn transaction_for(
     Ok(Transaction {
         install,
         remove,
+        system: None,
         versions: packages
             .iter()
             .filter(|(_, pkg)| !pkg.build_only)

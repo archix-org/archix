@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::pacman::LocalPkg;
+use crate::system::apply::SystemChange;
 
 const JOURNAL_VERSION: u32 = 1;
 
@@ -25,11 +26,27 @@ pub enum Step {
     Install,
     Remove,
     Reasons,
+    Users,
+    StopServices,
+    Files,
+    Reload,
+    Services,
     Verify,
     Activate,
 }
 
-pub const STEPS: [Step; 5] = [Step::Install, Step::Remove, Step::Reasons, Step::Verify, Step::Activate];
+pub const STEPS: [Step; 10] = [
+    Step::Install,
+    Step::Remove,
+    Step::Reasons,
+    Step::Users,
+    Step::StopServices,
+    Step::Files,
+    Step::Reload,
+    Step::Services,
+    Step::Verify,
+    Step::Activate,
+];
 
 impl Step {
     pub fn describe(self) -> &'static str {
@@ -37,6 +54,11 @@ impl Step {
             Step::Install => "installing packages",
             Step::Remove => "removing packages",
             Step::Reasons => "setting install reasons",
+            Step::Users => "updating users and groups",
+            Step::StopServices => "stopping and disabling services",
+            Step::Files => "writing managed files",
+            Step::Reload => "reloading systemd, sysctl, udev and locales",
+            Step::Services => "enabling and starting services",
             Step::Verify => "verifying the result",
             Step::Activate => "making the new generation current",
         }
@@ -52,6 +74,9 @@ pub struct Transaction {
     pub versions: BTreeMap<String, String>,
     /// Whether each package must end up explicitly installed (true) or as a dependency.
     pub reasons: BTreeMap<String, bool>,
+    /// Files, users and services, when the transaction manages them.
+    #[serde(default)]
+    pub system: Option<SystemChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

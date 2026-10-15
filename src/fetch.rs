@@ -82,6 +82,10 @@ fn matches(path: &Path, item: &Wanted) -> Result<bool> {
     Ok(sha256(path)? == *expected)
 }
 
+pub fn sha256_bytes(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn sha256(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     let mut file = File::open(path).with_context(|| format!("reading {}", path.display()))?;

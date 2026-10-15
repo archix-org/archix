@@ -12,6 +12,7 @@ use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
 use archix::resolve::resolve;
+use archix::system::{self, apply::SystemChange};
 
 use super::{
     Declared, Snapshot, Target, aur_git, aur_source, confirm, declared, describe_unfinished, print_warned,
@@ -116,11 +117,22 @@ pub fn diff(target: &Target) -> Result<()> {
             "{newer} packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading"
         );
     }
-    if changes.is_empty() {
-        println!("the system matches the lock");
+    let store = Store::new(&paths);
+    let current = store.current()?.map(|n| store.get(n)).transpose()?;
+    let rendered = system::render(target.config, target.config_dir)?;
+    let change = SystemChange {
+        from: current.map(|g| g.system).unwrap_or_default(),
+        to: rendered.state,
+    };
+    let system_lines = system::apply::describe(&change)?;
+    if changes.is_empty() && system_lines.is_empty() {
+        println!("the system matches the lock and the config");
     }
     for change in changes {
         println!("{change}");
+    }
+    for line in system_lines {
+        println!("{line}");
     }
     print_warned(&warned);
     Ok(())

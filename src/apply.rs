@@ -41,24 +41,55 @@ fn pacman_running() -> bool {
 }
 
 /// Runs the journal's remaining steps, saving progress after each; `reinstall` redoes installs after a crash.
-pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<()> {
+pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<String>> {
     let path = paths.journal();
+    let mut soft_failures = Vec::new();
     while let Some(step) = journal.next_step() {
         eprintln!(":: {}", step.describe());
-        run_step(paths, &journal.transaction, journal.generation, step, reinstall).with_context(|| {
-            format!(
-                "{} failed; the switch is unfinished, run `archix recover`",
-                step.describe()
-            )
-        })?;
+        soft_failures.extend(
+            run_step(paths, &journal.transaction, journal.generation, step, reinstall).with_context(|| {
+                format!(
+                    "{} failed; the switch is unfinished, run `archix recover`",
+                    step.describe()
+                )
+            })?,
+        );
         journal.done.push(step);
         journal.save(&path)?;
     }
-    Journal::delete(&path)
+    Journal::delete(&path)?;
+    Ok(soft_failures)
 }
 
-fn run_step(paths: &Paths, tx: &Transaction, generation: Option<u32>, step: Step, reinstall: bool) -> Result<()> {
+fn run_step(
+    paths: &Paths,
+    tx: &Transaction,
+    generation: Option<u32>,
+    step: Step,
+    reinstall: bool,
+) -> Result<Vec<String>> {
+    let system = tx.system.as_ref();
     match step {
+        Step::Users => system.map_or(Ok(()), crate::system::apply::users).map(|()| Vec::new()),
+        Step::Files => system
+            .map_or(Ok(()), |change| crate::system::apply::files(paths, change))
+            .map(|()| Vec::new()),
+        Step::Reload => Ok(system.map_or_else(Vec::new, crate::system::apply::reload)),
+        Step::StopServices => Ok(system.map_or_else(Vec::new, crate::system::apply::stop_services)),
+        Step::Services => Ok(system.map_or_else(Vec::new, crate::system::apply::start_services)),
+        step => run_package_step(paths, tx, generation, step, reinstall).map(|()| Vec::new()),
+    }
+}
+
+fn run_package_step(
+    paths: &Paths,
+    tx: &Transaction,
+    generation: Option<u32>,
+    step: Step,
+    reinstall: bool,
+) -> Result<()> {
+    match step {
+        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services => Ok(()),
         Step::Activate => match generation {
             Some(number) => Store::new(paths).activate(number),
             None => Ok(()),
