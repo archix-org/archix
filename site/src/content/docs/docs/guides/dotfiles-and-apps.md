@@ -265,7 +265,7 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 - **Caches and app state** aren't offered: `.cache`, `.local`, toolchains such as `.cargo` and `.rustup`, browsers, IDEs, chat apps and shell histories.
 - **Credentials** are never offered, only counted: `.ssh`, `.gnupg`, `.aws`, `.kube`, `.docker`, `.cloudflared`, `.config/gh`, password stores, `.claude.json`, `.config/sunshine` and anything else that looks like a secret. The step says so: `· 1 entry that holds a secret stays out of the config and isn't listed`, or `· 4 entries that hold secrets stay out of the config and aren't listed`.
 
-`space` or `enter` toggles an entry, `a` and `n` select all or none, and `r` goes back to the recommended ones. The full lists are in [`src/capture.json`](https://github.com/archix-org/archix/blob/main/src/capture.json).
+`space` or `enter` toggles an entry, `a` and `n` select all or none, and `r` goes back to the recommended ones. The full lists are in `src/capture.json` in the archix repository.
 
 Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
 
