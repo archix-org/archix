@@ -8,8 +8,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Padding, Paragraph, Wrap};
 
-use super::{Answers, BootFacts, FALLBACK, Facts, MISSING_VERSIONS, some_of};
+use super::{Answers, BootFacts, FALLBACK, Facts, Home, KEEP, KEEP_DAYS, MISSING_VERSIONS, secret_note, some_of};
 use crate::commands::count;
+use archix::capture::Dotfile;
 
 const ACCENT: Color = Color::Cyan;
 const GOOD: Color = Color::Green;
@@ -87,6 +88,10 @@ enum Control {
     KeepDays,
     DotUser,
     Dotfiles,
+    Settings,
+    Users,
+    Groups,
+    Services,
 }
 
 /// One focusable line: a choice's option, a toggle, a text field, a checklist item or a button.
@@ -185,12 +190,132 @@ impl<'a> App<'a> {
         self.facts.dotfiles.keys().collect()
     }
 
-    fn dotfile_candidates(&self) -> &[String] {
-        self.facts
-            .dotfiles
-            .values()
-            .nth(self.answers.dotfiles_user)
-            .map_or(&[], |(_, candidates)| candidates.as_slice())
+    fn home(&self) -> Option<&Home> {
+        self.facts.dotfiles.values().nth(self.answers.dotfiles_user)
+    }
+
+    fn dotfile_candidates(&self) -> &[Dotfile] {
+        self.home().map_or(&[], |home| home.offered.as_slice())
+    }
+
+    /// A checklist's items as (name, detail) pairs.
+    fn items(&self, control: Control) -> Vec<(String, String)> {
+        let facts = self.facts;
+        match control {
+            Control::Files => facts
+                .files
+                .iter()
+                .map(|file| {
+                    let why = if file.edited {
+                        "changed from its package's version"
+                    } else {
+                        "not from any package"
+                    };
+                    let tag = if file.recommended { "recommended · " } else { "" };
+                    (file.path.clone(), format!("{tag}{why}"))
+                })
+                .collect(),
+            Control::Dotfiles => self
+                .dotfile_candidates()
+                .iter()
+                .map(|d| {
+                    (
+                        d.name.clone(),
+                        if d.recommended {
+                            "recommended".into()
+                        } else {
+                            String::new()
+                        },
+                    )
+                })
+                .collect(),
+            Control::Settings => facts
+                .settings_summary
+                .iter()
+                .map(|s| (s.clone(), String::new()))
+                .collect(),
+            Control::Users => facts
+                .accounts
+                .users
+                .iter()
+                .map(|(name, user)| {
+                    let groups = if user.groups.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  groups {}", user.groups.join(", "))
+                    };
+                    (name.clone(), format!("uid {}  {}{groups}", user.uid, user.shell))
+                })
+                .collect(),
+            Control::Groups => facts
+                .accounts
+                .groups
+                .iter()
+                .map(|(name, gid)| (name.clone(), format!("gid {gid}")))
+                .collect(),
+            Control::Services => facts
+                .services
+                .iter()
+                .map(|(unit, on)| (unit.clone(), if *on { "enabled".into() } else { "disabled".into() }))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn is_list(control: Control) -> bool {
+        matches!(
+            control,
+            Control::Files
+                | Control::Dotfiles
+                | Control::Settings
+                | Control::Users
+                | Control::Groups
+                | Control::Services
+        )
+    }
+
+    fn checked(&self, control: Control, i: usize) -> bool {
+        let answers = &self.answers;
+        let name = || {
+            self.items(control)
+                .get(i)
+                .map(|(name, _)| name.clone())
+                .unwrap_or_default()
+        };
+        match control {
+            Control::Files => answers.files.contains(&i),
+            Control::Settings => answers.settings.contains(&i),
+            Control::Dotfiles => answers.dotfiles.contains(&name()),
+            Control::Users => answers.users.contains(&name()),
+            Control::Groups => answers.groups.contains(&name()),
+            Control::Services => answers.services.contains(&name()),
+            _ => false,
+        }
+    }
+
+    fn set_checked(&mut self, control: Control, i: usize, on: bool) {
+        let name = self
+            .items(control)
+            .get(i)
+            .map(|(name, _)| name.clone())
+            .unwrap_or_default();
+        let answers = &mut self.answers;
+        fn set<T: Ord>(set: &mut std::collections::BTreeSet<T>, value: T, on: bool) {
+            if on {
+                set.insert(value);
+            } else {
+                set.remove(&value);
+            }
+        }
+        match control {
+            Control::Files => set(&mut answers.files, i, on),
+            Control::Settings => set(&mut answers.settings, i, on),
+            Control::Dotfiles => set(&mut answers.dotfiles, name, on),
+            Control::Users => set(&mut answers.users, name, on),
+            Control::Groups => set(&mut answers.groups, name, on),
+            Control::Services => set(&mut answers.services, name, on),
+            _ => {}
+        }
     }
 
     fn controls(&self) -> Vec<Control> {
@@ -213,6 +338,20 @@ impl<'a> App<'a> {
                 controls.push(Control::Strict);
                 if !facts.aur_packages.is_empty() {
                     controls.extend([Control::AurReview, Control::MissingVersions]);
+                }
+            }
+            Step::System => {
+                if !facts.settings_summary.is_empty() {
+                    controls.push(Control::Settings);
+                }
+                if !facts.accounts.users.is_empty() {
+                    controls.push(Control::Users);
+                }
+                if !facts.accounts.groups.is_empty() {
+                    controls.push(Control::Groups);
+                }
+                if !facts.services.is_empty() {
+                    controls.push(Control::Services);
                 }
             }
             Step::Files if !facts.files.is_empty() => controls.push(Control::Files),
@@ -267,8 +406,7 @@ impl<'a> App<'a> {
             match control {
                 Control::Location | Control::Keep | Control::KeepDays => rows.push(Row::Edit(control)),
                 Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => rows.push(Row::Flip(control)),
-                Control::Files => rows.extend((0..self.facts.files.len()).map(|i| Row::Item(control, i))),
-                Control::Dotfiles => rows.extend((0..self.dotfile_candidates().len()).map(|i| Row::Item(control, i))),
+                c if Self::is_list(c) => rows.extend((0..self.items(c).len()).map(|i| Row::Item(control, i))),
                 _ => rows.extend((0..self.options(control).len()).map(|i| Row::Pick(control, i))),
             }
         }
@@ -326,11 +464,9 @@ impl<'a> App<'a> {
             KeyCode::PageUp => self.move_focus(-10),
             KeyCode::Home => self.focus = 0,
             KeyCode::End => self.focus_row(Row::Next),
-            KeyCode::Char('a') if in_list => self.select(|_, _| true),
-            KeyCode::Char('n') if in_list => self.select(|_, _| false),
-            KeyCode::Char('r') if row.control() == Some(Control::Files) => {
-                self.select(|facts, i| facts.files[i].recommended);
-            }
+            KeyCode::Char('a') if in_list => self.select(|_, _, _| true),
+            KeyCode::Char('n') if in_list => self.select(|_, _, _| false),
+            KeyCode::Char('r') if in_list => self.select(|app, control, i| app.recommended(control, i)),
             KeyCode::Char('q') => return Flow::Quit,
             _ => {}
         }
@@ -377,7 +513,19 @@ impl<'a> App<'a> {
                 Control::Strict => answers.strict = i == 0,
                 Control::DotUser if answers.dotfiles_user != i => {
                     answers.dotfiles_user = i;
-                    answers.dotfiles.clear();
+                    answers.dotfiles = self
+                        .facts
+                        .dotfiles
+                        .values()
+                        .nth(i)
+                        .map(|home| {
+                            home.offered
+                                .iter()
+                                .filter(|d| d.recommended)
+                                .map(|d| d.name.clone())
+                                .collect()
+                        })
+                        .unwrap_or_default();
                 }
                 _ => {}
             },
@@ -392,17 +540,9 @@ impl<'a> App<'a> {
                 let before = self.text(control).map(|text| text.clone());
                 self.editing = before;
             }
-            Row::Item(Control::Files, i) => {
-                if !answers.files.remove(&i) {
-                    answers.files.insert(i);
-                }
-            }
-            Row::Item(_, i) => {
-                if let Some(name) = self.dotfile_candidates().get(i).cloned()
-                    && !self.answers.dotfiles.remove(&name)
-                {
-                    self.answers.dotfiles.insert(name);
-                }
+            Row::Item(control, i) => {
+                let on = !self.checked(control, i);
+                self.set_checked(control, i, on);
             }
         }
         Flow::Stay
@@ -444,12 +584,15 @@ impl<'a> App<'a> {
     fn problem(&self) -> Option<String> {
         let answers = &self.answers;
         match self.current() {
-            Step::Config if !std::path::Path::new(answers.location.trim()).is_absolute() => {
+            Step::Config
+                if !answers.location.trim().is_empty()
+                    && !std::path::Path::new(answers.location.trim()).is_absolute() =>
+            {
                 Some("the config directory must be an absolute path".into())
             }
             Step::Generations => [&answers.keep, &answers.keep_days]
                 .into_iter()
-                .find(|value| value.trim().parse::<u32>().is_err())
+                .find(|value| !value.trim().is_empty() && value.trim().parse::<u32>().is_err())
                 .map(|value| format!("{value:?} isn't a number")),
             _ => None,
         }
@@ -466,22 +609,22 @@ impl<'a> App<'a> {
         self.focus = (self.focus as isize + delta).clamp(0, last) as usize;
     }
 
-    fn select(&mut self, keep: impl Fn(&Facts, usize) -> bool) {
-        match self.focused().control() {
-            Some(Control::Files) => {
-                self.answers.files = (0..self.facts.files.len()).filter(|i| keep(self.facts, *i)).collect();
-            }
-            Some(Control::Dotfiles) => {
-                let chosen = self
-                    .dotfile_candidates()
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| keep(self.facts, *i))
-                    .map(|(_, name)| name.clone())
-                    .collect();
-                self.answers.dotfiles = chosen;
-            }
-            _ => {}
+    /// Ticks the focused checklist's items `keep` says yes to and unticks the rest.
+    fn select(&mut self, keep: impl Fn(&Self, Control, usize) -> bool) {
+        let Some(control) = self.focused().control().filter(|c| Self::is_list(*c)) else {
+            return;
+        };
+        for i in 0..self.items(control).len() {
+            let on = keep(self, control, i);
+            self.set_checked(control, i, on);
+        }
+    }
+
+    fn recommended(&self, control: Control, i: usize) -> bool {
+        match control {
+            Control::Files => self.facts.files[i].recommended,
+            Control::Dotfiles => self.dotfile_candidates()[i].recommended,
+            _ => true,
         }
     }
 
@@ -583,12 +726,11 @@ impl<'a> App<'a> {
             *cursor_line = Some(lines.len());
         }
         let button = |label: String, row: Row, primary: bool| {
-            let style = if focused == row {
-                Style::new().fg(Color::Black).bg(ACCENT).bold()
-            } else if primary {
-                Style::new().fg(ACCENT).bold()
-            } else {
-                Style::new().fg(QUIET)
+            let style = match (focused == row, primary) {
+                (true, true) => Style::new().fg(Color::Black).bg(Color::White).bold(),
+                (false, true) => Style::new().fg(Color::Black).bg(ACCENT).bold(),
+                (true, false) => Style::new().fg(Color::Black).bg(Color::Gray).bold(),
+                (false, false) => Style::new().fg(QUIET),
             };
             Span::styled(format!(" {label} "), style)
         };
@@ -744,55 +886,30 @@ impl<'a> App<'a> {
                 }
             }
             Step::System => {
+                lines.push(note(
+                    "Everything here is taken over as it is; untick what archix should leave alone.".into(),
+                ));
+                lines.push(note("Passwords stay where they are; archix never manages them.".into()));
+                lines.push(Line::default());
                 if facts.settings_summary.is_empty() {
                     lines.push(note(
                         "no hostname, timezone, locale or keymap archix can take over exactly".into(),
                     ));
-                } else {
-                    lines.push(done(facts.settings_summary.join(", ")));
+                    lines.push(Line::default());
                 }
-                lines.push(Line::default());
-                lines.push(Line::styled("Users", Style::new().bold()));
-                for (name, user) in &facts.accounts.users {
-                    let groups = if user.groups.is_empty() {
-                        String::new()
-                    } else {
-                        format!("  groups {}", user.groups.join(", "))
-                    };
-                    lines.push(Line::from(vec![
-                        Span::raw(format!("  {name}")),
-                        Span::styled(
-                            format!("  uid {}  {}{groups}", user.uid, user.shell),
-                            Style::new().fg(QUIET),
-                        ),
-                    ]));
+                for control in self.controls() {
+                    self.control(control, lines, cursor_line);
                 }
                 if facts.accounts.users.is_empty() {
-                    lines.push(note("none in the regular uid range".into()));
-                }
-                lines.push(note("passwords stay where they are; archix never manages them".into()));
-                lines.push(Line::default());
-                lines.push(Line::styled(
-                    "Services that differ from their preset",
-                    Style::new().bold(),
-                ));
-                for (unit, on) in &facts.services {
-                    let (mark, color) = if *on { ("on ", GOOD) } else { ("off", WARN) };
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {mark} "), Style::new().fg(color)),
-                        Span::raw(unit.clone()),
-                    ]));
+                    lines.push(note("no users in the regular uid range".into()));
                 }
                 if facts.services.is_empty() {
-                    lines.push(note("none".into()));
+                    lines.push(note("no services differ from their preset".into()));
                 }
             }
             Step::Files => {
                 if facts.secrets > 0 {
-                    lines.push(note(format!(
-                        "{} that hold secrets stay out of the config and aren't listed",
-                        count(facts.secrets, "file", "files")
-                    )));
+                    lines.push(note(secret_note(facts.secrets, "file")));
                 }
                 if facts.files.is_empty() {
                     lines.push(note("no edited or hand-written config files found".into()));
@@ -850,8 +967,12 @@ impl<'a> App<'a> {
                             .into(),
                     ));
                     lines.push(note(
-                        "The first switch backs up the originals. Nothing is ticked by default.".into(),
+                        "The first switch backs up the originals. Recommended ones start ticked; r resets to them."
+                            .into(),
                     ));
+                    if let Some(home) = self.home().filter(|home| home.secrets > 0) {
+                        lines.push(note(secret_note(home.secrets, "entry")));
+                    }
                     lines.push(Line::default());
                     for control in self.controls() {
                         self.control(control, lines, cursor_line);
@@ -875,7 +996,10 @@ impl<'a> App<'a> {
             ])
         };
         let git = if answers.git { ", a git repository" } else { "" };
-        lines.push(row("Config", format!("{}{git}", answers.location.trim())));
+        lines.push(row(
+            "Config",
+            format!("{}{git}", answers.location(&facts.default_dir).display()),
+        ));
         lines.push(row(
             "Packages",
             format!(
@@ -905,7 +1029,7 @@ impl<'a> App<'a> {
         if !facts.flatpak_apps.is_empty() {
             lines.push(row("Flatpak", count(facts.flatpak_apps.len(), "app", "apps")));
         }
-        let users: Vec<String> = facts.accounts.users.keys().cloned().collect();
+        let users: Vec<String> = answers.users.iter().cloned().collect();
         lines.push(row(
             "Accounts",
             if users.is_empty() {
@@ -914,7 +1038,10 @@ impl<'a> App<'a> {
                 users.join(", ")
             },
         ));
-        lines.push(row("Services", count(facts.services.len(), "unit", "units")));
+        lines.push(row(
+            "Services",
+            format!("{} of {}", answers.services.len(), facts.services.len()),
+        ));
         lines.push(row("Config files", count(answers.files.len(), "file", "files")));
         let boot = match (&facts.boot, answers.boot) {
             (BootFacts::Ready { esp, .. }, true) => format!("an entry per generation on {esp}"),
@@ -936,8 +1063,8 @@ impl<'a> App<'a> {
             "Generations",
             format!(
                 "keep {} and any younger than {} days",
-                answers.keep.trim(),
-                answers.keep_days.trim()
+                answers.keep(),
+                answers.keep_days()
             ),
         ));
         lines.push(row(
@@ -983,11 +1110,20 @@ impl<'a> App<'a> {
         };
         match control {
             Control::Location | Control::Keep | Control::KeepDays => {
-                let (title, value) = match control {
-                    Control::Location => ("Where should the config live?", &answers.location),
-                    Control::Keep => ("Generations gc always keeps", &answers.keep),
-                    _ => ("…and any younger than this many days", &answers.keep_days),
+                let (title, value, placeholder) = match control {
+                    Control::Location => (
+                        "Where should the config live?",
+                        &answers.location,
+                        self.facts.default_dir.display().to_string(),
+                    ),
+                    Control::Keep => ("Generations gc always keeps", &answers.keep, KEEP.to_string()),
+                    _ => (
+                        "…and any younger than this many days",
+                        &answers.keep_days,
+                        KEEP_DAYS.to_string(),
+                    ),
                 };
+                let placeholder = Span::styled(format!("{placeholder} (default)"), Style::new().fg(QUIET));
                 lines.push(heading(title));
                 let row = Row::Edit(control);
                 let editing = focused == row && self.editing.is_some();
@@ -998,11 +1134,18 @@ impl<'a> App<'a> {
                         format!("{value}▏"),
                         Style::new().fg(ACCENT).add_modifier(Modifier::UNDERLINED),
                     ));
+                    if value.is_empty() {
+                        spans.push(placeholder);
+                    }
                 } else {
-                    spans.push(Span::styled(
-                        value.clone(),
-                        label_style(row).add_modifier(Modifier::UNDERLINED),
-                    ));
+                    if value.is_empty() {
+                        spans.push(placeholder);
+                    } else {
+                        spans.push(Span::styled(
+                            value.clone(),
+                            label_style(row).add_modifier(Modifier::UNDERLINED),
+                        ));
+                    }
                     if focused == row {
                         spans.push(Span::styled("  enter to edit", Style::new().fg(QUIET)));
                     }
@@ -1038,34 +1181,22 @@ impl<'a> App<'a> {
                 ]));
                 lines.push(Line::default());
             }
-            Control::Files | Control::Dotfiles => {
-                let title = if control == Control::Files {
-                    "Config files archix manages"
-                } else {
-                    "Dotfiles to bring in"
+            c if Self::is_list(c) => {
+                let title = match control {
+                    Control::Files => "Config files archix manages",
+                    Control::Dotfiles => "Dotfiles to bring in",
+                    Control::Settings => "Settings",
+                    Control::Users => "Users",
+                    Control::Groups => "Groups",
+                    _ => "Services that differ from their preset",
                 };
                 lines.push(heading(title));
-                let items: Vec<(String, bool, String)> = if control == Control::Files {
-                    self.facts
-                        .files
-                        .iter()
-                        .enumerate()
-                        .map(|(i, file)| {
-                            let why = if file.edited {
-                                "changed from its package's version"
-                            } else {
-                                "not from any package"
-                            };
-                            let tag = if file.recommended { "recommended · " } else { "" };
-                            (file.path.clone(), answers.files.contains(&i), format!("{tag}{why}"))
-                        })
-                        .collect()
-                } else {
-                    self.dotfile_candidates()
-                        .iter()
-                        .map(|name| (name.clone(), answers.dotfiles.contains(name), String::new()))
-                        .collect()
-                };
+                let items: Vec<(String, bool, String)> = self
+                    .items(control)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (name, detail))| (name, self.checked(control, i), detail))
+                    .collect();
                 for (i, (name, checked, detail)) in items.into_iter().enumerate() {
                     let row = Row::Item(control, i);
                     let pointer = pointer(row, cursor_line, lines.len());
@@ -1166,7 +1297,7 @@ mod tests {
             aur_packages: vec!["yay-bin".into()],
             unknown: Vec::new(),
             orphans: vec!["old-dep".into()],
-            settings: Vec::new(),
+            settings: vec![("hostname".into(), archix::luagen::Lua::str("box"))],
             settings_summary: vec!["hostname box".into()],
             accounts: Accounts {
                 users: BTreeMap::from([("me".to_string(), me)]),
@@ -1187,7 +1318,20 @@ mod tests {
             flatpak_gone: Vec::new(),
             dotfiles: BTreeMap::from([(
                 "me".to_string(),
-                (PathBuf::from("/home/me"), vec![".config/nvim".into(), ".zshrc".into()]),
+                Home {
+                    dir: PathBuf::from("/home/me"),
+                    offered: vec![
+                        Dotfile {
+                            name: ".config/kdeglobals".into(),
+                            recommended: false,
+                        },
+                        Dotfile {
+                            name: ".config/nvim".into(),
+                            recommended: true,
+                        },
+                    ],
+                    secrets: 1,
+                },
             )]),
         }
     }
@@ -1255,6 +1399,51 @@ mod tests {
     }
 
     #[test]
+    fn defaults_are_placeholders_git_and_recommended_dotfiles() {
+        let facts = facts();
+        let answers = Answers::recommended(&facts);
+        assert!(answers.git, "git is on when it's installed");
+        assert_eq!(answers.dotfiles, [".config/nvim".to_string()].into());
+        assert_eq!((answers.keep(), answers.keep_days()), (10, 30));
+        let mut app = App::new(&facts, "box", answers);
+        for _ in 0..6 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.current(), Step::Generations);
+        let screen = render(&mut app);
+        assert!(
+            screen.contains("10 (default)") && screen.contains("30 (default)"),
+            "{screen}"
+        );
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.answers.keep(), 5);
+    }
+
+    #[test]
+    fn the_system_step_can_leave_things_out() {
+        let facts = facts();
+        let mut app = App::new(&facts, "box", Answers::recommended(&facts));
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.current(), Step::System);
+        assert_eq!(app.focused(), Row::Item(Control::Settings, 0));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.focused(), Row::Item(Control::Services, 0));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.answers.services.is_empty());
+        let config = crate::commands::init::build(&facts, &app.answers, std::path::Path::new("/cfg"), "box");
+        assert!(
+            config.fields.iter().all(|(key, _)| key != "services"),
+            "unticked services aren't declared"
+        );
+        assert!(config.fields.iter().any(|(key, _)| key == "users"));
+    }
+
+    #[test]
     fn enter_ticks_checklist_items() {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
@@ -1284,10 +1473,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert_eq!(app.focused(), Row::Edit(Control::Location));
         press(&mut app, KeyCode::Char('q'));
-        assert_eq!(
-            app.answers.location, "/etc/archix",
-            "keys aren't typed until editing starts"
-        );
+        assert_eq!(app.answers.location, "", "keys aren't typed until editing starts");
         press(&mut app, KeyCode::Enter);
         for _ in 0.."/etc/archix".len() {
             press(&mut app, KeyCode::Backspace);

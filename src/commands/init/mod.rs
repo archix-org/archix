@@ -14,7 +14,7 @@ use archix::adopt::{Candidates, Fit, best_snapshot, fit};
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::aur::index::Index;
 use archix::aur::review::review;
-use archix::capture::{self, Accounts, FoundFile};
+use archix::capture::{self, Accounts, Dotfile, FoundFile};
 use archix::date::Date;
 use archix::eval::{self, Evaluation};
 use archix::flatpak::{self, InstalledApp, LockedApp, Remote};
@@ -45,6 +45,21 @@ fn note(text: impl std::fmt::Display) {
 
 fn warn(text: impl std::fmt::Display) {
     println!("  {} {text}", style("!").yellow().bold());
+}
+
+/// "1 file that holds a secret stays…", "3 files that hold secrets stay…".
+fn secret_note(n: usize, what: &str) -> String {
+    let rest = if n == 1 {
+        "that holds a secret stays out of the config and isn't listed"
+    } else {
+        "that hold secrets stay out of the config and aren't listed"
+    };
+    let what = match (n, what) {
+        (1, _) => what.to_string(),
+        (_, "entry") => "entries".to_string(),
+        _ => format!("{what}s"),
+    };
+    format!("{n} {what} {rest}")
 }
 
 /// Up to `max` names, then how many more there are.
@@ -99,7 +114,14 @@ struct Facts {
     flatpak_apps: BTreeMap<String, InstalledApp>,
     flatpak_remotes: BTreeMap<String, Remote>,
     flatpak_gone: Vec<String>,
-    dotfiles: BTreeMap<String, (PathBuf, Vec<String>)>,
+    dotfiles: BTreeMap<String, Home>,
+}
+
+/// One user's home and the dotfiles init can offer from it.
+struct Home {
+    dir: PathBuf,
+    offered: Vec<Dotfile>,
+    secrets: usize,
 }
 
 /// The choices that shape the config; every field starts at the recommended answer.
@@ -115,11 +137,19 @@ struct Answers {
     files: BTreeSet<usize>,
     snapshots: bool,
     boot: bool,
+    /// Empty means the default; the wizard shows it as a placeholder.
     keep: String,
     keep_days: String,
     dotfiles_user: usize,
     dotfiles: BTreeSet<String>,
+    settings: BTreeSet<usize>,
+    users: BTreeSet<String>,
+    groups: BTreeSet<String>,
+    services: BTreeSet<String>,
 }
+
+const KEEP: u32 = 10;
+const KEEP_DAYS: u32 = 30;
 
 const FALLBACK: [(&str, &str); 3] = [
     ("ask", "ask each time, defaulting to falling back (recommended)"),
@@ -139,8 +169,8 @@ const MISSING_VERSIONS: [(&str, &str); 3] = [
 impl Answers {
     fn recommended(facts: &Facts) -> Answers {
         Answers {
-            location: facts.default_dir.to_string_lossy().into_owned(),
-            git: false,
+            location: String::new(),
+            git: facts.git,
             fallback: 0,
             keep_orphans: true,
             strict: true,
@@ -149,20 +179,52 @@ impl Answers {
             files: (0..facts.files.len()).filter(|i| facts.files[*i].recommended).collect(),
             snapshots: true,
             boot: matches!(facts.boot, BootFacts::Ready { .. }),
-            keep: "10".into(),
-            keep_days: "30".into(),
+            keep: String::new(),
+            keep_days: String::new(),
             dotfiles_user: 0,
-            dotfiles: BTreeSet::new(),
+            dotfiles: facts
+                .dotfiles
+                .values()
+                .next()
+                .map(|home| {
+                    home.offered
+                        .iter()
+                        .filter(|d| d.recommended)
+                        .map(|d| d.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            settings: (0..facts.settings.len()).collect(),
+            users: facts.accounts.users.keys().cloned().collect(),
+            groups: facts.accounts.groups.keys().cloned().collect(),
+            services: facts.services.keys().cloned().collect(),
         }
+    }
+
+    /// The chosen config directory, or `default` when none was typed.
+    fn location(&self, default: &Path) -> PathBuf {
+        match self.location.trim() {
+            "" => default.to_path_buf(),
+            typed => PathBuf::from(typed),
+        }
+    }
+
+    fn keep(&self) -> u32 {
+        self.keep.trim().parse().unwrap_or(KEEP)
+    }
+
+    fn keep_days(&self) -> u32 {
+        self.keep_days.trim().parse().unwrap_or(KEEP_DAYS)
     }
 
     /// Why the answers can't be used yet, if they can't.
     fn problem(&self) -> Option<String> {
-        if !Path::new(self.location.trim()).is_absolute() {
-            return Some(format!("{:?} isn't an absolute path", self.location.trim()));
+        let location = self.location.trim();
+        if !location.is_empty() && !Path::new(location).is_absolute() {
+            return Some(format!("{location:?} isn't an absolute path"));
         }
         for (what, value) in [("generations to keep", &self.keep), ("days to keep", &self.keep_days)] {
-            if value.trim().parse::<u32>().is_err() {
+            if !value.trim().is_empty() && value.trim().parse::<u32>().is_err() {
                 return Some(format!("{what}: {value:?} isn't a number"));
             }
         }
@@ -217,7 +279,7 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
         report(&facts, &answers);
     }
 
-    let dir = settle_location(config_dir, Path::new(answers.location.trim()))?;
+    let dir = settle_location(config_dir, &answers.location(config_dir))?;
     let config = build(&facts, &answers, &dir, host);
 
     section("Lock");
@@ -360,9 +422,9 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .users
         .iter()
         .map(|(name, user)| {
-            let home = PathBuf::from(user.home.clone().unwrap_or_else(|| format!("/home/{name}")));
-            let candidates = capture::dotfile_candidates(&home);
-            (name.clone(), (home, candidates))
+            let dir = PathBuf::from(user.home.clone().unwrap_or_else(|| format!("/home/{name}")));
+            let (offered, secrets) = capture::dotfiles(&dir);
+            (name.clone(), Home { dir, offered, secrets })
         })
         .collect();
 
@@ -437,8 +499,10 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         packages: facts.packages.clone(),
         ..Host::default()
     };
-    for (key, value) in &facts.settings {
-        config.set(key, value.clone());
+    for (i, (key, value)) in facts.settings.iter().enumerate() {
+        if answers.settings.contains(&i) {
+            config.set(key, value.clone());
+        }
     }
     if facts.official != ["core", "extra"] {
         config.set("repos", Lua::strings(&facts.official));
@@ -519,11 +583,12 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         }
         config.set("flatpak", Lua::Table(fields));
     }
-    if !facts.accounts.users.is_empty() {
+    if !answers.users.is_empty() {
         let users = facts
             .accounts
             .users
             .iter()
+            .filter(|(name, _)| answers.users.contains(*name))
             .map(|(name, user)| {
                 let mut fields = vec![("uid".to_string(), Lua::Int(user.uid.into()))];
                 if let Some(group) = &user.group {
@@ -546,22 +611,24 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
             .collect();
         config.set("users", Lua::Table(users));
     }
-    if !facts.accounts.groups.is_empty() {
+    if !answers.groups.is_empty() {
         let groups = facts
             .accounts
             .groups
             .iter()
+            .filter(|(name, _)| answers.groups.contains(*name))
             .map(|(name, gid)| (name.clone(), Lua::Table(vec![("gid".into(), Lua::Int((*gid).into()))])))
             .collect();
         config.set("groups", Lua::Table(groups));
     }
-    if !facts.services.is_empty() {
+    if !answers.services.is_empty() {
         config.set(
             "services",
             Lua::Table(
                 facts
                     .services
                     .iter()
+                    .filter(|(unit, _)| answers.services.contains(*unit))
                     .map(|(unit, on)| (unit.clone(), Lua::Bool(*on)))
                     .collect(),
             ),
@@ -614,19 +681,17 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     if !boot.is_empty() {
         config.set("boot", Lua::Table(boot));
     }
-    let keep: i64 = answers.keep.trim().parse().unwrap_or(10);
-    let days: i64 = answers.keep_days.trim().parse().unwrap_or(30);
     let mut generations = Vec::new();
-    if keep != 10 {
-        generations.push(("keep".to_string(), Lua::Int(keep)));
+    if answers.keep() != KEEP {
+        generations.push(("keep".to_string(), Lua::Int(answers.keep().into())));
     }
-    if days != 30 {
-        generations.push(("keep_days".to_string(), Lua::Int(days)));
+    if answers.keep_days() != KEEP_DAYS {
+        generations.push(("keep_days".to_string(), Lua::Int(answers.keep_days().into())));
     }
     if !generations.is_empty() {
         config.set("generations", Lua::Table(generations));
     }
-    if let Some((user, (home, _))) = facts.dotfiles.iter().nth(answers.dotfiles_user)
+    if let Some((user, Home { dir: home, .. })) = facts.dotfiles.iter().nth(answers.dotfiles_user)
         && !answers.dotfiles.is_empty()
     {
         let mut files = Vec::new();
@@ -713,10 +778,7 @@ fn report(facts: &Facts, answers: &Answers) {
     }
     section("Config files");
     if facts.secrets > 0 {
-        note(format!(
-            "{} that hold secrets stay out of the config and aren't listed",
-            count(facts.secrets, "file", "files")
-        ));
+        note(secret_note(facts.secrets, "file"));
     }
     for i in &answers.files {
         done(&facts.files[*i].path);
@@ -743,8 +805,8 @@ fn report(facts: &Facts, answers: &Answers) {
     section("Generations");
     done(format!(
         "gc keeps the newest {} generations and any younger than {} days",
-        answers.keep.trim(),
-        answers.keep_days.trim()
+        answers.keep(),
+        answers.keep_days()
     ));
 }
 

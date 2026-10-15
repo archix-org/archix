@@ -28,6 +28,34 @@ pub struct Lists {
     pub secret: Vec<String>,
     /// Worth managing by default; an entry ending in `/` covers everything under it.
     pub recommended: Vec<String>,
+    pub dotfiles: DotfileLists,
+}
+
+/// Names relative to a home; `x*` matches by prefix and `*x` by suffix.
+#[derive(Debug, Deserialize)]
+pub struct DotfileLists {
+    /// Ticked by default.
+    pub recommended: Vec<String>,
+    /// Hold credentials: never offered, only counted.
+    pub secret: Vec<String>,
+    /// Caches, app state and the like: never offered.
+    pub skip: Vec<String>,
+}
+
+fn matches_name(list: &[String], name: &str) -> bool {
+    list.iter()
+        .any(|entry| match (entry.strip_suffix('*'), entry.strip_prefix('*')) {
+            (Some(prefix), _) => name.starts_with(prefix),
+            (_, Some(suffix)) => name.ends_with(suffix),
+            _ => entry == name,
+        })
+}
+
+/// A home entry init can offer to bring into the config.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Dotfile {
+    pub name: String,
+    pub recommended: bool,
 }
 
 pub static LISTS: LazyLock<Lists> =
@@ -422,45 +450,34 @@ pub fn systemd_boot_esp() -> Option<String> {
     (output.status.success() && !esp.is_empty()).then_some(esp)
 }
 
-/// Home entries worth offering as dotfiles: everything in ~/.config plus top-level dotfiles, minus caches and keys.
-pub fn dotfile_candidates(home: &Path) -> Vec<String> {
-    const SKIP: &[&str] = &[
-        ".cache",
-        ".local",
-        ".ssh",
-        ".gnupg",
-        ".pki",
-        ".mozilla",
-        ".config",
-        ".cargo",
-        ".rustup",
-        ".npm",
-        ".var",
-        ".steam",
-        ".wine",
-        ".java",
-        ".dbus",
-        ".Xauthority",
-        ".ICEauthority",
-        ".lesshst",
-        ".viminfo",
-        ".python_history",
-        ".node_repl_history",
-        ".sudo_as_admin_successful",
-    ];
-    let mut out = Vec::new();
+/// What in a home is worth offering as dotfiles (~/.config entries and top-level dotfiles), and how many hold secrets.
+pub fn dotfiles(home: &Path) -> (Vec<Dotfile>, usize) {
+    let lists = &LISTS.dotfiles;
+    let mut names = Vec::new();
     for entry in fs::read_dir(home.join(".config")).into_iter().flatten().flatten() {
-        out.push(format!(".config/{}", entry.file_name().to_string_lossy()));
+        names.push(format!(".config/{}", entry.file_name().to_string_lossy()));
     }
     for entry in fs::read_dir(home).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') && !SKIP.contains(&name.as_str()) && !name.contains("history") {
-            out.push(name);
+        if name.starts_with('.') {
+            names.push(name);
         }
     }
-    out.retain(|name| !is_secret(name));
-    out.sort();
-    out
+    names.sort();
+    let mut secrets = 0;
+    let mut out = Vec::new();
+    for name in names {
+        if matches_name(&lists.secret, &name) || is_secret(&name) {
+            secrets += 1;
+            continue;
+        }
+        if matches_name(&lists.skip, &name) {
+            continue;
+        }
+        let recommended = matches_name(&lists.recommended, &name);
+        out.push(Dotfile { name, recommended });
+    }
+    (out, secrets)
 }
 
 #[cfg(test)]
@@ -549,5 +566,43 @@ mod tests {
         assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
         assert!(!listed(&LISTS.recommended, "/etc/shells"));
         assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));
+    }
+
+    #[test]
+    fn dotfiles_are_recommended_skipped_or_kept_secret() {
+        let home = tempfile::tempdir().unwrap();
+        for dir in [
+            ".config/nvim",
+            ".config/gh",
+            ".config/chromium",
+            ".config/kwinrc.d",
+            ".ssh",
+            ".cache",
+        ] {
+            fs::create_dir_all(home.path().join(dir)).unwrap();
+        }
+        for file in [
+            ".bashrc",
+            ".bash_history",
+            ".claude.json",
+            ".claude.json.backup",
+            ".config/kdeglobals",
+            ".config/plasmashellrc",
+        ] {
+            fs::write(home.path().join(file), "").unwrap();
+        }
+        let (offered, secrets) = dotfiles(home.path());
+        let names: Vec<(&str, bool)> = offered.iter().map(|d| (d.name.as_str(), d.recommended)).collect();
+        assert_eq!(
+            names,
+            [
+                (".bashrc", true),
+                (".config/kdeglobals", false),
+                (".config/kwinrc.d", false),
+                (".config/nvim", true),
+                (".config/plasmashellrc", false),
+            ]
+        );
+        assert_eq!(secrets, 4, ".ssh, .config/gh, .claude.json and its backup");
     }
 }
