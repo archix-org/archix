@@ -49,8 +49,14 @@ It works through the system one section at a time. `✓` lines are what it captu
 
 ── Config files ────────────────────────────────
   · 3 files that hold secrets stay out of the config
-  ✓ 4 config files worth managing: /etc/fstab, /etc/mkinitcpio.conf, /etc/pacman.d/mirrorlist, /etc/sysctl.d/80-swappiness.conf
-  · 2 files more, mostly edited by package scripts: /etc/shells, /etc/xdg/reflector/reflector.conf
+  ✓ 4 config files worth managing:
+      /etc/fstab  (changed from its package's version)
+      /etc/mkinitcpio.conf  (changed from its package's version)
+      /etc/pacman.d/mirrorlist  (changed from its package's version)
+      /etc/sysctl.d/80-swappiness.conf  (not from any package)
+  · 2 files more, mostly changed by package install scripts:
+      /etc/shells  (changed from its package's version)
+      /etc/xdg/reflector/reflector.conf  (changed from its package's version)
 ✔ Which config files should archix manage? · the 4 worth managing (recommended)
   ✓ 4 files copied into files/desktop/
 
@@ -92,11 +98,11 @@ What each section does:
 
 1. **Config.** The config can live in `/etc/archix` or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Making it a git repository runs `git init` and `git add`; nothing is committed.
 
-2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at; apps installed with `--user` are left out. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
+2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at. Apps installed with `--user` are left out, and so are apps whose remote is gone, with a `!` line: `their remote is gone, so archix leaves these Flatpak apps alone: ...`. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
 
 3. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999) with their real groups, shell, home and description, so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset.
 
-4. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never shown or copied, only counted. The rest are split into the ones worth managing, such as `/etc/fstab` and anything hand-written, and the others, which are mostly edited by package scripts. Answer `the N worth managing (recommended)`, `let me pick` for a checklist with those ticked, or `none for now`. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
+4. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never shown or copied, only counted. The rest are split into the ones worth managing, such as `/etc/fstab` and anything hand-written, and the others, which are mostly changed by package install scripts. Every file worth managing is listed with its reason, `(changed from its package's version)` or `(not from any package)`. The others are listed the same way, up to 12, then `and N more; "let me pick" lists them all`. Answer `the N worth managing (recommended)`, `let me pick` for a checklist with those ticked, or `none for now`. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
 
 5. **Boot.** On a btrfs root, init asks whether to snapshot `/` before every switch as an extra recovery point. If systemd-boot is installed and your kernel command line has `root=`, it asks whether to write a boot entry for each generation.
 

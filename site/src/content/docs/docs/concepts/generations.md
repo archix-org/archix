@@ -86,7 +86,13 @@ archix: booted generation 41, but 42 is current; rolling back to 41
 
 You land in generation 41, and it stays current until your next switch. This works the same on every filesystem.
 
-Flatpak commits come from their remote, which usually isn't reachable that early in boot. If the boot service couldn't pin them, run `sudo archix rollback 41` once you're logged in; naming the current generation puts back whatever still differs, Flatpak apps included.
+Flatpak commits come from their remote, and the network isn't up that early in boot, so the boot service leaves Flatpak apps as they are and says so:
+
+```
+archix: Flatpak apps aren't pinned at boot; run `sudo archix rollback 41` once you're online
+```
+
+Naming the current generation puts back whatever still differs, Flatpak apps included.
 
 ### Older kernels keep booting
 

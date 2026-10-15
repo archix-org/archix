@@ -209,10 +209,10 @@ A Flatpak app is an OSTree commit on its remote, so archix locks it by commit. H
 The commits move like AUR commits do:
 
 - `archix lock` keeps them, and locks a newly declared app to its remote's current commit.
-- `archix update` moves every app to its remote's current commit.
+- `archix update` checks every app again and moves it to its remote's current commit. An app whose remote can't be reached keeps its commit: `warning: couldn't check org.mozilla.firefox on flathub; keeping its locked commit`.
 - An app that leaves the config leaves the lock.
 
-`lock` and `update` ask the remote for the current commit through flatpak itself. When a lock is written before flatpak is installed, the app has no entry yet; the switch that installs flatpak locks it and writes it into `archix.lock`.
+`lock` and `update` ask the remote for the current commit through flatpak itself, and never add remotes. When a lock is written before flatpak is installed, or before an app's remote has been added, the app has no entry yet; `archix diff` lists it as `flatpak    install <id>: ...` with the reason, and the next switch adds the remote, locks the app and writes it into `archix.lock`.
 
 Runtimes aren't locked. An app's runtime follows the branch the app's metadata asks for, at that branch's current commit when the app is installed or updated.
 

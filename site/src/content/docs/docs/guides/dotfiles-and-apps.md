@@ -107,7 +107,7 @@ home = {
 },
 ```
 
-If the path is already a directory, such as the `~/.config/nvim` you had before you moved it into the config, the switch moves that directory to `/var/lib/archix/backups`, contents and all, and puts the link in its place. When the entry leaves the config, the link goes and the directory comes back. archix only does this once per path: if an earlier backup of it still exists, the switch stops with `/home/me/.config/nvim is a directory and an earlier backup of it exists; move one of them away`. See [Safety](/docs/concepts/safety/#managed-files-backups-and-hand-edits).
+If the path is already a directory, such as the `~/.config/nvim` you had before you moved it into the config, the switch moves that directory to `/var/lib/archix/backups`, contents and all, and puts the link in its place. When the entry leaves the config, the link goes and the directory comes back. This works with a separate `/home` or a btrfs `@home` subvolume too. archix only does this once per path: if an earlier backup of it still exists, the switch stops before changing anything, with `/home/me/.config/nvim is a directory and an earlier backup of it exists; move one of them away`. See [Safety](/docs/concepts/safety/#managed-files-backups-and-hand-edits).
 
 A `source` that's a directory has to be live; archix only copies single files. `live` needs a `source` to link to, so `live = true` with `text`, `link` or `url` makes `diff` and `switch` stop:
 

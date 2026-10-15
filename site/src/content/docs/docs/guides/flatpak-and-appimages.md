@@ -37,7 +37,7 @@ return {
 }
 ```
 
-To take most apps from another remote, set `flatpak.remote` to its name; ids without a prefix then come from there. archix adds the remotes your apps use, with `flatpak remote-add --system --if-not-exists`, and never removes one.
+To take most apps from another remote, set `flatpak.remote` to its name; ids without a prefix then come from there. `switch` adds the remotes your apps use, with `flatpak remote-add --system --if-not-exists`, and never removes one.
 
 ### Switch
 
@@ -53,15 +53,15 @@ apply 3 changes? [Y/n]
 switched to generation 44 (snapshot 2026-10-09)
 ```
 
-Before it asks, `switch` adds the remotes new apps use, locks each new app to its remote's current commit and writes it to `archix.lock`; the short commit is shown in brackets. After the new generation is current, it installs the apps and pins each one to its locked commit with `flatpak update --commit=`. Pinning holds even when the remote already has something newer, so a second machine with the same lock gets the same build.
+Before it asks, `switch` locks each new app to its remote's current commit and writes it to `archix.lock`; the short commit is shown in brackets. After you confirm and the new generation is current, it adds the remotes your apps use, installs the apps and pins each one to its locked commit with `flatpak update --commit=`. Pinning holds even when the remote already has something newer, so a second machine with the same lock gets the same build.
 
-If flatpak isn't installed yet, there's nothing to ask for a commit, so `switch` says so:
+Only `switch` adds remotes, and only after you confirm; `diff` and `lock` never do. So when flatpak isn't installed yet, or an app's remote hasn't been added, there's nothing to ask for a commit, and the app is listed with the reason:
 
 ```console
 flatpak    install org.mozilla.firefox: flatpak isn't installed yet
 ```
 
-The same switch installs the `flatpak` package, then locks the app, writes it to `archix.lock` and installs it.
+The same switch installs the `flatpak` package and adds the remote, then locks the app, writes it to `archix.lock` and installs it.
 
 A Flatpak step that fails, such as a remote that can't be reached, doesn't undo the switch. The new generation is current, the failure is listed, and archix exits non-zero, as with a service that doesn't start. See [Hard and soft failures](/docs/concepts/safety/#hard-and-soft-failures).
 
@@ -79,7 +79,7 @@ Commit it with the rest of the lock. `archix lock` keeps these commits, and only
 
 ### Update
 
-Flatpak apps move forward with everything else. `archix update` moves each one to its remote's current commit, and prints the commit it's now locked to:
+Flatpak apps move forward with everything else. `archix update` checks every app on its remote, moves it to the remote's current commit, and prints a line for each app whose commit changed:
 
 ```console
 $ sudo archix update
@@ -89,8 +89,9 @@ snapshot 2026-10-09 -> 2026-10-15
 212 packages locked
 wrote /etc/archix/archix.lock
 flatpak com.spotify.Client at 81c2d4e6f0a3
-flatpak org.mozilla.firefox at 0bb3a9e40c1f
 ```
+
+An app whose remote can't be reached keeps its locked commit, with `warning: couldn't check org.mozilla.firefox on flathub; keeping its locked commit`.
 
 Nothing changes until you switch. `archix diff` shows what will:
 
@@ -111,12 +112,12 @@ Each generation records the commits it pinned. `archix rollback` pins the older 
 $ sudo archix rollback
 flatpak    com.spotify.Client 81c2d4e6f0a3 -> 5f8806197a2b
 downgrade  mesa 1:25.3.1-1 -> 1:25.3.0-1
-roll back to generation 44 (snapshot 2026-10-09) with 1 change? [Y/n]
+roll back to generation 44 (snapshot 2026-10-09) with 2 changes? [Y/n]
 ...
 rolled back to generation 44 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-Old commits come from the remote, so rolling back Flatpak apps needs the network, and a remote that still has the commit. When you roll back from the boot menu, the network usually isn't up yet; once you're logged in, `sudo archix rollback` with the current generation's number pins whatever is still off. See [Generations and rollback](/docs/concepts/generations/).
+Old commits come from the remote, so rolling back Flatpak apps needs the network, and a remote that still has the commit. Rolling back from the boot menu happens before the network is up, so it skips Flatpak apps and says so: ``archix: Flatpak apps aren't pinned at boot; run `sudo archix rollback 44` once you're online``. Running that pins them. See [Generations and rollback](/docs/concepts/generations/).
 
 ### What gets removed
 
@@ -140,7 +141,11 @@ Only apps are locked. Each app's runtime, such as `org.freedesktop.Platform`, fo
 
 ### Existing apps and `archix init`
 
-`archix init` declares the system-wide apps already installed, with any remote other than Flathub, and locks each one to the commit it's installed at. The first `archix diff` stays empty, and the first switch changes no app.
+`archix init` declares the system-wide apps already installed, with any remote other than Flathub, and locks each one to the commit it's installed at. The first `archix diff` stays empty, and the first switch changes no app. Apps whose remote has been deleted can't be locked, so init leaves them out, and archix never touches them:
+
+```
+  ! their remote is gone, so archix leaves these Flatpak apps alone: org.example.App
+```
 
 ## AppImages
 

@@ -714,7 +714,7 @@ Remotes archix adds system-wide, keyed by name.
 | `url` | `str` | *required* | The remote's `.flatpakrepo` file or repository URL. |
 | `gpg_verify` | `bool` | `true` | Check the remote's GPG signatures. `false` adds it with `--no-gpg-verify`. |
 
-Flathub is always available, even when you set `remotes` and leave it out. An app naming any other remote that `remotes` doesn't declare is an error: `flatpak.apps: myremote:org.example.App uses remote myremote, which flatpak.remotes doesn't declare`. archix adds the remotes your apps use with `flatpak remote-add --system --if-not-exists`, so a remote that already exists under that name is left as it is. Remotes are never removed.
+Flathub is always available, even when you set `remotes` and leave it out. An app naming any other remote that `remotes` doesn't declare is an error: `flatpak.apps: myremote:org.example.App uses remote myremote, which flatpak.remotes doesn't declare`. `switch` adds the remotes your apps use after you confirm, with `flatpak remote-add --system --if-not-exists`, so a remote that already exists under that name is left as it is. Remotes are never removed.
 
 ```lua
 flatpak = {
