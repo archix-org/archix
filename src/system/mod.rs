@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod blobs;
 pub mod boot;
+pub mod firewall;
 pub mod hooks;
 pub mod merge;
 pub mod rescue;
@@ -362,6 +363,18 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     if let Some(Value::Str(keymap)) = root("keymap") {
         b.text("/etc/vconsole.conf", &format!("KEYMAP={keymap}\n"));
     }
+    render_environment(&mut b, root("environment"));
+    if let Some(rules) = firewall::ruleset(root("firewall").unwrap_or(&Value::Null))? {
+        b.text(firewall::RULES, &rules);
+        b.text(&format!("/etc/systemd/system/{}", firewall::UNIT), &firewall::unit());
+        b.state.services.insert(firewall::UNIT.to_string(), true);
+        let reload = Hook {
+            run: format!("systemctl try-reload-or-restart {}", firewall::UNIT),
+            user: None,
+            after: Vec::new(),
+        };
+        b.state.on_change.insert(firewall::RULES.to_string(), reload);
+    }
 
     render_home(&mut b, config, config_dir)?;
 
@@ -424,6 +437,44 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         blobs: b.blobs,
         fetches: b.fetches,
     })
+}
+
+/// `environment.variables` for login shells and systemd user sessions, and `environment.shell_aliases` for login shells.
+fn render_environment(b: &mut Builder, environment: Option<&Value>) {
+    let as_text = |value: &Value| match value {
+        Value::Str(s) => s.clone(),
+        Value::List(items) => items
+            .iter()
+            .map(|item| match item {
+                Value::Str(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(":"),
+        other => other.to_string(),
+    };
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    if let Some(Value::Map(variables)) = environment.and_then(|e| get(e, "variables"))
+        && !variables.is_empty()
+    {
+        let (mut shell, mut session) = (String::new(), String::new());
+        for (name, value) in variables {
+            let value = as_text(value);
+            shell.push_str(&format!("export {name}={}\n", quote(&value)));
+            session.push_str(&format!("{name}={value}\n"));
+        }
+        b.text("/etc/profile.d/archix-environment.sh", &shell);
+        b.text("/etc/environment.d/90-archix.conf", &session);
+    }
+    if let Some(Value::Map(aliases)) = environment.and_then(|e| get(e, "shell_aliases"))
+        && !aliases.is_empty()
+    {
+        let text: String = aliases
+            .iter()
+            .map(|(name, command)| format!("alias {name}={}\n", quote(&as_text(command))))
+            .collect();
+        b.text("/etc/profile.d/archix-aliases.sh", &text);
+    }
 }
 
 /// Home files of `home.user`, owned by them, keyed by absolute path.

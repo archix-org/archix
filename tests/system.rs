@@ -219,3 +219,56 @@ fn files_taken_over_unchanged_survive_being_unmanaged() {
     );
     fs::remove_file(path).unwrap();
 }
+
+fn nft_table() -> Option<String> {
+    let output = Command::new("nft")
+        .args(["list", "table", "inet", "archix"])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+#[ignore]
+fn the_firewall_and_environment_come_from_the_config() {
+    let _system = lock_system();
+    let body = |port: u32| {
+        format!(
+            r#"firewall = {{ enable = true, allowed_tcp_ports = {{ {port} }}, trusted_interfaces = {{ "wg0" }} }},
+            environment = {{ variables = {{ EDITOR = "nvim", PATHS = {{ "/a", "/b" }} }}, shell_aliases = {{ ll = "ls -l" }} }}"#
+        )
+    };
+    let setup = Setup::new(&[], &body(2222));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(systemctl(&["is-active", "archix-firewall.service"]), "active");
+    let table = nft_table().expect("the archix table is loaded");
+    assert!(
+        table.contains("tcp dport 2222 accept") && table.contains("\"wg0\""),
+        "{table}"
+    );
+    assert_eq!(
+        read("/etc/profile.d/archix-environment.sh"),
+        "export EDITOR='nvim'\nexport PATHS='/a:/b'\n"
+    );
+    assert_eq!(read("/etc/environment.d/90-archix.conf"), "EDITOR=nvim\nPATHS=/a:/b\n");
+    assert_eq!(read("/etc/profile.d/archix-aliases.sh"), "alias ll='ls -l'\n");
+
+    setup.set_body(&[], &body(2223));
+    setup.ok(&["switch", "--noconfirm"]);
+    let table = nft_table().unwrap();
+    assert!(
+        table.contains("tcp dport 2223 accept") && !table.contains("2222"),
+        "changed rules are reloaded:\n{table}"
+    );
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        nft_table().is_none(),
+        "turning the firewall off removes only archix's table"
+    );
+    assert!(!std::path::Path::new("/etc/profile.d/archix-environment.sh").exists());
+}
