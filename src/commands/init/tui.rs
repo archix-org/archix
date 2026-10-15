@@ -553,7 +553,7 @@ impl<'a> App<'a> {
         self.seen = self.seen.max(step);
         self.editing = None;
         self.scroll = 0;
-        self.focus = 0;
+        self.focus_row(Row::Next);
     }
 
     fn focus_row(&mut self, target: Row) {
@@ -697,8 +697,14 @@ impl<'a> App<'a> {
         ];
         let mut cursor_line = None;
         self.content(&mut lines, &mut cursor_line);
-        lines.push(Line::default());
-        self.buttons(&mut lines, &mut cursor_line);
+        let [content, buttons] = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).areas(area);
+        let mut button_line = Vec::new();
+        self.buttons(&mut button_line, &mut None);
+        frame.render_widget(
+            Paragraph::new(button_line).block(Block::new().padding(Padding::new(3, 2, 0, 0))),
+            buttons,
+        );
+        let area = content;
         let block = Block::new().padding(Padding::new(3, 2, 1, 0));
         let height = block.inner(area).height;
         if let Some(line) = cursor_line.filter(|_| !self.only_buttons()) {
@@ -739,7 +745,7 @@ impl<'a> App<'a> {
         } else {
             format!("Next: {} ›", STEPS[self.step + 1].title())
         };
-        let mut spans = vec![Span::raw("  ")];
+        let mut spans = Vec::new();
         if self.step > 0 {
             spans.push(button("‹ Back".into(), Row::Back, false));
             spans.push(Span::raw("   "));
@@ -1362,6 +1368,8 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         next(&mut app);
         assert_eq!(app.current(), Step::Packages);
+        assert_eq!(app.focused(), Row::Next, "every step opens on Next");
+        press(&mut app, KeyCode::Home);
         assert_eq!(app.focused(), Row::Pick(Control::Orphans, 0));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
@@ -1410,6 +1418,7 @@ mod tests {
             "{screen}"
         );
         assert!(!screen.contains("› 10"), "the field itself stays empty:\n{screen}");
+        press(&mut app, KeyCode::Home);
         press(&mut app, KeyCode::Enter);
         press(&mut app, KeyCode::Char('5'));
         press(&mut app, KeyCode::Enter);
@@ -1424,6 +1433,7 @@ mod tests {
             press(&mut app, KeyCode::Right);
         }
         assert_eq!(app.current(), Step::System);
+        press(&mut app, KeyCode::Home);
         assert_eq!(app.focused(), Row::Item(Control::Settings, 0));
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
@@ -1447,6 +1457,7 @@ mod tests {
         }
         assert_eq!(app.current(), Step::Files);
         assert_eq!(app.answers.files, [0].into());
+        press(&mut app, KeyCode::Home);
         press(&mut app, KeyCode::Enter);
         assert!(app.answers.files.is_empty());
         press(&mut app, KeyCode::Down);
@@ -1466,6 +1477,8 @@ mod tests {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
         assert_eq!(app.focused(), Row::Edit(Control::Location));
         press(&mut app, KeyCode::Char('q'));
         assert_eq!(app.answers.location, "", "keys aren't typed until editing starts");
