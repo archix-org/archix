@@ -292,7 +292,7 @@ restored pacman 7.0.0.r7.g1f38429-1
 
 It unpacks glibc, pacman, systemd, the kernel, archix itself and the rest of the core set straight from the cache, keeps edited config files (the package's version is saved as `.pacnew`) and rewrites their entries in pacman's database. Then `sudo archix rollback 42`, as the last line says, repairs everything else.
 
-`/usr/lib/archix/archix-static` is the static binary the `archix` and `archix-bin` AUR packages install, and the one rescue boot entries carry. See [Safety](/docs/concepts/safety/#rescue-mode).
+`/usr/lib/archix/archix-static` is the static binary the `archix`, `archix-bin` and `archix-git` AUR packages install, and the one rescue boot entries carry. See [Safety](/docs/concepts/safety/#rescue-mode).
 
 | Flag | Default | Description |
 | --- | --- | --- |

@@ -530,7 +530,7 @@ archix can write a boot entry for every generation, so you can pick an older gen
 
 With `boot.loader` set, archix declares the packages it needs for this itself: the `boot.kernel` package, `mkinitcpio` and `systemd-ukify`, plus `sbctl` when `boot.secure_boot = true`. You don't list them in `packages`. With the default `secure_boot = null`, signing depends on sbctl being installed with keys, so keep `sbctl` declared yourself if you rely on that.
 
-The newest two generations also get a rescue entry when the static binary `/usr/lib/archix/archix-static` exists, which the `archix` and `archix-bin` AUR packages install. See [Safety](/docs/concepts/safety/#rescue-mode).
+The newest two generations also get a rescue entry when the static binary `/usr/lib/archix/archix-static` exists, which the `archix`, `archix-bin` and `archix-git` AUR packages install. See [Safety](/docs/concepts/safety/#rescue-mode).
 
 ```lua
 boot = { loader = "systemd-boot", microcode = { "amd-ucode.img" } },
