@@ -206,7 +206,10 @@ fn warn_mode_keeps_undeclared_packages() {
 
     setup.set_body(&[], "ignored_packages = { \"tree\" }");
     let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("no package changes"), "a settings change is a new generation:\n{out}");
+    assert!(
+        out.contains("no package changes"),
+        "a settings change is a new generation:\n{out}"
+    );
     assert!(installed("tree").is_some());
     pacman(&["-R", "tree"]);
 }
