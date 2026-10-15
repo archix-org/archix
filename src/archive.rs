@@ -80,6 +80,13 @@ impl Archive {
 
     /// Downloads via a per-process `.part` file so partial downloads never look complete; false if missing.
     pub fn fetch(&self, url: &str, dest: &Path) -> Result<bool> {
+        if let Some(path) = url.strip_prefix("file://") {
+            return match fs::copy(path, dest) {
+                Ok(_) => Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e).with_context(|| format!("copying {path}")),
+            };
+        }
         let mut response = match self.agent.get(url).call() {
             Ok(response) => response,
             Err(ureq::Error::StatusCode(404)) => return Ok(false),

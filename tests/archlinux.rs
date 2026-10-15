@@ -80,7 +80,7 @@ fn unknown_packages_fail_to_lock() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("`definitely-not-a-package` is not in the configured repos"),
+        stderr.contains("`definitely-not-a-package` is neither in the configured repos nor in the AUR"),
         "{stderr}"
     );
     assert!(!dir.path().join(LOCK_FILE).exists());

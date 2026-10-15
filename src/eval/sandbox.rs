@@ -20,6 +20,7 @@ pub struct Markers {
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("packages", include_str!("modules/packages.lua")),
     ("generations", include_str!("modules/generations.lua")),
+    ("aur", include_str!("modules/aur.lua")),
 ];
 
 pub struct Sandbox {

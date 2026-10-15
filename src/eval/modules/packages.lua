@@ -5,7 +5,7 @@ return {
     packages = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "Packages from the official repositories. Their dependencies are installed too and recorded in archix.lock.",
+      description = "Packages to install: from the configured repositories, else from the AUR. Their dependencies are installed too and recorded in archix.lock.",
     },
     repos = archix.option {
       type = t.list_of(t.enum { "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing" }),

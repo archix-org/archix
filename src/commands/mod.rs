@@ -11,13 +11,17 @@ use anyhow::{Result, bail};
 
 use archix::apply::{self, PacmanLock};
 use archix::archive::Archive;
+use archix::aur;
+use archix::aur::git::AurGit;
+use archix::aur::index::Index;
 use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
 use archix::journal::{Journal, Kind, Transaction};
-use archix::lock::{ARCHIVE_REPO, Locked};
+use archix::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, Locked};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
+use archix::resolve::Aur;
 use archix::value::Value;
 
 pub use lock::{diff, lock, status};
@@ -52,6 +56,17 @@ struct Declared {
     ignored: BTreeSet<String>,
     keep: u32,
     keep_days: u32,
+    aur_url: String,
+    aur_review: bool,
+    build_on_host: BTreeSet<String>,
+    missing_versions: Option<Nearest>,
+}
+
+/// Which version to take when a locked AUR version can't be built any more.
+#[derive(Clone, Copy, Debug, PartialEq, clap::ValueEnum)]
+pub enum Nearest {
+    Newer,
+    Older,
 }
 
 fn declared(config: &Value) -> Result<Declared> {
@@ -98,6 +113,32 @@ fn declared(config: &Value) -> Result<Declared> {
         ignored: strings("ignored_packages").into_iter().collect(),
         keep: generation_limit("keep", 10),
         keep_days: generation_limit("keep_days", 30),
+        aur_url: match map.get("aur") {
+            Some(Value::Map(aur)) => match aur.get("url") {
+                Some(Value::Str(url)) => url.clone(),
+                _ => aur::DEFAULT_URL.to_string(),
+            },
+            _ => aur::DEFAULT_URL.to_string(),
+        },
+        aur_review: !matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("review") == Some(&Value::Bool(false))),
+        build_on_host: match map.get("aur") {
+            Some(Value::Map(aur)) => match aur.get("build_on_host") {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => BTreeSet::new(),
+            },
+            _ => BTreeSet::new(),
+        },
+        missing_versions: match map.get("missing_versions") {
+            Some(Value::Str(policy)) if policy == "newer" => Some(Nearest::Newer),
+            Some(Value::Str(policy)) if policy == "older" => Some(Nearest::Older),
+            _ => None,
+        },
     })
 }
 
@@ -139,13 +180,29 @@ fn transaction_for(
     date: Date,
     packages: &BTreeMap<String, Locked>,
     changes: &[Change],
+    built: &BTreeMap<String, PathBuf>,
 ) -> Result<Transaction> {
     let mut wanted = Vec::new();
     let mut remove = Vec::new();
+    let mut install = Vec::new();
     for change in changes {
         match change {
             Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. } => {
                 let pkg = &packages[name];
+                if let Some(path) = built.get(name) {
+                    install.push(path.clone());
+                    continue;
+                }
+                if pkg.repo == AUR_REPO {
+                    let sha256 = (!pkg.sha256.is_empty()).then(|| pkg.sha256.clone());
+                    wanted.push(Wanted {
+                        name: name.clone(),
+                        file: pkg.file.clone(),
+                        urls: Vec::new(),
+                        sha256,
+                    });
+                    continue;
+                }
                 let mut urls = vec![archive.package_url(name, &pkg.file)];
                 if pkg.repo != ARCHIVE_REPO {
                     urls.insert(0, format!("{}/{}", archive.repo_url(date, &pkg.repo), pkg.file));
@@ -161,21 +218,23 @@ fn transaction_for(
             Change::Reason { .. } => {}
         }
     }
-    let install = fetch_all(
+    install.extend(fetch_all(
         archive,
         &paths.packages(),
         std::slice::from_ref(&paths.pacman_cache),
         &wanted,
-    )?;
+    )?);
     Ok(Transaction {
         install,
         remove,
         versions: packages
             .iter()
+            .filter(|(_, pkg)| !pkg.build_only)
             .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
             .collect(),
         reasons: packages
             .iter()
+            .filter(|(_, pkg)| !pkg.build_only)
             .map(|(name, pkg)| (name.clone(), pkg.explicit))
             .collect(),
     })
@@ -249,4 +308,21 @@ fn user_cache() -> Result<PathBuf> {
         Some(home) => Ok(PathBuf::from(home).join(".cache/archix")),
         None => bail!("neither XDG_CACHE_HOME nor HOME is set"),
     }
+}
+
+fn aur_git(declared: &Declared) -> Result<AurGit> {
+    Ok(AurGit::new(&declared.aur_url, &user_cache()?))
+}
+
+/// The AUR as the resolver sees it; the package list is downloaded only if a name isn't in the official repos.
+fn aur_source<'a>(
+    git: &'a AurGit,
+    declared: &'a Declared,
+    archive: &'a Archive,
+    previous: Option<&'a HostLock>,
+    refresh: bool,
+) -> Aur<'a> {
+    Aur::new(git, previous, move || {
+        Index::load(archive, &declared.aur_url, &user_cache()?, refresh)
+    })
 }

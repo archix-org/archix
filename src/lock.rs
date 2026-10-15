@@ -11,6 +11,7 @@ use crate::date::Date;
 pub const LOCK_FILE: &str = "archix.lock";
 /// The `repo` of entries pinned to an exact version from the archive's per-package history.
 pub const ARCHIVE_REPO: &str = "archive";
+pub const AUR_REPO: &str = "aur";
 const LOCK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -31,14 +32,24 @@ pub struct HostLock {
     pub packages: BTreeMap<String, Locked>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Locked {
     pub version: String,
     pub repo: String,
     pub file: String,
+    /// Empty for AUR packages in the lock: builds aren't bit-for-bit reproducible, so the commit is what's locked.
+    #[serde(default)]
     pub sha256: String,
     #[serde(default)]
     pub explicit: bool,
+    /// The AUR package base and the commit of its build recipe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Needed only to build other AUR packages, so it's built but never installed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -118,16 +129,23 @@ impl Lockfile {
             }
             let _ = writeln!(out, "\n[hosts.{host}.packages]");
             for (name, pkg) in &lock.packages {
-                let _ = writeln!(
-                    out,
-                    "{} = {{ version = {}, repo = {}, file = {}, sha256 = {}, explicit = {} }}",
-                    key(name),
-                    string(&pkg.version),
-                    string(&pkg.repo),
-                    string(&pkg.file),
-                    string(&pkg.sha256),
-                    pkg.explicit
-                );
+                let mut fields = vec![
+                    format!("version = {}", string(&pkg.version)),
+                    format!("repo = {}", string(&pkg.repo)),
+                    format!("file = {}", string(&pkg.file)),
+                ];
+                if !pkg.sha256.is_empty() {
+                    fields.push(format!("sha256 = {}", string(&pkg.sha256)));
+                }
+                if let (Some(base), Some(commit)) = (&pkg.base, &pkg.commit) {
+                    fields.push(format!("base = {}", string(base)));
+                    fields.push(format!("commit = {}", string(commit)));
+                }
+                fields.push(format!("explicit = {}", pkg.explicit));
+                if pkg.build_only {
+                    fields.push("build_only = true".to_string());
+                }
+                let _ = writeln!(out, "{} = {{ {} }}", key(name), fields.join(", "));
             }
         }
         out
@@ -174,6 +192,7 @@ mod tests {
                 file: "gtk+-1:2.24-1-x86_64.pkg.tar.zst".into(),
                 sha256: "ab".into(),
                 explicit: true,
+                ..Default::default()
             },
         );
         packages.insert(
@@ -184,6 +203,19 @@ mod tests {
                 file: "zlib-1:1.3.1-2-x86_64.pkg.tar.zst".into(),
                 sha256: "cd".into(),
                 explicit: false,
+                ..Default::default()
+            },
+        );
+        packages.insert(
+            "yay-bin".to_string(),
+            Locked {
+                version: "13.0.1-1".into(),
+                repo: AUR_REPO.into(),
+                file: "yay-bin-13.0.1-1-x86_64.pkg.tar.zst".into(),
+                base: Some("yay-bin".into()),
+                commit: Some("0123abcd".into()),
+                build_only: true,
+                ..Default::default()
             },
         );
         let host = HostLock {
@@ -208,6 +240,10 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[hosts.\"my.laptop\".packages]"), "{text}");
         assert!(text.contains("\"gtk+\" = { version = \"1:2.24-1\""), "{text}");
+        assert!(
+            text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", explicit = false, build_only = true }"),
+            "{text}"
+        );
     }
 
     #[test]

@@ -1,136 +1,13 @@
 //! Changes the installed packages; run only inside the throwaway Arch container via `tests/arch/run.sh`.
 
+mod common;
+
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
-use std::sync::Mutex;
 
 use archix::journal::{Journal, Kind, Transaction};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
-use tempfile::TempDir;
-
-/// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
-const IMAGE_SNAPSHOT: &str = "2026-10-10";
-static SYSTEM: Mutex<()> = Mutex::new(());
-
-struct Setup {
-    dir: TempDir,
-    paths: Paths,
-}
-
-impl Setup {
-    /// A config declaring everything explicitly installed in the image plus `extra`, locked at the image's snapshot.
-    fn new(extra: &[&str], body: &str) -> Setup {
-        let paths = Paths::system();
-        let mut packages: Vec<String> = read_local_db(&paths.local_db())
-            .unwrap()
-            .into_values()
-            .filter(|pkg| pkg.explicit)
-            .map(|pkg| pkg.name)
-            .filter(|name| name != "tree" && name != "lemon")
-            .collect();
-        packages.extend(extra.iter().map(|p| p.to_string()));
-        let quoted: Vec<String> = packages.iter().map(|p| format!("{p:?}")).collect();
-        let dir = TempDir::new().unwrap();
-        let init = format!("return {{ packages = {{ {} }}, {body} }}", quoted.join(", "));
-        fs::write(dir.path().join("init.lua"), init).unwrap();
-        let setup = Setup { dir, paths };
-        setup.ok(&["update", "--to", IMAGE_SNAPSHOT]);
-        setup
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_archix"))
-            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
-            .args(args)
-            .output()
-            .unwrap()
-    }
-
-    fn answering(&self, input: &str, args: &[&str]) -> String {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
-            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
-            .args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write;
-        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
-        let output = child.wait_with_output().unwrap();
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.status.success(), "archix {args:?} failed:\n{text}");
-        text
-    }
-
-    fn lock(&self) -> archix::lock::HostLock {
-        archix::lock::Lockfile::load(&self.dir.path().join("archix.lock"))
-            .unwrap()
-            .hosts["box"]
-            .clone()
-    }
-
-    fn ok(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.status.success(), "archix {args:?} failed:\n{text}");
-        text
-    }
-
-    fn fails(&self, args: &[&str]) -> String {
-        let output = self.run(args);
-        assert!(!output.status.success(), "archix {args:?} should have failed");
-        String::from_utf8_lossy(&output.stderr).into_owned()
-    }
-
-    fn set_body(&self, extra: &[&str], body: &str) {
-        let replacement = Setup::new(extra, body);
-        fs::copy(
-            replacement.dir.path().join("init.lua"),
-            self.dir.path().join("init.lua"),
-        )
-        .unwrap();
-        fs::copy(
-            replacement.dir.path().join("archix.lock"),
-            self.dir.path().join("archix.lock"),
-        )
-        .unwrap();
-    }
-}
-
-fn installed(name: &str) -> Option<String> {
-    read_local_db(&Paths::system().local_db())
-        .unwrap()
-        .remove(name)
-        .map(|pkg| pkg.version)
-}
-
-fn pacman(args: &[&str]) {
-    let status = Command::new("pacman").args(args).arg("--noconfirm").status().unwrap();
-    assert!(status.success(), "pacman {args:?}");
-}
-
-fn cached_file(dir: &Path, name: &str) -> PathBuf {
-    fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|entry| entry.path())
-        .find(|path| {
-            let file = path.file_name().unwrap().to_string_lossy().into_owned();
-            file.starts_with(&format!("{name}-")) && file.ends_with(".pkg.tar.zst")
-        })
-        .unwrap_or_else(|| panic!("no cached {name} package in {}", dir.display()))
-}
+use common::*;
 
 /// Writes the journal a crash during "install tree" would leave behind, as if pacman had died mid-transaction.
 fn fake_interrupted_switch(paths: &Paths) {
@@ -165,10 +42,6 @@ fn fake_interrupted_switch(paths: &Paths) {
 /// The lock file a pacman killed mid-transaction leaves behind.
 fn stale_pacman_lock(paths: &Paths) {
     fs::write(paths.pacman_lock(), "").unwrap();
-}
-
-fn lock_system() -> std::sync::MutexGuard<'static, ()> {
-    SYSTEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[test]

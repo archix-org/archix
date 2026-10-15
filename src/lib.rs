@@ -1,6 +1,7 @@
 pub mod adopt;
 pub mod apply;
 pub mod archive;
+pub mod aur;
 pub mod date;
 pub mod eval;
 pub mod fetch;

@@ -1,32 +1,39 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 use archix::adopt::{adopt, newer_than_lock};
 use archix::apply;
 use archix::archive::{ARCHIVE_URL, Archive};
+use archix::aur::build::Builder;
+use archix::aur::install::{BuildFailed, Installer, nearest};
+use archix::aur::review::review;
 use archix::date::Date;
+use archix::fetch::sha256;
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
 use archix::journal::{Journal, Kind};
-use archix::lock::{LOCK_FILE, Lockfile};
+use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
+use archix::plan::Change;
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Snapshot, Target, check_pacman_free, confirm, declared, print_warned, refuse_if_unfinished, require_root,
-    select_changes, transaction_for, user_cache,
+    Declared, Nearest, Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, declared, print_warned,
+    refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
 };
 
-pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
+pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>) -> Result<()> {
     require_root("switch")?;
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
-    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true)?;
+    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm)?;
     let installed = read_local_db(&paths.local_db())?;
     let archive = Archive::new(ARCHIVE_URL);
 
@@ -43,9 +50,13 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
             shown.join(", ")
         );
         if noconfirm || confirm("adopt them into the lock? (no reverts them to the lock)")? {
-            let adopted = adopt(&archive, &user_cache()?, &paths, &lock, &installed)?;
+            let git = aur_git(&declared)?;
+            let previous = lock.clone();
+            let aur = aur_source(&git, &declared, &archive, Some(&previous), false);
+            let adopted = adopt(&archive, &user_cache()?, &paths, &previous, &installed, Some(&aur))?;
             let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
-            save_lock(target, &mut lockfile, Some(&lock), &adopted)?;
+            save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
+            drop(aur);
             lock = adopted;
         }
     }
@@ -54,12 +65,16 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
     if let Some((_, true)) = &commit {
         eprintln!("warning: {} has uncommitted changes", target.config_dir.display());
     }
-    let generation = Generation {
+    let store = Store::new(&paths);
+    let current = store.current()?.map(|n| store.get(n)).transpose()?;
+    let mut packages = lock.packages.clone();
+    carry_aur_hashes(&mut packages, current.as_ref());
+    let mut generation = Generation {
         number: 0,
         created: now(),
         host: target.host.to_string(),
         date: lock.date,
-        packages: lock.packages.clone(),
+        packages,
         settings: Settings {
             remove_undeclared: declared.remove_undeclared,
             ignored: declared.ignored.iter().cloned().collect(),
@@ -69,8 +84,6 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
     };
-    let store = Store::new(&paths);
-    let current = store.current()?.map(|n| store.get(n)).transpose()?;
 
     let (changes, warned) = select_changes(
         &lock.packages,
@@ -104,7 +117,54 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
         bail!("aborted; nothing was changed");
     }
 
-    let transaction = transaction_for(&archive, &paths, lock.date, &lock.packages, &changes)?;
+    let aur_names: Vec<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. }
+                if lock.packages[name].repo == AUR_REPO =>
+            {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let built = if aur_names.is_empty() {
+        BTreeMap::new()
+    } else {
+        build_aur(
+            target,
+            &declared,
+            &paths,
+            &archive,
+            &mut lock,
+            &aur_names,
+            noconfirm,
+            accept_nearest,
+        )?
+    };
+    for (name, path) in &built {
+        if let Some(pkg) = lock.packages.get(name) {
+            let mut pkg = pkg.clone();
+            pkg.sha256 = sha256(path)?;
+            pkg.file = path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or(pkg.file);
+            generation.packages.insert(name.clone(), pkg);
+        }
+    }
+    for (name, pkg) in &lock.packages {
+        if pkg.repo == AUR_REPO && !built.contains_key(name) {
+            let mut pkg = pkg.clone();
+            if let Some(previous) = generation.packages.get(name) {
+                pkg.sha256 = previous.sha256.clone();
+            }
+            generation.packages.insert(name.clone(), pkg);
+        }
+    }
+    generation.date = lock.date;
+
+    let transaction = transaction_for(&archive, &paths, lock.date, &lock.packages, &changes, &built)?;
     let created = store.create(generation)?;
     let name = format!("generation {} (snapshot {})", created.number, lock.date);
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
@@ -114,6 +174,99 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
     finish(&paths)?;
     println!("switched to {name}");
     Ok(())
+}
+
+/// The current generation's built-file hashes for AUR packages still locked at the same commit.
+fn carry_aur_hashes(packages: &mut BTreeMap<String, Locked>, current: Option<&Generation>) {
+    let Some(current) = current else { return };
+    for (name, pkg) in packages
+        .iter_mut()
+        .filter(|(_, pkg)| pkg.repo == AUR_REPO && pkg.sha256.is_empty())
+    {
+        if let Some(previous) = current.packages.get(name)
+            && previous.commit == pkg.commit
+            && previous.version == pkg.version
+        {
+            pkg.sha256 = previous.sha256.clone();
+            pkg.file = previous.file.clone();
+        }
+    }
+}
+
+/// Builds the AUR packages a switch installs; a base that can't be built is moved to the nearest version per policy.
+#[allow(clippy::too_many_arguments)]
+fn build_aur(
+    target: &Target,
+    declared: &Declared,
+    paths: &Paths,
+    archive: &Archive,
+    lock: &mut HostLock,
+    names: &[String],
+    noconfirm: bool,
+    accept_nearest: Option<Nearest>,
+) -> Result<BTreeMap<String, PathBuf>> {
+    let git = aur_git(declared)?;
+    let cache = user_cache()?;
+    let builder = Builder {
+        paths,
+        archive,
+        git: &git,
+        snapshot_cache: &cache,
+    };
+    let mut moved = BTreeSet::new();
+    loop {
+        let result =
+            Installer::new(&builder, lock, &declared.build_on_host).and_then(|installer| installer.build(names));
+        let error = match result {
+            Ok(built) => return Ok(built),
+            Err(error) => error,
+        };
+        let Some(failed) = error.downcast_ref::<BuildFailed>() else {
+            return Err(error);
+        };
+        if !moved.insert(failed.base.clone()) {
+            return Err(error);
+        }
+        eprintln!("{failed}");
+        let (newer, older) = nearest(&git, &failed.base, &failed.commit, &failed.version)?;
+        let policy = accept_nearest.or(declared.missing_versions);
+        let pick = match policy {
+            Some(Nearest::Newer) => newer,
+            Some(Nearest::Older) => older,
+            None if noconfirm => newer,
+            None => {
+                let base = &failed.base;
+                if let Some(n) = newer.filter(|(_, info)| {
+                    confirm(&format!("use the nearest newer version, {base} {}?", info.version)).unwrap_or(false)
+                }) {
+                    Some(n)
+                } else {
+                    older.filter(|(_, info)| {
+                        confirm(&format!("use the nearest older version, {base} {}?", info.version)).unwrap_or(false)
+                    })
+                }
+            }
+        };
+        let Some((commit, info)) = pick else {
+            return Err(error.context("no other version was accepted; nothing was changed"));
+        };
+        let old = lock.clone();
+        for (name, pkg) in lock
+            .packages
+            .iter_mut()
+            .filter(|(_, pkg)| pkg.base.as_deref() == Some(failed.base.as_str()))
+        {
+            let Some(srcpkg) = info.package(name) else {
+                bail!("{} {} no longer builds {name}", failed.base, info.version);
+            };
+            pkg.version = info.version.clone();
+            pkg.file = info.file(srcpkg);
+            pkg.commit = Some(commit.clone());
+        }
+        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
+        let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+        save_lock(target, &mut lockfile, Some(&old), lock)?;
+    }
 }
 
 /// After a successful switch: outside changes are reconciled, integration files are in place, old garbage goes.
@@ -189,7 +342,14 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
         bail!("aborted; nothing was changed");
     }
     let archive = Archive::new(ARCHIVE_URL);
-    let transaction = transaction_for(&archive, &paths, generation.date, &generation.packages, &changes)?;
+    let transaction = transaction_for(
+        &archive,
+        &paths,
+        generation.date,
+        &generation.packages,
+        &changes,
+        &BTreeMap::new(),
+    )?;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;

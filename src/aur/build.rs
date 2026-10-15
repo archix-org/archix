@@ -1,0 +1,300 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use super::git::AurGit;
+use super::srcinfo::SrcInfo;
+use crate::apply::TRANSACTION_ENV;
+use crate::archive::Archive;
+use crate::date::Date;
+use crate::fetch::{Wanted, fetch_all};
+use crate::pacman::read_sync_db;
+use crate::paths::Paths;
+use crate::resolve::{pacman_conf, print_targets, snapshot_conf};
+
+/// The unprivileged user AUR packages are built as; makepkg refuses to run as root.
+pub const BUILD_USER: &str = "archix-build";
+
+pub struct Builder<'a> {
+    pub paths: &'a Paths,
+    pub archive: &'a Archive,
+    pub git: &'a AurGit,
+    pub snapshot_cache: &'a Path,
+}
+
+/// One AUR base to build at a commit, against a snapshot, with these already-built AUR packages installed first.
+pub struct Job<'a> {
+    pub base: &'a str,
+    pub commit: &'a str,
+    pub info: &'a SrcInfo,
+    pub date: Date,
+    pub repos: &'a [String],
+    pub inputs: &'a [PathBuf],
+    pub on_host: bool,
+}
+
+/// The files one build produced, so the same commit and snapshot never needs building twice.
+#[derive(Serialize, Deserialize)]
+struct Record {
+    files: Vec<(String, String)>,
+}
+
+impl Builder<'_> {
+    fn chroot(&self) -> PathBuf {
+        self.paths.state.join("chroot")
+    }
+
+    fn record(&self, base: &str, commit: &str, date: Date) -> PathBuf {
+        self.paths
+            .cache
+            .join("aur-builds")
+            .join(base)
+            .join(format!("{commit}-{date}.json"))
+    }
+
+    /// The built package file for every package of `base`, from the build cache or a fresh build.
+    pub fn build(&self, job: Job) -> Result<Vec<(String, PathBuf)>> {
+        let Job {
+            base,
+            commit,
+            info,
+            date,
+            repos,
+            inputs,
+            on_host,
+        } = job;
+        let record = self.record(base, commit, date);
+        if let Ok(text) = fs::read_to_string(&record)
+            && let Ok(record) = serde_json::from_str::<Record>(&text)
+        {
+            let files: Vec<(String, PathBuf)> = record
+                .files
+                .into_iter()
+                .map(|(name, file)| (name, self.paths.packages().join(file)))
+                .collect();
+            if files.iter().all(|(_, path)| path.is_file()) {
+                return Ok(files);
+            }
+        }
+
+        ensure_user()?;
+        let dir = self
+            .paths
+            .cache
+            .join("aur-build")
+            .join(format!("{base}-{}", std::process::id()));
+        if dir.exists() {
+            fs::remove_dir_all(&dir)?;
+        }
+        self.git.export(base, commit, &dir)?;
+        chown(&dir)?;
+        eprintln!(
+            ":: building {base} {} ({})",
+            info.version,
+            if on_host { "on the host" } else { "in a clean chroot" }
+        );
+        let built = if on_host {
+            self.build_on_host(&dir, info, date, repos, inputs)
+        } else {
+            self.ensure_chroot(date, repos)
+                .and_then(|()| self.build_in_chroot(&dir, inputs))
+        };
+        let result = built.and_then(|()| {
+            fs::create_dir_all(self.paths.packages())?;
+            let mut files = Vec::new();
+            for pkg in &info.packages {
+                let file = info.file(pkg);
+                let produced = dir.join(&file);
+                if !produced.is_file() {
+                    bail!("building {base} did not produce {file}");
+                }
+                let dest = self.paths.packages().join(&file);
+                fs::rename(&produced, &dest).or_else(|_| fs::copy(&produced, &dest).map(|_| ()))?;
+                files.push((pkg.name.clone(), file));
+            }
+            fs::create_dir_all(record.parent().expect("record has a parent"))?;
+            fs::write(&record, serde_json::to_string(&Record { files: files.clone() })?)?;
+            Ok(files
+                .into_iter()
+                .map(|(name, file)| (name, self.paths.packages().join(file)))
+                .collect())
+        });
+        let _ = fs::remove_dir_all(&dir);
+        result
+    }
+
+    /// Creates the chroot on first use and moves it to `date`'s snapshot when the lock needs another one.
+    fn ensure_chroot(&self, date: Date, repos: &[String]) -> Result<()> {
+        let chroot = self.chroot();
+        let root = chroot.join("root");
+        let marker = chroot.join("snapshot");
+        let conf = chroot.join("pacman.conf");
+        fs::create_dir_all(&chroot)?;
+        fs::write(&conf, pacman_conf(self.archive, date, repos))?;
+        if !root.join(".arch-chroot").exists() {
+            if root.exists() {
+                fs::remove_dir_all(&root)?;
+            }
+            eprintln!(":: creating the build chroot at the {date} snapshot");
+            run(
+                devtools("mkarchroot").arg("-C").arg(&conf).arg(&root).arg("base-devel"),
+                "mkarchroot",
+            )?;
+        } else if fs::read_to_string(&marker).ok().as_deref() != Some(&date.to_string()) {
+            eprintln!(":: moving the build chroot to the {date} snapshot");
+            run(
+                devtools("arch-nspawn")
+                    .arg("-C")
+                    .arg(&conf)
+                    .arg(&root)
+                    .args(["pacman", "-Syyuu", "--noconfirm"]),
+                "arch-nspawn",
+            )?;
+        }
+        fs::write(&marker, date.to_string())?;
+        Ok(())
+    }
+
+    fn build_in_chroot(&self, dir: &Path, inputs: &[PathBuf]) -> Result<()> {
+        let mut cmd = devtools("makechrootpkg");
+        cmd.current_dir(dir)
+            .arg("-c")
+            .arg("-r")
+            .arg(self.chroot())
+            .args(["-U", BUILD_USER]);
+        for input in inputs {
+            cmd.arg("-I").arg(input);
+        }
+        run(&mut cmd, "makechrootpkg")
+    }
+
+    /// Installs missing build dependencies from the snapshot, runs makepkg as the build user, then removes them again.
+    fn build_on_host(
+        &self,
+        dir: &Path,
+        info: &SrcInfo,
+        date: Date,
+        repos: &[String],
+        inputs: &[PathBuf],
+    ) -> Result<()> {
+        let mut deps: BTreeSet<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
+        deps.extend(info.packages.iter().flat_map(|pkg| pkg.depends.iter().cloned()));
+        let output = Command::new("pacman")
+            .arg("-T")
+            .args(&deps)
+            .output()
+            .context("running pacman -T")?;
+        let missing: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+
+        let installed_before = crate::pacman::read_local_db(&self.paths.local_db())?;
+        let mut files: Vec<PathBuf> = inputs.to_vec();
+        if !missing.is_empty() {
+            let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, repos)?;
+            let needed: Vec<(String, String, String)> = print_targets(&conf, &db, &missing, false)?
+                .into_iter()
+                .filter(|(name, _, _)| !installed_before.contains_key(name))
+                .collect();
+            let mut wanted = Vec::new();
+            for (name, _, repo) in &needed {
+                let sync = read_sync_db(&db.join("sync").join(format!("{repo}.db")))?;
+                let pkg = &sync[name];
+                wanted.push(Wanted {
+                    name: name.clone(),
+                    file: pkg.filename.clone(),
+                    urls: vec![format!("{}/{}", self.archive.repo_url(date, repo), pkg.filename)],
+                    sha256: Some(pkg.sha256.clone()),
+                });
+            }
+            files.extend(fetch_all(
+                self.archive,
+                &self.paths.packages(),
+                std::slice::from_ref(&self.paths.pacman_cache),
+                &wanted,
+            )?);
+        }
+        if !files.is_empty() {
+            let mut cmd = Command::new("pacman");
+            cmd.args(["-U", "--noconfirm", "--needed", "--asdeps"])
+                .args(&files)
+                .env(TRANSACTION_ENV, "1");
+            run(&mut cmd, "pacman -U")?;
+        }
+        let built = run(
+            Command::new("runuser")
+                .args(["-u", BUILD_USER, "--", "env"])
+                .arg(format!("HOME={}", dir.display()))
+                .args(["makepkg", "--noconfirm", "--clean"])
+                .current_dir(dir),
+            "makepkg",
+        );
+        let installed_after = crate::pacman::read_local_db(&self.paths.local_db())?;
+        let added: Vec<&String> = installed_after
+            .keys()
+            .filter(|name| !installed_before.contains_key(*name))
+            .collect();
+        if !added.is_empty() {
+            let mut cmd = Command::new("pacman");
+            cmd.args(["-R", "--noconfirm"]).args(&added).env(TRANSACTION_ENV, "1");
+            run(&mut cmd, "pacman -R")?;
+        }
+        built
+    }
+}
+
+fn devtools(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    if std::env::var_os("USER").is_none_or(|user| user.is_empty()) {
+        cmd.env("USER", "root");
+    }
+    cmd
+}
+
+fn run(cmd: &mut Command, what: &str) -> Result<()> {
+    let status = match cmd.status() {
+        Ok(status) => status,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            bail!("{what} not found; AUR builds need devtools and git (pacman -S devtools git)")
+        }
+        Err(e) => return Err(e).with_context(|| format!("running {what}")),
+    };
+    if !status.success() {
+        bail!("{what} failed with {status}");
+    }
+    Ok(())
+}
+
+/// Creates the build user the first time a package is built.
+fn ensure_user() -> Result<()> {
+    let exists = Command::new("id")
+        .arg("-u")
+        .arg(BUILD_USER)
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if exists {
+        return Ok(());
+    }
+    run(
+        Command::new("useradd").args([
+            "--system",
+            "--no-create-home",
+            "--shell",
+            "/usr/bin/nologin",
+            BUILD_USER,
+        ]),
+        "useradd",
+    )
+}
+
+fn chown(dir: &Path) -> Result<()> {
+    run(
+        Command::new("chown").arg("-R").arg(format!("{BUILD_USER}:")).arg(dir),
+        "chown",
+    )
+}

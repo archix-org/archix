@@ -31,7 +31,7 @@ impl fmt::Display for Change {
 /// The changes, sorted by package name, that turn `installed` into exactly the `locked` set.
 pub fn plan(locked: &BTreeMap<String, Locked>, installed: &BTreeMap<String, LocalPkg>) -> Vec<Change> {
     let mut changes = Vec::new();
-    for (name, want) in locked {
+    for (name, want) in locked.iter().filter(|(_, want)| !want.build_only) {
         let Some(have) = installed.get(name) else {
             changes.push(Change::Install {
                 name: name.clone(),
@@ -66,7 +66,7 @@ pub fn plan(locked: &BTreeMap<String, Locked>, installed: &BTreeMap<String, Loca
         }
     }
     for (name, have) in installed {
-        if !locked.contains_key(name) {
+        if locked.get(name).is_none_or(|want| want.build_only) {
             changes.push(Change::Remove {
                 name: name.clone(),
                 version: have.version.clone(),
@@ -98,9 +98,8 @@ mod tests {
                 let pkg = Locked {
                     version: version.to_string(),
                     repo: "core".into(),
-                    file: String::new(),
-                    sha256: String::new(),
                     explicit: *explicit,
+                    ..Default::default()
                 };
                 (name.to_string(), pkg)
             })

@@ -33,13 +33,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Resolve the declared packages into archix.lock, keeping the locked snapshot date
-    Lock,
+    /// Resolve the declared packages into archix.lock, keeping the locked snapshot date and AUR commits
+    Lock {
+        /// Don't ask before trusting new AUR build recipes
+        #[arg(long)]
+        noconfirm: bool,
+    },
     /// Move archix.lock to the newest archive snapshot (or --to a date) and re-resolve
     Update {
         /// Snapshot date to move to, as YYYY-MM-DD
         #[arg(long)]
         to: Option<archix::date::Date>,
+        /// Don't ask before trusting new AUR build recipes
+        #[arg(long)]
+        noconfirm: bool,
     },
     /// Show what a switch would change to make this machine match the lock
     Diff,
@@ -48,6 +55,9 @@ enum Command {
         /// Don't ask for confirmation
         #[arg(long)]
         noconfirm: bool,
+        /// When a locked AUR version can't be built, take the nearest newer or older one without asking
+        #[arg(long, value_enum)]
+        accept_nearest: Option<commands::Nearest>,
     },
     /// Deal with a switch that was interrupted: continue it, roll it back or abandon it
     #[command(group = clap::ArgGroup::new("mode"))]
@@ -160,11 +170,17 @@ fn run() -> Result<ExitCode> {
     match cli.command {
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
-        Command::Lock => commands::lock(&target, commands::Snapshot::Locked)?,
-        Command::Update { to: None } => commands::lock(&target, commands::Snapshot::Latest)?,
-        Command::Update { to: Some(date) } => commands::lock(&target, commands::Snapshot::On(date))?,
+        Command::Lock { noconfirm } => commands::lock(&target, commands::Snapshot::Locked, noconfirm)?,
+        Command::Update { to: None, noconfirm } => commands::lock(&target, commands::Snapshot::Latest, noconfirm)?,
+        Command::Update {
+            to: Some(date),
+            noconfirm,
+        } => commands::lock(&target, commands::Snapshot::On(date), noconfirm)?,
         Command::Diff => commands::diff(&target)?,
-        Command::Switch { noconfirm } => commands::switch(&target, noconfirm)?,
+        Command::Switch {
+            noconfirm,
+            accept_nearest,
+        } => commands::switch(&target, noconfirm, accept_nearest)?,
         Command::Status => commands::status(&target)?,
         Command::Recover { .. }
         | Command::HookRecord

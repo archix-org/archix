@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use archix::adopt::newer_than_lock;
 use archix::archive::{ARCHIVE_URL, Archive};
+use archix::aur::review::review;
 use archix::generations::Store;
 use archix::integration;
 use archix::journal::Journal;
@@ -13,8 +14,8 @@ use archix::paths::Paths;
 use archix::resolve::resolve;
 
 use super::{
-    Declared, Snapshot, Target, declared, describe_unfinished, print_warned, refuse_if_unfinished, select_changes,
-    user_cache,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm, declared, describe_unfinished, print_warned,
+    refuse_if_unfinished, select_changes, user_cache,
 };
 
 /// The host's lock, re-resolved at the locked date (or `snapshot`) if the config changed; saved when `save`.
@@ -23,16 +24,19 @@ pub(super) fn current_lock(
     declared: &Declared,
     snapshot: Snapshot,
     save: bool,
+    noconfirm: bool,
 ) -> Result<(HostLock, bool)> {
     let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
     let old = lockfile.hosts.get(target.host).cloned();
     let archive = Archive::new(ARCHIVE_URL);
+    let updating = !matches!(snapshot, Snapshot::Locked);
     let date = match (snapshot, &old) {
         (Snapshot::On(date), _) => date,
         (Snapshot::Locked, Some(old)) => old.date,
         (Snapshot::Locked | Snapshot::Latest, _) => archive.latest()?,
     };
     if let Some(old) = &old
+        && !updating
         && old.date == date
         && old.matches(&declared.packages, &declared.repos)
     {
@@ -42,7 +46,17 @@ pub(super) fn current_lock(
         "resolving {} declared packages against the {date} snapshot",
         declared.packages.len()
     );
-    let mut new = resolve(&archive, &user_cache()?, date, &declared.repos, &declared.packages)?;
+    let git = aur_git(declared)?;
+    let keep_commits = if updating { None } else { old.as_ref() };
+    let aur = aur_source(&git, declared, &archive, keep_commits, updating);
+    let mut new = resolve(
+        &archive,
+        &user_cache()?,
+        date,
+        &declared.repos,
+        &declared.packages,
+        Some(&aur),
+    )?;
     if let Some(old) = &old {
         new.keep_pins(old);
     }
@@ -53,6 +67,7 @@ pub(super) fn current_lock(
         );
         return Ok((new, true));
     }
+    review(&git, old.as_ref(), &new, declared.aur_review && !noconfirm, &confirm)?;
     save_lock(target, &mut lockfile, old.as_ref(), &new)?;
     Ok((new, true))
 }
@@ -73,10 +88,10 @@ pub(super) fn save_lock(
     Ok(())
 }
 
-pub fn lock(target: &Target, snapshot: Snapshot) -> Result<()> {
+pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
     refuse_if_unfinished(&Paths::system())?;
     let declared = declared(target.config)?;
-    let (lock, changed) = current_lock(target, &declared, snapshot, true)?;
+    let (lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm)?;
     if !changed {
         println!("{LOCK_FILE} is up to date for {} (snapshot {})", target.host, lock.date);
     }
@@ -86,7 +101,7 @@ pub fn lock(target: &Target, snapshot: Snapshot) -> Result<()> {
 pub fn diff(target: &Target) -> Result<()> {
     let paths = Paths::system();
     let declared = declared(target.config)?;
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false)?;
+    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
     let installed = read_local_db(&paths.local_db())?;
     let (changes, warned) = select_changes(
         &lock.packages,

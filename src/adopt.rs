@@ -5,12 +5,14 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use crate::archive::Archive;
+use crate::aur::git::AurGit;
+use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all, sha256};
-use crate::lock::{ARCHIVE_REPO, HostLock, Locked};
+use crate::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, Locked};
 use crate::pacman::{LocalPkg, vercmp};
 use crate::paths::Paths;
-use crate::resolve::resolve;
+use crate::resolve::{Aur, resolve};
 
 /// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves.
 pub fn newer_than_lock<'a>(lock: &HostLock, installed: &'a BTreeMap<String, LocalPkg>) -> Vec<&'a LocalPkg> {
@@ -31,6 +33,7 @@ pub fn adopt(
     paths: &Paths,
     lock: &HostLock,
     installed: &BTreeMap<String, LocalPkg>,
+    aur: Option<&Aur>,
 ) -> Result<HostLock> {
     let newer = newer_than_lock(lock, installed);
     if newer.is_empty() {
@@ -46,7 +49,7 @@ pub fn adopt(
 
     let mut best: Option<(usize, HostLock)> = None;
     for date in candidates {
-        let mut resolved = match resolve(archive, cache, date, &lock.repos, &lock.declared) {
+        let mut resolved = match resolve(archive, cache, date, &lock.repos, &lock.declared, aur) {
             Ok(resolved) => resolved,
             Err(e) => {
                 eprintln!("skipping snapshot {date}: {e:#}");
@@ -68,10 +71,37 @@ pub fn adopt(
     };
 
     let mut pins = Vec::new();
+    let mut aur_bases = BTreeMap::new();
     for (name, locked) in &adopted.packages {
         let Some(pkg) = installed.get(name) else { continue };
-        if vercmp(&pkg.version, &locked.version) == Ordering::Greater {
-            pins.push((name.clone(), pkg.clone(), locked.explicit));
+        if vercmp(&pkg.version, &locked.version) != Ordering::Greater {
+            continue;
+        }
+        match &locked.base {
+            Some(base) if locked.repo == AUR_REPO => {
+                aur_bases.insert(base.clone(), pkg.version.clone());
+            }
+            _ => pins.push((name.clone(), pkg.clone(), locked.explicit)),
+        }
+    }
+    if let Some(aur) = aur {
+        for (base, version) in aur_bases {
+            match commit_for_version(aur.git, &base, &version)? {
+                Some((commit, info)) => {
+                    for (name, locked) in adopted.packages.iter_mut() {
+                        if locked.base.as_deref() == Some(base.as_str())
+                            && let Some(pkg) = info.package(name)
+                        {
+                            locked.version = info.version.clone();
+                            locked.file = info.file(pkg);
+                            locked.commit = Some(commit.clone());
+                        }
+                    }
+                }
+                None => eprintln!(
+                    "warning: no {base} commit in the AUR builds {version}; switch will rebuild the locked one"
+                ),
+            }
         }
     }
     let wanted: Vec<Wanted> = pins
@@ -102,8 +132,25 @@ pub fn adopt(
                 .unwrap_or_default(),
             sha256: sha256(&file)?,
             explicit,
+            ..Default::default()
         };
         adopted.pin(&name, locked);
     }
     Ok(adopted)
+}
+
+/// The newest commit in a base's history whose .SRCINFO builds exactly `version`.
+pub fn commit_for_version(git: &AurGit, base: &str, version: &str) -> Result<Option<(String, SrcInfo)>> {
+    git.sync(base)?;
+    for commit in git.history(base)?.into_iter().take(500) {
+        let Ok(text) = git.show(base, &commit, ".SRCINFO") else {
+            continue;
+        };
+        if let Ok(info) = srcinfo::parse(&text)
+            && info.version == version
+        {
+            return Ok(Some((commit, info)));
+        }
+    }
+    Ok(None)
 }
