@@ -46,6 +46,20 @@ archix 1.0.0
 
 Then run `sudo archix init` to capture your system into a config and a lock that match it exactly, so the first `archix diff` is empty. The [quick start](/docs/quick-start/) walks through it.
 
+## Build from source
+
+To run archix from a git checkout instead, the install script builds and installs both binaries:
+
+```console
+$ git clone https://github.com/archix-org/archix
+$ cd archix
+$ scripts/install.sh
+```
+
+Run it as your normal user; it uses `sudo` only to install. If cargo, musl or rust-musl are missing, it installs them with `pacman -S --needed`, which asks first. With rustup, it runs `rustup target add x86_64-unknown-linux-musl` instead of installing rust-musl. It builds the normal and the static binary, installs `/usr/local/bin/archix` and `/usr/lib/archix/archix-static`, and ends with `next: sudo archix init`.
+
+A source install isn't a package, so archix doesn't update it: pull and run the script again. `scripts/install.sh --uninstall` removes both files.
+
 ## Updates to archix itself
 
 archix is an AUR package on your system, so `archix init` declares it in `installed.lua` like your other explicitly installed packages, and locks it by AUR commit. From then on it updates like everything else: `archix update` and `archix switch`, or `archix -Syu`, build the new version in a clean chroot and install it in the same transaction as the rest. If an archix update turns out bad, rolling back the generation rolls back archix too.
@@ -56,7 +70,7 @@ Don't update it with `makepkg` again.
 
 Both AUR packages also install a statically linked archix at `/usr/lib/archix/archix-static`. When archix manages booting, it adds an mkinitcpio hook that copies that binary into the initramfs, and gives the newest two generations an `archix rescue` boot entry. That entry repairs a system pacman can't repair, without a live USB.
 
-Rescue entries are only built when `/usr/lib/archix/archix-static` exists. If you installed archix some other way, build the static binary from the source tree yourself. With Arch's `rust` package, the musl target comes from `rust-musl`:
+Rescue entries are only built when `/usr/lib/archix/archix-static` exists. `scripts/install.sh` installs it too. If you built archix by hand, build the static binary from the source tree yourself. With Arch's `rust` package, the musl target comes from `rust-musl`:
 
 ```console
 $ cargo build --release --target x86_64-unknown-linux-musl

@@ -211,7 +211,7 @@ Booting it adds `archix.rescue` to the kernel command line. Before switching to 
 
 Rolling back to the current generation puts back whatever differs from it, packages, files and services alike. If a switch was interrupted, run `sudo archix recover` instead.
 
-That's what makes a broken pacman repairable without a live USB. It works with both systemd-based and busybox initramfs images. The rescue hook copies the static binary that the `archix` and `archix-bin` AUR packages install at `/usr/lib/archix/archix-static`; rescue entries are only built when that file exists. If you installed archix another way, build it yourself from the source tree:
+That's what makes a broken pacman repairable without a live USB. It works with both systemd-based and busybox initramfs images. The rescue hook copies the static binary that the `archix` and `archix-bin` AUR packages install at `/usr/lib/archix/archix-static`, and that [`scripts/install.sh`](/docs/installation/#build-from-source) installs too; rescue entries are only built when that file exists. If you built archix by hand, build it yourself from the source tree:
 
 ```console
 $ cargo build --release --target x86_64-unknown-linux-musl
