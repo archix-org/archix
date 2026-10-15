@@ -26,6 +26,8 @@ pub struct Lists {
     pub never: Vec<String>,
     /// Any path containing one of these holds credentials and is never copied.
     pub secret: Vec<String>,
+    /// Text that only shows up in credentials; a file containing any of it is treated as a secret too.
+    pub secret_content: Vec<String>,
     /// Worth managing by default; an entry ending in `/` covers everything under it.
     pub recommended: Vec<String>,
     pub dotfiles: DotfileLists,
@@ -178,6 +180,37 @@ pub fn is_secret(path: &str) -> bool {
     LISTS.secret.iter().any(|hint| path.contains(hint.as_str()))
 }
 
+/// Whether a file, or any file in a directory, contains text that only credentials have; big files and trees are sampled, not read whole.
+pub fn holds_secret(path: &Path) -> bool {
+    const MAX_FILE: u64 = 1024 * 1024;
+    const MAX_FILES: usize = 200;
+    let mut stack = vec![path.to_path_buf()];
+    let mut seen = 0;
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            stack.extend(fs::read_dir(&path).into_iter().flatten().flatten().map(|e| e.path()));
+            continue;
+        }
+        if !meta.is_file() || meta.len() > MAX_FILE {
+            continue;
+        }
+        seen += 1;
+        if seen > MAX_FILES {
+            break;
+        }
+        if let Ok(bytes) = fs::read(&path) {
+            let text = String::from_utf8_lossy(&bytes);
+            if LISTS.secret_content.iter().any(|marker| text.contains(marker.as_str())) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn found(path: &str, edited: bool) -> Result<Option<FoundFile>> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_file() => meta,
@@ -230,7 +263,7 @@ pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<Str
         if excluded(&path, skip) {
             continue;
         }
-        if is_secret(&path) {
+        if is_secret(&path) || holds_secret(Path::new(&path)) {
             out.secrets.push(path);
         } else if let Some(file) = found(&path, edited)? {
             out.files.push(file);
@@ -488,6 +521,10 @@ pub fn dotfiles(home: &Path) -> (Vec<Dotfile>, usize) {
         if matches_name(&lists.skip, &name) {
             continue;
         }
+        if holds_secret(&home.join(&name)) {
+            secrets += 1;
+            continue;
+        }
         let recommended = matches_name(&lists.recommended, &name);
         let replaced = !home.join(&name).is_dir() && matches_name(&lists.replaced, &name);
         out.push(Dotfile {
@@ -585,6 +622,32 @@ mod tests {
         assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
         assert!(!listed(&LISTS.recommended, "/etc/shells"));
         assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));
+    }
+
+    #[test]
+    fn content_marks_secrets_that_names_dont() {
+        let home = tempfile::tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".config/someapp")).unwrap();
+        fs::write(
+            home.path().join(".config/someapp/settings.json"),
+            "{\"theme\": \"dark\"}",
+        )
+        .unwrap();
+        fs::create_dir_all(home.path().join(".config/sometool")).unwrap();
+        fs::write(
+            home.path().join(".config/sometool/auth.yml"),
+            "token: ghp_abcdefghijklmnop\n",
+        )
+        .unwrap();
+        fs::write(home.path().join(".deploy-key"), "-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        let (offered, secrets) = dotfiles(home.path());
+        let names: Vec<&str> = offered.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&".config/someapp"), "{names:?}");
+        assert!(
+            !names.contains(&".config/sometool") && !names.contains(&".deploy-key"),
+            "{names:?}"
+        );
+        assert_eq!(secrets, 2);
     }
 
     #[test]

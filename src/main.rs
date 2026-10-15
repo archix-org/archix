@@ -251,14 +251,68 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: {e:#}");
+            let denied = e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+                    || cause.to_string().contains("Permission denied")
+            });
+            if denied && !is_root() {
+                eprintln!("hint: that needs root; run it with sudo: {}", with_sudo());
+            }
             ExitCode::FAILURE
         }
+    }
+}
+
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// The command line as typed, with sudo in front.
+fn with_sudo() -> String {
+    let mut args = std::env::args();
+    let program = args
+        .next()
+        .and_then(|arg0| {
+            PathBuf::from(arg0)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "archix".to_string());
+    std::iter::once(format!("sudo {program}"))
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Commands that change the system, checked before anything (like installed.lua) is touched.
+fn needs_root(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Install { .. } => Some("install"),
+        Command::Remove { .. } => Some("remove"),
+        Command::Switch { .. } => Some("switch"),
+        Command::Upgrade { .. } => Some("upgrade"),
+        Command::Rollback { .. } => Some("rollback"),
+        Command::Recover { .. } => Some("recover"),
+        Command::Gc => Some("gc"),
+        Command::Init { .. } => Some("init"),
+        Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
+        _ => None,
     }
 }
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
+    if let Some(name) = needs_root(&command)
+        && !is_root()
+    {
+        anyhow::bail!(
+            "`archix {name}` changes the system, so it needs root; run it with sudo: {}",
+            with_sudo()
+        );
+    }
     match command {
         Command::HookRecord => {
             commands::hook_record();
@@ -332,6 +386,12 @@ fn run() -> Result<ExitCode> {
     if let Command::Init { defaults } = command {
         commands::init(&cli.config, &hostname, defaults)?;
         return Ok(ExitCode::SUCCESS);
+    }
+    if !cli.config.join("init.lua").is_file() {
+        anyhow::bail!(
+            "there's no archix config at {} yet; run `sudo archix init` to write one that describes this machine, or point --config at yours",
+            cli.config.display()
+        );
     }
     let edit = match &command {
         Command::Install {

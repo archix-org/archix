@@ -393,11 +393,11 @@ fn write_and_lock(
             count(lock.flatpak.len(), "Flatpak app", "Flatpak apps")
         ));
     }
-    hand_over(&dir)?;
     if answers.git {
         run(Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]), "git init")?;
         run(Command::new("git").arg("-C").arg(&dir).args(["add", "-A"]), "git add")?;
     }
+    hand_over(&dir)?;
 
     section("Result");
     let (lines, warned) = pending(&target, &declared, &lock)?;

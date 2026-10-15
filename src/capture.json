@@ -70,6 +70,21 @@
     ".p12",
     ".pfx"
   ],
+  "secret_content": [
+    "PRIVATE KEY-----",
+    "PRIVATE KEY BLOCK-----",
+    "ghp_",
+    "gho_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "sk-ant-",
+    "aws_secret_access_key",
+    "\"refresh_token\"",
+    "psk=",
+    "password="
+  ],
   "recommended": [
     "/etc/fstab",
     "/etc/crypttab",

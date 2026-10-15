@@ -246,6 +246,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     print_hooks(&system_change);
     if let Some(boot) = &declared.boot {
         system::boot::check_signing(boot.secure_boot)?;
+        system::boot::check_space(&boot.esp, boot.protected_entry)?;
     }
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
@@ -496,11 +497,19 @@ fn build_aur(
     };
     let recipes = recipes(target, declared)?;
     let mut moved = BTreeSet::new();
+    let before_fallbacks = lock.clone();
     loop {
         let result = Installer::new(&builder, lock, &declared.build_on_host, Some(&recipes))
             .and_then(|installer| installer.build(names));
         let error = match result {
-            Ok(built) => return Ok(built),
+            Ok(built) => {
+                // A fallback version only reaches archix.lock once it has actually built.
+                if !moved.is_empty() {
+                    let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+                    save_lock(target, &mut lockfile, Some(&before_fallbacks), lock)?;
+                }
+                return Ok(built);
+            }
             Err(error) => error,
         };
         let Some(failed) = error
@@ -549,12 +558,9 @@ fn build_aur(
             pkg.commit = Some(commit.clone());
         }
         review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
-        let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
-        save_lock(target, &mut lockfile, Some(&old), lock)?;
     }
 }
 
-/// Lists what failed without undoing the switch, and makes the command fail so scripts notice.
 /// Lists soft failures and fails the command; `state` says what did happen, such as "the new generation is current".
 pub(super) fn report_soft_failures(failures: &[String], state: &str) -> Result<()> {
     if failures.is_empty() {

@@ -334,6 +334,38 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     Ok(version)
 }
 
+/// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.
+pub fn check_space(esp: &str, protected: bool) -> Result<()> {
+    let existing = entries(esp);
+    let Some(newest) = existing
+        .iter()
+        .filter(|(_, extra, _)| !extra)
+        .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|m| m.len()))
+        .max()
+    else {
+        return Ok(());
+    };
+    let rescue = Path::new("/etc/initcpio/install/archix-rescue").exists();
+    let copies = 1 + u64::from(rescue) + u64::from(protected);
+    let needed = newest * copies + MARGIN;
+    let dir = linux_dir(esp);
+    let reclaimable: u64 = existing
+        .iter()
+        .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|m| m.len()))
+        .sum();
+    let free = free_bytes(&dir)?;
+    if free + reclaimable < needed {
+        let mib = |bytes: u64| bytes / (1024 * 1024);
+        bail!(
+            "the ESP at {esp} has {} MiB free ({} MiB more after removing every older archix entry), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set boot.entries lower",
+            mib(free),
+            mib(reclaimable),
+            mib(needed)
+        );
+    }
+    Ok(())
+}
+
 /// Checked before a switch changes anything: with Secure Boot enforcing, entries archix won't sign could never boot.
 pub fn check_signing(secure_boot: Option<bool>) -> Result<()> {
     let enforcing = super::secureboot::Machine::new()
