@@ -35,6 +35,11 @@ return {
       description = "System units to enable and start (true) or disable and stop (false).",
     },
     user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user." },
+    restart_if_changed = archix.option {
+      type = t.attrs_of(t.bool),
+      default = {},
+      description = "System or user units to always (true) or never (false) restart when a switch replaces files they use. By default archix restarts them, except the display manager, dbus, logind, NetworkManager, sshd, gettys and the desktop session's own units, which it lists for a logout instead.",
+    },
     sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings applied with sysctl, written to /etc/sysctl.d/90-archix.conf." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules." },
     modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf." },

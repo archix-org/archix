@@ -50,22 +50,19 @@ impl Running {
             .is_some_and(|have| tx.versions.get(package) != Some(&have.version));
         if changes {
             preserve_from(&self.modules, paths, release)?;
+            let mut kept = kept(paths);
+            kept.insert(release.clone());
+            save(paths, &kept)?;
         }
         Ok(())
     }
 
-    /// Puts the running kernel's modules back if pacman removed them, and remembers to clean them up after a reboot; true if it did.
+    /// Puts the running kernel's modules back if pacman removed them; true if it did.
     pub fn restore(&self, paths: &Paths) -> Result<bool> {
         let Some(release) = &self.release else {
             return Ok(false);
         };
-        if !restore_into(&self.modules, paths, release)? {
-            return Ok(false);
-        }
-        let mut restored = restored(paths);
-        restored.insert(release.clone());
-        save(paths, &restored)?;
-        Ok(true)
+        restore_into(&self.modules, paths, release)
     }
 
     /// Whether the running kernel's package was replaced or removed, so only a reboot finishes the switch.
@@ -74,23 +71,26 @@ impl Running {
         dir.join("pkgbase").is_file() && !owned(&dir.join("pkgbase"))
     }
 
-    /// Deletes module directories archix put back for a kernel that's no longer running, unless a package owns them again.
+    /// For kernels archix kept that are no longer running: deletes the modules directory it put back, unless a package owns it again, and its copy, unless a boot entry uses it.
     pub fn clean_up(&self, paths: &Paths) -> Result<()> {
-        let mut restored = restored(paths);
-        let before = restored.len();
-        restored.retain(|release| {
-            let dir = self.modules.join(release);
-            if owned(&dir.join("pkgbase")) {
-                return false;
-            }
+        let mut kept = kept(paths);
+        let before = kept.len();
+        let booted = boot_entry_kernels(paths);
+        kept.retain(|release| {
             if self.release.as_ref() == Some(release) {
                 return true;
             }
-            let _ = fs::remove_dir_all(&dir);
+            let dir = self.modules.join(release);
+            if dir.exists() && !owned(&dir.join("pkgbase")) {
+                let _ = fs::remove_dir_all(&dir);
+            }
+            if !booted.contains(release) {
+                let _ = fs::remove_dir_all(paths.state.join("kernels").join(release));
+            }
             false
         });
-        if restored.len() != before {
-            save(paths, &restored)?;
+        if kept.len() != before {
+            save(paths, &kept)?;
         }
         Ok(())
     }
@@ -102,11 +102,24 @@ impl Default for Running {
     }
 }
 
+/// Kernels whose modules archix kept while they were running.
 fn list(paths: &Paths) -> PathBuf {
-    paths.state.join("restored-modules")
+    paths.state.join("kept-modules")
 }
 
-fn restored(paths: &Paths) -> BTreeSet<String> {
+/// The kernel versions boot entries were built with, whose kept modules they still need.
+fn boot_entry_kernels(paths: &Paths) -> BTreeSet<String> {
+    fs::read_dir(paths.state.join("boot"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".kernel"))
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .map(|release| release.trim().to_string())
+        .collect()
+}
+
+fn kept(paths: &Paths) -> BTreeSet<String> {
     fs::read_to_string(list(paths))
         .unwrap_or_default()
         .lines()
@@ -114,13 +127,13 @@ fn restored(paths: &Paths) -> BTreeSet<String> {
         .collect()
 }
 
-fn save(paths: &Paths, restored: &BTreeSet<String>) -> Result<()> {
-    if restored.is_empty() {
+fn save(paths: &Paths, kept: &BTreeSet<String>) -> Result<()> {
+    if kept.is_empty() {
         let _ = fs::remove_file(list(paths));
         return Ok(());
     }
     fs::create_dir_all(&paths.state)?;
-    let text: String = restored.iter().map(|r| format!("{r}\n")).collect();
+    let text: String = kept.iter().map(|r| format!("{r}\n")).collect();
     fs::write(list(paths), text)?;
     Ok(())
 }

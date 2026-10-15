@@ -3,6 +3,7 @@ pub mod blobs;
 pub mod boot;
 pub mod hooks;
 pub mod rescue;
+pub mod restart;
 pub mod running;
 pub mod snapshot;
 
@@ -34,6 +35,9 @@ pub struct SystemState {
     /// Scripts for managed files, keyed by path, run when a switch changes that file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub on_change: BTreeMap<String, Hook>,
+    /// Units to always (true) or never (false) restart when a switch replaces files they use.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub restart_if_changed: BTreeMap<String, bool>,
 }
 
 /// A script run after a switch; `user` None means root.
@@ -366,6 +370,11 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         for (name, enabled) in map(config, key).into_iter().flatten() {
             target.insert(unit_name(name)?.to_string(), *enabled == Value::Bool(true));
         }
+    }
+    for (unit, restart) in map(config, "restart_if_changed").into_iter().flatten() {
+        b.state
+            .restart_if_changed
+            .insert(unit_name(unit)?.to_string(), *restart == Value::Bool(true));
     }
     for (name, spec) in map(config, "hooks").into_iter().flatten() {
         let hook = Hook {

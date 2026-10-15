@@ -164,7 +164,7 @@ fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
             .is_dir()
     );
     assert!(
-        fs::read_to_string("/var/lib/archix/restored-modules")
+        fs::read_to_string("/var/lib/archix/kept-modules")
             .unwrap()
             .contains(&running),
         "they're recorded for cleanup after the reboot"
@@ -174,5 +174,106 @@ fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
     setup.ok(&["switch", "--noconfirm"]);
     assert!(installed("archix-test-kernel").is_none());
     fs::remove_dir_all(&modules).unwrap();
-    let _ = fs::remove_file("/var/lib/archix/restored-modules");
+    let _ = fs::remove_file("/var/lib/archix/kept-modules");
+    let _ = fs::remove_dir_all(format!("/var/lib/archix/kernels/{running}"));
+}
+
+fn recipe(name: &str, version: &str, depends: &str, package: &str) -> String {
+    format!(
+        "pkgname={name}\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\ndepends=({depends})\n\
+         package() {{\n{package}\n}}\n"
+    )
+}
+
+fn sleeper(version: &str) -> String {
+    recipe(
+        "archix-test-sleeper",
+        version,
+        "",
+        "  install -Dm755 /usr/bin/sleep \"$pkgdir/usr/bin/archix-test-sleep\"",
+    )
+}
+
+fn perl_lib(version: &str) -> String {
+    recipe(
+        "archix-test-perllib",
+        version,
+        "perl",
+        &format!(
+            "  mkdir -p \"$pkgdir/usr/share/perl5/vendor_perl\"\n  echo 'package ArchixTest; our $V = \"{version}\"; 1;' > \"$pkgdir/usr/share/perl5/vendor_perl/ArchixTest.pm\""
+        ),
+    )
+}
+
+const PERL_APP: &str = "  mkdir -p \"$pkgdir/usr/lib/archix-test-perlapp\"\n  echo 'use ArchixTest; sleep;' > \"$pkgdir/usr/lib/archix-test-perlapp/app.pl\"";
+
+fn service(exec: &str) -> String {
+    format!("[Service]\nExecStart={exec}\n[Install]\nWantedBy=multi-user.target")
+}
+
+fn main_pid(unit: &str) -> String {
+    let output = Command::new("systemctl")
+        .args(["show", "-P", "MainPID", unit])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+#[ignore]
+fn services_using_replaced_files_or_changed_interpreted_code_restart() {
+    let _system = lock_system();
+    let body = format!(
+        r#"units = {{ ["archix-test-native.service"] = {native:?}, ["archix-test-perl.service"] = {perl:?}, ["archix-test-kept.service"] = {kept:?} }},
+        services = {{ ["archix-test-native.service"] = true, ["archix-test-perl.service"] = true, ["archix-test-kept.service"] = true }},
+        restart_if_changed = {{ ["archix-test-kept.service"] = false }}"#,
+        native = service("/usr/bin/archix-test-sleep infinity"),
+        perl = service("/usr/bin/perl /usr/lib/archix-test-perlapp/app.pl"),
+        kept = service("/usr/bin/archix-test-sleep infinity"),
+    );
+    let packages = ["archix-test-sleeper", "archix-test-perllib", "archix-test-perlapp"];
+    let setup = Setup::with_files(
+        &packages,
+        &body,
+        &[
+            ("pkgbuilds/sleeper/PKGBUILD", &sleeper("1")),
+            ("pkgbuilds/perllib/PKGBUILD", &perl_lib("1")),
+            (
+                "pkgbuilds/perlapp/PKGBUILD",
+                &recipe("archix-test-perlapp", "1", "archix-test-perllib", PERL_APP),
+            ),
+        ],
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let before: Vec<String> = ["archix-test-native", "archix-test-perl", "archix-test-kept"]
+        .iter()
+        .map(|unit| main_pid(&format!("{unit}.service")))
+        .collect();
+    assert!(before.iter().all(|pid| pid != "0"), "{before:?}");
+
+    fs::write(setup.dir.path().join("pkgbuilds/sleeper/PKGBUILD"), sleeper("2")).unwrap();
+    fs::write(setup.dir.path().join("pkgbuilds/perllib/PKGBUILD"), perl_lib("2")).unwrap();
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert_ne!(
+        main_pid("archix-test-native.service"),
+        before[0],
+        "a daemon whose binary was replaced restarts:\n{out}"
+    );
+    assert_ne!(
+        main_pid("archix-test-perl.service"),
+        before[1],
+        "a Perl daemon restarts when a library it depends on changes:\n{out}"
+    );
+    assert_eq!(
+        main_pid("archix-test-kept.service"),
+        before[2],
+        "restart_if_changed = false is respected"
+    );
+    assert!(
+        out.contains("still using replaced files") && out.contains("archix-test-kept.service"),
+        "{out}"
+    );
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }

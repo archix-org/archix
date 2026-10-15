@@ -438,6 +438,7 @@ fn transaction_for(
     )?);
     Ok(Transaction {
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
+        restart: true,
         install,
         remove,
         system: None,

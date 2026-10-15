@@ -815,6 +815,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     )?;
     let rewritten = system::apply::out_of_date(&system_change)?;
     transaction.system = Some(system_change.clone());
+    transaction.restart = online;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;

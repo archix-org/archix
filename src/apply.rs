@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::process::Command;
@@ -49,14 +50,12 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
     let mut soft_failures = Vec::new();
     while let Some(step) = journal.next_step() {
         eprintln!(":: {}", step.describe());
-        soft_failures.extend(
-            run_step(paths, &journal.transaction, journal.generation, step, reinstall).with_context(|| {
-                format!(
-                    "{} failed; the switch is unfinished, run `archix recover`",
-                    step.describe()
-                )
-            })?,
-        );
+        soft_failures.extend(run_step(paths, journal, step, reinstall).with_context(|| {
+            format!(
+                "{} failed; the switch is unfinished, run `archix recover`",
+                step.describe()
+            )
+        })?);
         journal.done.push(step);
         journal.save(&path)?;
     }
@@ -64,15 +63,28 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
     Ok(soft_failures)
 }
 
-fn run_step(
-    paths: &Paths,
-    tx: &Transaction,
-    generation: Option<u32>,
-    step: Step,
-    reinstall: bool,
-) -> Result<Vec<String>> {
+fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Result<Vec<String>> {
+    let (tx, generation) = (&journal.transaction, journal.generation);
     let system = tx.system.as_ref();
     match step {
+        Step::Restart if !tx.restart => Ok(Vec::new()),
+        Step::Restart => {
+            let changed: BTreeSet<String> = journal
+                .before
+                .keys()
+                .chain(tx.versions.keys())
+                .filter(|name| journal.before.get(*name).map(|pkg| &pkg.version) != tx.versions.get(*name))
+                .cloned()
+                .collect();
+            let overrides = system
+                .map(|change| change.to.restart_if_changed.clone())
+                .unwrap_or_default();
+            Ok(crate::system::restart::run(&crate::system::restart::plan(
+                &paths.local_db(),
+                &changed,
+                &overrides,
+            )))
+        }
         Step::Users => system.map_or(Ok(()), crate::system::apply::users).map(|()| Vec::new()),
         Step::Files => system
             .map_or(Ok(()), |change| crate::system::apply::files(paths, change))
@@ -96,7 +108,9 @@ fn run_package_step(
     reinstall: bool,
 ) -> Result<()> {
     match step {
-        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services | Step::Boot => Ok(()),
+        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services | Step::Restart | Step::Boot => {
+            Ok(())
+        }
         Step::Activate => match generation {
             Some(number) => Store::new(paths).activate(number),
             None => Ok(()),
