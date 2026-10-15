@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::archive::{ARCH, Archive};
+use crate::archive::Archive;
 use crate::aur::git::AurGit;
 use crate::aur::index::Index;
 use crate::aur::srcinfo::{self, SrcInfo};
@@ -75,7 +75,8 @@ pub fn snapshot_conf(archive: &Archive, cache: &Path, date: Date, repos: &[Repo]
 /// The pacman.conf serving one archive snapshot of the official repos, plus custom repos as they are now.
 pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
     let mut text = format!(
-        "[options]\nArchitecture = {ARCH}\nSigLevel = Required DatabaseOptional\nLocalFileSigLevel = Optional\n"
+        "[options]\nArchitecture = {}\nSigLevel = Required DatabaseOptional\nLocalFileSigLevel = Optional\n",
+        crate::archive::architectures()
     );
     for repo in repos {
         let _ = write!(text, "\n[{}]\n", repo.name);

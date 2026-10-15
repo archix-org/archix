@@ -9,6 +9,30 @@ use crate::date::Date;
 
 pub const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 pub const ARCH: &str = "x86_64";
+
+/// The package architectures this CPU can run: x86_64 plus each x86-64 level the dynamic loader reports as supported, for CachyOS's x86_64_v3/v4 repos.
+pub fn architectures() -> String {
+    let report = std::process::Command::new("/lib/ld-linux-x86-64.so.2")
+        .arg("--help")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    levels(&report)
+}
+
+fn levels(report: &str) -> String {
+    let mut arches = vec![ARCH.to_string()];
+    for level in ["v2", "v3", "v4"] {
+        if report
+            .lines()
+            .any(|l| l.trim_start().starts_with(&format!("x86-64-{level} (supported")))
+        {
+            arches.push(format!("{ARCH}_{level}"));
+        }
+    }
+    arches.join(" ")
+}
+
 const SEARCH_DAYS: usize = 14;
 
 /// The Arch Linux Archive: dated, immutable snapshots of the official repositories.
@@ -152,4 +176,13 @@ const ATTEMPTS: u32 = 3;
 /// Waits before another attempt: 4 seconds, then 8.
 fn pause(attempt: u32) {
     std::thread::sleep(Duration::from_secs(2u64 << attempt));
+}
+
+#[cfg(test)]
+mod level_tests {
+    #[test]
+    fn only_supported_levels_are_accepted() {
+        let report = "Subdirectories of glibc-hwcaps directories, in priority order:\n  x86-64-v4\n  x86-64-v3 (supported, searched)\n  x86-64-v2 (supported, searched)\n";
+        assert_eq!(super::levels(report), "x86_64 x86_64_v2 x86_64_v3");
+    }
 }
