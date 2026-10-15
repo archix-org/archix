@@ -20,7 +20,7 @@ use archix::flatpak::{self, LockedApp};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
-use archix::journal::{Journal, Kind, Step};
+use archix::journal::{Journal, Kind};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
@@ -196,7 +196,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
                 "nothing to do: the system matches generation {} (snapshot {})",
                 current.number, lock.date
             );
-            return report_soft_failures(&run_hooks(&system_change));
+            print_hooks(&system_change);
+            let failures = run_hooks(&system_change, &BTreeSet::new());
+            return report_soft_failures(&failures, "nothing was changed");
         }
         system::blobs::ensure(&paths, &archive, &rendered)?;
         system::apply::keep_originals(&paths, &system_change)?;
@@ -207,7 +209,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             "switched to generation {} (snapshot {}); no package changes were needed",
             created.number, lock.date
         );
-        return report_soft_failures(&run_hooks(&system_change));
+        print_hooks(&system_change);
+        let failures = run_hooks(&system_change, &BTreeSet::new());
+        return report_soft_failures(&failures, "the new generation is current");
     }
     for change in &changes {
         println!("{change}");
@@ -218,11 +222,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     if declared.boot.is_some() {
         println!("boot entry for the new generation");
     }
-    if let Ok(names) = system::hooks::order(&system_change.to.hooks)
-        && !names.is_empty()
-    {
-        println!("run hooks  {}", names.join(", "));
-    }
+    print_hooks(&system_change);
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
     if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
         bail!("aborted; nothing was changed");
@@ -299,7 +299,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         &built,
         &declared.repos,
     )?;
-    transaction.system = Some(system_change);
+    let rewritten = system::apply::out_of_date(&system_change)?;
+    transaction.system = Some(system_change.clone());
     let mut created = store.create(generation)?;
     if let Some(boot) = &declared.boot {
         transaction.boot = Some(BootPlan {
@@ -330,17 +331,27 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         created.number,
         &previous_flatpak,
     )?);
+    soft_failures.extend(run_hooks(&system_change, &rewritten));
     println!("switched to {name}");
-    report_soft_failures(&soft_failures)
+    report_soft_failures(&soft_failures, "the new generation is current")
 }
 
-/// Hooks for a switch that needed no journal; NixOS runs activation on every switch too.
-fn run_hooks(change: &SystemChange) -> Vec<String> {
+/// The preview line naming the hooks a switch or rollback runs, in order.
+fn print_hooks(change: &SystemChange) {
+    if let Ok(names) = system::hooks::order(&change.to.hooks)
+        && !names.is_empty()
+    {
+        println!("run hooks  {}", names.join(", "));
+    }
+}
+
+/// on_change scripts and hooks, last thing in every switch, rollback and recovery, like NixOS activation.
+pub(super) fn run_hooks(change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
     if change.to.hooks.is_empty() && change.to.on_change.is_empty() {
         return Vec::new();
     }
-    eprintln!(":: {}", Step::Hooks.describe());
-    system::hooks::run(change)
+    eprintln!(":: running activation hooks");
+    system::hooks::run(change, rewritten)
 }
 
 /// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
@@ -460,7 +471,8 @@ fn build_aur(
 }
 
 /// Lists what failed without undoing the switch, and makes the command fail so scripts notice.
-fn report_soft_failures(failures: &[String]) -> Result<()> {
+/// Lists soft failures and fails the command; `state` says what did happen, such as "the new generation is current".
+pub(super) fn report_soft_failures(failures: &[String], state: &str) -> Result<()> {
     if failures.is_empty() {
         return Ok(());
     }
@@ -468,7 +480,7 @@ fn report_soft_failures(failures: &[String]) -> Result<()> {
         eprintln!("failed: {failure}");
     }
     bail!(
-        "the new generation is current, but {} (listed above)",
+        "{state}, but {} (listed above)",
         count(failures.len(), "step failed", "steps failed")
     )
 }
@@ -657,8 +669,8 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     roll_back(to, noconfirm, true)
 }
 
-/// A rollback; at boot there's no network yet, so Flatpak apps are left for a later `archix rollback N`.
-fn roll_back(to: Option<u32>, noconfirm: bool, pin_flatpak: bool) -> Result<()> {
+/// A rollback; at boot there's no network or session yet, so Flatpak apps and hooks are left for a later `archix rollback N`.
+fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     require_root("rollback")?;
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
@@ -703,10 +715,21 @@ fn roll_back(to: Option<u32>, noconfirm: bool, pin_flatpak: bool) -> Result<()> 
     for line in system_lines.iter().chain(&flatpak_lines) {
         println!("{line}");
     }
+    print_hooks(&system_change);
+    let hooks_at_end = |rewritten: &BTreeSet<String>| {
+        if online {
+            run_hooks(&system_change, rewritten)
+        } else {
+            if !system_change.to.hooks.is_empty() || !system_change.to.on_change.is_empty() {
+                println!("archix: hooks don't run at boot; run `sudo archix rollback {number}` once you're online");
+            }
+            Vec::new()
+        }
+    };
     if changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() {
         store.activate(number)?;
         println!("{name} is current; no package changes were needed");
-        return Ok(());
+        return report_soft_failures(&hooks_at_end(&BTreeSet::new()), &format!("{name} is current"));
     }
     for change in &changes {
         println!("{change}");
@@ -733,13 +756,14 @@ fn roll_back(to: Option<u32>, noconfirm: bool, pin_flatpak: bool) -> Result<()> 
         &BTreeMap::new(),
         &[],
     )?;
-    transaction.system = Some(system_change);
+    let rewritten = system::apply::out_of_date(&system_change)?;
+    transaction.system = Some(system_change.clone());
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;
     let mut soft_failures = apply::run(&paths, &mut journal, false)?;
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
-        if pin_flatpak {
+        if online {
             soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
         } else {
             println!(
@@ -747,8 +771,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, pin_flatpak: bool) -> Result<()> 
             );
         }
     }
+    soft_failures.extend(hooks_at_end(&rewritten));
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
-    report_soft_failures(&soft_failures)
+    report_soft_failures(&soft_failures, &format!("{name} is current"))
 }
 
 pub fn generations() -> Result<()> {

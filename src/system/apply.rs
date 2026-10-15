@@ -161,6 +161,17 @@ fn under(root: &Path, path: &str) -> PathBuf {
     root.join(path.trim_start_matches('/'))
 }
 
+/// Target files that are missing or differ on disk, so applying `change` rewrites them.
+pub fn out_of_date(change: &SystemChange) -> Result<BTreeSet<String>> {
+    let mut paths = BTreeSet::new();
+    for (path, want) in &change.to.files {
+        if !matches(&on_disk(Path::new(path))?, want) {
+            paths.insert(path.clone());
+        }
+    }
+    Ok(paths)
+}
+
 /// One line per change applying `change` would make, flagging managed files someone edited by hand.
 pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
     let mut lines = Vec::new();

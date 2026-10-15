@@ -167,9 +167,17 @@ fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
     );
     assert_eq!(read("/var/tmp/archix-on-change"), "changed\n", "the file didn't change");
 
+    fs::write("/etc/archix-hook.conf", "edited by hand\n").unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        read("/var/tmp/archix-on-change"),
+        "changed\nchanged\n",
+        "restoring a hand-edited file changes it on disk"
+    );
+
     setup.set_body(&[], &hooks_body("two", ""));
     setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(read("/var/tmp/archix-on-change"), "changed\nchanged\n");
+    assert_eq!(read("/var/tmp/archix-on-change").lines().count(), 3);
 
     setup.set_body(&[], &hooks_body("three", r#"broken = { run = "false" },"#));
     let output = setup.run(&["switch", "--noconfirm"]);
@@ -182,7 +190,7 @@ fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
     setup.ok(&["rollback", "--noconfirm"]);
     assert_eq!(
         read("/var/tmp/archix-on-change").lines().count(),
-        4,
+        5,
         "a rollback runs the target generation's on_change too"
     );
     setup.set_body(&[], "");

@@ -28,12 +28,7 @@ pub fn order(hooks: &BTreeMap<String, Hook>) -> Result<Vec<&str>> {
             .map(|(name, _)| name.as_str())
             .collect();
         let Some(first) = ready.first() else {
-            let stuck: Vec<&str> = hooks
-                .keys()
-                .map(String::as_str)
-                .filter(|name| !done.contains(name))
-                .collect();
-            bail!("hooks {} wait on each other in a cycle", stuck.join(", "));
+            bail!("{}", cycle(hooks, &done));
         };
         done.insert(first);
         ordered.push(*first);
@@ -41,15 +36,41 @@ pub fn order(hooks: &BTreeMap<String, Hook>) -> Result<Vec<&str>> {
     Ok(ordered)
 }
 
-/// Runs the target's on_change scripts for files the change touched, then every hook; failures are returned, not fatal.
-pub fn run(change: &SystemChange) -> Vec<String> {
+/// Names one cycle among the hooks that can't run: every one of them waits on another that can't run either.
+fn cycle(hooks: &BTreeMap<String, Hook>, done: &BTreeSet<&str>) -> String {
+    let stuck_dep = |name: &str| {
+        hooks[name]
+            .after
+            .iter()
+            .find(|dep| !done.contains(dep.as_str()))
+            .map(String::as_str)
+    };
+    let mut path: Vec<&str> = Vec::new();
+    let mut next = hooks.keys().map(String::as_str).find(|name| !done.contains(name));
+    while let Some(name) = next {
+        if let Some(start) = path.iter().position(|seen| *seen == name) {
+            let mut cycle = path[start..].to_vec();
+            if cycle.len() == 1 {
+                return format!("hook {name} lists itself in after");
+            }
+            cycle.push(name);
+            return format!("hooks {} wait on each other in a cycle", cycle.join(" -> "));
+        }
+        path.push(name);
+        next = stuck_dep(name);
+    }
+    "hooks wait on each other in a cycle".to_string()
+}
+
+/// Runs the target's on_change scripts for files that differ from the previous generation or that the switch rewrote on disk, then every hook; failures are returned, not fatal.
+pub fn run(change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
     let mut failures = Vec::new();
     let changed = change.changed_paths();
     for (path, hook) in change
         .to
         .on_change
         .iter()
-        .filter(|(path, _)| changed.contains(path.as_str()))
+        .filter(|(path, _)| changed.contains(path.as_str()) || rewritten.contains(*path))
     {
         if let Err(e) = run_one(hook) {
             failures.push(format!("on_change of {path}: {e:#}"));
@@ -108,9 +129,7 @@ fn user_command(user: &str, script: &[&str]) -> Result<Command> {
     .args(script)
     .env_clear();
     cmd.env("HOME", &home).env("USER", user).env("LOGNAME", user);
-    if Path::new(&home).is_dir() {
-        cmd.current_dir(&home);
-    }
+    cmd.current_dir(if Path::new(&home).is_dir() { home.as_str() } else { "/" });
     let runtime = format!("/run/user/{uid}");
     if Path::new(&runtime).is_dir() {
         cmd.env("XDG_RUNTIME_DIR", &runtime);
@@ -160,7 +179,18 @@ mod tests {
     fn rejects_unknown_names_and_cycles() {
         let unknown = BTreeMap::from([("a".to_string(), hook(&["nope"]))]);
         assert!(order(&unknown).unwrap_err().to_string().contains("\"nope\""));
-        let cycle = BTreeMap::from([("a".to_string(), hook(&["b"])), ("b".to_string(), hook(&["a"]))]);
-        assert!(order(&cycle).unwrap_err().to_string().contains("cycle"));
+        let cycle = BTreeMap::from([
+            ("a".to_string(), hook(&["b"])),
+            ("b".to_string(), hook(&["c"])),
+            ("c".to_string(), hook(&["b"])),
+            ("d".to_string(), hook(&[])),
+        ]);
+        assert_eq!(
+            order(&cycle).unwrap_err().to_string(),
+            "hooks b -> c -> b wait on each other in a cycle",
+            "a only waits behind the cycle, so it isn't named"
+        );
+        let itself = BTreeMap::from([("a".to_string(), hook(&["a"]))]);
+        assert_eq!(order(&itself).unwrap_err().to_string(), "hook a lists itself in after");
     }
 }

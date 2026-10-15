@@ -79,7 +79,6 @@ fn run_step(
         Step::Reload => Ok(system.map_or_else(Vec::new, crate::system::apply::reload)),
         Step::StopServices => Ok(system.map_or_else(Vec::new, crate::system::apply::stop_services)),
         Step::Services => Ok(system.map_or_else(Vec::new, crate::system::apply::start_services)),
-        Step::Hooks => Ok(system.map_or_else(Vec::new, crate::system::hooks::run)),
         Step::Boot => match &tx.boot {
             Some(plan) => crate::system::boot::write_entry(paths, plan).map(|_| Vec::new()),
             None => Ok(Vec::new()),
@@ -96,9 +95,7 @@ fn run_package_step(
     reinstall: bool,
 ) -> Result<()> {
     match step {
-        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services | Step::Hooks | Step::Boot => {
-            Ok(())
-        }
+        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services | Step::Boot => Ok(()),
         Step::Activate => match generation {
             Some(number) => Store::new(paths).activate(number),
             None => Ok(()),

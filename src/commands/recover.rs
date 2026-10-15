@@ -14,6 +14,7 @@ use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::system::apply::SystemChange;
 
+use super::switch::{report_soft_failures, run_hooks};
 use super::{RecoverMode, count, describe_unfinished, kind_name, require_root};
 
 pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
@@ -42,6 +43,7 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
             let install_interrupted = !journal.done.contains(&Step::Install);
             apply::run(&paths, &mut journal, install_interrupted)?;
             println!("finished the interrupted {kind} to {}", journal.target);
+            return finish_with_hooks(&journal, &format!("{} is current", journal.target));
         }
         RecoverMode::Rollback => {
             let archive = Archive::new(ARCHIVE_URL);
@@ -53,6 +55,7 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
             apply::run(&paths, &mut rollback, true)?;
             forget_unactivated(&paths, &journal);
             println!("rolled back to the packages from before the {kind}");
+            return finish_with_hooks(&rollback, "the rollback finished");
         }
         RecoverMode::Abandon => {
             let problems = apply::mismatches(&paths, &journal.transaction)?;
@@ -71,6 +74,16 @@ pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Hooks run after a recovery too, since the interrupted switch never got to them.
+fn finish_with_hooks(journal: &Journal, state: &str) -> Result<()> {
+    let failures = journal
+        .transaction
+        .system
+        .as_ref()
+        .map_or_else(Vec::new, |change| run_hooks(change, &BTreeSet::new()));
+    report_soft_failures(&failures, state)
 }
 
 /// Deletes the generation an abandoned or rolled-back switch created but never made current.
