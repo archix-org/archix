@@ -348,10 +348,11 @@ fn print_hooks(change: &SystemChange) {
 /// on_change scripts and hooks, last thing in every switch, rollback and recovery, like NixOS activation.
 pub(super) fn run_hooks(paths: &Paths, change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
     let pending = paths.pending_on_change();
-    let mut due = system::hooks::due(change, rewritten);
-    due.extend(system::hooks::deferred(&pending));
+    // A script this switch is due to run for the same file is newer than the one a boot rollback left behind.
+    let mut due = system::hooks::deferred(&pending);
+    due.extend(system::hooks::due(change, rewritten));
     let _ = fs::remove_file(&pending);
-    if change.to.hooks.is_empty() && change.to.on_change.is_empty() {
+    if change.to.hooks.is_empty() && due.is_empty() {
         return Vec::new();
     }
     eprintln!(":: running activation hooks");

@@ -63,42 +63,40 @@ fn cycle(hooks: &BTreeMap<String, Hook>, done: &BTreeSet<&str>) -> String {
     "hooks wait on each other in a cycle".to_string()
 }
 
-/// Files whose on_change scripts are due: their entry differs from the previous generation, or the switch rewrote them on disk.
-pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeSet<String> {
+/// The target's on_change scripts that are due: their file's entry differs from the previous generation, or the switch rewrote it on disk.
+pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeMap<String, Hook> {
     let changed = change.changed_paths();
     change
         .to
         .on_change
-        .keys()
-        .filter(|path| changed.contains(path.as_str()) || rewritten.contains(*path))
-        .cloned()
+        .iter()
+        .filter(|(path, _)| changed.contains(path.as_str()) || rewritten.contains(*path))
+        .map(|(path, hook)| (path.clone(), hook.clone()))
         .collect()
 }
 
-/// Remembers on_change scripts a boot-time rollback skipped, adding to any already waiting.
-pub fn defer(path: &Path, due: &BTreeSet<String>) -> Result<()> {
+/// Remembers the on_change scripts a boot-time rollback skipped, as that generation had them, adding to any already waiting.
+pub fn defer(path: &Path, due: &BTreeMap<String, Hook>) -> Result<()> {
     let mut pending = deferred(path);
-    pending.extend(due.iter().cloned());
+    pending.extend(due.clone());
     if pending.is_empty() {
         return Ok(());
     }
-    let text: String = pending.iter().map(|file| format!("{file}\n")).collect();
-    fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+    fs::write(path, serde_json::to_string_pretty(&pending)?).with_context(|| format!("writing {}", path.display()))
 }
 
-/// on_change scripts a boot-time rollback left for later.
-pub fn deferred(path: &Path) -> BTreeSet<String> {
+/// on_change scripts a boot-time rollback left for later, keyed by file.
+pub fn deferred(path: &Path) -> BTreeMap<String, Hook> {
     fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default()
-        .lines()
-        .map(str::to_string)
-        .collect()
 }
 
-/// Runs the target's on_change scripts for the files in `due`, then every hook; failures are returned, not fatal.
-pub fn run(change: &SystemChange, due: &BTreeSet<String>) -> Vec<String> {
+/// Runs the on_change scripts in `due`, then every hook of the target; failures are returned, not fatal.
+pub fn run(change: &SystemChange, due: &BTreeMap<String, Hook>) -> Vec<String> {
     let mut failures = Vec::new();
-    for (path, hook) in change.to.on_change.iter().filter(|(path, _)| due.contains(*path)) {
+    for (path, hook) in due {
         if let Err(e) = run_one(hook) {
             failures.push(format!("on_change of {path}: {e:#}"));
         }
@@ -196,13 +194,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let pending = dir.path().join("pending");
         assert!(deferred(&pending).is_empty());
-        defer(&pending, &BTreeSet::from(["/etc/a".to_string()])).unwrap();
-        defer(&pending, &BTreeSet::from(["/etc/b".to_string()])).unwrap();
+        let script = |run: &str| Hook {
+            run: run.into(),
+            user: None,
+            after: Vec::new(),
+        };
+        defer(&pending, &BTreeMap::from([("/etc/a".to_string(), script("old a"))])).unwrap();
+        defer(
+            &pending,
+            &BTreeMap::from([
+                ("/etc/a".to_string(), script("new a")),
+                ("/etc/b".to_string(), script("b")),
+            ]),
+        )
+        .unwrap();
+        let waiting = deferred(&pending);
+        assert_eq!(waiting.len(), 2);
         assert_eq!(
-            deferred(&pending),
-            BTreeSet::from(["/etc/a".to_string(), "/etc/b".to_string()])
+            waiting["/etc/a"].run, "new a",
+            "a later boot rollback's script replaces an earlier one"
         );
-        defer(&dir.path().join("untouched"), &BTreeSet::new()).unwrap();
+        defer(&dir.path().join("untouched"), &BTreeMap::new()).unwrap();
         assert!(!dir.path().join("untouched").exists(), "nothing due writes nothing");
     }
 
