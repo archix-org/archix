@@ -10,6 +10,7 @@ use archix::adopt::{adopt, newer_than_lock};
 use archix::apply;
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::aur::build::Builder;
+use archix::aur::build::built_version;
 use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
@@ -315,16 +316,31 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             accept_nearest,
         )?
     };
+    let mut versioned = Vec::new();
     for (name, path) in &built {
-        if let Some(pkg) = lock.packages.get(name) {
+        if let Some(pkg) = lock.packages.get_mut(name) {
+            let file = path.file_name().map(|f| f.to_string_lossy().into_owned());
+            if let Some(version) = file.as_deref().and_then(|f| built_version(name, f))
+                && version != pkg.version
+            {
+                versioned.push(format!("{name} {version}"));
+                pkg.version = version;
+            }
             let mut pkg = pkg.clone();
             pkg.sha256 = sha256(path)?;
-            pkg.file = path
-                .file_name()
-                .map(|f| f.to_string_lossy().into_owned())
-                .unwrap_or(pkg.file);
+            pkg.file = file.unwrap_or(pkg.file);
             generation.packages.insert(name.clone(), pkg);
         }
+    }
+    if !versioned.is_empty() {
+        println!(
+            "recorded the versions these packages gave themselves while building: {}",
+            versioned.join(", ")
+        );
+        let path = target.config_dir.join(LOCK_FILE);
+        let mut lockfile = Lockfile::load(&path)?;
+        lockfile.hosts.insert(target.host.to_string(), lock.clone());
+        lockfile.save(&path)?;
     }
     for (name, pkg) in &lock.packages {
         if pkg.is_built() && !built.contains_key(name) {

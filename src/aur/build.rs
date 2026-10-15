@@ -126,11 +126,15 @@ impl Builder<'_> {
             fs::create_dir_all(self.paths.packages())?;
             let mut files = Vec::new();
             for pkg in &info.packages {
-                let file = info.file(pkg);
-                let produced = dir.join(&file);
-                if !produced.is_file() {
-                    bail!("building {base} did not produce {file}");
-                }
+                let expected = info.file(pkg);
+                // A VCS package (-git and the like) sets its version while building, so the file can differ from .SRCINFO's.
+                let Some(produced) = Some(dir.join(&expected))
+                    .filter(|path| path.is_file())
+                    .or_else(|| find_built(&dir, &pkg.name))
+                else {
+                    bail!("building {base} did not produce {expected}");
+                };
+                let file = produced.file_name().unwrap_or_default().to_string_lossy().into_owned();
                 // A changed local recipe can rebuild the same version, so its file name carries the recipe hash.
                 let file = match recipe {
                     Some(_) => format!("{}-{file}", &crate::fetch::sha256_bytes(commit.as_bytes())[..12]),
@@ -323,6 +327,55 @@ impl Builder<'_> {
             run(&mut cmd, "pacman -R")?;
         }
         built
+    }
+}
+
+/// The package file a build produced for `name`, whatever version it gave itself.
+fn find_built(dir: &Path, name: &str) -> Option<PathBuf> {
+    fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|path| {
+        path.file_name()
+            .and_then(|f| f.to_str())
+            .and_then(|f| f.strip_prefix(name)?.strip_prefix('-'))
+            .and_then(|rest| rest.strip_suffix(".pkg.tar.zst"))
+            .is_some_and(|rest| rest.split('-').count() == 3)
+    })
+}
+
+/// The version in a built package's file name, past archix's recipe-hash prefix if there is one.
+pub fn built_version(name: &str, file: &str) -> Option<String> {
+    let file = match file.split_once('-') {
+        Some((hash, rest))
+            if hash.len() == 12 && hash.chars().all(|c| c.is_ascii_hexdigit()) && rest.starts_with(name) =>
+        {
+            rest
+        }
+        _ => file,
+    };
+    let rest = file
+        .strip_prefix(name)?
+        .strip_prefix('-')?
+        .strip_suffix(".pkg.tar.zst")?;
+    let mut parts = rest.rsplitn(3, '-');
+    let (_arch, rel, ver) = (parts.next()?, parts.next()?, parts.next()?);
+    (!ver.contains('-')).then(|| format!("{ver}-{rel}"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn versions_come_from_built_file_names() {
+        assert_eq!(
+            super::built_version("chatmixd-git", "chatmixd-git-0.2.0.r23.g5e00a5b-1-x86_64.pkg.tar.zst").as_deref(),
+            Some("0.2.0.r23.g5e00a5b-1")
+        );
+        assert_eq!(
+            super::built_version("tree", "0123456789ab-tree-1:2.3.2-1.1-x86_64.pkg.tar.zst").as_deref(),
+            Some("1:2.3.2-1.1")
+        );
+        assert_eq!(
+            super::built_version("tree", "tree-debug-2.3-1-x86_64.pkg.tar.zst"),
+            None
+        );
     }
 }
 
