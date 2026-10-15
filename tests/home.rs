@@ -3,7 +3,7 @@
 mod common;
 
 use std::fs;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use common::*;
@@ -100,4 +100,76 @@ fn a_live_link_replaces_a_directory_and_gives_it_back() {
     let _system = lock_system();
     live_link_over_a_directory("/home/homeuser");
     live_link_over_a_directory("/tmp/archix-other-fs/homeuser");
+}
+
+#[test]
+#[ignore]
+fn merged_keys_and_read_only_files() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let body = r##"users = { homeuser = {} },
+        mutable_files = false,
+        home = {
+          user = "homeuser",
+          files = {
+            [".config/kdeglobals"] = { merge = { format = "kconfig", values = { General = { ColorScheme = "Breeze" } } } },
+            [".config/app/settings.json"] = { merge = { format = "json", values = { bar = { position = "top" } } } },
+            [".zshrc"] = { text = "echo managed" },
+            [".config/notes.conf"] = { text = "free", mutable = true },
+          },
+        }"##;
+    setup.set_body(&[], body);
+    setup.ok(&["switch", "--noconfirm"]);
+    fs::write(
+        "/home/homeuser/.config/kdeglobals",
+        "[General]\nColorScheme=Old\nfont=Noto\n\n[KDE]\nSingleClick=false\n",
+    )
+    .unwrap();
+    fs::write(
+        "/home/homeuser/.config/app/settings.json",
+        "{\"bar\":{\"position\":\"bottom\",\"height\":30}}",
+    )
+    .unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+
+    assert_eq!(
+        read_text("/home/homeuser/.config/kdeglobals"),
+        "[General]\nColorScheme[$i]=Breeze\nfont=Noto\n\n[KDE]\nSingleClick=false\n",
+        "only the declared key changes, locked with [$i] since files are read-only"
+    );
+    let json: serde_json::Value = serde_json::from_str(&read_text("/home/homeuser/.config/app/settings.json")).unwrap();
+    assert_eq!(json, serde_json::json!({ "bar": { "position": "top", "height": 30 } }));
+    assert_eq!(fs::metadata("/home/homeuser/.zshrc").unwrap().mode() & 0o777, 0o444);
+    assert_eq!(
+        fs::metadata("/home/homeuser/.config/notes.conf").unwrap().mode() & 0o777,
+        0o644
+    );
+
+    let mut kde = read_text("/home/homeuser/.config/kdeglobals");
+    kde.push_str("[Icons]\nTheme=Papirus\n");
+    fs::write("/home/homeuser/.config/kdeglobals", kde).unwrap();
+    fs::write(
+        "/home/homeuser/.config/app/settings.json",
+        "{\n    \"bar\": {\"height\": 31, \"position\": \"top\"}\n}\n",
+    )
+    .unwrap();
+    assert!(
+        setup.ok(&["diff"]).contains("matches the lock and the config"),
+        "an app's own keys and formatting aren't drift"
+    );
+
+    fs::set_permissions("/home/homeuser/.zshrc", fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write("/home/homeuser/.zshrc", "echo edited").unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(read_text("/home/homeuser/.zshrc"), "echo managed");
+    assert_eq!(fs::metadata("/home/homeuser/.zshrc").unwrap().mode() & 0o777, 0o444);
+
+    setup.set_body(&[], "users = { homeuser = {} }");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        read_text("/home/homeuser/.config/kdeglobals").contains("ColorScheme[$i]=Breeze"),
+        "a merged file leaving the config keeps its keys"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }

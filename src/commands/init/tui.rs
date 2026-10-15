@@ -76,6 +76,7 @@ impl Step {
 enum Control {
     Location,
     Git,
+    ReadOnly,
     Fallback,
     Orphans,
     Strict,
@@ -327,6 +328,7 @@ impl<'a> App<'a> {
                 if facts.git {
                     controls.push(Control::Git);
                 }
+                controls.push(Control::ReadOnly);
             }
             Step::Packages => {
                 if !facts.custom.is_empty() {
@@ -405,7 +407,9 @@ impl<'a> App<'a> {
         for control in self.controls() {
             match control {
                 Control::Location | Control::Keep | Control::KeepDays => rows.push(Row::Edit(control)),
-                Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => rows.push(Row::Flip(control)),
+                Control::Git | Control::ReadOnly | Control::AurReview | Control::Snapshots | Control::Boot => {
+                    rows.push(Row::Flip(control))
+                }
                 c if Self::is_list(c) => rows.extend((0..self.items(c).len()).map(|i| Row::Item(control, i))),
                 _ => rows.extend((0..self.options(control).len()).map(|i| Row::Pick(control, i))),
             }
@@ -531,6 +535,7 @@ impl<'a> App<'a> {
             },
             Row::Flip(control) => match control {
                 Control::Git => answers.git = !answers.git,
+                Control::ReadOnly => answers.read_only = !answers.read_only,
                 Control::AurReview => answers.aur_review = !answers.aur_review,
                 Control::Snapshots => answers.snapshots = !answers.snapshots,
                 Control::Boot => answers.boot = !answers.boot,
@@ -1154,9 +1159,13 @@ impl<'a> App<'a> {
                     lines.push(Line::default());
                 }
             }
-            Control::Git | Control::AurReview | Control::Snapshots | Control::Boot => {
+            Control::Git | Control::ReadOnly | Control::AurReview | Control::Snapshots | Control::Boot => {
                 let (title, on) = match control {
                     Control::Git => ("Make it a git repository", answers.git),
+                    Control::ReadOnly => (
+                        "Write files read-only, like the Nix store (apps can't change them; a switch puts them back)",
+                        answers.read_only,
+                    ),
                     Control::AurReview => (
                         "Show each AUR build recipe and ask before trusting it",
                         answers.aur_review,
@@ -1482,6 +1491,9 @@ mod tests {
         let facts = facts();
         let mut app = App::new(&facts, "box", Answers::recommended(&facts));
         press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.focused(), Row::Flip(Control::ReadOnly));
+        assert!(!app.answers.read_only, "files stay writable unless asked");
         press(&mut app, KeyCode::Up);
         press(&mut app, KeyCode::Up);
         assert_eq!(app.focused(), Row::Edit(Control::Location));

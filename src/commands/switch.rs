@@ -246,7 +246,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     print_hooks(&system_change);
     if let Some(boot) = &declared.boot {
         system::boot::check_signing(boot.secure_boot)?;
-        system::boot::check_space(&boot.esp, boot.protected_entry)?;
+        system::boot::check_space(&boot.esp, &boot.kernel, boot.protected_entry)?;
     }
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),

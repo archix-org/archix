@@ -90,7 +90,11 @@ fn gid(name: &str) -> Option<u32> {
     (!entry.is_null()).then(|| unsafe { (*entry).gr_gid })
 }
 
-fn matches(disk: &OnDisk, want: &ManagedFile) -> bool {
+fn matches(path: &Path, disk: &OnDisk, want: &ManagedFile) -> bool {
+    if let Some(merge) = &want.merge {
+        return matches!(disk, OnDisk::File { .. })
+            && fs::read_to_string(path).is_ok_and(|text| merge.satisfied(&text));
+    }
     match (disk, &want.link) {
         (OnDisk::Link(target), Some(link)) => target == link,
         (
@@ -165,7 +169,7 @@ fn under(root: &Path, path: &str) -> PathBuf {
 pub fn out_of_date(change: &SystemChange) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
     for (path, want) in &change.to.files {
-        if !matches(&on_disk(Path::new(path))?, want) {
+        if !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
             paths.insert(path.clone());
         }
     }
@@ -177,14 +181,12 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     for (path, want) in &change.to.files {
         let disk = on_disk(Path::new(path))?;
-        if matches(&disk, want) {
+        if matches(Path::new(path), &disk, want) {
             continue;
         }
-        let edited = change
-            .from
-            .files
-            .get(path)
-            .is_some_and(|prev| disk != OnDisk::Missing && !matches(&disk, prev));
+        let edited = change.from.files.get(path).is_some_and(|prev| {
+            prev.merge.is_none() && disk != OnDisk::Missing && !matches(Path::new(path), &disk, prev)
+        });
         let verb = match (&disk, change.from.files.contains_key(path)) {
             (OnDisk::Missing, _) => "create",
             (_, false) => "replace",
@@ -447,7 +449,13 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
     for (path, want) in &change.to.files {
         let target = Path::new(path);
         let disk = on_disk(target)?;
-        if matches(&disk, want) {
+        if let Some(merge) = &want.merge {
+            if !matches(target, &disk, want) {
+                write_merged(target, want, merge).with_context(|| format!("setting keys in {path}"))?;
+            }
+            continue;
+        }
+        if matches(Path::new(path), &disk, want) {
             if disk != OnDisk::Missing && !change.from.files.contains_key(path) {
                 keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
             }
@@ -462,7 +470,7 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                         move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
                     }
                 }
-                Some(previous) if !matches(&disk, previous) => {
+                Some(previous) if !matches(target, &disk, previous) => {
                     let copy = under(&edited, path);
                     fs::create_dir_all(copy.parent().expect("absolute path"))?;
                     fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
@@ -480,13 +488,13 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
         .from
         .files
         .iter()
-        .filter(|(path, _)| !change.to.files.contains_key(*path))
+        .filter(|(path, previous)| !change.to.files.contains_key(*path) && previous.merge.is_none())
     {
         let target = Path::new(path);
         let backup = under(&backups, path);
         let disk = on_disk(target)?;
         if fs::symlink_metadata(&backup).is_ok() {
-            if disk != OnDisk::Missing && !matches(&disk, previous) {
+            if disk != OnDisk::Missing && !matches(target, &disk, previous) {
                 eprintln!(
                     "warning: {path} was edited outside archix; restoring the original anyway, see {}",
                     backup.display()
@@ -498,7 +506,7 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                 fs::remove_file(target).with_context(|| format!("removing {path}"))?;
             }
             move_path(&backup, target).with_context(|| format!("restoring {path}"))?;
-        } else if matches(&disk, previous) {
+        } else if matches(target, &disk, previous) {
             fs::remove_file(target).with_context(|| format!("removing {path}"))?;
         }
     }
@@ -511,7 +519,11 @@ pub fn keep_originals(paths: &Paths, change: &SystemChange) -> Result<()> {
     for (path, want) in &change.to.files {
         let target = Path::new(path);
         let disk = on_disk(target)?;
-        if disk != OnDisk::Missing && matches(&disk, want) && !change.from.files.contains_key(path) {
+        if want.merge.is_none()
+            && disk != OnDisk::Missing
+            && matches(target, &disk, want)
+            && !change.from.files.contains_key(path)
+        {
             keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
         }
     }
@@ -531,6 +543,37 @@ fn keep_original(target: &Path, backup: &Path) -> Result<()> {
         fs::copy(target, backup)?;
     }
     std::os::unix::fs::lchown(backup, Some(meta.uid()), Some(meta.gid()))?;
+    Ok(())
+}
+
+/// Sets a merged file's keys in place, keeping the app's other keys, mode and owner; a new file gets the managed mode and owner.
+fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge) -> Result<()> {
+    let existing = fs::metadata(target).ok();
+    let text = match &existing {
+        Some(_) => fs::read_to_string(target)?,
+        None => String::new(),
+    };
+    let merged = merge.apply(&text)?;
+    let dir = target.parent().context("file has no parent directory")?;
+    create_parents(dir, want)?;
+    let name = target.file_name().context("file has no name")?.to_string_lossy();
+    let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
+    fs::write(&tmp, merged)?;
+    let (mode, owner) = match &existing {
+        Some(meta) => (meta.mode() & 0o7777, (meta.uid(), meta.gid())),
+        None => {
+            let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
+                let _ = fs::remove_file(&tmp);
+                bail!("owner {}:{} doesn't exist", want.owner, want.group);
+            };
+            (want.mode, (u, g))
+        }
+    };
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    std::os::unix::fs::chown(&tmp, Some(owner.0), Some(owner.1))?;
+    fs::rename(&tmp, target).inspect_err(|_| {
+        let _ = fs::remove_file(&tmp);
+    })?;
     Ok(())
 }
 
@@ -696,7 +739,7 @@ pub fn start_services(change: &SystemChange) -> Vec<String> {
 pub fn mismatches(change: &SystemChange) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     for (path, want) in &change.to.files {
-        if !matches(&on_disk(Path::new(path))?, want) {
+        if !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
             problems.push(format!("{path} doesn't have its managed contents"));
         }
     }

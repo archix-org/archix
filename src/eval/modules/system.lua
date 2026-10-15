@@ -18,6 +18,19 @@ local text_file = t.submodule {
     default = archix.null,
     description = "A bash script run as root after a switch or rollback that changed this file, before the hooks.",
   },
+  mutable = archix.option {
+    type = t.nullable(t.bool),
+    default = archix.null,
+    description = "Write the file read-only (false) or writable (true); by default as mutable_files says.",
+  },
+  merge = archix.option {
+    type = t.nullable(t.submodule {
+      format = archix.option { type = t.enum { "ini", "kconfig", "json" }, description = "The file's format." },
+      values = archix.option { type = t.attrs_of(t.any), default = {}, description = "Keys to set: sections (kconfig groups nest) of keys, or a JSON object deep-merged into the file." },
+    }),
+    default = archix.null,
+    description = "Set only these keys in a file the app also writes, keeping the rest of it, like plasma-manager. Leaving the config leaves the keys as they are.",
+  },
 }
 
 return {
@@ -26,6 +39,11 @@ return {
       type = t.attrs_of(text_file),
       default = {},
       description = "Files archix writes, keyed by absolute path; give one of text, source, link or url. Files archix replaces are backed up and restored when they leave the config.",
+    },
+    mutable_files = archix.option {
+      type = t.bool,
+      default = true,
+      description = "Whether files archix writes stay writable. false writes them read-only like the Nix store, restores them on every switch, and marks merged kconfig keys [$i]; each file's mutable overrides it.",
     },
     units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd system units, keyed by file name such as foo.service." },
     user_units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd user units for every user, keyed by file name." },

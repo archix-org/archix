@@ -387,6 +387,21 @@ fn run() -> Result<ExitCode> {
         commands::init(&cli.config, &hostname, defaults)?;
         return Ok(ExitCode::SUCCESS);
     }
+    if matches!(command, Command::Options { .. }) && !cli.config.join("init.lua").is_file() {
+        let empty = std::env::temp_dir().join(format!("archix-options-{}", std::process::id()));
+        fs::create_dir_all(&empty)?;
+        fs::write(empty.join("init.lua"), "return {}\n")?;
+        let evaluation = eval::evaluate(&Input {
+            config_dir: empty.clone(),
+            hostname: hostname.clone(),
+        });
+        let _ = fs::remove_dir_all(&empty);
+        let evaluation = evaluation.map_err(|errors| anyhow::anyhow!("{errors}"))?;
+        if let Command::Options { json } = command {
+            print!("{}", render_options(&evaluation, json)?);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     if !cli.config.join("init.lua").is_file() {
         anyhow::bail!(
             "there's no archix config at {} yet; run `sudo archix init` to write one that describes this machine, or point --config at yours",

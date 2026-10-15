@@ -2,6 +2,7 @@ pub mod apply;
 pub mod blobs;
 pub mod boot;
 pub mod hooks;
+pub mod merge;
 pub mod rescue;
 pub mod restart;
 pub mod running;
@@ -64,6 +65,9 @@ pub struct ManagedFile {
     pub mode: u32,
     pub owner: String,
     pub group: String,
+    /// Keys to set in a file an app also writes, instead of owning the whole file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<merge::Merge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +119,7 @@ impl Builder {
             mode,
             owner: owner.to_string(),
             group: group.to_string(),
+            merge: None,
         };
         self.state.files.insert(path.to_string(), file);
     }
@@ -131,9 +136,22 @@ impl Builder {
             mode,
             owner: owner.to_string(),
             group: group.to_string(),
+            merge: None,
         };
         self.state.files.insert(path.to_string(), file);
         Ok(())
+    }
+
+    fn merged(&mut self, path: &str, merge: merge::Merge, owner: &str, group: &str) {
+        let file = ManagedFile {
+            sha256: String::new(),
+            link: None,
+            mode: 0o644,
+            owner: owner.to_string(),
+            group: group.to_string(),
+            merge: Some(merge),
+        };
+        self.state.files.insert(path.to_string(), file);
     }
 
     fn on_change(&mut self, path: &str, spec: &Value, user: Option<&str>) {
@@ -158,6 +176,7 @@ impl Builder {
             mode: 0o777,
             owner: owner.to_string(),
             group: group.to_string(),
+            merge: None,
         };
         self.state.files.insert(path.to_string(), file);
     }
@@ -230,20 +249,28 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         if FORBIDDEN.iter().any(|prefix| path.starts_with(prefix)) && !path.starts_with("/usr/local/") {
             bail!("files: {path} is in a directory archix doesn't write to (home files come with step 6's dotfiles)");
         }
-        let mode = u32::from_str_radix(str_of(spec, "mode").unwrap_or("0644"), 8)
+        let mut mode = u32::from_str_radix(str_of(spec, "mode").unwrap_or("0644"), 8)
             .with_context(|| format!("files.{path}.mode must be octal, like \"0644\""))?;
         let owner = str_of(spec, "owner").unwrap_or("root");
         let group = str_of(spec, "group").unwrap_or("root");
+        let immutable = read_only(config, spec);
+        if immutable {
+            mode &= !0o222;
+        }
+        let merge = merge_of(spec, immutable, &format!("files.{path}"))?;
         let sources = [
             str_of(spec, "text").is_some(),
             str_of(spec, "source").is_some(),
             str_of(spec, "link").is_some(),
             str_of(spec, "url").is_some(),
+            merge.is_some(),
         ];
         if sources.iter().filter(|set| **set).count() != 1 {
-            bail!("files.{path}: give exactly one of text, source, link or url");
+            bail!("files.{path}: give exactly one of text, source, link, url or merge");
         }
-        if let Some(url) = str_of(spec, "url") {
+        if let Some(merge) = merge {
+            b.merged(path, merge, owner, group);
+        } else if let Some(url) = str_of(spec, "url") {
             let sha256 = str_of(spec, "sha256").with_context(|| format!("files.{path}: url needs sha256"))?;
             b.fetched(path, url, sha256, mode, owner, group)?;
         } else if let Some(text) = str_of(spec, "text") {
@@ -427,20 +454,31 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
             bail!("home.files: {relative:?} must be a path inside the home directory");
         }
         let path = format!("{}/{relative}", dir.trim_end_matches('/'));
-        let mode = if get(spec, "executable") == Some(&Value::Bool(true)) {
+        let mut mode = if get(spec, "executable") == Some(&Value::Bool(true)) {
             0o755
         } else {
             0o644
         };
+        let immutable = read_only(config, spec);
+        if immutable {
+            mode &= !0o222;
+        }
+        let merge = merge_of(spec, immutable, &format!("home.files.{relative}"))?;
         let live = get(spec, "live") == Some(&Value::Bool(true));
         let sources = [
             str_of(spec, "text").is_some(),
             str_of(spec, "source").is_some(),
             str_of(spec, "link").is_some(),
             str_of(spec, "url").is_some(),
+            merge.is_some(),
         ];
         if sources.iter().filter(|set| **set).count() != 1 {
-            bail!("home.files.{relative}: give exactly one of text, source, link or url");
+            bail!("home.files.{relative}: give exactly one of text, source, link, url or merge");
+        }
+        if let Some(merge) = merge {
+            b.merged(&path, merge, user, &group);
+            b.on_change(&path, spec, Some(user));
+            continue;
         }
         if live && str_of(spec, "source").is_none() {
             bail!("home.files.{relative}: live = true needs source, the file in the config to link to");
@@ -471,6 +509,33 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
         b.on_change(&path, spec, Some(user));
     }
     Ok(())
+}
+
+/// Whether a file is written read-only: its own `mutable`, else the config's `mutable_files`.
+fn read_only(config: &Value, spec: &Value) -> bool {
+    match get(spec, "mutable") {
+        Some(Value::Bool(mutable)) => !mutable,
+        _ => config_get(config, "mutable_files") == Some(&Value::Bool(false)),
+    }
+}
+
+/// The `merge = { format, values }` of a file spec, if it has one.
+fn merge_of(spec: &Value, immutable: bool, what: &str) -> Result<Option<merge::Merge>> {
+    let Some(Value::Map(merge)) = get(spec, "merge") else {
+        return Ok(None);
+    };
+    let format = match merge.get("format") {
+        Some(Value::Str(format)) => format.clone(),
+        _ => bail!("{what}.merge needs a format: ini, kconfig or json"),
+    };
+    let values = serde_json::to_value(merge.get("values").unwrap_or(&Value::Null))?;
+    let merge = merge::Merge {
+        immutable: immutable && format == "kconfig",
+        format,
+        values,
+    };
+    merge.apply("").with_context(|| format!("{what}.merge"))?;
+    Ok(Some(merge))
 }
 
 fn config_get<'a>(config: &'a Value, key: &str) -> Option<&'a Value> {

@@ -335,13 +335,20 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
 }
 
 /// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.
-pub fn check_space(esp: &str, protected: bool) -> Result<()> {
+pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
     let existing = entries(esp);
+    // Without an entry to go by, the kernel image plus room for an initramfs stands in for one.
+    let estimate = || {
+        let version = kernel_version(kernel).ok()?;
+        let image = fs::metadata(Path::new(MODULES).join(version).join("vmlinuz")).ok()?;
+        Some(image.len() + 64 * 1024 * 1024)
+    };
     let Some(newest) = existing
         .iter()
         .filter(|(_, extra, _)| !extra)
         .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|m| m.len()))
         .max()
+        .or_else(estimate)
     else {
         return Ok(());
     };
@@ -353,7 +360,8 @@ pub fn check_space(esp: &str, protected: bool) -> Result<()> {
         .iter()
         .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|m| m.len()))
         .sum();
-    let free = free_bytes(&dir)?;
+    let measured = dir.ancestors().find(|path| path.exists()).unwrap_or(Path::new("/"));
+    let free = free_bytes(measured)?;
     if free + reclaimable < needed {
         let mib = |bytes: u64| bytes / (1024 * 1024);
         bail!(

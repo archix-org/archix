@@ -134,6 +134,8 @@ struct Home {
 struct Answers {
     location: String,
     git: bool,
+    /// Write managed files read-only, like the Nix store.
+    read_only: bool,
     fallback: usize,
     keep_orphans: bool,
     strict: bool,
@@ -176,6 +178,7 @@ impl Answers {
         Answers {
             location: String::new(),
             git: facts.git,
+            read_only: false,
             fallback: 0,
             keep_orphans: true,
             strict: true,
@@ -762,20 +765,25 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     if !generations.is_empty() {
         config.set("generations", Lua::Table(generations));
     }
-    if let Some((user, Home { dir: home, .. })) = facts.dotfiles.iter().nth(answers.dotfiles_user)
+    if answers.read_only {
+        config.set("mutable_files", Lua::Bool(false));
+    }
+    if let Some((user, Home { dir: home, offered, .. })) = facts.dotfiles.iter().nth(answers.dotfiles_user)
         && !answers.dotfiles.is_empty()
     {
         let mut files = Vec::new();
         for relative in &answers.dotfiles {
             let source = format!("home/{relative}");
             config.copies.push((home.join(relative), dir.join(&source)));
-            files.push((
-                relative.clone(),
-                Lua::Table(vec![
-                    ("source".into(), Lua::str(&source)),
-                    ("live".into(), Lua::Bool(true)),
-                ]),
-            ));
+            let replaced = offered.iter().any(|d| d.name == *relative && d.replaced);
+            let mut fields = vec![("source".to_string(), Lua::str(&source))];
+            // Directories stay live; a file its app replaces on save gets a writable copy, since a link wouldn't survive.
+            if home.join(relative).is_dir() || (!replaced && !answers.read_only) {
+                fields.push(("live".into(), Lua::Bool(true)));
+            } else if replaced {
+                fields.push(("mutable".into(), Lua::Bool(true)));
+            }
+            files.push((relative.clone(), Lua::Table(fields)));
         }
         config.set(
             "home",
