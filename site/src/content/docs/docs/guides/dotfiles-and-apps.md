@@ -258,7 +258,7 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 
 ## Bringing your existing dotfiles in
 
-`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it: after capturing the system, init asks `Bring some dotfiles into the config too?`, then `Whose?` (one of the users it captured) and `Which ones?`. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
+`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it. In the wizard's Dotfiles step, pick the user under `Whose dotfiles` if init captured more than one, then tick entries in `Dotfiles to bring in` with `space`; nothing is ticked by default. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
 
 Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
 

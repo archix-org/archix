@@ -99,7 +99,7 @@ using linux-cachyos 6.17.4-1 from cachyos-core-v3
 
 Press Enter and archix uses the fallback. Answer `n` and the switch stops before anything is installed: `aborted; nothing was changed`.
 
-The [`third_party_fallback`](/docs/reference/options/) option sets the behaviour, and `archix init` asks about it when you have third-party repos:
+The [`third_party_fallback`](/docs/reference/options/) option sets the behaviour, and when you have third-party repos, `archix init` asks about it in its Packages step, as `If a locked package disappears from a third-party repo`:
 
 | Value | Behaviour |
 | --- | --- |

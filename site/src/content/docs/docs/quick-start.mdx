@@ -19,65 +19,86 @@ You don't write your first config by hand. `archix init` reads your running syst
 $ sudo archix init
 ```
 
-It works through the system one section at a time. `✓` lines are what it captured, `·` lines are notes, `!` lines need your attention, and in between it asks a few questions. `sudo archix init --defaults` takes every default without asking, and skips the dotfile import. Here's a typical run:
+It opens a full-screen wizard in nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. Each step shows what init found and asks what it can't decide for you, with the recommended answer already chosen. You can go back and change any answer, and nothing is written until you press `enter` on Review. Here's the Packages step:
+
+```text wrap=false
+ archix init                                                  host desktop  ·  step 3 of 9
+
+ ✓ 1 Welcome         │   Packages
+ ✓ 2 Config          │   What's installed, and what happens to what isn't declared.
+ › 3 Packages        │
+   4 System          │   ✓ repos core, extra, multilib
+   5 Config files    │   ✓ 86 packages declared, 3 from the AUR
+   6 Boot            │   ✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox
+   7 Generations     │   · 2 dependencies that nothing needs any more: python-pip, rust
+   8 Dotfiles        │   · Everything installed now is declared, so the first switch removes nothing.
+   9 Review          │
+                     │   ▌ Dependencies nothing needs any more
+                     │       ● keep them (listed in ignored_packages)
+                     │       ○ let the first switch remove them
+                     │
+                     │     Later, when you install something with plain pacman or yay
+                     │       ● switch offers to declare it, and removes it if you say no (recommended)
+                     │       ○ switch leaves it installed and only lists it
+                     │
+                     │     [x] Show each AUR build recipe and ask before trusting it
+                     │
+                     │     If a locked AUR version can't be built any more
+                     │       ● ask, defaulting to the nearest newer version (recommended)
+                     │       ○ take the nearest newer version
+                     │       ○ take the nearest older version
+
+ enter next  ·  esc back  ·  ↑↓ field  ·  ←→ choose  ·  1-9 jump  ·  q quit
+```
+
+The sidebar marks the steps you've seen with `✓` and the current one with `›`, and the header shows the host and the step. `▌` marks the field you're on. The bottom line lists the keys that work right now:
+
+| Key | What it does |
+| --- | --- |
+| `enter` | Go to the next step. On Review, write the config. |
+| `esc` | Go back a step. |
+| `1`–`9` | Jump to that step. |
+| `↑` `↓`, `tab` | Move between fields, or through a checklist. |
+| `←` `→` | Change a choice, or flip a `[x]` setting. |
+| `space` | Tick or untick the checklist entry under the cursor. |
+| `a`, `n` | In a checklist, select all or none. |
+| `r` | In Config files, go back to the recommended files. |
+| `q`, `ctrl-c` | Quit without writing anything: `init was cancelled; nothing was written`. |
+
+Answers stay as you left them when you move between steps. Text fields, the config location and the generation limits, take typing directly, so while you're in one, letters and digits (`q` and `1`–`9` included) go into the field; `tab` or `↑` `↓` moves on, and `ctrl-c` still quits. A step with a text field won't advance until the value is valid, and the problem shows above the key hints, such as `! the config directory must be an absolute path`.
+
+What each step decides:
+
+<Steps>
+
+1. **Welcome.** What init found: how many packages to declare and how many come from the AUR, config files, user accounts and Flatpak apps. Nothing to answer.
+
+2. **Config.** `Where should the config live?` is `/etc/archix` by default, but any directory works, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. When git is installed, `Make it a git repository` runs `git init` and `git add`; nothing is committed.
+
+3. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR are left alone, in `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. `Later, when you install something with plain pacman or yay` sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, there are also review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at. Apps installed with `--user` are left out, and so are apps whose remote is gone, with a `!` line. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
+
+4. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999), each listed with uid, shell and groups, declared with their real groups, shell, home and description so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset, each listed as `on` or `off`. Nothing to answer; this step shows what gets taken over.
+
+5. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never listed or copied, only counted. The rest is one scrollable checklist, each file tagged with why it's there: `recommended`, then `changed from its package's version` or `not from any package`. Recommended files, such as `/etc/fstab` and anything hand-written, start ticked; the others are mostly changed by package install scripts. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
+
+6. **Boot.** On a btrfs root, `Snapshot / before every switch, as an extra recovery point`. If systemd-boot is installed and your kernel command line has `root=`, the step shows the command line and offers `Write a boot entry for each generation`.
+
+7. **Generations.** `Generations gc always keeps` (10) and `…and any younger than this many days` (30). Both have to be whole numbers.
+
+8. **Dotfiles.** Opt-in. Pick a user if there's more than one, then tick entries from `~/.config` and top-level dotfiles; nothing is ticked by default. They're copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
+
+9. **Review.** Everything init will write, one line each: the config location, packages, undeclared and unused packages, Flatpak apps, accounts, services, config files, boot, snapshots, generations and dotfiles. `enter` writes it.
+
+</Steps>
+
+Then the wizard closes, and init prints the rest in the terminal. With AUR review on, it shows each AUR build recipe and asks before trusting it. It finds the Arch Linux Archive snapshot that matches the most installed versions and pins every package that differs from it, older ones included, so the lock is exactly what you have (see [The lockfile](/docs/concepts/lockfile/#how-init-picks-the-snapshot)). Then it shows what the first switch would change, which should be nothing:
 
 ```
-  archix init  describe this machine as a config
-  · nothing on the system changes; init only writes the config and its lock
-
-── Config ──────────────────────────────────────
-  · any directory works, such as a clone of your own repo; /etc/archix then links to it
-✔ Where should the config live? · /etc/archix
-✔ Make it a git repository? · no
-
-── Packages ────────────────────────────────────
-  ✓ repos core, extra, multilib
-  ✓ 86 packages declared, 3 from the AUR
-  · 2 dependencies that nothing needs any more: python-pip, rust
-✔ What should happen to them? · keep them (listed in ignored_packages)
-  · everything installed now is declared, so the first switch removes nothing
-✔ Later, when you install something with plain pacman or yay · switch offers to declare it, and removes it if you say no (recommended)
-✔ Show each AUR build recipe and ask before trusting it? · yes
-✔ If a locked AUR version can't be built any more · ask, defaulting to the nearest newer version (recommended)
-  ✓ 2 Flatpak apps, locked to their installed commits
-
-── System ──────────────────────────────────────
-  ✓ hostname desktop, timezone Europe/Berlin
-  ✓ 1 user: me
-  · passwords stay where they are; archix never manages them
-  ✓ 4 services that differ from their preset
-
-── Config files ────────────────────────────────
-  · 3 files that hold secrets stay out of the config
-  ✓ 4 config files worth managing:
-      /etc/fstab  (changed from its package's version)
-      /etc/mkinitcpio.conf  (changed from its package's version)
-      /etc/pacman.d/mirrorlist  (changed from its package's version)
-      /etc/sysctl.d/80-swappiness.conf  (not from any package)
-  · 2 files more, mostly changed by package install scripts:
-      /etc/shells  (changed from its package's version)
-      /etc/xdg/reflector/reflector.conf  (changed from its package's version)
-✔ Which config files should archix manage? · the 4 worth managing (recommended)
-  ✓ 4 files copied into files/desktop/
-
-── Boot ────────────────────────────────────────
-  · / isn't btrfs, so there are no snapshots; packages, config and boot entries still roll back
-  · systemd-boot is installed on /boot
-✔ Let archix write a boot entry for each generation? · yes
-  ✓ boot entries on /boot, kernel linux
-
-── Generations ─────────────────────────────────
-✔ How many generations should gc always keep? · 10
-✔ And any generation younger than how many days? · 30
-  ✓ gc keeps the newest 10 generations and any younger than 30 days
-
-── Dotfiles ────────────────────────────────────
-✔ Bring some dotfiles into the config too? · no
-
 ── Lock ────────────────────────────────────────
   · finding the archive snapshot closest to what's installed
   ✓ 212 packages locked to the 2026-10-09 snapshot
   · held at their installed version instead: mesa
+  ✓ 2 Flatpak apps locked to their installed commits
 
 ── Result ──────────────────────────────────────
   ✓ the system matches the lock and the config: the first switch changes nothing
@@ -92,29 +113,7 @@ It works through the system one section at a time. `✓` lines are what it captu
   Next: look it over, then run sudo archix switch
 ```
 
-What each section does:
-
-<Steps>
-
-1. **Config.** The config can live in `/etc/archix` or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Making it a git repository runs `git init` and `git add`; nothing is committed.
-
-2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions). System-wide Flatpak apps are declared in `flatpak.apps`, with any remote other than Flathub, and locked to the commits they're installed at. Apps installed with `--user` are left out, and so are apps whose remote is gone, with a `!` line: `their remote is gone, so archix leaves these Flatpak apps alone: ...`. See [Flatpak and AppImages](/docs/guides/flatpak-and-appimages/).
-
-3. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999) with their real groups, shell, home and description, so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset.
-
-4. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never shown or copied, only counted. The rest are split into the ones worth managing, such as `/etc/fstab` and anything hand-written, and the others, which are mostly changed by package install scripts. Every file worth managing is listed with its reason, `(changed from its package's version)` or `(not from any package)`. The others are listed the same way, up to 12, then `and N more; "let me pick" lists them all`. Answer `the N worth managing (recommended)`, `let me pick` for a checklist with those ticked, or `none for now`. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
-
-5. **Boot.** On a btrfs root, init asks whether to snapshot `/` before every switch as an extra recovery point. If systemd-boot is installed and your kernel command line has `root=`, it asks whether to write a boot entry for each generation.
-
-6. **Generations.** How many generations `gc` always keeps, and how many days it keeps every generation.
-
-7. **Dotfiles.** Opt-in. Pick a user, then entries from `~/.config` and top-level dotfiles. They're copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
-
-8. **Lock.** init finds the Arch Linux Archive snapshot that matches the most installed versions, and pins every package that differs from it, older ones included, so the lock is exactly what you have. See [The lockfile](/docs/concepts/lockfile/#how-init-picks-the-snapshot).
-
-9. **Result.** What the first switch would change, which should be nothing.
-
-</Steps>
+For scripts, `sudo archix init --defaults` takes every recommended answer without opening the wizard, so it needs no terminal. It ticks the recommended config files, brings in no dotfiles and doesn't make a git repository, and prints what it captured in Packages, System, Config files and Boot sections before the same Lock and Result.
 
 There are two exceptions to an empty Result. Dotfiles you imported are listed, because the first switch backs up the originals and replaces them with links into the config. And if you let archix write boot entries, it declares the boot tooling it needs, `mkinitcpio` and `systemd-ukify`, so the Result lists them as installs if they're missing. Either way, the section starts with `! the first switch would still change these:`.
 

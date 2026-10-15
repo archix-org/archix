@@ -39,13 +39,30 @@ Write a config that describes this machine as it is, and a lock pinned to exactl
 $ sudo archix init
 ```
 
-`init` works in sections (Config, Packages, System, Config files, Boot, Generations, Dotfiles, Lock, Result), with `✓` lines for what it captured, `·` notes and `!` warnings. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which config files to manage, whether to write boot entries, how many generations to keep, and whether to bring in dotfiles. Then it writes the config and the lock, and shows what the first switch would change:
+`init` opens a full-screen wizard with nine steps: Welcome, Config, Packages, System, Config files, Boot, Generations, Dotfiles and Review. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which config files to manage (a checklist, each file tagged `recommended`, `changed from its package's version` or `not from any package`), whether to write boot entries, how many generations to keep, and which dotfiles to bring in. Every answer starts at the recommended one.
+
+| Key | What it does |
+| --- | --- |
+| `enter` | Next step; on Review, write the config. |
+| `esc` | Previous step. |
+| `1`–`9` | Jump to a step. |
+| `↑` `↓`, `tab` | Move between fields, or through a checklist. |
+| `←` `→` | Change a choice. |
+| `space` | Toggle the entry under the cursor. |
+| `a`, `n` | Select all or none in a checklist. |
+| `r` | Reset the config files to the recommended ones. |
+| `q`, `ctrl-c` | Quit without writing anything. |
+
+Text fields take typing directly, so in one, `q` and `1`–`9` are typed too; `ctrl-c` still quits. The config location must be an absolute path and the generation limits whole numbers, or the step won't advance. Quitting prints `init was cancelled; nothing was written`.
+
+Nothing is written until `enter` on Review. Then the wizard closes, and init writes the config and the lock and shows what the first switch would change:
 
 ```
 ── Lock ────────────────────────────────────────
   · finding the archive snapshot closest to what's installed
   ✓ 212 packages locked to the 2026-10-09 snapshot
   · held at their installed version instead: mesa
+  ✓ 2 Flatpak apps locked to their installed commits
 
 ── Result ──────────────────────────────────────
   ✓ the system matches the lock and the config: the first switch changes nothing
@@ -60,11 +77,11 @@ $ sudo archix init
   Next: look it over, then run sudo archix switch
 ```
 
-In the Config files section, init lists each file worth managing with its reason, `(changed from its package's version)` or `(not from any package)`, and the rest the same way, up to 12, then `and N more; "let me pick" lists them all`. System-wide Flatpak apps are declared too, each locked to the commit it's installed at; `--user` apps are left out, and so are apps whose remote is gone: `! their remote is gone, so archix leaves these Flatpak apps alone: org.example.App`. `init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. Imported dotfiles are the exception: the first switch replaces them with links, and the Result section lists them under `! the first switch would still change these:`. Secret files are never shown or copied, only counted. See the [quick start](/docs/quick-start/) for every section and question.
+System-wide Flatpak apps are declared too, each locked to the commit it's installed at; `--user` apps are left out, and so are apps whose remote is gone. `init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. Imported dotfiles are the exception: the first switch replaces them with links, and the Result section lists them under `! the first switch would still change these:`. Secret files are never shown or copied, only counted. See the [quick start](/docs/quick-start/) for every step.
 
 | Flag | Description |
 | --- | --- |
-| `--defaults` | Take every question's default without asking: the recommended config files, no dotfiles, no git. Without it, `init` needs a terminal. |
+| `--defaults` | Take every recommended answer without opening the wizard: the recommended config files, no dotfiles, no git. It needs no terminal, and prints what it captured in Packages, System, Config files and Boot sections before Lock and Result, including `! their remote is gone, so archix leaves these Flatpak apps alone: ...` when that applies. Without it, `init` needs a terminal: `` `archix init` asks questions; run it in a terminal, or pass --defaults to take every default ``. |
 
 `init` refuses to run if the config directory already has an `init.lua`.
 
