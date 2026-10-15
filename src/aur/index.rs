@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Read;
@@ -90,16 +91,27 @@ impl Index {
         self.entries.get(name)
     }
 
-    /// The package satisfying a dependency: one with that exact name, else the most popular provider.
+    /// The package satisfying a dependency, version constraint included: one with that exact name, else the most popular provider.
     pub fn satisfier(&self, dep: &str) -> Option<&Entry> {
         let name = dep_name(dep);
-        self.entries.get(name).or_else(|| {
-            self.providers
-                .get(name)?
-                .iter()
-                .filter_map(|provider| self.entries.get(provider))
-                .max_by(|a, b| a.popularity.total_cmp(&b.popularity))
-        })
+        let wanted = constraint(dep);
+        self.entries
+            .get(name)
+            .filter(|entry| meets(Some(&entry.version), wanted))
+            .or_else(|| {
+                self.providers
+                    .get(name)?
+                    .iter()
+                    .filter_map(|provider| self.entries.get(provider))
+                    .filter(|entry| {
+                        entry
+                            .provides
+                            .iter()
+                            .filter(|provided| dep_name(provided) == name)
+                            .any(|provided| meets(provided.split_once('=').map(|(_, v)| v), wanted))
+                    })
+                    .max_by(|a, b| a.popularity.total_cmp(&b.popularity))
+            })
     }
 
     /// Packages whose name or description contains every term, most popular first.
@@ -115,6 +127,38 @@ impl Index {
             .collect();
         hits.sort_by(|a, b| b.popularity.total_cmp(&a.popularity).then_with(|| a.name.cmp(&b.name)));
         hits
+    }
+}
+
+/// The operator and version of a dependency like `java-environment>=21`, if it has one.
+fn constraint(dep: &str) -> Option<(&str, &str)> {
+    let at = dep.find(['<', '>', '='])?;
+    let rest = &dep[at..];
+    let op_len = if rest.starts_with(">=") || rest.starts_with("<=") {
+        2
+    } else {
+        1
+    };
+    Some((&rest[..op_len], rest[op_len..].trim()))
+}
+
+/// Whether a provided version meets a constraint the way pacman decides it: no version meets only an unversioned dependency, and a wanted version without a pkgrel compares against the pkgver alone.
+fn meets(have: Option<&str>, wanted: Option<(&str, &str)>) -> bool {
+    let Some((op, want)) = wanted else { return true };
+    let Some(have) = have else { return false };
+    let have = if want.contains('-') {
+        have
+    } else {
+        have.rsplit_once('-').map_or(have, |(v, _)| v)
+    };
+    let order = crate::pacman::vercmp(have, want);
+    match op {
+        "=" => order == Ordering::Equal,
+        ">=" => order != Ordering::Less,
+        "<=" => order != Ordering::Greater,
+        ">" => order == Ordering::Greater,
+        "<" => order == Ordering::Less,
+        _ => false,
     }
 }
 
@@ -166,6 +210,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["jdk-b", "jdk-a"]
         );
+    }
+
+    #[test]
+    fn version_constraints_pick_only_providers_that_meet_them() {
+        let index = Index::new(vec![
+            entry("jdk21", &["java-environment=21"], 9.0),
+            entry("jdk26", &["java-environment=26"], 1.0),
+            entry("jdk-any", &["java-environment"], 20.0),
+        ]);
+        assert_eq!(index.satisfier("java-environment=26").unwrap().name, "jdk26");
+        assert_eq!(index.satisfier("java-environment>=22").unwrap().name, "jdk26");
+        assert_eq!(index.satisfier("java-environment<22").unwrap().name, "jdk21");
+        assert!(index.satisfier("java-environment=27").is_none());
+        assert_eq!(index.satisfier("java-environment").unwrap().name, "jdk-any");
+        assert!(index.satisfier("jdk21>=2").is_none(), "jdk21 is version 1-1");
     }
 
     #[test]
