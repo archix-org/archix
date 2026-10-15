@@ -582,6 +582,8 @@ mod tests {
             fs::create_dir_all(home.path().join(dir)).unwrap();
         }
         for file in [
+            ".pulse-cookie",
+            ".steampid",
             ".bashrc",
             ".bash_history",
             ".claude.json",
@@ -603,6 +605,9 @@ mod tests {
                 (".config/plasmashellrc", false),
             ]
         );
-        assert_eq!(secrets, 4, ".ssh, .config/gh, .claude.json and its backup");
+        assert_eq!(
+            secrets, 5,
+            ".ssh, .config/gh, .claude.json, its backup and .pulse-cookie"
+        );
     }
 }

@@ -209,7 +209,9 @@
       ".config/op",
       ".config/Bitwarden*",
       ".config/keepassxc",
-      ".config/sunshine"
+      ".config/sunshine",
+      ".pulse-cookie",
+      ".esd_auth"
     ],
     "skip": [
       ".cache",
@@ -276,7 +278,34 @@
       ".config/Trolltech.conf",
       ".config/go",
       ".config/jgit",
-      ".config/helm"
+      ".config/helm",
+      ".dotnet",
+      ".jabba",
+      ".nv",
+      ".steampath",
+      ".steampid",
+      ".yarn",
+      ".config/KDE",
+      ".sdkman",
+      ".gem",
+      ".bundle",
+      ".ghcup",
+      ".stack",
+      ".cabal",
+      ".opam",
+      ".elan",
+      ".julia",
+      ".conda",
+      ".nuget",
+      ".android",
+      ".arduino*",
+      ".platformio",
+      ".vagrant.d",
+      ".minikube",
+      ".pub-cache",
+      ".dartServer",
+      ".gnome",
+      ".xsession-errors*"
     ]
   }
 }
