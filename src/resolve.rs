@@ -55,7 +55,7 @@ pub fn snapshot_conf(archive: &Archive, cache: &Path, date: Date, repos: &[Repo]
     for repo in repos.iter().filter(|r| r.custom.is_some()) {
         fetch_db(archive, repo, &db.join("sync").join(format!("{}.db", repo.name)))?;
     }
-    let conf = db.join("pacman.conf");
+    let conf = db.join(format!("pacman.{}.conf", std::process::id()));
     fs::write(&conf, pacman_conf(archive, date, repos)).with_context(|| format!("writing {}", conf.display()))?;
     Ok((conf, db))
 }

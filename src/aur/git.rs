@@ -14,7 +14,7 @@ impl AurGit {
     pub fn new(url: &str, cache: &Path) -> AurGit {
         AurGit {
             url: url.trim_end_matches('/').to_string(),
-            dir: cache.join("aur-git"),
+            dir: cache.join("aur-git").join(super::index::url_key(url)),
         }
     }
 

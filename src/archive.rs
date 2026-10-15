@@ -59,7 +59,15 @@ impl Archive {
         let dir = cache.join("snapshots").join(date.to_string());
         let sync = dir.join("sync");
         fs::create_dir_all(&sync).with_context(|| format!("creating {}", sync.display()))?;
-        fs::create_dir_all(dir.join("local"))?;
+        let local = dir.join("local");
+        fs::create_dir_all(&local)?;
+        let version = local.join("ALPM_DB_VERSION");
+        if !version.exists() {
+            // pacman writes this into an empty local db on first use; parallel first uses race on it.
+            let tmp = local.join(format!("ALPM_DB_VERSION.{}", std::process::id()));
+            fs::write(&tmp, "9\n")?;
+            fs::rename(&tmp, &version)?;
+        }
         for repo in repos {
             let path = sync.join(format!("{repo}.db"));
             if !path.is_file() {
@@ -80,19 +88,21 @@ impl Archive {
 
     /// Downloads via a per-process `.part` file so partial downloads never look complete; false if missing.
     pub fn fetch(&self, url: &str, dest: &Path) -> Result<bool> {
+        let part = dest.with_extension(format!("part.{}", std::process::id()));
         if let Some(path) = url.strip_prefix("file://") {
-            return match fs::copy(path, dest) {
-                Ok(_) => Ok(true),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e).with_context(|| format!("copying {path}")),
-            };
+            match fs::copy(path, &part) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e).with_context(|| format!("copying {path}")),
+            }
+            fs::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
+            return Ok(true);
         }
         let mut response = match self.agent.get(url).call() {
             Ok(response) => response,
             Err(ureq::Error::StatusCode(404)) => return Ok(false),
             Err(e) => return Err(e).with_context(|| format!("downloading {url}")),
         };
-        let part = dest.with_extension(format!("part.{}", std::process::id()));
         let mut file = File::create(&part).with_context(|| format!("creating {}", part.display()))?;
         io::copy(&mut response.body_mut().as_reader(), &mut file).with_context(|| format!("downloading {url}"))?;
         file.sync_all()?;

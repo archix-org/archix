@@ -419,7 +419,7 @@ fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Re
             ..Default::default()
         });
     }
-    let index = Index::load(archive, &declared.aur_url, &cache, false)?;
+    let index = Index::load(archive, &declared.aur_url, &cache, true)?;
     if let Some(entry) = index.get(name) {
         let git = aur_git(declared)?;
         let base = entry.package_base.clone();

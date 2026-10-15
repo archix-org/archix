@@ -41,12 +41,12 @@ pub struct Index {
 impl Index {
     /// Loads the cached dump, downloading a fresh one if it's missing, older than an hour, or `refresh` is set.
     pub fn load(archive: &Archive, aur_url: &str, cache: &Path, refresh: bool) -> Result<Index> {
-        let path = cache.join(DUMP);
+        let path = dump_path(cache, aur_url);
         let stale = fs::metadata(&path).and_then(|m| m.modified()).map_or(true, |modified| {
             SystemTime::now().duration_since(modified).unwrap_or_default() > MAX_AGE
         });
         if refresh || stale {
-            fs::create_dir_all(cache)?;
+            fs::create_dir_all(path.parent().expect("dump path has a parent"))?;
             let url = format!("{}/{DUMP}", aur_url.trim_end_matches('/'));
             let fetched = match archive.fetch(&url, &path) {
                 Ok(true) => Ok(()),
@@ -118,8 +118,17 @@ impl Index {
     }
 }
 
-pub fn dump_path(cache: &Path) -> PathBuf {
-    cache.join(DUMP)
+/// Where an AUR's package list is cached; keyed by the AUR's URL so a mirror or test AUR never mixes with another.
+pub fn dump_path(cache: &Path, aur_url: &str) -> PathBuf {
+    cache.join("aur-index").join(url_key(aur_url)).join(DUMP)
+}
+
+/// A directory-name-safe form of a URL.
+pub fn url_key(url: &str) -> String {
+    url.trim_end_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 #[cfg(test)]
