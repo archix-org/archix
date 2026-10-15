@@ -12,10 +12,10 @@ use crate::aur::git::AurGit;
 use crate::aur::index::Index;
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
-use crate::lock::{AUR_REPO, HostLock, LOCAL_REPO, Locked};
+use crate::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, LOCAL_REPO, Locked};
 use crate::pacman::{SyncPkg, read_sync_db};
 use crate::recipes::Recipes;
-use crate::repos::{Repo, fetch_db};
+use crate::repos::{Repo, fetch_db, is_official};
 
 /// Where AUR packages come from while resolving, and the previous lock whose AUR commits are kept.
 pub struct Aur<'a> {
@@ -117,12 +117,12 @@ pub fn resolve(
         pinned: Vec::new(),
         packages: BTreeMap::new(),
         flatpak: BTreeMap::new(),
-        recipes: match aur.and_then(|aur| aur.recipes) {
-            Some(recipes) => recipes.fingerprints()?,
-            None => BTreeMap::new(),
-        },
+        recipes: BTreeMap::new(),
     };
     if declared.is_empty() {
+        if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
+            lock.recipes = recipes.fingerprints(&BTreeSet::new())?;
+        }
         return Ok(lock);
     }
     let (conf, db) = snapshot_conf(archive, cache, date, repos)?;
@@ -201,6 +201,7 @@ pub fn resolve(
     }
     if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
         apply_patches(recipes, &sync, &mut lock)?;
+        lock.recipes = recipes.fingerprints(&lock.local_recipes())?;
     }
     Ok(lock)
 }
@@ -211,9 +212,14 @@ fn apply_patches(
     sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
     lock: &mut HostLock,
 ) -> Result<()> {
+    // A pinned package (repo "archive", e.g. adopted after a pacman -Syu) keeps the pkgbase the snapshot's repos list for it.
     let base_of = |name: &str, locked: &Locked| {
-        sync.get(&locked.repo)
-            .and_then(|packages| packages.get(name))
+        if !is_official(&locked.repo) && locked.repo != ARCHIVE_REPO {
+            return None;
+        }
+        sync.iter()
+            .filter(|(repo, _)| is_official(repo))
+            .find_map(|(_, packages)| packages.get(name))
             .map(|pkg| pkg.base.clone())
     };
     for name in recipes.patched_packages() {
@@ -222,7 +228,7 @@ fn apply_patches(
         };
         let Some(base) = base_of(name, locked) else {
             bail!(
-                "patches.{name}: {name} comes from {}, but only packages from the official repos can be patched",
+                "patches.{name}: {name} comes from {}, but only packages from Arch's official repos can be patched",
                 locked.repo
             );
         };

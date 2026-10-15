@@ -70,6 +70,17 @@ struct OnDisk {
     hosts: BTreeMap<String, HostLock>,
 }
 
+impl HostLock {
+    /// The config's local recipes this lock builds from.
+    pub fn local_recipes(&self) -> std::collections::BTreeSet<String> {
+        self.packages
+            .values()
+            .filter(|pkg| pkg.repo == LOCAL_REPO)
+            .filter_map(|pkg| pkg.base.clone())
+            .collect()
+    }
+}
+
 impl Locked {
     /// Built by archix from a recipe (AUR or the config's own) rather than downloaded.
     pub fn is_built(&self) -> bool {

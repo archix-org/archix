@@ -46,7 +46,7 @@ pub(super) fn current_lock(
             &declared.packages,
             &declared.prefer,
             &declared.repo_names(),
-            &recipes.fingerprints()?,
+            &recipes.fingerprints(&old.local_recipes())?,
         )
     {
         return Ok((old.clone(), false));
@@ -226,7 +226,7 @@ pub fn status(target: &Target) -> Result<()> {
         count(lock.packages.len(), "package", "packages")
     );
     let declared = declared(target.config)?;
-    let fingerprints = recipes(target, &declared)?.fingerprints()?;
+    let fingerprints = recipes(target, &declared)?.fingerprints(&lock.local_recipes())?;
     if !lock.matches(
         &declared.packages,
         &declared.prefer,

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -86,12 +86,25 @@ impl Recipes {
         self
     }
 
-    /// What a lock depends on from the config: each local recipe's hash and each patched package's patch hash.
-    pub fn fingerprints(&self) -> Result<BTreeMap<String, String>> {
+    /// What a lock depends on from the config: the hash of each recipe it uses, the names every other recipe builds, and each patched package's patch hash.
+    pub fn fingerprints(&self, used: &BTreeSet<String>) -> Result<BTreeMap<String, String>> {
         let mut prints: BTreeMap<String, String> = self
             .local
             .iter()
-            .map(|(id, recipe)| (id.clone(), recipe.commit.clone()))
+            .map(|(id, recipe)| {
+                let print = if used.contains(id) {
+                    recipe.commit.clone()
+                } else {
+                    let names: Vec<String> = recipe
+                        .info
+                        .packages
+                        .iter()
+                        .flat_map(|pkg| std::iter::once(pkg.name.clone()).chain(pkg.provides.iter().cloned()))
+                        .collect();
+                    format!("builds:{}", sha256_bytes(names.join(" ").as_bytes()))
+                };
+                (id.clone(), print)
+            })
             .collect();
         for name in self.patches.keys() {
             prints.insert(format!("{PATCH}{name}"), self.patch_hash(name)?);
@@ -329,15 +342,17 @@ pub fn hash_dir(dir: &Path) -> Result<String> {
     Ok(sha256_bytes(&all))
 }
 
-fn skipped(name: &str) -> bool {
-    matches!(name, ".git" | "src" | "pkg" | ".SRCINFO") || name.contains(".pkg.tar") || name.ends_with(".log")
+/// makepkg's output only sits at the top of a recipe; deeper down, a `src/` is part of the recipe.
+fn skipped(name: &str, top: bool) -> bool {
+    name == ".git"
+        || (top && (matches!(name, "src" | "pkg" | ".SRCINFO") || name.contains(".pkg.tar") || name.ends_with(".log")))
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, bool, Vec<u8>)>) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if skipped(&name) {
+        if skipped(&name, dir == root) {
             continue;
         }
         let path = entry.path();
@@ -486,8 +501,16 @@ mod tests {
         fs::write(dir.path().join("src/built"), "x").unwrap();
         fs::write(dir.path().join("x-1-1-x86_64.pkg.tar.zst"), "x").unwrap();
         assert_eq!(hash_dir(dir.path()).unwrap(), before);
+        fs::create_dir_all(dir.path().join("files/src")).unwrap();
+        fs::write(dir.path().join("files/src/part.c"), "int x;").unwrap();
+        assert_ne!(
+            hash_dir(dir.path()).unwrap(),
+            before,
+            "a src/ below the top is part of the recipe"
+        );
+        let nested = hash_dir(dir.path()).unwrap();
         fs::write(dir.path().join("PKGBUILD"), "pkgname=y\n").unwrap();
-        assert_ne!(hash_dir(dir.path()).unwrap(), before);
+        assert_ne!(hash_dir(dir.path()).unwrap(), nested);
     }
 
     #[test]

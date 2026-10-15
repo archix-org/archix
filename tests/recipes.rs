@@ -53,7 +53,7 @@ fn local_recipes_are_locked_by_content_and_built_in_the_chroot() {
 
     fs::write(&recipe, pkgbuild("2.0").replace("echo 2.0", "echo rebuilt")).unwrap();
     let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("rebuild    archix-test-local 2.0-1"), "{out}");
+    assert!(out.contains("reinstall  archix-test-local 2.0-1"), "{out}");
     assert_eq!(
         fs::read_to_string("/usr/share/archix-test-local/version").unwrap(),
         "rebuilt\n",
@@ -92,7 +92,7 @@ fn patched_packages_rebuild_archs_recipe_with_the_patches() {
     .unwrap();
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
-        out.contains("rebuild    tree"),
+        out.contains("reinstall  tree"),
         "changing a patch rebuilds at the same version:\n{out}"
     );
     assert_ne!(setup.lock().packages["tree"].commit, locked.commit);

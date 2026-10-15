@@ -737,15 +737,20 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     let generation = store.get(number)?;
     let installed = read_local_db(&paths.local_db())?;
     let ignored = generation.settings.ignored.iter().cloned().collect();
-    let (changes, warned) = select_changes(
+    let current_generation = store.get(current)?;
+    let (mut changes, warned) = select_changes(
         &generation.packages,
         &installed,
         generation.settings.remove_undeclared,
         &ignored,
     );
+    changes.extend(rebuilds(
+        &generation.packages,
+        &installed,
+        Some(&current_generation.packages),
+    ));
     print_warned(&warned);
     let name = format!("generation {number} (snapshot {})", generation.date);
-    let current_generation = store.get(current)?;
     let system_change = SystemChange {
         from: current_generation.system,
         to: generation.system.clone(),

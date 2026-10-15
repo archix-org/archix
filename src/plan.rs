@@ -46,7 +46,9 @@ impl fmt::Display for Change {
             Change::Remove { name, version } => write!(f, "remove     {name} {version} (not in the lock)"),
             Change::Reason { name, explicit: true } => write!(f, "mark       {name} as explicitly installed"),
             Change::Reason { name, explicit: false } => write!(f, "mark       {name} as a dependency"),
-            Change::Rebuild { name, version } => write!(f, "rebuild    {name} {version} (its recipe changed)"),
+            Change::Rebuild { name, version } => {
+                write!(f, "reinstall  {name} {version} (a build from a different recipe)")
+            }
         }
     }
 }
