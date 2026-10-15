@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-/// The archix-owned module `archix install` and `archix remove` edit; it's imported automatically from its default place.
+/// The host's package list, which you edit and `archix install`/`archix remove` edit too; it's imported automatically from its default place.
 pub const FILE: &str = "installed.lua";
 
 pub fn default_dir(config_dir: &Path, host: &str) -> PathBuf {
@@ -34,7 +34,9 @@ pub fn read(path: &Path) -> Result<Vec<String>> {
 }
 
 pub fn render(packages: &[String]) -> String {
-    let mut out = String::from("-- Managed by `archix install` and `archix remove`.\nreturn {\n  packages = {\n");
+    let mut out = String::from(
+        "-- This host's packages. Edit freely; `archix install` and `archix remove` add and remove names here too.\nreturn {\n  packages = {\n",
+    );
     for name in packages {
         out.push_str(&format!("    {name:?},\n"));
     }

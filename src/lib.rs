@@ -6,6 +6,7 @@ pub mod capture;
 pub mod date;
 pub mod eval;
 pub mod fetch;
+pub mod flatpak;
 pub mod gc;
 pub mod generations;
 pub mod installed;

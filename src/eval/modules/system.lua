@@ -7,6 +7,8 @@ local text_file = t.submodule {
     default = archix.null,
     description = "A file in the config directory to copy, as a path relative to it.",
   },
+  url = archix.option { type = t.nullable(t.str), default = archix.null, description = "Download the file from here; needs sha256. archix.fetchurl { url, sha256 } builds both." },
+  sha256 = archix.option { type = t.nullable(t.str), default = archix.null, description = "The sha256 the download from url must have; `archix prefetch <url>` prints it." },
   link = archix.option { type = t.nullable(t.str), default = archix.null, description = "Make the file a symlink to this target." },
   mode = archix.option { type = t.str, default = "0644" },
   owner = archix.option { type = t.str, default = "root" },
@@ -18,7 +20,7 @@ return {
     files = archix.option {
       type = t.attrs_of(text_file),
       default = {},
-      description = "Files archix writes, keyed by absolute path; give one of text, source or link. Files archix replaces are backed up and restored when they leave the config.",
+      description = "Files archix writes, keyed by absolute path; give one of text, source, link or url. Files archix replaces are backed up and restored when they leave the config.",
     },
     units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd system units, keyed by file name such as foo.service." },
     user_units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd user units for every user, keyed by file name." },

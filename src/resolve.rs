@@ -101,6 +101,7 @@ pub fn resolve(
         declared: declared.to_vec(),
         pinned: Vec::new(),
         packages: BTreeMap::new(),
+        flatpak: BTreeMap::new(),
     };
     if declared.is_empty() {
         return Ok(lock);

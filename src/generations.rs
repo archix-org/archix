@@ -31,6 +31,9 @@ pub struct Generation {
     /// A read-only btrfs snapshot of / taken just before this generation was applied.
     #[serde(default)]
     pub snapshot: Option<String>,
+    /// Flatpak apps this generation pinned, by id.
+    #[serde(default)]
+    pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -55,6 +58,7 @@ impl Generation {
             && self.packages == other.packages
             && self.settings == other.settings
             && self.system == other.system
+            && self.flatpak == other.flatpak
     }
 }
 
@@ -218,6 +222,7 @@ mod tests {
             config_dirty: false,
             system: SystemState::default(),
             snapshot: None,
+            flatpak: BTreeMap::new(),
         }
     }
 

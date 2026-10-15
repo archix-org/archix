@@ -62,6 +62,8 @@ pub struct Group {
 pub struct Rendered {
     pub state: SystemState,
     pub blobs: BTreeMap<String, Vec<u8>>,
+    /// Contents that come from a download instead: sha256 to url, fetched into the blob store at switch.
+    pub fetches: BTreeMap<String, String>,
 }
 
 const FORBIDDEN: &[&str] = &[
@@ -71,6 +73,7 @@ const FORBIDDEN: &[&str] = &[
 struct Builder {
     state: SystemState,
     blobs: BTreeMap<String, Vec<u8>>,
+    fetches: BTreeMap<String, String>,
 }
 
 impl Builder {
@@ -89,6 +92,23 @@ impl Builder {
             group: group.to_string(),
         };
         self.state.files.insert(path.to_string(), file);
+    }
+
+    fn fetched(&mut self, path: &str, url: &str, sha256: &str, mode: u32, owner: &str, group: &str) -> Result<()> {
+        if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+            bail!("{path}: sha256 must be 64 hex digits; `archix prefetch {url}` prints it");
+        }
+        let sha256 = sha256.to_ascii_lowercase();
+        self.fetches.insert(sha256.clone(), url.to_string());
+        let file = ManagedFile {
+            sha256,
+            link: None,
+            mode,
+            owner: owner.to_string(),
+            group: group.to_string(),
+        };
+        self.state.files.insert(path.to_string(), file);
+        Ok(())
     }
 
     fn link(&mut self, path: &str, target: &str) {
@@ -164,6 +184,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     let mut b = Builder {
         state: SystemState::default(),
         blobs: BTreeMap::new(),
+        fetches: BTreeMap::new(),
     };
 
     for (path, spec) in map(config, "files").into_iter().flatten() {
@@ -181,11 +202,15 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             str_of(spec, "text").is_some(),
             str_of(spec, "source").is_some(),
             str_of(spec, "link").is_some(),
+            str_of(spec, "url").is_some(),
         ];
         if sources.iter().filter(|set| **set).count() != 1 {
-            bail!("files.{path}: give exactly one of text, source or link");
+            bail!("files.{path}: give exactly one of text, source, link or url");
         }
-        if let Some(text) = str_of(spec, "text") {
+        if let Some(url) = str_of(spec, "url") {
+            let sha256 = str_of(spec, "sha256").with_context(|| format!("files.{path}: url needs sha256"))?;
+            b.fetched(path, url, sha256, mode, owner, group)?;
+        } else if let Some(text) = str_of(spec, "text") {
             b.content(
                 path,
                 lines(&Value::Str(text.to_string())).into_bytes(),
@@ -316,6 +341,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     Ok(Rendered {
         state: b.state,
         blobs: b.blobs,
+        fetches: b.fetches,
     })
 }
 
@@ -357,14 +383,18 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
             str_of(spec, "text").is_some(),
             str_of(spec, "source").is_some(),
             str_of(spec, "link").is_some(),
+            str_of(spec, "url").is_some(),
         ];
         if sources.iter().filter(|set| **set).count() != 1 {
-            bail!("home.files.{relative}: give exactly one of text, source or link");
+            bail!("home.files.{relative}: give exactly one of text, source, link or url");
         }
         if live && str_of(spec, "source").is_none() {
             bail!("home.files.{relative}: live = true needs source, the file in the config to link to");
         }
-        if let Some(text) = str_of(spec, "text") {
+        if let Some(url) = str_of(spec, "url") {
+            let sha256 = str_of(spec, "sha256").with_context(|| format!("home.files.{relative}: url needs sha256"))?;
+            b.fetched(&path, url, sha256, mode, user, &group)?;
+        } else if let Some(text) = str_of(spec, "text") {
             b.content(&path, text.as_bytes().to_vec(), mode, user, &group);
         } else if let Some(link) = str_of(spec, "link") {
             b.owned_link(&path, link, user, &group);

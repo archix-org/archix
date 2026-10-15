@@ -381,7 +381,13 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
             continue;
         }
         if disk == OnDisk::Other {
-            bail!("{path} exists and is not a file or symlink; archix won't replace it");
+            let directory = fs::symlink_metadata(target).is_ok_and(|meta| meta.is_dir());
+            if !directory || change.from.files.contains_key(path) {
+                bail!("{path} exists and is not a file or symlink; archix won't replace it");
+            }
+            if fs::symlink_metadata(under(&backups, path)).is_ok() {
+                bail!("{path} is a directory and an earlier backup of it exists; move one of them away");
+            }
         }
         if disk != OnDisk::Missing {
             match change.from.files.get(path) {
@@ -423,6 +429,11 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                     "warning: {path} was edited outside archix; restoring the original anyway, see {}",
                     backup.display()
                 );
+            }
+            if fs::symlink_metadata(&backup).is_ok_and(|meta| meta.is_dir())
+                && matches!(disk, OnDisk::Link(_) | OnDisk::File { .. })
+            {
+                fs::remove_file(target).with_context(|| format!("removing {path}"))?;
             }
             fs::rename(&backup, target).with_context(|| format!("restoring {path}"))?;
         } else if matches(&disk, previous) {
@@ -500,7 +511,8 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
             }
         }
         None => {
-            fs::write(&tmp, blobs::read(paths, &want.sha256)?)?;
+            let blob = blobs::path(paths, &want.sha256);
+            fs::copy(&blob, &tmp).with_context(|| format!("copying {}", blob.display()))?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(want.mode))?;
             let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
                 let _ = fs::remove_file(&tmp);

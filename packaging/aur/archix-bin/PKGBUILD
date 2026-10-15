@@ -1,0 +1,29 @@
+# Maintainer: archix contributors <https://github.com/archix-org/archix>
+pkgname=archix-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Declarative, lockable, rollback-able system configuration for Arch Linux (prebuilt)"
+arch=('x86_64')
+url="https://archix.dev"
+license=('MIT OR Apache-2.0')
+depends=('pacman' 'gcc-libs' 'glibc')
+optdepends=(
+  'git: AUR packages and recording the config commit'
+  'devtools: building AUR packages in a clean chroot'
+  'mkinitcpio: boot entries'
+  'systemd-ukify: boot entries'
+  'sbctl: signing boot entries for Secure Boot'
+  'btrfs-progs: snapshots before each switch'
+  'flatpak: Flatpak apps'
+)
+provides=('archix')
+conflicts=('archix')
+source=("archix-$pkgver-x86_64-linux.tar.gz::https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-x86_64-linux.tar.gz")
+sha256sums=('SKIP')
+
+package() {
+  cd "archix-$pkgver-x86_64-linux"
+  install -Dm755 archix "$pkgdir/usr/bin/archix"
+  install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
+  install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/archix"
+}

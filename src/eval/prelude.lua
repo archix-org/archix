@@ -88,7 +88,21 @@ function pairs(t)
   end, t, nil
 end
 
+-- A file spec downloaded from url and checked against sha256, for files and home.files.
+local function fetchurl(spec)
+  if type(spec) ~= "table" or type(spec.url) ~= "string" then
+    error("archix.fetchurl needs { url = ..., sha256 = ... }", 2)
+  end
+  if type(spec.sha256) ~= "string" or not spec.sha256:match("^%x+$") or #spec.sha256 ~= 64 then
+    error("archix.fetchurl: sha256 must be 64 hex digits; `archix prefetch " .. spec.url .. "` prints it", 2)
+  end
+  local out = {}
+  for k, v in next, spec do out[k] = v end
+  return out
+end
+
 archix = {
+  fetchurl = fetchurl,
   types = types,
   option = option,
   override = override,

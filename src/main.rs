@@ -146,6 +146,8 @@ enum Command {
         needed: bool,
         targets: Vec<String>,
     },
+    /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
+    Prefetch { url: String },
     /// Restore a generation's core packages under another root without pacman (rescue mode, or from a live USB)
     Rescue {
         /// The mounted system to repair, such as /mnt or the initramfs's /sysroot
@@ -241,6 +243,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::Gc => {
             commands::gc()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Prefetch { url } => {
+            commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Rescue {
@@ -373,6 +379,7 @@ fn run() -> Result<ExitCode> {
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc
+        | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::Sync { .. } => {

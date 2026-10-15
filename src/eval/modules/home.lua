@@ -26,6 +26,8 @@ return {
             default = false,
             description = "Symlink to source in the config directory instead of copying it, so apps that write their own config edit your repo.",
           },
+          url = archix.option { type = t.nullable(t.str), default = archix.null, description = "Download the file from here; needs sha256. archix.fetchurl { url, sha256 } builds both." },
+          sha256 = archix.option { type = t.nullable(t.str), default = archix.null, description = "The sha256 the download from url must have; `archix prefetch <url>` prints it." },
           link = archix.option { type = t.nullable(t.str), default = archix.null, description = "Make the file a symlink to this target." },
           executable = archix.option { type = t.bool, default = false },
         }),

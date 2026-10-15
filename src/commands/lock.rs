@@ -5,6 +5,7 @@ use anyhow::Result;
 use archix::adopt::newer_than_lock;
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::aur::review::review;
+use archix::flatpak;
 use archix::generations::Store;
 use archix::integration;
 use archix::journal::Journal;
@@ -16,7 +17,7 @@ use archix::system::{self, apply::SystemChange};
 
 use super::{
     Declared, Snapshot, Target, aur_git, aur_source, confirm, declared, describe_unfinished, print_warned,
-    refuse_if_unfinished, select_changes, user_cache,
+    refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
 };
 
 /// The host's lock, re-resolved at the locked date (or `snapshot`) if the config changed; saved when `save`.
@@ -60,6 +61,9 @@ pub(super) fn current_lock(
     )?;
     if let Some(old) = &old {
         new.keep_pins(old);
+        if !updating {
+            new.flatpak = old.flatpak.clone();
+        }
     }
     if !save {
         eprintln!(
@@ -92,8 +96,17 @@ pub(super) fn save_lock(
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
     refuse_if_unfinished(&Paths::system())?;
     let declared = declared(target.config)?;
-    let (lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm)?;
-    if !changed {
+    let (mut lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm)?;
+    let before = lock.flatpak.clone();
+    for app in settle_flatpak(target, &declared, &mut lock, true)? {
+        println!("note: {app}; the next `archix switch` locks it");
+    }
+    for (id, app) in &lock.flatpak {
+        if before.get(id) != Some(app) {
+            println!("flatpak {id} at {}", &app.commit[..app.commit.len().min(12)]);
+        }
+    }
+    if !changed && lock.flatpak == before {
         println!("{LOCK_FILE} is up to date for {} (snapshot {})", target.host, lock.date);
     }
     Ok(())
@@ -112,12 +125,21 @@ pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> 
     let store = Store::new(&paths);
     let current = store.current()?.map(|n| store.get(n)).transpose()?;
     let rendered = system::render(target.config, target.config_dir)?;
+    let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let change = SystemChange {
         from: current.map(|g| g.system).unwrap_or_default(),
         to: rendered.state,
     };
     let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
     lines.extend(system::apply::describe(&change)?);
+    let mut lock = lock.clone();
+    let unresolved = settle_flatpak(target, declared, &mut lock, false)?;
+    let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
+    lines.extend(flatpak_lines);
+    lines.extend(unresolved.iter().map(|app| format!("flatpak    install {app}")));
+    if !unmanaged.is_empty() {
+        println!("flatpak apps archix doesn't manage: {}", unmanaged.join(" "));
+    }
     Ok((lines, warned))
 }
 

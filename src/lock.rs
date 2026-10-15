@@ -30,6 +30,9 @@ pub struct HostLock {
     pub pinned: Vec<String>,
     #[serde(default)]
     pub packages: BTreeMap<String, Locked>,
+    /// Flatpak apps by id, each at an exact commit.
+    #[serde(default)]
+    pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -147,6 +150,19 @@ impl Lockfile {
                 }
                 let _ = writeln!(out, "{} = {{ {} }}", key(name), fields.join(", "));
             }
+            if !lock.flatpak.is_empty() {
+                let _ = writeln!(out, "\n[hosts.{host}.flatpak]");
+                for (id, app) in &lock.flatpak {
+                    let _ = writeln!(
+                        out,
+                        "{} = {{ remote = {}, ref = {}, commit = {} }}",
+                        key(id),
+                        string(&app.remote),
+                        string(&app.reference),
+                        string(&app.commit)
+                    );
+                }
+            }
         }
         out
     }
@@ -224,6 +240,14 @@ mod tests {
             declared: vec!["gtk+".into()],
             pinned: vec!["zlib".into()],
             packages,
+            flatpak: BTreeMap::from([(
+                "org.mozilla.firefox".to_string(),
+                crate::flatpak::LockedApp {
+                    remote: "flathub".into(),
+                    reference: "app/org.mozilla.firefox/x86_64/stable".into(),
+                    commit: "0bb3a9e4".into(),
+                },
+            )]),
         };
         Lockfile {
             hosts: BTreeMap::from([("my.laptop".to_string(), host)]),

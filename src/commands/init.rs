@@ -17,6 +17,7 @@ use archix::aur::review::review;
 use archix::capture::{self, FoundFile};
 use archix::date::Date;
 use archix::eval::{self, Evaluation};
+use archix::flatpak::{self, LockedApp};
 use archix::installed;
 use archix::integration;
 use archix::lock::{HostLock, LOCK_FILE, Lockfile};
@@ -173,6 +174,7 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
 
     section("Packages");
     packages(&ask, &mut config, &machine)?;
+    let flatpaks = flatpaks(&mut config)?;
     section("System");
     host_settings(&mut config, &mut skip);
     accounts(&mut config)?;
@@ -211,6 +213,7 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
         host,
         config: &evaluation.config,
     };
+    lock.flatpak = flatpaks;
     let git_aur = aur_git(&declared)?;
     review(&git_aur, None, &lock, declared.aur_review && !defaults, &confirm)?;
     let mut lockfile = Lockfile::default();
@@ -525,6 +528,63 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// System-wide Flatpak apps, declared as they are and locked to their installed commits.
+fn flatpaks(config: &mut Host) -> Result<BTreeMap<String, LockedApp>> {
+    let apps = flatpak::installed()?;
+    if apps.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let remotes = flatpak::remotes()?;
+    let mut ids = Vec::new();
+    let mut used = BTreeMap::new();
+    for (id, app) in &apps {
+        if app.origin == "flathub" {
+            ids.push(id.clone());
+        } else {
+            ids.push(format!("{}:{id}", app.origin));
+            if let Some(remote) = remotes.get(&app.origin) {
+                used.insert(app.origin.clone(), remote.clone());
+            }
+        }
+    }
+    let mut fields = vec![("apps".to_string(), Lua::strings(&ids))];
+    if !used.is_empty() {
+        let mut table: Vec<(String, Lua)> = vec![(
+            "flathub".to_string(),
+            Lua::Table(vec![(
+                "url".into(),
+                Lua::str("https://dl.flathub.org/repo/flathub.flatpakrepo"),
+            )]),
+        )];
+        for (name, remote) in &used {
+            let mut fields = vec![("url".to_string(), Lua::str(&remote.url))];
+            if !remote.gpg_verify {
+                fields.push(("gpg_verify".into(), Lua::Bool(false)));
+            }
+            table.push((name.clone(), Lua::Table(fields)));
+        }
+        fields.push(("remotes".into(), Lua::Table(table)));
+    }
+    config.set("flatpak", Lua::Table(fields));
+    done(format!(
+        "{}, locked to their installed commits",
+        count(apps.len(), "Flatpak app", "Flatpak apps")
+    ));
+    Ok(apps
+        .into_iter()
+        .map(|(id, app)| {
+            (
+                id,
+                LockedApp {
+                    remote: app.origin,
+                    reference: app.reference,
+                    commit: app.commit,
+                },
+            )
+        })
+        .collect())
 }
 
 fn accounts(config: &mut Host) -> Result<()> {

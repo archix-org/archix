@@ -18,8 +18,9 @@ use archix::aur::git::AurGit;
 use archix::aur::index::Index;
 use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
+use archix::flatpak;
 use archix::journal::{Journal, Kind, Transaction};
-use archix::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, Locked};
+use archix::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
@@ -27,11 +28,13 @@ use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
-pub use helper::{edit_installed, install_temporarily, search, upgrade};
+pub use helper::{edit_installed, install_temporarily, prefetch, search, upgrade};
 pub use init::init;
 pub use lock::{diff, lock, status};
 pub use recover::recover;
 pub use switch::{boot_check, gc, generations, hook_record, rescue, rollback, switch};
+
+const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
 pub struct Target<'a> {
     pub config_dir: &'a Path,
@@ -68,6 +71,9 @@ struct Declared {
     missing_versions: Option<Nearest>,
     boot: Option<BootSettings>,
     snapshots: bool,
+    /// (remote, app id) pairs.
+    flatpak_apps: Vec<(String, String)>,
+    flatpak_remotes: BTreeMap<String, flatpak::Remote>,
 }
 
 /// The boot.* settings, present when archix manages booting.
@@ -251,7 +257,52 @@ fn declared(config: &Value) -> Result<Declared> {
             Some(Value::Str(policy)) if policy == "older" => Some(Nearest::Older),
             _ => None,
         },
+        flatpak_apps: Vec::new(),
+        flatpak_remotes: BTreeMap::new(),
     };
+    if let Some(Value::Map(fp)) = map.get("flatpak") {
+        let default_remote = match fp.get("remote") {
+            Some(Value::Str(remote)) => remote.clone(),
+            _ => "flathub".to_string(),
+        };
+        if let Some(Value::Map(remotes)) = fp.get("remotes") {
+            for (name, remote) in remotes {
+                let Value::Map(remote) = remote else { continue };
+                let Some(Value::Str(url)) = remote.get("url") else {
+                    continue;
+                };
+                declared.flatpak_remotes.insert(
+                    name.clone(),
+                    flatpak::Remote {
+                        url: url.clone(),
+                        gpg_verify: remote.get("gpg_verify") != Some(&Value::Bool(false)),
+                    },
+                );
+            }
+        }
+        if let Some(Value::List(apps)) = fp.get("apps") {
+            for app in apps {
+                let Value::Str(app) = app else { continue };
+                let (remote, id) = match app.split_once(':') {
+                    Some((remote, id)) => (remote.to_string(), id.to_string()),
+                    None => (default_remote.clone(), app.clone()),
+                };
+                if !declared.flatpak_remotes.contains_key(&remote) {
+                    if remote != "flathub" {
+                        bail!("flatpak.apps: {app} uses remote {remote}, which flatpak.remotes doesn't declare");
+                    }
+                    declared.flatpak_remotes.insert(
+                        remote.clone(),
+                        flatpak::Remote {
+                            url: FLATHUB.to_string(),
+                            gpg_verify: true,
+                        },
+                    );
+                }
+                declared.flatpak_apps.push((remote, id));
+            }
+        }
+    }
     if let Some(boot) = &declared.boot {
         let mut needed = vec![
             boot.kernel.clone(),
@@ -459,4 +510,60 @@ fn aur_source<'a>(
     Aur::new(git, previous, move || {
         Index::load(archive, &declared.aur_url, &user_cache()?, refresh)
     })
+}
+
+/// Drops locked Flatpak apps the config no longer declares and locks new ones to their remote's commit; returns the ones it couldn't lock yet.
+fn settle_flatpak(target: &Target, declared: &Declared, lock: &mut HostLock, save: bool) -> Result<Vec<String>> {
+    let wanted: BTreeMap<&str, &str> = declared
+        .flatpak_apps
+        .iter()
+        .map(|(remote, id)| (id.as_str(), remote.as_str()))
+        .collect();
+    let before = lock.flatpak.clone();
+    lock.flatpak
+        .retain(|id, app| wanted.get(id.as_str()) == Some(&app.remote.as_str()));
+    let mut unresolved = Vec::new();
+    let missing: Vec<&(String, String)> = declared
+        .flatpak_apps
+        .iter()
+        .filter(|(_, id)| !lock.flatpak.contains_key(id))
+        .collect();
+    if !missing.is_empty() && flatpak::available() {
+        ensure_flatpak_remotes(declared)?;
+        for (remote, id) in &missing {
+            match flatpak::latest(remote, id) {
+                Ok(app) => {
+                    lock.flatpak.insert(id.clone(), app);
+                }
+                Err(e) => unresolved.push(format!("{id}: {e:#}")),
+            }
+        }
+    } else {
+        unresolved.extend(
+            missing
+                .iter()
+                .map(|(_, id)| format!("{id}: flatpak isn't installed yet")),
+        );
+    }
+    if save && lock.flatpak != before {
+        let path = target.config_dir.join(LOCK_FILE);
+        let mut lockfile = Lockfile::load(&path)?;
+        lockfile.hosts.insert(target.host.to_string(), lock.clone());
+        lockfile.save(&path)?;
+    }
+    Ok(unresolved)
+}
+
+/// Adds the remotes declared apps use, when running as root with flatpak installed.
+fn ensure_flatpak_remotes(declared: &Declared) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 || !flatpak::available() {
+        return Ok(());
+    }
+    let used: BTreeMap<String, flatpak::Remote> = declared
+        .flatpak_remotes
+        .iter()
+        .filter(|(name, _)| declared.flatpak_apps.iter().any(|(remote, _)| remote == *name))
+        .map(|(name, remote)| (name.clone(), remote.clone()))
+        .collect();
+    flatpak::ensure_remotes(&used)
 }

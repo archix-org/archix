@@ -16,6 +16,7 @@ use archix::aur::review::review;
 use archix::date::Date;
 use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
+use archix::flatpak::{self, LockedApp};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
@@ -32,7 +33,8 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 use super::lock::{current_lock, save_lock};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, declared,
-    edit_installed, print_warned, refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
+    edit_installed, ensure_flatpak_remotes, print_warned, refuse_if_unfinished, require_root, select_changes,
+    settle_flatpak, transaction_for, user_cache,
 };
 
 /// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
@@ -129,6 +131,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         }
     }
 
+    let unresolved_flatpak = settle_flatpak(target, &declared, &mut lock, true)?;
     let commit = config_commit(target.config_dir);
     if let Some((_, true)) = &commit {
         eprintln!("warning: {} has uncommitted changes", target.config_dir.display());
@@ -160,6 +163,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
         system: SystemState::default(),
         snapshot: None,
+        flatpak: lock.flatpak.clone(),
     };
     let rendered = system::render(target.config, target.config_dir)?;
     generation.system = rendered.state.clone();
@@ -168,6 +172,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         to: rendered.state.clone(),
     };
     let system_lines = system::apply::describe(&system_change)?;
+    let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
+    let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
+    flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
 
     let (changes, warned) = select_changes(
         &lock.packages,
@@ -177,7 +184,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     );
     print_warned(&warned);
     let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
-    if changes.is_empty() && system_lines.is_empty() && (unchanged || declared.boot.is_none()) {
+    if changes.is_empty()
+        && system_lines.is_empty()
+        && flatpak_lines.is_empty()
+        && (unchanged || declared.boot.is_none())
+    {
         if let Some(current) = current.filter(|current| current.same_system(&generation)) {
             finish(&paths, declared.boot.is_some(), &declared.repos)?;
             println!(
@@ -186,6 +197,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             );
             return Ok(());
         }
+        system::blobs::ensure(&paths, &archive, &rendered)?;
         system::apply::keep_originals(&paths, &system_change)?;
         let created = store.create(generation)?;
         store.activate(created.number)?;
@@ -199,17 +211,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     for change in &changes {
         println!("{change}");
     }
-    for line in &system_lines {
+    for line in system_lines.iter().chain(&flatpak_lines) {
         println!("{line}");
     }
     if declared.boot.is_some() {
         println!("boot entry for the new generation");
     }
-    let count = changes.len() + system_lines.len() + usize::from(declared.boot.is_some());
+    let count = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
     if !noconfirm && !confirm(&format!("apply {count} changes?"))? {
         bail!("aborted; nothing was changed");
     }
-    system::blobs::store(&paths, &rendered.blobs)?;
+    system::blobs::ensure(&paths, &archive, &rendered)?;
 
     import_keys(&declared.repos)?;
     let mut changes = changes;
@@ -302,10 +314,41 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
     journal.save(&paths.journal())?;
-    let soft_failures = apply::run(&paths, &mut journal, false)?;
+    let mut soft_failures = apply::run(&paths, &mut journal, false)?;
     finish(&paths, declared.boot.is_some(), &declared.repos)?;
+    soft_failures.extend(finish_flatpak(
+        target,
+        &declared,
+        &mut lock,
+        &store,
+        created.number,
+        &previous_flatpak,
+    )?);
     println!("switched to {name}");
     report_soft_failures(&soft_failures)
+}
+
+/// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
+fn finish_flatpak(
+    target: &Target,
+    declared: &Declared,
+    lock: &mut HostLock,
+    store: &Store,
+    number: u32,
+    previous: &BTreeMap<String, LockedApp>,
+) -> Result<Vec<String>> {
+    if declared.flatpak_apps.is_empty() && previous.is_empty() {
+        return Ok(Vec::new());
+    }
+    ensure_flatpak_remotes(declared)?;
+    let mut failures = settle_flatpak(target, declared, lock, true)?;
+    let mut generation = store.get(number)?;
+    if generation.flatpak != lock.flatpak {
+        generation.flatpak = lock.flatpak.clone();
+        store.update(&generation)?;
+    }
+    failures.extend(flatpak::sync(&lock.flatpak, previous));
+    Ok(failures)
 }
 
 /// The current generation's built-file hashes for AUR packages still locked at the same commit.
@@ -628,15 +671,18 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     );
     print_warned(&warned);
     let name = format!("generation {number} (snapshot {})", generation.date);
+    let current_generation = store.get(current)?;
     let system_change = SystemChange {
-        from: store.get(current)?.system,
+        from: current_generation.system,
         to: generation.system.clone(),
     };
     let system_lines = system::apply::describe(&system_change)?;
-    for line in &system_lines {
+    let previous_flatpak = current_generation.flatpak;
+    let (flatpak_lines, _) = flatpak::describe(&generation.flatpak, &previous_flatpak, &flatpak::installed()?);
+    for line in system_lines.iter().chain(&flatpak_lines) {
         println!("{line}");
     }
-    if changes.is_empty() && system_lines.is_empty() {
+    if changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() {
         store.activate(number)?;
         println!("{name} is current; no package changes were needed");
         return Ok(());
@@ -661,7 +707,10 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;
-    let soft_failures = apply::run(&paths, &mut journal, false)?;
+    let mut soft_failures = apply::run(&paths, &mut journal, false)?;
+    if !generation.flatpak.is_empty() || !previous_flatpak.is_empty() {
+        soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
+    }
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
     report_soft_failures(&soft_failures)
 }

@@ -287,3 +287,29 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
     }
     super::switch(target, noconfirm, None)
 }
+
+/// Downloads `url` and prints the fetchurl snippet with its sha256; as root it also keeps the file for the next switch.
+pub fn prefetch(url: &str) -> Result<()> {
+    let dir = user_cache()?.join("prefetch");
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let tmp = dir.join(format!("download.{}", std::process::id()));
+    if !Archive::new(ARCHIVE_URL).fetch(url, &tmp)? {
+        bail!("{url} doesn't exist");
+    }
+    let sha256 = archix::fetch::sha256(&tmp)?;
+    if unsafe { libc::geteuid() } == 0 {
+        let blob = archix::system::blobs::path(&Paths::system(), &sha256);
+        if let Some(parent) = blob.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if fs::rename(&tmp, &blob).is_err() {
+            fs::copy(&tmp, &blob)?;
+        }
+    }
+    let _ = fs::remove_file(&tmp);
+    println!(
+        "archix.fetchurl {{ url = {}, sha256 = \"{sha256}\" }}",
+        archix::luagen::string(url)
+    );
+    Ok(())
+}
