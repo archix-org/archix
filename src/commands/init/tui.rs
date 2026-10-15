@@ -219,14 +219,14 @@ impl<'a> App<'a> {
                 .dotfile_candidates()
                 .iter()
                 .map(|d| {
-                    (
-                        d.name.clone(),
-                        if d.recommended {
-                            "recommended".into()
-                        } else {
-                            String::new()
-                        },
-                    )
+                    let detail = if d.recommended {
+                        "recommended"
+                    } else if d.replaced {
+                        "its app replaces this file on save, so a link wouldn't last"
+                    } else {
+                        ""
+                    };
+                    (d.name.clone(), detail.to_string())
                 })
                 .collect(),
             Control::Settings => facts
@@ -1312,10 +1312,12 @@ mod tests {
                         Dotfile {
                             name: ".config/kdeglobals".into(),
                             recommended: false,
+                            replaced: true,
                         },
                         Dotfile {
                             name: ".config/nvim".into(),
                             recommended: true,
+                            replaced: false,
                         },
                     ],
                     secrets: 1,

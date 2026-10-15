@@ -138,7 +138,6 @@
       ".inputrc",
       ".vimrc",
       ".tmux.conf",
-      ".gitconfig",
       ".xinitrc",
       ".Xresources",
       ".config/git",
@@ -179,11 +178,21 @@
       ".config/mpv",
       ".config/zathura",
       ".config/bat",
-      ".config/mimeapps.list",
-      ".config/user-dirs.dirs",
-      ".config/user-dirs.locale",
       ".config/fontconfig",
-      ".config/environment.d"
+      ".config/environment.d",
+      ".config/wlogout",
+      ".config/matugen",
+      ".config/Kvantum",
+      ".config/ohmyposh",
+      ".config/quickshell",
+      ".config/DankMaterialShell",
+      ".config/danksearch",
+      ".config/vim",
+      ".config/swaync",
+      ".config/eww",
+      ".config/nwg-dock-hyprland",
+      ".config/waypaper",
+      ".config/wpaperd"
     ],
     "secret": [
       ".ssh",
@@ -306,6 +315,16 @@
       ".dartServer",
       ".gnome",
       ".xsession-errors*"
+    ],
+    "replaced": [
+      ".gitconfig",
+      ".config/mimeapps.list",
+      ".config/user-dirs.dirs",
+      ".config/user-dirs.locale",
+      ".config/*rc",
+      ".config/gtkrc*",
+      ".config/*.conf",
+      ".config/kdeglobals"
     ]
   }
 }

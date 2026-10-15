@@ -31,7 +31,7 @@ pub struct Lists {
     pub dotfiles: DotfileLists,
 }
 
-/// Names relative to a home; `x*` matches by prefix and `*x` by suffix.
+/// Names relative to a home; one `*` stands for any run of characters.
 #[derive(Debug, Deserialize)]
 pub struct DotfileLists {
     /// Ticked by default.
@@ -40,15 +40,17 @@ pub struct DotfileLists {
     pub secret: Vec<String>,
     /// Caches, app state and the like: never offered.
     pub skip: Vec<String>,
+    /// Single files their app replaces on save, which turns a live link back into a plain file.
+    pub replaced: Vec<String>,
 }
 
 fn matches_name(list: &[String], name: &str) -> bool {
-    list.iter()
-        .any(|entry| match (entry.strip_suffix('*'), entry.strip_prefix('*')) {
-            (Some(prefix), _) => name.starts_with(prefix),
-            (_, Some(suffix)) => name.ends_with(suffix),
-            _ => entry == name,
-        })
+    list.iter().any(|entry| match entry.split_once('*') {
+        Some((prefix, suffix)) => {
+            name.len() >= prefix.len() + suffix.len() && name.starts_with(prefix) && name.ends_with(suffix)
+        }
+        None => entry == name,
+    })
 }
 
 /// A home entry init can offer to bring into the config.
@@ -56,6 +58,8 @@ fn matches_name(list: &[String], name: &str) -> bool {
 pub struct Dotfile {
     pub name: String,
     pub recommended: bool,
+    /// Its app replaces the file on save, so a live link wouldn't last.
+    pub replaced: bool,
 }
 
 pub static LISTS: LazyLock<Lists> =
@@ -475,7 +479,12 @@ pub fn dotfiles(home: &Path) -> (Vec<Dotfile>, usize) {
             continue;
         }
         let recommended = matches_name(&lists.recommended, &name);
-        out.push(Dotfile { name, recommended });
+        let replaced = !home.join(&name).is_dir() && matches_name(&lists.replaced, &name);
+        out.push(Dotfile {
+            name,
+            recommended,
+            replaced,
+        });
     }
     (out, secrets)
 }
@@ -594,6 +603,12 @@ mod tests {
             fs::write(home.path().join(file), "").unwrap();
         }
         let (offered, secrets) = dotfiles(home.path());
+        let replaced: Vec<&str> = offered.iter().filter(|d| d.replaced).map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            replaced,
+            [".config/kdeglobals", ".config/plasmashellrc"],
+            "single rc files are replaced on save; directories and .bashrc aren't"
+        );
         let names: Vec<(&str, bool)> = offered.iter().map(|d| (d.name.as_str(), d.recommended)).collect();
         assert_eq!(
             names,
