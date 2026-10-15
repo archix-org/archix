@@ -30,6 +30,7 @@ fn fake_interrupted_switch(paths: &Paths) {
     reasons.insert("tree".into(), true);
     let transaction = Transaction {
         system: None,
+        boot: None,
         install: vec![tree],
         remove: vec![],
         versions,

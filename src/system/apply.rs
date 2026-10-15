@@ -412,10 +412,10 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
     match &want.link {
         Some(link) => {
             symlink(link, &tmp)?;
-            if want.owner != "root" {
-                if let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) {
-                    std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
-                }
+            if want.owner != "root"
+                && let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group))
+            {
+                std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
             }
         }
         None => {

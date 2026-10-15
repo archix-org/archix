@@ -13,6 +13,8 @@ use crate::paths::Paths;
 pub const TRANSACTION_ENV: &str = "ARCHIX_TRANSACTION";
 /// pacman's `--ask` bit that answers "remove the conflicting package?" with yes (ALPM_QUESTION_CONFLICT_PKG).
 const ASK_REMOVE_CONFLICTS: &str = "--ask=4";
+/// archix may have restored an old kernel's modules itself, so reinstalling that kernel may overwrite them.
+const KERNEL_MODULES: &str = "/usr/lib/modules/*";
 
 #[derive(Debug, PartialEq)]
 pub enum PacmanLock {
@@ -77,6 +79,10 @@ fn run_step(
         Step::Reload => Ok(system.map_or_else(Vec::new, crate::system::apply::reload)),
         Step::StopServices => Ok(system.map_or_else(Vec::new, crate::system::apply::stop_services)),
         Step::Services => Ok(system.map_or_else(Vec::new, crate::system::apply::start_services)),
+        Step::Boot => match &tx.boot {
+            Some(plan) => crate::system::boot::write_entry(paths, plan).map(|_| Vec::new()),
+            None => Ok(Vec::new()),
+        },
         step => run_package_step(paths, tx, generation, step, reinstall).map(|()| Vec::new()),
     }
 }
@@ -89,7 +95,7 @@ fn run_package_step(
     reinstall: bool,
 ) -> Result<()> {
     match step {
-        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services => Ok(()),
+        Step::Users | Step::StopServices | Step::Files | Step::Reload | Step::Services | Step::Boot => Ok(()),
         Step::Activate => match generation {
             Some(number) => Store::new(paths).activate(number),
             None => Ok(()),
@@ -100,6 +106,8 @@ fn run_package_step(
                 OsStr::new("-U"),
                 OsStr::new("--noconfirm"),
                 OsStr::new(ASK_REMOVE_CONFLICTS),
+                OsStr::new("--overwrite"),
+                OsStr::new(KERNEL_MODULES),
             ];
             if !reinstall {
                 args.push(OsStr::new("--needed"));

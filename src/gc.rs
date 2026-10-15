@@ -33,8 +33,21 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     let mut report = Report::default();
     for generation in &generations {
         if !keep.contains(&generation.number) {
+            if let Some(snapshot) = &generation.snapshot {
+                crate::system::snapshot::delete(snapshot)?;
+            }
             store.delete(generation.number)?;
             report.generations.push(generation.number);
+        }
+    }
+    if let Some(esp) = &settings.esp {
+        crate::system::boot::prune_entries(esp, &keep)?;
+        let kernels: BTreeSet<String> = keep
+            .iter()
+            .filter_map(|number| crate::system::boot::kernel_of(paths, *number))
+            .collect();
+        if !kernels.is_empty() {
+            crate::system::boot::prune_kernels(paths, &kernels)?;
         }
     }
 

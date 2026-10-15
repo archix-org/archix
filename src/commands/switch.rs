@@ -25,7 +25,8 @@ use archix::paths::Paths;
 use archix::plan::Change;
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
-use archix::system::{self, SystemState, apply::SystemChange};
+use archix::system::boot::BootPlan;
+use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 
 use super::lock::{current_lock, save_lock};
 use super::{
@@ -94,10 +95,18 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             ignored: declared.ignored.iter().cloned().collect(),
             keep: declared.keep,
             keep_days: declared.keep_days,
+            esp: declared.boot.as_ref().map(|boot| boot.esp.clone()),
+            boot: declared.boot.as_ref().map(|boot| {
+                format!(
+                    "{} {} {:?} {:?} {:?} {}",
+                    boot.kernel, boot.cmdline, boot.microcode, boot.secure_boot, boot.entries, boot.esp
+                )
+            }),
         },
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
         system: SystemState::default(),
+        snapshot: None,
     };
     let rendered = system::render(target.config, target.config_dir)?;
     generation.system = rendered.state.clone();
@@ -114,9 +123,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         &declared.ignored,
     );
     print_warned(&warned);
-    if changes.is_empty() && system_lines.is_empty() {
+    let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
+    if changes.is_empty() && system_lines.is_empty() && (unchanged || declared.boot.is_none()) {
         if let Some(current) = current.filter(|current| current.same_system(&generation)) {
-            finish(&paths, &declared.repos)?;
+            finish(&paths, declared.boot.is_some(), &declared.repos)?;
             println!(
                 "nothing to do: the system matches generation {} (snapshot {})",
                 current.number, lock.date
@@ -125,7 +135,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         }
         let created = store.create(generation)?;
         store.activate(created.number)?;
-        finish(&paths, &declared.repos)?;
+        finish(&paths, false, &declared.repos)?;
         println!(
             "generation {} is current (snapshot {}, no package changes)",
             created.number, lock.date
@@ -138,7 +148,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     for line in &system_lines {
         println!("{line}");
     }
-    let count = changes.len() + system_lines.len();
+    if declared.boot.is_some() {
+        println!("boot entry for the new generation");
+    }
+    let count = changes.len() + system_lines.len() + usize::from(declared.boot.is_some());
     if !noconfirm && !confirm(&format!("apply {count} changes?"))? {
         bail!("aborted; nothing was changed");
     }
@@ -215,13 +228,28 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         &declared.repos,
     )?;
     transaction.system = Some(system_change);
-    let created = store.create(generation)?;
+    let mut created = store.create(generation)?;
+    if let Some(boot) = &declared.boot {
+        transaction.boot = Some(BootPlan {
+            generation: created.number,
+            esp: boot.esp.clone(),
+            kernel: boot.kernel.clone(),
+            microcode: boot.microcode.clone(),
+            cmdline: boot.cmdline.clone(),
+            keep: boot.entries,
+            secure_boot: boot.secure_boot,
+        });
+    }
+    if declared.snapshots && snapshot::root_is_btrfs() {
+        created.snapshot = Some(snapshot::take(created.number)?);
+        store.update(&created)?;
+    }
     let name = format!("generation {} (snapshot {})", created.number, lock.date);
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
     journal.save(&paths.journal())?;
     let soft_failures = apply::run(&paths, &mut journal, false)?;
-    finish(&paths, &declared.repos)?;
+    finish(&paths, declared.boot.is_some(), &declared.repos)?;
     println!("switched to {name}");
     report_soft_failures(&soft_failures)
 }
@@ -486,9 +514,9 @@ fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Re
 }
 
 /// After a successful switch: outside changes are reconciled, integration files are in place, old garbage goes.
-fn finish(paths: &Paths, repos: &[Repo]) -> Result<()> {
+fn finish(paths: &Paths, boot: bool, repos: &[Repo]) -> Result<()> {
     integration::clear_outside_changes(paths)?;
-    integration::ensure(paths)?;
+    integration::ensure(paths, boot)?;
     integration::sync_pacman_conf(paths, repos)?;
     match gc::collect(paths, &user_cache()?) {
         Ok(report) => print_gc(&report, false),
@@ -641,4 +669,65 @@ pub fn hook_record() {
     if paths.journal().exists() {
         println!("archix: a switch is unfinished; run `sudo archix recover`");
     }
+}
+
+/// Run early at boot by archix-boot.service: if an older generation's entry was booted, make that generation current.
+pub fn boot_check(cmdline: Option<String>) -> Result<()> {
+    let cmdline = match cmdline {
+        Some(cmdline) => cmdline,
+        None => fs::read_to_string("/proc/cmdline").context("reading /proc/cmdline")?,
+    };
+    let Some(booted) = system::boot::booted_generation(&cmdline) else {
+        return Ok(());
+    };
+    let paths = Paths::system();
+    let release = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    if system::boot::restore_modules(&paths, release.trim())? {
+        println!("archix: restored the modules of kernel {}", release.trim());
+    }
+    if let Some(journal) = Journal::load(&paths.journal())? {
+        println!(
+            "archix: {}; not changing anything at boot, run `sudo archix recover`",
+            super::describe_unfinished(&journal)
+        );
+        return Ok(());
+    }
+    let store = Store::new(&paths);
+    match store.current()? {
+        Some(current) if current == booted => Ok(()),
+        Some(current) => {
+            println!("archix: booted generation {booted}, but {current} is current; rolling back to {booted}");
+            rollback(Some(booted), true)
+        }
+        None => Ok(()),
+    }
+}
+
+/// Restores a generation's core packages under `root` without pacman, for a system that no longer boots.
+pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String]) -> Result<()> {
+    require_root("rescue")?;
+    let store = Store::new(&Paths::under(root));
+    let number = match generation {
+        Some(number) => number,
+        None => store
+            .current()?
+            .context("there is no current generation under that root; pass --generation")?,
+    };
+    let generation = store.get(number)?;
+    println!(
+        "restoring the core packages of generation {number} under {}",
+        root.display()
+    );
+    let rescued = system::rescue::rescue(root, &generation, extra)?;
+    for line in &rescued.restored {
+        println!("restored {line}");
+    }
+    for line in &rescued.missing {
+        println!("missing  {line}");
+    }
+    println!(
+        "{} packages restored; boot normally, then run `sudo archix rollback {number}` to put everything else back",
+        rescued.restored.len()
+    );
+    Ok(())
 }

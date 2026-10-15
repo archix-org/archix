@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pacman::LocalPkg;
 use crate::system::apply::SystemChange;
+use crate::system::boot::BootPlan;
 
 const JOURNAL_VERSION: u32 = 1;
 
@@ -32,10 +33,11 @@ pub enum Step {
     Reload,
     Services,
     Verify,
+    Boot,
     Activate,
 }
 
-pub const STEPS: [Step; 10] = [
+pub const STEPS: [Step; 11] = [
     Step::Install,
     Step::Remove,
     Step::Reasons,
@@ -45,6 +47,7 @@ pub const STEPS: [Step; 10] = [
     Step::Reload,
     Step::Services,
     Step::Verify,
+    Step::Boot,
     Step::Activate,
 ];
 
@@ -60,6 +63,7 @@ impl Step {
             Step::Reload => "reloading systemd, sysctl, udev and locales",
             Step::Services => "enabling and starting services",
             Step::Verify => "verifying the result",
+            Step::Boot => "writing the boot entry",
             Step::Activate => "making the new generation current",
         }
     }
@@ -77,6 +81,9 @@ pub struct Transaction {
     /// Files, users and services, when the transaction manages them.
     #[serde(default)]
     pub system: Option<SystemChange>,
+    /// The boot entry to write, when archix manages booting.
+    #[serde(default)]
+    pub boot: Option<BootPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

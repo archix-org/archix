@@ -125,6 +125,7 @@ fn rollback_transaction(
     )?;
     Ok(Transaction {
         system: journal.transaction.system.as_ref().map(SystemChange::reversed),
+        boot: None,
         install,
         remove: installed
             .keys()

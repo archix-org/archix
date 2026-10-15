@@ -28,6 +28,9 @@ pub struct Generation {
     pub config_dirty: bool,
     #[serde(default)]
     pub system: SystemState,
+    /// A read-only btrfs snapshot of / taken just before this generation was applied.
+    #[serde(default)]
+    pub snapshot: Option<String>,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -37,6 +40,12 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
+    /// The ESP holding this generation's boot entry, when archix manages booting.
+    #[serde(default)]
+    pub esp: Option<String>,
+    /// The boot settings the entry was built with, so changing them makes a new generation.
+    #[serde(default)]
+    pub boot: Option<String>,
 }
 
 impl Generation {
@@ -123,6 +132,14 @@ impl Store {
         Ok(generation)
     }
 
+    /// Rewrites a stored generation, such as after its snapshot was taken.
+    pub fn update(&self, generation: &Generation) -> Result<()> {
+        let path = self.path(generation.number).join(GENERATION_FILE);
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(generation)?)?;
+        fs::rename(&tmp, &path).with_context(|| format!("updating generation {}", generation.number))
+    }
+
     /// Points `current` at a generation by renaming a fresh symlink over it, which is atomic.
     pub fn activate(&self, number: u32) -> Result<()> {
         let tmp = self.current.with_extension("new");
@@ -194,10 +211,13 @@ mod tests {
                 ignored: vec![],
                 keep: 10,
                 keep_days: 30,
+                esp: None,
+                boot: None,
             },
             config_commit: None,
             config_dirty: false,
             system: SystemState::default(),
+            snapshot: None,
         }
     }
 

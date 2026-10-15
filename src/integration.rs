@@ -45,10 +45,80 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     ]
 }
 
-/// Writes the integration files that are missing or out of date.
-pub fn ensure(paths: &Paths) -> Result<()> {
+/// The statically linked archix the rescue initramfs hook copies; the package installs it.
+pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
+
+/// Files for managed booting: the early-boot generation check, and the rescue hook when the static binary exists.
+pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
+    let root = paths
+        .pacman_conf
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("/"));
+    let unit = format!(
+        "[Unit]\nDescription=archix: match the booted generation\nDefaultDependencies=no\nAfter=local-fs.target\n\
+         Before=sysinit.target systemd-udev-trigger.service systemd-modules-load.service\nConditionKernelCommandLine=archix.generation\n\n\
+         [Service]\nType=oneshot\nExecStart={} boot-check\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
+        archix.display()
+    );
+    let mut files = vec![(root.join("etc/systemd/system/archix-boot.service"), unit)];
+    if root.join(STATIC_BINARY.trim_start_matches('/')).exists() {
+        files.push((
+            root.join("etc/initcpio/install/archix-rescue"),
+            format!(
+                "#!/bin/bash\n\nbuild() {{\n    add_binary {STATIC_BINARY} /usr/bin/archix\n    add_runscript\n    \
+                 add_file /usr/lib/archix/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n    \
+                 add_symlink /usr/lib/systemd/system/initrd.target.wants/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n}}\n\n\
+                 help() {{\n    echo \"archix rescue: restores core packages from the cache when archix.rescue is on the kernel command line\"\n}}\n"
+            ),
+        ));
+        files.push((
+            root.join("etc/initcpio/hooks/archix-rescue"),
+            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline; then\n        \
+             mount -o remount,rw /new_root\n        /usr/bin/archix rescue --root /new_root\n    fi\n}\n"
+                .to_string(),
+        ));
+        files.push((
+            root.join("usr/lib/archix/archix-rescue.service"),
+            "[Unit]\nDescription=archix rescue: restore core packages\nDefaultDependencies=no\nConditionKernelCommandLine=archix.rescue\n\
+             After=initrd-root-fs.target\nBefore=initrd-parse-etc.service initrd-switch-root.target\n\n\
+             [Service]\nType=oneshot\nExecStartPre=/usr/bin/mount -o remount,rw /sysroot\nExecStart=/usr/bin/archix rescue --root /sysroot\n\
+             StandardOutput=journal+console\n"
+                .to_string(),
+        ));
+        files.push((
+            root.join("etc/mkinitcpio.conf.d/archix-rescue.conf"),
+            "HOOKS+=(archix-rescue)\n".to_string(),
+        ));
+    }
+    files
+}
+
+/// Writes the integration files that are missing or out of date, and boot ones only while archix manages booting.
+pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
     let archix = std::env::current_exe().context("finding the archix binary")?;
-    for (path, content) in files(paths, &archix) {
+    let root = paths
+        .pacman_conf
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("/"))
+        .to_path_buf();
+    let wants = root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service");
+    if boot {
+        if let Some(dir) = wants.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        if fs::symlink_metadata(&wants).is_err() {
+            std::os::unix::fs::symlink("/etc/systemd/system/archix-boot.service", &wants)?;
+        }
+    } else {
+        let _ = fs::remove_file(&wants);
+        for (path, _) in boot_files(paths, &archix) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let boot_files = if boot { boot_files(paths, &archix) } else { Vec::new() };
+    for (path, content) in files(paths, &archix).into_iter().chain(boot_files) {
         if fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
             continue;
         }

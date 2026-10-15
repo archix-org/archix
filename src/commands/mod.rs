@@ -29,7 +29,7 @@ use archix::value::Value;
 pub use helper::{edit_installed, install_temporarily, search, upgrade};
 pub use lock::{diff, lock, status};
 pub use recover::recover;
-pub use switch::{gc, generations, hook_record, rollback, switch};
+pub use switch::{boot_check, gc, generations, hook_record, rescue, rollback, switch};
 
 pub struct Target<'a> {
     pub config_dir: &'a Path,
@@ -64,6 +64,18 @@ struct Declared {
     aur_review: bool,
     build_on_host: BTreeSet<String>,
     missing_versions: Option<Nearest>,
+    boot: Option<BootSettings>,
+    snapshots: bool,
+}
+
+/// The boot.* settings, present when archix manages booting.
+struct BootSettings {
+    esp: String,
+    kernel: String,
+    microcode: Vec<String>,
+    entries: u32,
+    secure_boot: Option<bool>,
+    cmdline: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -193,6 +205,45 @@ fn declared(config: &Value) -> Result<Declared> {
             },
             _ => BTreeSet::new(),
         },
+        boot: match map.get("boot") {
+            Some(Value::Map(boot)) if matches!(boot.get("loader"), Some(Value::Str(_))) => {
+                let text = |key: &str, default: &str| match boot.get(key) {
+                    Some(Value::Str(s)) => s.clone(),
+                    _ => default.to_string(),
+                };
+                let params = strings("kernel_params");
+                if !params.iter().any(|p| p.starts_with("root=")) {
+                    bail!(
+                        "boot.loader is set, but kernel_params has no root=; archix needs the full kernel command line"
+                    );
+                }
+                Some(BootSettings {
+                    esp: text("esp", "/boot"),
+                    kernel: text("kernel", "linux"),
+                    microcode: match boot.get("microcode") {
+                        Some(Value::List(items)) => items
+                            .iter()
+                            .filter_map(|i| match i {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    },
+                    entries: match boot.get("entries") {
+                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(5).max(1),
+                        _ => 5,
+                    },
+                    secure_boot: match boot.get("secure_boot") {
+                        Some(Value::Bool(b)) => Some(*b),
+                        _ => None,
+                    },
+                    cmdline: params.join(" "),
+                })
+            }
+            _ => None,
+        },
+        snapshots: !matches!(map.get("boot"), Some(Value::Map(boot)) if boot.get("snapshots") == Some(&Value::Bool(false))),
         missing_versions: match map.get("missing_versions") {
             Some(Value::Str(policy)) if policy == "newer" => Some(Nearest::Newer),
             Some(Value::Str(policy)) if policy == "older" => Some(Nearest::Older),
@@ -293,6 +344,7 @@ fn transaction_for(
         install,
         remove,
         system: None,
+        boot: None,
         versions: packages
             .iter()
             .filter(|(_, pkg)| !pkg.build_only)

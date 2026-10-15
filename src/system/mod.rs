@@ -1,5 +1,8 @@
 pub mod apply;
 pub mod blobs;
+pub mod boot;
+pub mod rescue;
+pub mod snapshot;
 
 use std::collections::BTreeMap;
 use std::fs;

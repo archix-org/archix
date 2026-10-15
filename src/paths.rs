@@ -27,6 +27,22 @@ impl Paths {
         }
     }
 
+    /// The same layout inside another root, such as a mounted system being repaired from a live USB.
+    pub fn under(root: &std::path::Path) -> Paths {
+        let inside = |path: PathBuf| root.join(path.strip_prefix("/").unwrap_or(&path));
+        let system = Paths::system();
+        Paths {
+            pacman_db: inside(system.pacman_db),
+            pacman_cache: inside(system.pacman_cache),
+            state: inside(system.state),
+            cache: inside(system.cache),
+            pacman_conf: inside(system.pacman_conf),
+            pacman_hooks: inside(system.pacman_hooks),
+            profile_d: inside(system.profile_d),
+            autostart: inside(system.autostart),
+        }
+    }
+
     pub fn local_db(&self) -> PathBuf {
         self.pacman_db.join("local")
     }

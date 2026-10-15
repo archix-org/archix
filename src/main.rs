@@ -140,6 +140,24 @@ enum Command {
         needed: bool,
         targets: Vec<String>,
     },
+    /// Restore a generation's core packages under another root without pacman (rescue mode, or from a live USB)
+    Rescue {
+        /// The mounted system to repair, such as /mnt or the initramfs's /sysroot
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+        /// Generation whose packages to restore; the current one by default
+        #[arg(long)]
+        generation: Option<u32>,
+        /// Also restore these packages, beyond the core set
+        #[arg(long = "package")]
+        packages: Vec<String>,
+    },
+    /// Run at boot by archix-boot.service: switch to the generation whose boot entry was chosen
+    #[command(hide = true)]
+    BootCheck {
+        #[arg(long)]
+        cmdline: Option<String>,
+    },
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
@@ -217,6 +235,18 @@ fn run() -> Result<ExitCode> {
         }
         Command::Gc => {
             commands::gc()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Rescue {
+            root,
+            generation,
+            packages,
+        } => {
+            commands::rescue(&root, generation, &packages)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::BootCheck { cmdline } => {
+            commands::boot_check(cmdline)?;
             return Ok(ExitCode::SUCCESS);
         }
         _ => {}
@@ -332,6 +362,8 @@ fn run() -> Result<ExitCode> {
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc
+        | Command::Rescue { .. }
+        | Command::BootCheck { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }
