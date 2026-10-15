@@ -1,4 +1,4 @@
--- Ported from Home Manager's modules/systemd.nix (MIT); see tests/hm/PORTED for the commit.
+-- Ported from Home Manager's modules/systemd.nix (MIT); see tests/hm/cases.toml for the commit.
 local suffixes = {
   services = "service",
   timers = "timer",

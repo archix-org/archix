@@ -14,6 +14,7 @@ use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
+use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
@@ -31,8 +32,34 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 use super::lock::{current_lock, save_lock};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, declared,
-    print_warned, refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
+    edit_installed, print_warned, refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
 };
+
+/// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
+fn switch_after_declaring(
+    target: &Target,
+    added: &[String],
+    noconfirm: bool,
+    accept_nearest: Option<Nearest>,
+) -> Result<()> {
+    let edit = edit_installed(target.config_dir, target.host, None, added, &[])?;
+    let result = eval::evaluate(&eval::Input {
+        config_dir: target.config_dir.to_path_buf(),
+        hostname: target.host.to_string(),
+    })
+    .map_err(|errors| anyhow::anyhow!("{errors}"))
+    .and_then(|evaluation| {
+        let target = Target {
+            config: &evaluation.config,
+            ..*target
+        };
+        switch(&target, noconfirm, accept_nearest)
+    });
+    if result.is_err() {
+        edit.restore();
+    }
+    result.context("installed.lua was restored")
+}
 
 pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>) -> Result<()> {
     require_root("switch")?;
@@ -73,6 +100,32 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
             drop(aur);
             lock = adopted;
+        }
+    }
+
+    if declared.remove_undeclared {
+        let outside: BTreeSet<String> = integration::outside_changes(&paths)?
+            .into_iter()
+            .flat_map(|change| change.packages)
+            .collect();
+        let added: Vec<String> = installed
+            .values()
+            .filter(|pkg| {
+                pkg.explicit
+                    && outside.contains(&pkg.name)
+                    && !lock.packages.contains_key(&pkg.name)
+                    && !declared.ignored.contains(&pkg.name)
+            })
+            .map(|pkg| pkg.name.clone())
+            .collect();
+        if !added.is_empty() {
+            println!(
+                "installed with pacman or an AUR helper but not declared: {}",
+                added.join(" ")
+            );
+            if noconfirm || confirm("declare them in installed.lua? (no removes them)")? {
+                return switch_after_declaring(target, &added, noconfirm, accept_nearest);
+            }
         }
     }
 
@@ -133,11 +186,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             );
             return Ok(());
         }
+        system::apply::keep_originals(&paths, &system_change)?;
         let created = store.create(generation)?;
         store.activate(created.number)?;
         finish(&paths, false, &declared.repos)?;
         println!(
-            "generation {} is current (snapshot {}, no package changes)",
+            "switched to generation {} (snapshot {}); no package changes were needed",
             created.number, lock.date
         );
         return Ok(());
@@ -561,8 +615,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
             .context("there is no generation older than the current one")?,
     };
     if number == current {
-        println!("generation {number} is already current");
-        return Ok(());
+        println!("generation {number} is current; putting back whatever differs from it");
     }
     let generation = store.get(number)?;
     let installed = read_local_db(&paths.local_db())?;

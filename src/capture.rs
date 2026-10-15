@@ -8,70 +8,40 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::process::Command;
 
+use std::sync::LazyLock;
+
 use anyhow::{Context, Result, bail};
 use md5::{Digest, Md5};
+use serde::Deserialize;
 
 use crate::pacman::parse_desc;
 use crate::repos::{Custom, is_official};
 
-/// Directories whose files no package owns are still config someone wrote, so init offers to capture them.
-pub const CONFIG_DIRS: &[&str] = &[
-    "/etc/systemd/system",
-    "/etc/systemd/network",
-    "/etc/systemd/logind.conf.d",
-    "/etc/systemd/journald.conf.d",
-    "/etc/systemd/resolved.conf.d",
-    "/etc/sudoers.d",
-    "/etc/modprobe.d",
-    "/etc/modules-load.d",
-    "/etc/sysctl.d",
-    "/etc/udev/rules.d",
-    "/etc/X11/xorg.conf.d",
-    "/etc/tmpfiles.d",
-    "/etc/mkinitcpio.conf.d",
-    "/etc/environment.d",
-];
+/// Which config files init scans for, never touches, treats as secrets and recommends; kept in capture.json.
+#[derive(Debug, Deserialize)]
+pub struct Lists {
+    /// Directories whose files no package owns are config someone wrote.
+    pub scan: Vec<String>,
+    /// Files archix or other tools own; an entry ending in `/` covers everything under it.
+    pub never: Vec<String>,
+    /// Any path containing one of these holds credentials and is never copied.
+    pub secret: Vec<String>,
+    /// Worth managing by default; an entry ending in `/` covers everything under it.
+    pub recommended: Vec<String>,
+}
 
-/// Files archix or other tools own, which a config must never take over.
-const NEVER: &[&str] = &[
-    "/etc/pacman.conf",
-    "/etc/passwd",
-    "/etc/passwd-",
-    "/etc/group",
-    "/etc/group-",
-    "/etc/shadow",
-    "/etc/shadow-",
-    "/etc/gshadow",
-    "/etc/gshadow-",
-    "/etc/machine-id",
-    "/etc/resolv.conf",
-    "/etc/mtab",
-    "/etc/ld.so.cache",
-    "/etc/kernel/cmdline",
-    "/etc/sysctl.d/90-archix.conf",
-    "/etc/modules-load.d/archix.conf",
-];
+pub static LISTS: LazyLock<Lists> =
+    LazyLock::new(|| serde_json::from_str(include_str!("capture.json")).expect("capture.json is valid"));
 
-const NEVER_UNDER: &[&str] = &[
-    "/etc/pacman.d/gnupg/",
-    "/etc/ca-certificates/extracted/",
-    "/etc/ssl/certs/",
-];
-
-/// Paths that typically hold credentials; init only copies them into the config when asked to.
-const SECRET_HINTS: &[&str] = &[
-    "/etc/ssh/ssh_host_",
-    "/etc/NetworkManager/system-connections/",
-    "/etc/wpa_supplicant/",
-    "/etc/iwd/",
-    "/etc/wireguard/",
-    "/etc/ssl/private/",
-    "/etc/krb5.keytab",
-    "secret",
-    "password",
-    ".key",
-    ".pem",
-];
+fn listed(list: &[String], path: &str) -> bool {
+    list.iter().any(|entry| {
+        if entry.ends_with('/') {
+            path.starts_with(entry.as_str())
+        } else {
+            entry == path
+        }
+    })
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FoundFile {
@@ -79,10 +49,17 @@ pub struct FoundFile {
     pub mode: u32,
     pub owner: String,
     pub group: String,
-    /// Not world-readable or named like a credential.
-    pub secret: bool,
+    /// On the recommended list, so managed unless deselected.
+    pub recommended: bool,
     /// Edited from what its package shipped, rather than written from scratch.
     pub edited: bool,
+}
+
+/// Config files init can offer, and the secret ones it leaves out without asking.
+#[derive(Debug, Default)]
+pub struct Found {
+    pub files: Vec<FoundFile>,
+    pub secrets: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -162,11 +139,11 @@ pub fn md5(path: &Path) -> Result<String> {
 }
 
 fn excluded(path: &str, skip: &BTreeSet<String>) -> bool {
-    NEVER.contains(&path) || NEVER_UNDER.iter().any(|prefix| path.starts_with(prefix)) || skip.contains(path)
+    listed(&LISTS.never, path) || skip.contains(path)
 }
 
-pub fn looks_secret(path: &str, mode: u32) -> bool {
-    mode & 0o004 == 0 || SECRET_HINTS.iter().any(|hint| path.contains(hint))
+pub fn is_secret(path: &str) -> bool {
+    LISTS.secret.iter().any(|hint| path.contains(hint.as_str()))
 }
 
 fn found(path: &str, edited: bool) -> Result<Option<FoundFile>> {
@@ -174,29 +151,23 @@ fn found(path: &str, edited: bool) -> Result<Option<FoundFile>> {
         Ok(meta) if meta.is_file() => meta,
         _ => return Ok(None),
     };
-    let mode = meta.mode() & 0o7777;
     Ok(Some(FoundFile {
         path: path.to_string(),
-        mode,
+        mode: meta.mode() & 0o7777,
         owner: user_name(meta.uid()).unwrap_or_else(|| meta.uid().to_string()),
         group: group_name(meta.gid()).unwrap_or_else(|| meta.gid().to_string()),
-        secret: looks_secret(path, mode),
+        recommended: listed(&LISTS.recommended, path),
         edited,
     }))
 }
 
-/// Backup files edited since their package installed them, plus files nobody owns in [`CONFIG_DIRS`].
-pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<String>) -> Result<Vec<FoundFile>> {
-    let mut out = BTreeMap::new();
+/// Backup files edited since their package installed them, plus files nobody owns in the scanned directories.
+pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<String>) -> Result<Found> {
+    let mut candidates: BTreeMap<String, bool> = BTreeMap::new();
     for pkg in installed.values() {
         for (path, sum) in &pkg.backups {
-            if excluded(path, skip) || !Path::new(path).is_file() {
-                continue;
-            }
-            if md5(Path::new(path)).is_ok_and(|now| now != *sum)
-                && let Some(file) = found(path, true)?
-            {
-                out.insert(path.clone(), file);
+            if Path::new(path).is_file() && md5(Path::new(path)).is_ok_and(|now| now != *sum) {
+                candidates.insert(path.clone(), true);
             }
         }
     }
@@ -204,7 +175,7 @@ pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<Str
         .values()
         .flat_map(|pkg| pkg.files.iter().map(|f| format!("/{f}")))
         .collect();
-    for dir in CONFIG_DIRS {
+    for dir in &LISTS.scan {
         let mut stack = vec![Path::new(dir).to_path_buf()];
         while let Some(dir) = stack.pop() {
             let Ok(entries) = fs::read_dir(&dir) else { continue };
@@ -213,19 +184,27 @@ pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<Str
                 let Ok(kind) = entry.file_type() else { continue };
                 if kind.is_dir() {
                     stack.push(path);
-                    continue;
-                }
-                let text = path.to_string_lossy().into_owned();
-                if !kind.is_file() || owned.contains(&text) || excluded(&text, skip) || out.contains_key(&text) {
-                    continue;
-                }
-                if let Some(file) = found(&text, false)? {
-                    out.insert(text, file);
+                } else if kind.is_file() {
+                    let text = path.to_string_lossy().into_owned();
+                    if !owned.contains(&text) {
+                        candidates.entry(text).or_insert(false);
+                    }
                 }
             }
         }
     }
-    Ok(out.into_values().collect())
+    let mut out = Found::default();
+    for (path, edited) in candidates {
+        if excluded(&path, skip) {
+            continue;
+        }
+        if is_secret(&path) {
+            out.secrets.push(path);
+        } else if let Some(file) = found(&path, edited)? {
+            out.files.push(file);
+        }
+    }
+    Ok(out)
 }
 
 fn user_name(uid: u32) -> Option<String> {
@@ -479,7 +458,7 @@ pub fn dotfile_candidates(home: &Path) -> Vec<String> {
             out.push(name);
         }
     }
-    out.retain(|name| !looks_secret(name, 0o644));
+    out.retain(|name| !is_secret(name));
     out.sort();
     out
 }
@@ -549,12 +528,26 @@ mod tests {
     }
 
     #[test]
-    fn secrets_by_mode_or_name() {
-        assert!(looks_secret(
-            "/etc/NetworkManager/system-connections/home.nmconnection",
-            0o600
-        ));
-        assert!(looks_secret("/etc/sudoers", 0o440));
-        assert!(!looks_secret("/etc/fstab", 0o644));
+    fn lists_parse_and_sort_files() {
+        assert!(
+            LISTS
+                .scan
+                .iter()
+                .all(|dir| dir.starts_with("/etc/") && !dir.ends_with('/'))
+        );
+        assert!(
+            LISTS
+                .never
+                .iter()
+                .chain(&LISTS.recommended)
+                .all(|path| path.starts_with("/etc/"))
+        );
+        assert!(is_secret("/etc/NetworkManager/system-connections/home.nmconnection"));
+        assert!(is_secret("/etc/ssh/ssh_host_ed25519_key"));
+        assert!(!is_secret("/etc/sudoers"));
+        assert!(listed(&LISTS.recommended, "/etc/fstab"));
+        assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
+        assert!(!listed(&LISTS.recommended, "/etc/shells"));
+        assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));
     }
 }

@@ -1,4 +1,4 @@
--- Ported from Home Manager's modules/programs/zsh (MIT); see tests/hm/PORTED for the commit. Nix-only parts are left out.
+-- Ported from Home Manager's modules/programs/zsh (MIT); see tests/hm/cases.toml for the commit. Nix-only parts are left out.
 local t = archix.types
 local f = archix.formats
 

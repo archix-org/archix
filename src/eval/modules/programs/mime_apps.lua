@@ -1,4 +1,4 @@
--- Ported from Home Manager's modules/misc/xdg-mime-apps.nix (MIT); see tests/hm/PORTED for the commit.
+-- Ported from Home Manager's modules/misc/xdg-mime-apps.nix (MIT); see tests/hm/cases.toml for the commit.
 local t = archix.types
 
 local function as_list(v)

@@ -174,7 +174,7 @@ fn declared(config: &Value) -> Result<Declared> {
         },
         _ => default,
     };
-    Ok(Declared {
+    let mut declared = Declared {
         packages,
         repos,
         third_party_fallback: match map.get("third_party_fallback") {
@@ -251,7 +251,21 @@ fn declared(config: &Value) -> Result<Declared> {
             Some(Value::Str(policy)) if policy == "older" => Some(Nearest::Older),
             _ => None,
         },
-    })
+    };
+    if let Some(boot) = &declared.boot {
+        let mut needed = vec![
+            boot.kernel.clone(),
+            "mkinitcpio".to_string(),
+            "systemd-ukify".to_string(),
+        ];
+        if boot.secure_boot == Some(true) {
+            needed.push("sbctl".to_string());
+        }
+        declared.packages.extend(needed);
+        declared.packages.sort();
+        declared.packages.dedup();
+    }
+    Ok(declared)
 }
 
 /// Changes that turn `installed` into `packages`; removals skip ignored packages and are only warned about in warn mode.

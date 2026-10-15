@@ -432,6 +432,19 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
     Ok(())
 }
 
+/// Backs up every file the target manages that's already on disk exactly as wanted, for when no file step runs.
+pub fn keep_originals(paths: &Paths, change: &SystemChange) -> Result<()> {
+    let backups = paths.state.join("backups");
+    for (path, want) in &change.to.files {
+        let target = Path::new(path);
+        let disk = on_disk(target)?;
+        if disk != OnDisk::Missing && matches(&disk, want) && !change.from.files.contains_key(path) {
+            keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Copies a file archix takes over as it is, so unmanaging it later puts it back instead of deleting it.
 fn keep_original(target: &Path, backup: &Path) -> Result<()> {
     if fs::symlink_metadata(backup).is_ok() {

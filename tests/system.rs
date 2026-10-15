@@ -129,3 +129,26 @@ fn a_failing_service_does_not_undo_the_switch() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn files_taken_over_unchanged_survive_being_unmanaged() {
+    let _system = lock_system();
+    let path = "/etc/archix-taken-over.conf";
+    fs::write(path, "already here\n").unwrap();
+    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    let setup = Setup::new(
+        &[],
+        &format!("files = {{ [\"{path}\"] = {{ text = \"already here\" }} }}"),
+    );
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("no package changes were needed"), "{out}");
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        read(path),
+        "already here\n",
+        "unmanaging puts the original back instead of deleting it"
+    );
+    fs::remove_file(path).unwrap();
+}

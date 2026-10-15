@@ -361,6 +361,9 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
         if sources.iter().filter(|set| **set).count() != 1 {
             bail!("home.files.{relative}: give exactly one of text, source or link");
         }
+        if live && str_of(spec, "source").is_none() {
+            bail!("home.files.{relative}: live = true needs source, the file in the config to link to");
+        }
         if let Some(text) = str_of(spec, "text") {
             b.content(&path, text.as_bytes().to_vec(), mode, user, &group);
         } else if let Some(link) = str_of(spec, "link") {
@@ -469,5 +472,8 @@ mod tests {
                 "{files}"
             );
         }
+        let live_text =
+            serde_json::json!({ "home": { "user": "u", "files": { ".x": { "text": "x", "live": true } } } });
+        assert!(render(&config(live_text), dir.path()).is_err());
     }
 }

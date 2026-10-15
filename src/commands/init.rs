@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use console::style;
 use dialoguer::theme::ColorfulTheme;
 use dialoguer::{Confirm, Input, MultiSelect, Select};
 
@@ -18,14 +19,44 @@ use archix::date::Date;
 use archix::eval::{self, Evaluation};
 use archix::installed;
 use archix::integration;
-use archix::lock::{HostLock, Lockfile};
+use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::luagen::Lua;
 use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
 
-use super::lock::{diff, save_lock};
-use super::{Declared, Target, aur_git, aur_source, confirm, declared, require_root, user_cache};
+use super::lock::pending;
+use super::{Declared, Target, aur_git, aur_source, confirm, declared, print_warned, require_root, user_cache};
+
+fn section(title: &str) {
+    let rule = "─".repeat(44usize.saturating_sub(title.chars().count()));
+    println!("\n{}", style(format!("── {title} {rule}")).cyan().bold());
+}
+
+fn done(text: impl std::fmt::Display) {
+    println!("  {} {text}", style("✓").green().bold());
+}
+
+fn note(text: impl std::fmt::Display) {
+    println!("  {} {}", style("·").dim(), style(text).dim());
+}
+
+fn warn(text: impl std::fmt::Display) {
+    println!("  {} {text}", style("!").yellow().bold());
+}
+
+/// Up to `max` names, then how many more there are.
+fn some_of(names: &[String], max: usize) -> String {
+    let shown = names.iter().take(max).cloned().collect::<Vec<_>>().join(", ");
+    match names.len().saturating_sub(max) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
+}
+
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
 
 /// Answers questions interactively, or with each question's default under `--defaults`.
 struct Ask {
@@ -73,6 +104,7 @@ impl Ask {
             .with_prompt(question)
             .items(items)
             .defaults(checked)
+            .max_length(15)
             .interact()?)
     }
 }
@@ -112,11 +144,17 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
         defaults,
         theme: ColorfulTheme::default(),
     };
+    println!(
+        "\n  {}  {}",
+        style("archix init").bold(),
+        style("describe this machine as a config").dim()
+    );
+    note("nothing on the system changes; init only writes the config and its lock");
+
+    section("Config");
     let paths = Paths::system();
     let dir = choose_location(&ask, config_dir)?;
-    let git = which("git") && ask.yes("Make the config directory a git repository?", false)?;
-
-    eprintln!("reading this system");
+    let git = which("git") && ask.yes("Make it a git repository?", false)?;
     let machine = Machine {
         local: read_local_db(&paths.local_db())?,
         details: capture::read_installed(&paths.local_db())?,
@@ -126,21 +164,28 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
         orphans: capture::pacman_query("dt")?,
     };
     let mut config = Host::default();
-    let mut skip: BTreeSet<String> = integration::files(&paths, &std::env::current_exe()?)
+    let exe = std::env::current_exe()?;
+    let mut skip: BTreeSet<String> = integration::files(&paths, &exe)
         .into_iter()
-        .chain(integration::boot_files(&paths, &std::env::current_exe()?))
+        .chain(integration::boot_files(&paths, &exe))
         .map(|(path, _)| path.to_string_lossy().into_owned())
         .collect();
 
-    host_settings(&mut config, &mut skip);
+    section("Packages");
     packages(&ask, &mut config, &machine)?;
+    section("System");
+    host_settings(&mut config, &mut skip);
     accounts(&mut config)?;
     services(&mut config)?;
+    section("Config files");
     files(&ask, &mut config, &dir, host, &machine, &skip)?;
+    section("Boot");
     boot(&ask, &mut config, &machine)?;
+    section("Generations");
     generations(&ask, &mut config)?;
     dotfiles(&ask, &mut config, &dir)?;
 
+    section("Lock");
     write_config(&dir, host, &config)?;
     let evaluation = evaluate(&dir, host)?;
     let mut declared = declared(&evaluation.config)?;
@@ -149,10 +194,10 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
     let evaluation = if swapped.is_empty() {
         evaluation
     } else {
-        println!(
-            "declaring {} so the lock keeps the providers this machine has instead of the default ones",
-            swapped.join(" ")
-        );
+        note(format!(
+            "declaring {} too, so the lock keeps the providers this machine has",
+            some_of(&swapped, 6)
+        ));
         config.packages.extend(swapped);
         config.packages.sort();
         write_installed(&dir, host, &config.packages)?;
@@ -168,20 +213,72 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
     };
     let git_aur = aur_git(&declared)?;
     review(&git_aur, None, &lock, declared.aur_review && !defaults, &confirm)?;
-    save_lock(&target, &mut Lockfile::default(), None, &lock)?;
+    let mut lockfile = Lockfile::default();
+    lockfile.hosts.insert(host.to_string(), lock.clone());
+    lockfile.save(&dir.join(LOCK_FILE))?;
+    done(format!(
+        "{} locked to the {} snapshot",
+        count(lock.packages.len(), "package", "packages"),
+        lock.date
+    ));
+    if !lock.pinned.is_empty() {
+        note(format!(
+            "held at their installed version instead: {}",
+            some_of(&lock.pinned, 8)
+        ));
+    }
     hand_over(&dir)?;
     if git {
         run(Command::new("git").arg("-C").arg(&dir).args(["init", "-q"]), "git init")?;
         run(Command::new("git").arg("-C").arg(&dir).args(["add", "-A"]), "git add")?;
     }
 
-    println!("\nwhat `archix switch` would change now:");
-    diff(&target)?;
-    println!(
-        "\nthe config is in {}; read it over, then run `sudo archix switch` to make this the first generation",
-        dir.display()
-    );
+    section("Result");
+    let (lines, warned) = pending(&target, &declared, &lock)?;
+    if lines.is_empty() {
+        done("the system matches the lock and the config: the first switch changes nothing");
+    } else {
+        warn("the first switch would still change these:");
+        for line in &lines {
+            println!("      {line}");
+        }
+    }
+    print_warned(&warned);
+    summary(&dir, host, &config, git);
     Ok(())
+}
+
+fn summary(dir: &Path, host: &str, config: &Host, git: bool) {
+    println!("\n  Config written to {}", style(dir.display()).bold());
+    let mut rows = vec![
+        ("init.lua".to_string(), "loads this host"),
+        (
+            format!("lua/hosts/{host}/init.lua"),
+            "settings, users, services and files",
+        ),
+        (
+            format!("lua/hosts/{host}/installed.lua"),
+            "packages; archix -S and -R edit it",
+        ),
+    ];
+    if config.copies.iter().any(|(_, to)| to.starts_with(dir.join("files"))) {
+        rows.push((format!("files/{host}/"), "copies of the managed config files"));
+    }
+    if config.home_user.is_some() {
+        rows.push(("home/".to_string(), "dotfiles, linked back into the home"));
+    }
+    rows.push((LOCK_FILE.to_string(), "the exact package versions"));
+    let width = rows.iter().map(|(path, _)| path.len()).max().unwrap_or(0);
+    for (path, what) in rows {
+        println!("    {path:<width$}   {}", style(what).dim());
+    }
+    if git {
+        note("it's a git repository now; nothing is committed yet");
+    }
+    println!(
+        "\n  Next: look it over, then run {}\n",
+        style("sudo archix switch").bold()
+    );
 }
 
 fn refuse_existing(dir: &Path) -> Result<()> {
@@ -208,10 +305,13 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 
 /// The directory to write to; choosing another one leaves `default` as a symlink to it.
 fn choose_location(ask: &Ask, default: &Path) -> Result<PathBuf> {
-    let answer = ask.text(
-        "Where should the config live? Any directory works, such as a clone of your own repo",
-        &default.to_string_lossy(),
-    )?;
+    if !ask.defaults {
+        note(format!(
+            "any directory works, such as a clone of your own repo; {} then links to it",
+            default.display()
+        ));
+    }
+    let answer = ask.text("Where should the config live?", &default.to_string_lossy())?;
     let chosen = PathBuf::from(answer.trim());
     if !chosen.is_absolute() {
         bail!("{} is not an absolute path", chosen.display());
@@ -227,7 +327,7 @@ fn choose_location(ask: &Ask, default: &Path) -> Result<PathBuf> {
             );
         }
         symlink(&chosen, default).with_context(|| format!("linking {} to {}", default.display(), chosen.display()))?;
-        println!("{} now links to {}", default.display(), chosen.display());
+        done(format!("{} links to {}", default.display(), chosen.display()));
     }
     Ok(chosen)
 }
@@ -238,16 +338,19 @@ fn exact(path: &str, content: &str) -> bool {
 
 /// Hostname, timezone, locales and keymap, but only where the option would write exactly what's there now.
 fn host_settings(config: &mut Host, skip: &mut BTreeSet<String>) {
+    let mut set = Vec::new();
     let hostname = fs::read_to_string("/etc/hostname").unwrap_or_default();
     let hostname = hostname.trim();
     if !hostname.is_empty() && exact("/etc/hostname", &format!("{hostname}\n")) {
         config.set("hostname", Lua::str(hostname));
         skip.insert("/etc/hostname".into());
+        set.push(format!("hostname {hostname}"));
     }
     if let Ok(target) = fs::read_link("/etc/localtime")
         && let Some(zone) = target.to_string_lossy().strip_prefix("/usr/share/zoneinfo/")
     {
         config.set("timezone", Lua::str(zone));
+        set.push(format!("timezone {zone}"));
     }
     let gen_text = fs::read_to_string("/etc/locale.gen").unwrap_or_default();
     let locales: Vec<String> = gen_text
@@ -269,6 +372,7 @@ fn host_settings(config: &mut Host, skip: &mut BTreeSet<String>) {
     {
         config.set("locales", Lua::strings(&locales));
         skip.extend(["/etc/locale.gen".to_string(), "/etc/locale.conf".to_string()]);
+        set.push(format!("locales {}", locales.join(" ")));
     }
     let vconsole = fs::read_to_string("/etc/vconsole.conf").unwrap_or_default();
     if let Some(keymap) = vconsole.strip_prefix("KEYMAP=").map(str::trim)
@@ -276,6 +380,10 @@ fn host_settings(config: &mut Host, skip: &mut BTreeSet<String>) {
     {
         config.set("keymap", Lua::str(keymap));
         skip.insert("/etc/vconsole.conf".into());
+        set.push(format!("keymap {keymap}"));
+    }
+    if !set.is_empty() {
+        done(set.join(", "));
     }
 }
 
@@ -285,7 +393,9 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
     if official != ["core", "extra"] {
         config.set("repos", Lua::strings(&official));
     }
+    done(format!("repos {}", official.join(", ")));
     if !custom.is_empty() {
+        let names: Vec<String> = custom.iter().map(|(name, _)| name.clone()).collect();
         let repos = custom
             .iter()
             .map(|(name, repo)| {
@@ -301,21 +411,18 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
             })
             .collect();
         config.set("custom_repos", Lua::List(repos));
-        println!(
-            "third-party repos {} are now declared; their signing keys stay in pacman's keyring, list them under `keys` to have archix import them on other machines",
-            custom
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        done(format!("third-party repos {}", names.join(", ")));
+        note("their signing keys stay in pacman's keyring; list them under `keys` to import them on other machines");
         let policy = [
             ("ask", "ask each time, defaulting to falling back (recommended)"),
-            ("fallback", "fall back without asking"),
+            (
+                "fallback",
+                "fall back without asking: its current version, then the AUR, then the official repos",
+            ),
             ("fail", "fail"),
         ];
         let choice = ask.pick(
-            "When a locked package disappears from a third-party repo, archix can fall back to its current version, then the AUR, then the official repos",
+            "If a locked package disappears from a third-party repo",
             &policy.map(|(_, label)| label),
         )?;
         if choice > 0 {
@@ -328,17 +435,18 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
     if !machine.foreign.is_empty() {
         let archive = Archive::new(ARCHIVE_URL);
         let index = Index::load(&archive, archix::aur::DEFAULT_URL, &user_cache()?, false)?;
-        let missing: Vec<&String> = machine
+        let missing: Vec<String> = machine
             .foreign
             .iter()
             .filter(|name| index.get(name).is_none())
+            .cloned()
             .collect();
         if !missing.is_empty() {
-            println!(
-                "not in any repo or the AUR, so archix leaves them alone (ignored_packages): {}",
-                missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
-            );
-            ignored.extend(missing.into_iter().cloned());
+            warn(format!(
+                "not in any repo or the AUR, so archix leaves them alone: {}",
+                some_of(&missing, 8)
+            ));
+            ignored.extend(missing);
         }
         aur_packages = machine
             .foreign_explicit
@@ -347,28 +455,48 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
             .cloned()
             .collect();
     }
-    let orphans: Vec<&String> = machine.orphans.iter().filter(|name| !ignored.contains(name)).collect();
+    config.packages = machine.explicit.iter().chain(&aur_packages).cloned().collect();
+    config.packages.sort();
+    config.packages.dedup();
+    let from_aur = if aur_packages.is_empty() {
+        String::new()
+    } else {
+        format!(", {} from the AUR", aur_packages.len())
+    };
+    done(format!(
+        "{} declared{from_aur}",
+        count(config.packages.len(), "package", "packages")
+    ));
+
+    let orphans: Vec<String> = machine
+        .orphans
+        .iter()
+        .filter(|name| !ignored.contains(name))
+        .cloned()
+        .collect();
     if !orphans.is_empty() {
-        println!(
-            "installed as dependencies, but nothing needs them any more: {}",
-            orphans.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
-        );
+        note(format!(
+            "{} that nothing needs any more: {}",
+            count(orphans.len(), "dependency", "dependencies"),
+            some_of(&orphans, 8)
+        ));
         let keep = ask.pick(
             "What should happen to them?",
             &[
-                "keep them, listed in ignored_packages",
+                "keep them (listed in ignored_packages)",
                 "let the first switch remove them",
             ],
         )? == 0;
         if keep {
-            ignored.extend(orphans.into_iter().cloned());
+            ignored.extend(orphans);
         }
     }
+    note("everything installed now is declared, so the first switch removes nothing");
     let strict = ask.pick(
-        "Installed packages that aren't declared",
+        "Later, when you install something with plain pacman or yay",
         &[
-            "get removed on switch, so the config is the whole truth (recommended)",
-            "are only listed",
+            "switch offers to declare it, and removes it if you say no (recommended)",
+            "switch leaves it installed and only lists it",
         ],
     )? == 0;
     if !strict {
@@ -380,10 +508,7 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
         config.set("ignored_packages", Lua::strings(&ignored));
     }
     if !aur_packages.is_empty() {
-        if !ask.yes(
-            "Show each AUR build recipe and ask before trusting it, when it enters the lock or changes?",
-            true,
-        )? {
+        if !ask.yes("Show each AUR build recipe and ask before trusting it?", true)? {
             config.set("aur", Lua::Table(vec![("review".into(), Lua::Bool(false))]));
         }
         let missing = [
@@ -392,16 +517,13 @@ fn packages(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
             ("older", "take the nearest older version"),
         ];
         let choice = ask.pick(
-            "When a locked AUR version can't be built any more",
+            "If a locked AUR version can't be built any more",
             &missing.map(|(_, label)| label),
         )?;
         if choice > 0 {
             config.set("missing_versions", Lua::str(missing[choice].0));
         }
     }
-    config.packages = machine.explicit.iter().chain(&aur_packages).cloned().collect();
-    config.packages.sort();
-    config.packages.dedup();
     Ok(())
 }
 
@@ -411,6 +533,7 @@ fn accounts(config: &mut Host) -> Result<()> {
         &fs::read_to_string("/etc/group").context("reading /etc/group")?,
     );
     if !accounts.users.is_empty() {
+        let names: Vec<String> = accounts.users.keys().cloned().collect();
         let users = accounts
             .users
             .iter()
@@ -435,14 +558,26 @@ fn accounts(config: &mut Host) -> Result<()> {
             })
             .collect();
         config.set("users", Lua::Table(users));
+        done(format!(
+            "{}: {}",
+            count(names.len(), "user", "users"),
+            some_of(&names, 6)
+        ));
+        note("passwords stay where they are; archix never manages them");
     }
     if !accounts.groups.is_empty() {
+        let names: Vec<String> = accounts.groups.keys().cloned().collect();
         let groups = accounts
             .groups
             .iter()
             .map(|(name, gid)| (name.clone(), Lua::Table(vec![("gid".into(), Lua::Int((*gid).into()))])))
             .collect();
         config.set("groups", Lua::Table(groups));
+        done(format!(
+            "{}: {}",
+            count(names.len(), "group", "groups"),
+            some_of(&names, 6)
+        ));
     }
     Ok(())
 }
@@ -450,6 +585,10 @@ fn accounts(config: &mut Host) -> Result<()> {
 fn services(config: &mut Host) -> Result<()> {
     let changed = capture::changed_services()?;
     if !changed.is_empty() {
+        done(format!(
+            "{} that differ from their preset",
+            count(changed.len(), "service", "services")
+        ));
         config.set(
             "services",
             Lua::Table(changed.into_iter().map(|(unit, on)| (unit, Lua::Bool(on))).collect()),
@@ -467,35 +606,61 @@ fn files(
     skip: &BTreeSet<String>,
 ) -> Result<()> {
     let found = capture::config_files(&machine.details, skip)?;
+    if !found.secrets.is_empty() {
+        note(format!(
+            "{} that hold secrets stay out of the config",
+            count(found.secrets.len(), "file", "files")
+        ));
+    }
+    let found = found.files;
     if found.is_empty() {
+        note("no edited or hand-written config files found");
         return Ok(());
     }
-    let labels: Vec<String> = found
-        .iter()
-        .map(|file| {
-            let why = if file.edited { "edited" } else { "written by hand" };
-            let secret = if file.secret { ", may hold secrets" } else { "" };
-            format!("{} ({why}{secret})", file.path)
-        })
-        .collect();
-    let checked: Vec<bool> = found.iter().map(|file| !file.secret).collect();
-    let chosen = ask.several(
-        "Config files to copy into the config and manage (space toggles; files that may hold secrets start unticked)",
-        &labels,
-        &checked,
-    )?;
-    let skipped: Vec<&str> = found
-        .iter()
-        .enumerate()
-        .filter(|(i, file)| file.secret && !chosen.contains(i))
-        .map(|(_, file)| file.path.as_str())
-        .collect();
-    if !skipped.is_empty() {
-        println!("left unmanaged because they may hold secrets: {}", skipped.join(" "));
+    let recommended: Vec<usize> = (0..found.len()).filter(|i| found[*i].recommended).collect();
+    let paths = |indexes: &[usize]| -> Vec<String> { indexes.iter().map(|i| found[*i].path.clone()).collect() };
+    let others: Vec<usize> = (0..found.len()).filter(|i| !found[*i].recommended).collect();
+    if !recommended.is_empty() {
+        done(format!(
+            "{} worth managing: {}",
+            count(recommended.len(), "config file", "config files"),
+            some_of(&paths(&recommended), 5)
+        ));
     }
+    if !others.is_empty() {
+        note(format!(
+            "{} more, mostly edited by package scripts: {}",
+            count(others.len(), "file", "files"),
+            some_of(&paths(&others), 4)
+        ));
+    }
+    let mut options = Vec::new();
+    if !recommended.is_empty() {
+        options.push(format!("the {} worth managing (recommended)", recommended.len()));
+    }
+    options.push("let me pick".to_string());
+    options.push("none for now".to_string());
+    let labels: Vec<&str> = options.iter().map(String::as_str).collect();
+    let choice = ask.pick("Which config files should archix manage?", &labels)?;
+    let chosen: Vec<usize> = match (recommended.is_empty(), choice) {
+        (false, 0) => recommended,
+        (false, 1) | (true, 0) => {
+            let labels: Vec<String> = found
+                .iter()
+                .map(|file| {
+                    let why = if file.edited { "edited" } else { "written by hand" };
+                    format!("{}  {}", file.path, style(format!("({why})")).dim())
+                })
+                .collect();
+            let checked: Vec<bool> = found.iter().map(|file| file.recommended).collect();
+            note("space toggles, enter confirms");
+            ask.several("Pick the files", &labels, &checked)?
+        }
+        _ => Vec::new(),
+    };
     let mut table = Vec::new();
-    for i in chosen {
-        let file: &FoundFile = &found[i];
+    for i in &chosen {
+        let file: &FoundFile = &found[*i];
         let source = format!("files/{host}{}", file.path);
         config.copies.push((PathBuf::from(&file.path), dir.join(&source)));
         let mut fields = vec![("source".to_string(), Lua::str(&source))];
@@ -512,6 +677,10 @@ fn files(
     }
     if !table.is_empty() {
         config.set("files", Lua::Table(table));
+        done(format!(
+            "{} copied into files/{host}/",
+            count(chosen.len(), "file", "files")
+        ));
     }
     Ok(())
 }
@@ -520,43 +689,45 @@ fn boot(ask: &Ask, config: &mut Host, machine: &Machine) -> Result<()> {
     let mut boot = Vec::new();
     if capture::is_btrfs(Path::new("/")) {
         if !ask.yes(
-            "/ is btrfs: take a read-only snapshot of it before every switch, as an extra recovery point?",
+            "/ is btrfs: snapshot it before every switch, as an extra recovery point?",
             true,
         )? {
             boot.push(("snapshots".to_string(), Lua::Bool(false)));
         }
     } else {
-        println!(
-            "note: / isn't btrfs, so archix can't snapshot it before a switch; packages, config and boot entries still roll back"
-        );
+        note("/ isn't btrfs, so there are no snapshots; packages, config and boot entries still roll back");
     }
-    if let Some(esp) = capture::systemd_boot_esp() {
-        let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
-        if !params.iter().any(|p| p.starts_with("root=")) {
-            println!("note: the kernel command line has no root=, so archix leaves booting alone");
-        } else if ask.yes(
-            &format!("systemd-boot is installed on {esp}: let archix write a boot entry for each generation?"),
-            true,
-        )? {
-            boot.insert(0, ("loader".to_string(), Lua::str("systemd-boot")));
-            if esp != "/boot" {
-                boot.push(("esp".into(), Lua::str(&esp)));
+    match capture::systemd_boot_esp() {
+        None => note("no systemd-boot found, so archix leaves booting alone"),
+        Some(esp) => {
+            let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
+            if !params.iter().any(|p| p.starts_with("root=")) {
+                warn("the kernel command line has no root=, so archix leaves booting alone");
+            } else {
+                note(format!("systemd-boot is installed on {esp}"));
+                if ask.yes("Let archix write a boot entry for each generation?", true)? {
+                    boot.insert(0, ("loader".to_string(), Lua::str("systemd-boot")));
+                    if esp != "/boot" {
+                        boot.push(("esp".into(), Lua::str(&esp)));
+                    }
+                    let kernel = ["linux", "linux-lts", "linux-zen", "linux-hardened"]
+                        .into_iter()
+                        .find(|kernel| machine.local.contains_key(*kernel));
+                    if let Some(kernel) = kernel.filter(|kernel| *kernel != "linux") {
+                        boot.push(("kernel".into(), Lua::str(kernel)));
+                    }
+                    let microcode: Vec<String> = ["amd-ucode.img", "intel-ucode.img"]
+                        .into_iter()
+                        .filter(|image| Path::new(&esp).join(image).is_file())
+                        .map(str::to_string)
+                        .collect();
+                    if !microcode.is_empty() {
+                        boot.push(("microcode".into(), Lua::strings(&microcode)));
+                    }
+                    config.set("kernel_params", Lua::strings(&params));
+                    done(format!("boot entries on {esp}, kernel {}", kernel.unwrap_or("linux")));
+                }
             }
-            let kernel = ["linux", "linux-lts", "linux-zen", "linux-hardened"]
-                .into_iter()
-                .find(|kernel| machine.local.contains_key(*kernel));
-            if let Some(kernel) = kernel.filter(|kernel| *kernel != "linux") {
-                boot.push(("kernel".into(), Lua::str(kernel)));
-            }
-            let microcode: Vec<String> = ["amd-ucode.img", "intel-ucode.img"]
-                .into_iter()
-                .filter(|image| Path::new(&esp).join(image).is_file())
-                .map(str::to_string)
-                .collect();
-            if !microcode.is_empty() {
-                boot.push(("microcode".into(), Lua::strings(&microcode)));
-            }
-            config.set("kernel_params", Lua::strings(&params));
         }
     }
     if !boot.is_empty() {
@@ -574,7 +745,7 @@ fn generations(ask: &Ask, config: &mut Host) -> Result<()> {
             .with_context(|| format!("{answer:?} is not a number"))
     };
     let keep = number(ask.text("How many generations should gc always keep?", "10")?)?;
-    let days = number(ask.text("And keep every generation younger than how many days?", "30")?)?;
+    let days = number(ask.text("And any generation younger than how many days?", "30")?)?;
     let mut fields = Vec::new();
     if keep != 10 {
         fields.push(("keep".to_string(), Lua::Int(keep)));
@@ -585,6 +756,9 @@ fn generations(ask: &Ask, config: &mut Host) -> Result<()> {
     if !fields.is_empty() {
         config.set("generations", Lua::Table(fields));
     }
+    done(format!(
+        "gc keeps the newest {keep} generations and any younger than {days} days"
+    ));
     Ok(())
 }
 
@@ -594,24 +768,27 @@ fn dotfiles(ask: &Ask, config: &mut Host, dir: &Path) -> Result<()> {
         Some((_, Lua::Table(users))) => users.iter().map(|(name, _)| name.clone()).collect(),
         _ => Vec::new(),
     };
-    if users.is_empty() || !ask.yes("Bring some dotfiles into the config too?", false)? {
+    if users.is_empty() || ask.defaults {
+        return Ok(());
+    }
+    section("Dotfiles");
+    if !ask.yes("Bring some dotfiles into the config too?", false)? {
         return Ok(());
     }
     let labels: Vec<&str> = users.iter().map(String::as_str).collect();
     let user = users[ask.pick("Whose?", &labels)?].clone();
     let home = PathBuf::from(format!("/home/{user}"));
     let candidates = capture::dotfile_candidates(&home);
-    let chosen = ask.several(
-        "Which ones? They become links into the config; the originals are backed up by the first switch",
-        &candidates,
-        &vec![false; candidates.len()],
-    )?;
+    note(
+        "they're copied in and linked back, so editing them edits the config; the first switch backs up the originals",
+    );
+    let chosen = ask.several("Which ones?", &candidates, &vec![false; candidates.len()])?;
     if chosen.is_empty() {
         return Ok(());
     }
     let mut files = Vec::new();
-    for i in chosen {
-        let relative = &candidates[i];
+    for i in &chosen {
+        let relative = &candidates[*i];
         let source = format!("home/{relative}");
         config.copies.push((home.join(relative), dir.join(&source)));
         files.push((
@@ -629,6 +806,10 @@ fn dotfiles(ask: &Ask, config: &mut Host, dir: &Path) -> Result<()> {
             ("files".into(), Lua::Table(files)),
         ]),
     );
+    done(format!(
+        "{} of {user}'s copied into home/",
+        count(chosen.len(), "dotfile", "dotfiles")
+    ));
     config.home_user = Some(user);
     Ok(())
 }
@@ -725,14 +906,10 @@ fn lock_as_installed(declared: &Declared, machine: &Machine, paths: &Paths) -> R
         .filter(|repo| repo.custom.is_none())
         .map(|repo| repo.name.clone())
         .collect();
-    eprintln!("finding the archive snapshot closest to what's installed");
+    note("finding the archive snapshot closest to what's installed");
     let latest = archive.latest()?;
     let date = best_snapshot(&archive, &user_cache()?, day, latest, &official, &machine.local)?;
     let dates = BTreeSet::from([date]);
-    eprintln!(
-        "locking {} declared packages to the snapshot that fits what's installed",
-        declared.packages.len()
-    );
     let git = aur_git(declared)?;
     let aur = aur_source(&git, declared, &archive, None, false);
     fit(

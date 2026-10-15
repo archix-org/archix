@@ -208,6 +208,40 @@ fn declining_adoption_reverts_to_the_lock() {
     setup.ok(&["switch", "--noconfirm"]);
 }
 
+#[test]
+#[ignore]
+fn packages_installed_with_pacman_are_offered_for_declaring() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
+
+    upgrade_lemon_behind_archix();
+    let out = setup.answering("n\ny\n", &["switch"]);
+    assert!(
+        out.contains("installed with pacman or an AUR helper but not declared: lemon"),
+        "{out}"
+    );
+    assert!(installed("lemon").is_none(), "declining removes it");
+    assert!(!installed_lua.exists());
+
+    upgrade_lemon_behind_archix();
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("not declared: lemon"), "{out}");
+    assert_eq!(archix::installed::read(&installed_lua).unwrap(), ["lemon"]);
+    assert_eq!(
+        installed("lemon").as_deref(),
+        Some("3.54.0-1"),
+        "declaring keeps the installed version"
+    );
+    assert_eq!(setup.lock().pinned, ["lemon"]);
+
+    fs::remove_file(&installed_lua).unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("lemon").is_none());
+}
+
 fn current_generation() -> Option<u32> {
     archix::generations::Store::new(&Paths::system()).current().unwrap()
 }

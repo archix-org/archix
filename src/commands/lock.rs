@@ -99,10 +99,9 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
     Ok(())
 }
 
-pub fn diff(target: &Target) -> Result<()> {
+/// What switching to `lock` would change, one line each, plus what's only kept because of warn mode.
+pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> Result<(Vec<String>, Vec<String>)> {
     let paths = Paths::system();
-    let declared = declared(target.config)?;
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
     let installed = read_local_db(&paths.local_db())?;
     let (changes, warned) = select_changes(
         &lock.packages,
@@ -110,13 +109,6 @@ pub fn diff(target: &Target) -> Result<()> {
         declared.remove_undeclared,
         &declared.ignored,
     );
-    println!("snapshot {}: {} packages", lock.date, lock.packages.len());
-    let newer = newer_than_lock(&lock, &installed).len();
-    if newer > 0 {
-        println!(
-            "{newer} packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading"
-        );
-    }
     let store = Store::new(&paths);
     let current = store.current()?.map(|n| store.get(n)).transpose()?;
     let rendered = system::render(target.config, target.config_dir)?;
@@ -124,14 +116,28 @@ pub fn diff(target: &Target) -> Result<()> {
         from: current.map(|g| g.system).unwrap_or_default(),
         to: rendered.state,
     };
-    let system_lines = system::apply::describe(&change)?;
-    if changes.is_empty() && system_lines.is_empty() {
+    let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
+    lines.extend(system::apply::describe(&change)?);
+    Ok((lines, warned))
+}
+
+pub fn diff(target: &Target) -> Result<()> {
+    let paths = Paths::system();
+    let declared = declared(target.config)?;
+    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
+    let installed = read_local_db(&paths.local_db())?;
+    println!("snapshot {}: {} packages", lock.date, lock.packages.len());
+    let newer = newer_than_lock(&lock, &installed).len();
+    if newer > 0 {
+        println!(
+            "{newer} packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading"
+        );
+    }
+    let (lines, warned) = pending(target, &declared, &lock)?;
+    if lines.is_empty() {
         println!("the system matches the lock and the config");
     }
-    for change in changes {
-        println!("{change}");
-    }
-    for line in system_lines {
+    for line in lines {
         println!("{line}");
     }
     print_warned(&warned);
