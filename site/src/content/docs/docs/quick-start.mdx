@@ -113,7 +113,7 @@ Then the wizard closes, and init prints the rest in the terminal. With AUR revie
   Next: look it over, then run sudo archix switch
 ```
 
-For scripts, `sudo archix init --defaults` takes every recommended answer without opening the wizard, so it needs no terminal. It ticks the recommended config files, brings in no dotfiles and doesn't make a git repository, and prints what it captured in Packages, System, Config files and Boot sections before the same Lock and Result.
+For scripts, `sudo archix init --defaults` takes every recommended answer without opening the wizard, so it needs no terminal. It ticks the recommended config files, brings in no dotfiles and doesn't make a git repository, and prints what it captured in Packages, System, Config files, Boot and Generations sections before the same Lock and Result. The config files you didn't get are counted, so you can run the wizard later to pick them.
 
 There are two exceptions to an empty Result. Dotfiles you imported are listed, because the first switch backs up the originals and replaces them with links into the config. And if you let archix write boot entries, it declares the boot tooling it needs, `mkinitcpio` and `systemd-ukify`, so the Result lists them as installs if they're missing. Either way, the section starts with `! the first switch would still change these:`.
 

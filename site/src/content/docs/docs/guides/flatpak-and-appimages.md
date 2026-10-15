@@ -141,7 +141,7 @@ Only apps are locked. Each app's runtime, such as `org.freedesktop.Platform`, fo
 
 ### Existing apps and `archix init`
 
-`archix init` declares the system-wide apps already installed, with any remote other than Flathub, and locks each one to the commit it's installed at. The first `archix diff` stays empty, and the first switch changes no app. The wizard's Packages step lists them, `✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox`. Apps whose remote has been deleted can't be locked, so init leaves them out, and archix never touches them. The Packages step shows `! Flatpak apps whose remote is gone, left alone: org.example.App`, and `--defaults` prints:
+`archix init` declares the system-wide apps already installed, with any remote other than Flathub, and locks each one to the commit it's installed at. The first `archix diff` stays empty, and the first switch changes no app. The wizard's Packages step lists them, `✓ 2 Flatpak apps, locked to their installed commits: com.spotify.Client, org.mozilla.firefox`. Apps whose remote has been deleted can't be locked, so init leaves them out, and archix never touches them. The wizard's Packages step and `--defaults` both say:
 
 ```
   ! their remote is gone, so archix leaves these Flatpak apps alone: org.example.App
