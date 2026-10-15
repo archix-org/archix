@@ -14,6 +14,7 @@ use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
+use archix::downgrade::unsafe_downgrades;
 use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
 use archix::flatpak::{self, LockedApp};
@@ -33,9 +34,9 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, count,
-    declared, edit_installed, ensure_flatpak_remotes, print_warned, recipes, refuse_if_unfinished, require_root,
-    select_changes, settle_flatpak, transaction_for, user_cache,
+    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
+    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, print_warned, recipes, refuse_if_unfinished,
+    require_root, select_changes, settle_flatpak, transaction_for, user_cache,
 };
 
 /// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
@@ -44,6 +45,7 @@ fn switch_after_declaring(
     added: &[String],
     noconfirm: bool,
     accept_nearest: Option<Nearest>,
+    allow_unsafe: bool,
 ) -> Result<()> {
     let edit = edit_installed(target.config_dir, target.host, None, added, &[])?;
     let result = eval::evaluate(&eval::Input {
@@ -56,7 +58,7 @@ fn switch_after_declaring(
             config: &evaluation.config,
             ..*target
         };
-        switch(&target, noconfirm, accept_nearest)
+        switch(&target, noconfirm, accept_nearest, allow_unsafe)
     });
     if result.is_err() {
         edit.restore();
@@ -64,7 +66,7 @@ fn switch_after_declaring(
     result.context("installed.lua was restored")
 }
 
-pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>) -> Result<()> {
+pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>, allow_unsafe: bool) -> Result<()> {
     require_root("switch")?;
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
@@ -129,7 +131,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
                 added.join(" ")
             );
             if noconfirm || confirm("declare them in installed.lua? (no removes them)")? {
-                return switch_after_declaring(target, &added, noconfirm, accept_nearest);
+                return switch_after_declaring(target, &added, noconfirm, accept_nearest, allow_unsafe);
             }
         }
     }
@@ -231,6 +233,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         println!("boot entry for the new generation");
     }
     print_hooks(&system_change);
+    guard_downgrades(
+        &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
+        noconfirm,
+        allow_unsafe,
+    )?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
     if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
         bail!("aborted; nothing was changed");
@@ -350,6 +357,27 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     println!("switched to {name}");
     reboot_notice();
     report_soft_failures(&soft_failures, "the new generation is current")
+}
+
+/// Lists unsafe downgrades and asks, defaulting to no; `--noconfirm` refuses them unless `allow` is set.
+fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -> Result<()> {
+    if risky.is_empty() {
+        return Ok(());
+    }
+    println!("unsafe downgrades: the older versions may refuse or damage data the newer ones wrote");
+    for line in risky {
+        println!("  {line}");
+    }
+    if allow {
+        return Ok(());
+    }
+    if noconfirm {
+        bail!("refusing unsafe downgrades with --noconfirm; pass --allow-unsafe-downgrade to go ahead");
+    }
+    if !confirm_no("downgrade anyway?")? {
+        bail!("aborted; nothing was changed");
+    }
+    Ok(())
 }
 
 /// Says so when the switch replaced the running kernel, which only a reboot finishes.
@@ -679,6 +707,7 @@ fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Re
 /// After a successful switch: outside changes are reconciled, integration files are in place, old garbage goes.
 fn finish(paths: &Paths, boot: bool, repos: &[Repo]) -> Result<()> {
     integration::clear_outside_changes(paths)?;
+    let _ = fs::remove_file(paths.notes());
     integration::ensure(paths, boot)?;
     integration::sync_pacman_conf(paths, repos)?;
     match gc::collect(paths, &user_cache()?) {
@@ -704,12 +733,14 @@ fn print_gc(report: &gc::Report, always: bool) {
 }
 
 /// Puts the packages of an earlier generation back; archix.lock stays as it is.
-pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
-    roll_back(to, noconfirm, true)
+pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()> {
+    roll_back(to, noconfirm, Some(allow_unsafe))
 }
 
 /// A rollback; at boot there's no network or session yet, so Flatpak apps and hooks are left for a later `archix rollback N`.
-fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
+/// `allow_unsafe` None means a boot-time rollback, which goes ahead like NixOS and leaves a login note about unsafe downgrades.
+fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Result<()> {
+    let online = allow_unsafe.is_some();
     require_root("rollback")?;
     let paths = Paths::system();
     refuse_if_unfinished(&paths)?;
@@ -791,6 +822,24 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     if online {
         print_hooks(&system_change);
     }
+    let mut configured = system_change.from.unsafe_downgrades.clone();
+    configured.extend(generation.system.unsafe_downgrades.clone());
+    let risky = unsafe_downgrades(&changes, &configured);
+    match allow_unsafe {
+        Some(allow) => guard_downgrades(&risky, noconfirm, allow)?,
+        None if !risky.is_empty() => {
+            let note = format!(
+                "archix: the boot-menu rollback to generation {number} went back across versions that may not read newer data; check these services:\n{}\n",
+                risky
+                    .iter()
+                    .map(|line| format!("  {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let _ = fs::write(paths.notes(), note);
+        }
+        None => {}
+    }
     if !noconfirm
         && !confirm(&format!(
             "roll back to {name} with {}?",
@@ -833,6 +882,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, online: bool) -> Result<()> {
     println!("rolled back to {name}; archix.lock is unchanged, so the next `archix switch` returns to the config");
     if online {
         reboot_notice();
+        let _ = fs::remove_file(paths.notes());
     }
     report_soft_failures(&soft_failures, &format!("{name} is current"))
 }
@@ -922,7 +972,7 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         Some(current) if current == booted => Ok(()),
         Some(current) => {
             println!("archix: booted generation {booted}, but {current} is current; rolling back to {booted}");
-            roll_back(Some(booted), true, false)
+            roll_back(Some(booted), true, None)
         }
         None => Ok(()),
     }

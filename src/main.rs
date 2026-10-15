@@ -61,6 +61,9 @@ enum Command {
         /// Don't ask for confirmation
         #[arg(long)]
         noconfirm: bool,
+        /// Go back across versions that may not read newer data (postgresql majors and the like) without asking
+        #[arg(long)]
+        allow_unsafe_downgrade: bool,
         /// When a locked AUR version can't be built, take the nearest newer or older one without asking
         #[arg(long, value_enum)]
         accept_nearest: Option<commands::Nearest>,
@@ -87,6 +90,9 @@ enum Command {
         /// Don't ask for confirmation
         #[arg(long)]
         noconfirm: bool,
+        /// Go back across versions that may not read newer data (postgresql majors and the like) without asking
+        #[arg(long)]
+        allow_unsafe_downgrade: bool,
     },
     /// List generations; the current one is marked with *
     Generations,
@@ -233,8 +239,12 @@ fn run() -> Result<ExitCode> {
             commands::hook_record();
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Rollback { generation, noconfirm } => {
-            commands::rollback(generation, noconfirm)?;
+        Command::Rollback {
+            generation,
+            noconfirm,
+            allow_unsafe_downgrade,
+        } => {
+            commands::rollback(generation, noconfirm, allow_unsafe_downgrade)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Generations => {
@@ -344,7 +354,7 @@ fn run() -> Result<ExitCode> {
             let result = if upgrade_first {
                 commands::upgrade(&target, noconfirm)
             } else {
-                commands::switch(&target, noconfirm, None)
+                commands::switch(&target, noconfirm, None, false)
             };
             if let Err(e) = result {
                 undo();
@@ -352,7 +362,7 @@ fn run() -> Result<ExitCode> {
             }
         }
         Command::Remove { noconfirm, .. } => {
-            if let Err(e) = commands::switch(&target, noconfirm, None) {
+            if let Err(e) = commands::switch(&target, noconfirm, None, false) {
                 undo();
                 return Err(e.context("installed.lua was restored"));
             }
@@ -371,7 +381,8 @@ fn run() -> Result<ExitCode> {
         Command::Switch {
             noconfirm,
             accept_nearest,
-        } => commands::switch(&target, noconfirm, accept_nearest)?,
+            allow_unsafe_downgrade,
+        } => commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?,
         Command::Status => commands::status(&target)?,
         Command::Recover { .. }
         | Command::Init { .. }

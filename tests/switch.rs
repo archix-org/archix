@@ -313,3 +313,46 @@ fn gc_keeps_only_what_the_limits_allow() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
+    let _system = lock_system();
+    let body = r#"unsafe_downgrades = { lemon = { "3.54" } }"#;
+    let setup = Setup::new(&["lemon"], body);
+    setup.ok(&["switch", "--noconfirm"]);
+    upgrade_lemon_behind_archix();
+
+    let output = setup.answering_raw("n\n\n", &["switch"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{text}");
+    assert!(
+        text.contains("unsafe downgrades") && text.contains("lemon 3.54.0-1 -> 3.53.4-1 crosses 3.54"),
+        "{text}"
+    );
+    assert!(text.contains("downgrade anyway? [y/N]"), "{text}");
+    assert_eq!(
+        installed("lemon").as_deref(),
+        Some("3.54.0-1"),
+        "the default answer is no"
+    );
+
+    setup.answering("n\ny\n", &["switch", "--allow-unsafe-downgrade"]);
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+
+    upgrade_lemon_behind_archix();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"), "--noconfirm adopts");
+    let err = setup.fails(&["rollback", "--noconfirm"]);
+    assert!(err.contains("--allow-unsafe-downgrade"), "{err}");
+    assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"));
+    setup.ok(&["rollback", "--noconfirm", "--allow-unsafe-downgrade"]);
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

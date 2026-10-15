@@ -55,6 +55,11 @@ impl Paths {
         self.state.join("journal.json")
     }
 
+    /// What a boot-time rollback wants you to know, shown at login until the next switch or rollback.
+    pub fn notes(&self) -> PathBuf {
+        self.state.join("notes")
+    }
+
     /// Files whose on_change scripts a boot-time rollback skipped, run by the next switch or rollback.
     pub fn pending_on_change(&self) -> PathBuf {
         self.state.join("pending-on-change")

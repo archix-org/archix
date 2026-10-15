@@ -25,6 +25,8 @@ pub struct OutsideChange {
 pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     let journal = paths.journal();
     let journal = journal.display();
+    let notes = paths.notes();
+    let notes = notes.display();
     let hook = format!(
         "[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Package\nTarget = *\n\n\
          [Action]\nDescription = Recording package changes for archix...\nWhen = PostTransaction\n\
@@ -32,7 +34,8 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
         archix.display()
     );
     let profile = format!(
-        "if [ -e {journal} ]; then\n  echo \"archix: a switch was interrupted; run 'sudo archix recover'\" >&2\nfi\n"
+        "if [ -e {journal} ]; then\n  echo \"archix: a switch was interrupted; run 'sudo archix recover'\" >&2\nfi\n\
+         if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n"
     );
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\

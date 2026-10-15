@@ -506,6 +506,16 @@ fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// Like `confirm`, but an empty answer means no.
+fn confirm_no(question: &str) -> Result<bool> {
+    eprint!("{question} [y/N] ");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 fn confirm(question: &str) -> Result<bool> {
     eprint!("{question} [Y/n] ");
     io::stderr().flush()?;

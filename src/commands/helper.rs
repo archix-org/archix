@@ -304,7 +304,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
             save_lock(target, &mut lockfile, Some(&lock), &fresh)?;
         }
     }
-    super::switch(target, noconfirm, None)
+    super::switch(target, noconfirm, None, false)
 }
 
 /// Downloads `url` and prints the fetchurl snippet with its sha256; as root it also keeps the file for the next switch.

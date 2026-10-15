@@ -35,6 +35,9 @@ pub struct SystemState {
     /// Scripts for managed files, keyed by path, run when a switch changes that file.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub on_change: BTreeMap<String, Hook>,
+    /// Extra versions per package that a downgrade mustn't cross without asking.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unsafe_downgrades: BTreeMap<String, Vec<String>>,
     /// Units to always (true) or never (false) restart when a switch replaces files they use.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub restart_if_changed: BTreeMap<String, bool>,
@@ -370,6 +373,9 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         for (name, enabled) in map(config, key).into_iter().flatten() {
             target.insert(unit_name(name)?.to_string(), *enabled == Value::Bool(true));
         }
+    }
+    for (name, versions) in map(config, "unsafe_downgrades").into_iter().flatten() {
+        b.state.unsafe_downgrades.insert(name.clone(), strings(Some(versions)));
     }
     for (unit, restart) in map(config, "restart_if_changed").into_iter().flatten() {
         b.state

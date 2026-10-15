@@ -12,6 +12,11 @@ return {
       default = {},
       description = "Packages to use when a dependency could be met by several, such as which font satisfies ttf-font. They're installed as dependencies, not declared.",
     },
+    unsafe_downgrades = archix.option {
+      type = t.attrs_of(t.list_of(t.str)),
+      default = {},
+      description = "Versions per package that a downgrade mustn't cross without asking, on top of archix's own list (postgresql and mariadb major versions and a few more). A switch or rollback going back across one asks, defaulting to no; --noconfirm refuses unless --allow-unsafe-downgrade is given.",
+    },
     patches = archix.option {
       type = t.attrs_of(t.list_of(t.str)),
       default = {},

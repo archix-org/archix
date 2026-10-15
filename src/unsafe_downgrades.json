@@ -1,0 +1,13 @@
+{
+  "_comment": "Packages whose on-disk data a newer version migrates, so going back across a major version can break or corrupt it; each value is how many leading version parts make the major version.",
+  "postgresql": 1,
+  "mariadb": 2,
+  "mysql": 2,
+  "percona-server": 2,
+  "forgejo": 1,
+  "gitea": 2,
+  "nextcloud": 1,
+  "mattermost": 2,
+  "redis": 1,
+  "valkey": 1
+}

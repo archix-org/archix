@@ -4,6 +4,7 @@ pub mod archive;
 pub mod aur;
 pub mod capture;
 pub mod date;
+pub mod downgrade;
 pub mod eval;
 pub mod fetch;
 pub mod flatpak;
