@@ -265,7 +265,10 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
             None => bail!("init was cancelled; nothing was written"),
         }
     } else {
-        answers
+        Answers {
+            dotfiles: BTreeSet::new(),
+            ..answers
+        }
     };
     if let Some(problem) = answers.problem() {
         bail!("{problem}");

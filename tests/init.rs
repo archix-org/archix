@@ -50,6 +50,9 @@ fn init_describes_the_machine_so_nothing_needs_to_change() {
     let _system = lock_system();
     write_hand_written();
     install_newer_lemon();
+    let user = Command::new("useradd").args(["-m", "dotuser"]).status().unwrap();
+    assert!(user.success());
+    fs::write("/home/dotuser/.bashrc", "alias ll='ls -l'\n").unwrap();
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("cfg");
     let config = config.to_str().unwrap();
@@ -83,6 +86,15 @@ fn init_describes_the_machine_so_nothing_needs_to_change() {
         fs::read_to_string(format!("{config}/files/initbox/etc/sysctl.d/50-init-test.conf")).unwrap(),
         "vm.swappiness = 10\n"
     );
+    assert!(host.contains("dotuser = "), "users are declared:\n{host}");
+    assert!(!host.contains("home = {"), "--defaults never imports dotfiles:\n{host}");
+    assert!(
+        !fs::symlink_metadata("/home/dotuser/.bashrc")
+            .unwrap()
+            .file_type()
+            .is_symlink()
+            && !std::path::Path::new(&format!("{config}/home")).exists()
+    );
     let packages = archix::installed::read(std::path::Path::new(&format!(
         "{config}/lua/hosts/initbox/installed.lua"
     )))
@@ -98,4 +110,11 @@ fn init_describes_the_machine_so_nothing_needs_to_change() {
     let (ok, again) = archix(config, &["init", "--defaults"]);
     assert!(!ok && again.contains("already has an init.lua"), "{again}");
     pacman(&["-R", "lemon"]);
+    assert!(
+        Command::new("userdel")
+            .args(["-r", "dotuser"])
+            .status()
+            .unwrap()
+            .success()
+    );
 }
