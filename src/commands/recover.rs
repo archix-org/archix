@@ -14,7 +14,7 @@ use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::system::apply::SystemChange;
 
-use super::{RecoverMode, describe_unfinished, kind_name, require_root};
+use super::{RecoverMode, count, describe_unfinished, kind_name, require_root};
 
 pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
     require_root("recover")?;
@@ -150,8 +150,8 @@ fn check_files(names: &[String]) -> Result<()> {
         return Ok(());
     }
     println!(
-        "checking the files of {} packages the transaction touched:",
-        names.len()
+        "checking the files of the {} the transaction touched:",
+        count(names.len(), "package", "packages")
     );
     let status = Command::new("pacman")
         .arg("-Qk")

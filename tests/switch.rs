@@ -162,7 +162,7 @@ fn manual_upgrades_are_recorded_and_adopted_as_pins() {
 
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
-        out.contains("the system is newer than the lock for 1 packages (lemon)"),
+        out.contains("the system is newer than the lock for 1 package (lemon)"),
         "{out}"
     );
     let lock = setup.lock();

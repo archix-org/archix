@@ -22,8 +22,8 @@ use archix::resolve::{resolve, snapshot_conf};
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, declared, refuse_if_unfinished, require_root,
-    transaction_for, user_cache,
+    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, refuse_if_unfinished,
+    require_root, transaction_for, user_cache,
 };
 
 /// An edit to an installed.lua that can be undone if the switch after it doesn't go through.
@@ -110,7 +110,12 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     for change in &changes {
         println!("{change}");
     }
-    if !noconfirm && !confirm(&format!("install {} packages without declaring them?", changes.len()))? {
+    if !noconfirm
+        && !confirm(&format!(
+            "install {} without declaring them?",
+            count(changes.len(), "package", "packages")
+        ))?
+    {
         bail!("aborted; nothing was changed");
     }
     let aur_names: Vec<String> = changes

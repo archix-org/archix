@@ -27,7 +27,7 @@ use archix::paths::Paths;
 use archix::plan::{Change, plan};
 
 use super::lock::pending;
-use super::{Declared, Target, aur_git, aur_source, confirm, declared, print_warned, require_root, user_cache};
+use super::{Declared, Target, aur_git, aur_source, confirm, count, declared, print_warned, require_root, user_cache};
 
 fn section(title: &str) {
     let rule = "─".repeat(44usize.saturating_sub(title.chars().count()));
@@ -53,10 +53,6 @@ fn some_of(names: &[String], max: usize) -> String {
         0 => shown,
         more => format!("{shown} and {more} more"),
     }
-}
-
-fn count(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// Answers questions interactively, or with each question's default under `--defaults`.

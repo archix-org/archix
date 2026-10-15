@@ -32,8 +32,8 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, declared,
-    edit_installed, ensure_flatpak_remotes, print_warned, refuse_if_unfinished, require_root, select_changes,
+    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, count,
+    declared, edit_installed, ensure_flatpak_remotes, print_warned, refuse_if_unfinished, require_root, select_changes,
     settle_flatpak, transaction_for, user_cache,
 };
 
@@ -81,8 +81,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         let shown: Vec<&str> = newer.iter().take(8).map(String::as_str).collect();
         let more = if newer.len() > shown.len() { ", ..." } else { "" };
         println!(
-            "the system is newer than the lock for {} packages ({}{more}), probably from pacman or an AUR helper",
-            newer.len(),
+            "the system is newer than the lock for {} ({}{more}), probably from pacman or an AUR helper",
+            count(newer.len(), "package", "packages"),
             shown.join(", ")
         );
         if noconfirm || confirm("adopt them into the lock? (no reverts them to the lock)")? {
@@ -217,8 +217,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     if declared.boot.is_some() {
         println!("boot entry for the new generation");
     }
-    let count = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
-    if !noconfirm && !confirm(&format!("apply {count} changes?"))? {
+    let total = changes.len() + system_lines.len() + flatpak_lines.len() + usize::from(declared.boot.is_some());
+    if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
         bail!("aborted; nothing was changed");
     }
     system::blobs::ensure(&paths, &archive, &rendered)?;
@@ -453,8 +453,8 @@ fn report_soft_failures(failures: &[String]) -> Result<()> {
         eprintln!("failed: {failure}");
     }
     bail!(
-        "the new generation is current, but {} services or reloads failed (listed above)",
-        failures.len()
+        "the new generation is current, but {} (listed above)",
+        count(failures.len(), "service or reload failed", "services or reloads failed")
     )
 }
 
@@ -690,7 +690,12 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
     for change in &changes {
         println!("{change}");
     }
-    if !noconfirm && !confirm(&format!("roll back to {name} with {} changes?", changes.len()))? {
+    if !noconfirm
+        && !confirm(&format!(
+            "roll back to {name} with {}?",
+            count(changes.len(), "change", "changes")
+        ))?
+    {
         bail!("aborted; nothing was changed");
     }
     let archive = Archive::new(ARCHIVE_URL);
@@ -734,12 +739,12 @@ pub fn generations() -> Result<()> {
             None => String::new(),
         };
         println!(
-            "{marker} {:>4}  {created} {:02}:{:02} UTC  snapshot {}  {} packages{commit}",
+            "{marker} {:>4}  {created} {:02}:{:02} UTC  snapshot {}  {}{commit}",
             generation.number,
             minutes / 60,
             minutes % 60,
             generation.date,
-            generation.packages.len()
+            count(generation.packages.len(), "package", "packages")
         );
     }
     Ok(())
@@ -762,8 +767,8 @@ pub fn hook_record() {
         .collect();
     match integration::record(&paths, packages) {
         Ok(Some(change)) => println!(
-            "archix: recorded {} packages changed outside archix; `archix switch` will offer to adopt them",
-            change.packages.len()
+            "archix: recorded {} changed outside archix; `archix switch` will offer to adopt them",
+            count(change.packages.len(), "package", "packages")
         ),
         Ok(None) => {}
         Err(e) => println!("archix: could not record this transaction: {e:#}"),
@@ -828,8 +833,8 @@ pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String])
         println!("missing  {line}");
     }
     println!(
-        "{} packages restored; boot normally, then run `sudo archix rollback {number}` to put everything else back",
-        rescued.restored.len()
+        "{} restored; boot normally, then run `sudo archix rollback {number}` to put everything else back",
+        count(rescued.restored.len(), "package", "packages")
     );
     Ok(())
 }

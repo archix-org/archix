@@ -16,7 +16,7 @@ use archix::resolve::resolve;
 use archix::system::{self, apply::SystemChange};
 
 use super::{
-    Declared, Snapshot, Target, aur_git, aur_source, confirm, declared, describe_unfinished, print_warned,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, describe_unfinished, print_warned,
     refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
 };
 
@@ -148,11 +148,16 @@ pub fn diff(target: &Target) -> Result<()> {
     let declared = declared(target.config)?;
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
     let installed = read_local_db(&paths.local_db())?;
-    println!("snapshot {}: {} packages", lock.date, lock.packages.len());
+    println!(
+        "snapshot {}: {}",
+        lock.date,
+        count(lock.packages.len(), "package", "packages")
+    );
     let newer = newer_than_lock(&lock, &installed).len();
     if newer > 0 {
         println!(
-            "{newer} packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading"
+            "{} newer than the lock; `archix switch` will offer to adopt them instead of downgrading",
+            count(newer, "package is", "packages are")
         );
     }
     let (lines, warned) = pending(target, &declared, &lock)?;
@@ -187,9 +192,9 @@ pub fn status(target: &Target) -> Result<()> {
     if !outside.is_empty() {
         let packages: BTreeSet<&String> = outside.iter().flat_map(|change| &change.packages).collect();
         println!(
-            "{} packages were changed outside archix in {} transactions since the last switch",
-            packages.len(),
-            outside.len()
+            "{} changed outside archix in {} since the last switch",
+            count(packages.len(), "package was", "packages were"),
+            count(outside.len(), "transaction", "transactions")
         );
     }
     let lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
@@ -198,10 +203,10 @@ pub fn status(target: &Target) -> Result<()> {
         return Ok(());
     };
     println!(
-        "{} is locked to snapshot {} ({} packages)",
+        "{} is locked to snapshot {} ({})",
         target.host,
         lock.date,
-        lock.packages.len()
+        count(lock.packages.len(), "package", "packages")
     );
     let declared = declared(target.config)?;
     if !lock.matches(&declared.packages, &declared.repo_names()) {
@@ -217,7 +222,7 @@ pub fn status(target: &Target) -> Result<()> {
         );
         match changes.len() {
             0 => println!("the system matches the lock"),
-            n => println!("{n} changes pending; see `archix diff`"),
+            n => println!("{} pending; see `archix diff`", count(n, "change", "changes")),
         }
     }
     Ok(())
@@ -246,6 +251,6 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
             lines.push(format!("- {name} {}", pkg.version));
         }
     }
-    lines.push(format!("{} packages locked", new.packages.len()));
+    lines.push(format!("{} locked", count(new.packages.len(), "package", "packages")));
     lines
 }

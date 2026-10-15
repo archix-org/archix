@@ -470,6 +470,11 @@ fn require_root(command: &str) -> Result<()> {
     Ok(())
 }
 
+/// "1 package", "3 packages".
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 fn confirm(question: &str) -> Result<bool> {
     eprint!("{question} [Y/n] ");
     io::stderr().flush()?;
