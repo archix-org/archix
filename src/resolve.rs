@@ -213,32 +213,31 @@ fn apply_patches(
     sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
     lock: &mut HostLock,
 ) -> Result<()> {
-    // A pinned package (repo "archive", e.g. adopted after a pacman -Syu) keeps the pkgbase the snapshot's repos list for it.
-    let base_of = |name: &str, locked: &Locked| {
-        if !is_official(&locked.repo) && locked.repo != ARCHIVE_REPO {
-            return None;
-        }
+    let official = |name: &str| {
         sync.iter()
             .filter(|(repo, _)| is_official(repo))
             .find_map(|(_, packages)| packages.get(name))
-            .map(|pkg| pkg.base.clone())
     };
     for name in recipes.patched_packages() {
         let Some(locked) = lock.packages.get(name) else {
             bail!("patches.{name}: {name} isn't among this config's packages or their dependencies");
         };
-        let Some(base) = base_of(name, locked) else {
-            bail!(
-                "patches.{name}: {name} comes from {}, but only packages from Arch's official repos can be patched",
-                locked.repo
-            );
+        let Some(arch) = official(name) else {
+            bail!("patches.{name}: {name} isn't in Arch's official repos, and only Arch's recipes can be patched");
         };
-        let recipe = recipes.patched(name, &base, &locked.version)?;
+        // An official or pinned package keeps its version; one a third-party repo (CachyOS) supplies is rebuilt at Arch's version.
+        let version = if is_official(&locked.repo) || locked.repo == ARCHIVE_REPO {
+            locked.version.clone()
+        } else {
+            arch.version.clone()
+        };
+        let base = arch.base.clone();
+        let recipe = recipes.patched(name, &base, &version)?;
         let members: Vec<String> = lock
             .packages
-            .iter()
-            .filter(|(member, locked)| base_of(member, locked).as_deref() == Some(base.as_str()))
-            .map(|(member, _)| member.clone())
+            .keys()
+            .filter(|member| official(member).is_some_and(|pkg| pkg.base == base))
+            .cloned()
             .collect();
         for member in members {
             let Some(pkg) = recipe.info.package(&member) else {
