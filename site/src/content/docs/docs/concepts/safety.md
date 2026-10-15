@@ -89,13 +89,21 @@ Users and groups archix created are removed when they leave the config, and thei
 
 archix is strict about what *it* manages, and only that. It doesn't revert changes to `/etc` files it never managed, and it doesn't disable services it never managed. Doing that blindly could, for example, delete users that packages create. `archix init` captures the files and services you'd changed, which makes them managed.
 
-### What init never captures
+Files archix takes over unchanged are backed up even when a switch has nothing else to do, as with the first switch after `archix init`, which usually prints only `switched to generation 1 (snapshot 2026-10-09); no package changes were needed`.
 
-`archix init` copies the `/etc` files you changed into your config: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sudoers.d`, `/etc/sysctl.d`, `/etc/modprobe.d`, `/etc/udev/rules.d` and `/etc/X11/xorg.conf.d`.
+### What init captures and never captures
+
+`archix init` looks for the `/etc` files you changed: package config files edited since they were installed (it compares them with the checksums in pacman's database), and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sudoers.d`, `/etc/sysctl.d`, `/etc/modprobe.d`, `/etc/udev/rules.d`, `/etc/X11/xorg.conf.d`, `/etc/pacman.d/hooks` and `/etc/polkit-1/rules.d`. It sorts what it finds into three groups:
+
+- **Secrets** are never shown or copied, only counted: `· 3 files that hold secrets stay out of the config`. That covers SSH host keys, NetworkManager connections, wpa_supplicant, iwd, WireGuard, OpenVPN and PPP configs, `/etc/ssl/private`, `/etc/cryptsetup-keys.d`, `krb5.keytab`, `smbpasswd`, `ipsec.secrets`, and any path containing `secret`, `password`, `passwd`, `token`, `credential`, `keyfile`, `.key`, `.pem`, `.p12` or `.pfx`.
+- **Worth managing** files are pre-selected: `/etc/fstab`, `/etc/crypttab`, `/etc/mkinitcpio.conf`, `/etc/sudoers`, `/etc/pacman.d/mirrorlist`, `/etc/makepkg.conf`, `/etc/hosts`, `sshd_config`, the systemd, NetworkManager, bluetooth and display manager configs, and everything hand-written in the directories above.
+- **The rest**, mostly files that package scripts edit, such as `/etc/shells`, are off by default.
+
+init then asks `Which config files should archix manage?`, with the answers `the N worth managing (recommended)`, `let me pick` (a checklist with those pre-selected) and `none for now`. `--defaults` takes the recommended ones. Chosen files are copied into `files/<host>/` and declared with their mode, owner and group.
 
 It never captures files that archix or other tools own: `/etc/pacman.conf`, `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` and their backups, `/etc/machine-id`, `/etc/resolv.conf`, `/etc/mtab`, `/etc/ld.so.cache`, `/etc/kernel/cmdline`, pacman's keyring, the extracted CA certificates, and archix's own files.
 
-Files that may hold secrets start unticked: anything that isn't world-readable, SSH host keys, NetworkManager connections, wpa_supplicant, iwd and WireGuard configs, `/etc/ssl/private`, `krb5.keytab`, and names containing `secret`, `password`, `.key` or `.pem`. With `--defaults` they stay unmanaged, and init lists them. Tick one only if you're happy for it to live in your config directory, and in its git history.
+Since init only declares what's already there, the first switch after it changes nothing, with one exception: dotfiles you chose to import. The first switch backs up the originals and replaces them with links into the config, and init's Result section lists them under `! the first switch would still change these:`.
 
 ## Hard and soft failures
 
@@ -184,9 +192,20 @@ For that, when archix manages booting, the initramfs carries a static archix, an
   Arch Linux (archix rescue, generation 42)
 ```
 
-Booting it adds `archix.rescue` to the kernel command line. Before switching to the real root, the initramfs runs `archix rescue`, which unpacks the current generation's core packages straight from the cache, without pacman: glibc, pacman and its libraries, systemd, bash, coreutils, the kernel, archix itself and the rest of the core set. It keeps config files you edited, saving the package's version as `.pacnew`, and rewrites the packages' entries in pacman's database. Then the system boots, and you finish with the regular tools: `archix diff` shows what still differs from the lock, `sudo archix switch` puts it back, and `sudo archix recover` deals with a switch that was interrupted.
+Booting it adds `archix.rescue` to the kernel command line. Before switching to the real root, the initramfs runs `archix rescue`, which unpacks the current generation's core packages straight from the cache, without pacman: glibc, pacman and its libraries, systemd, bash, coreutils, the kernel, archix itself and the rest of the core set. It keeps config files you edited, saving the package's version as `.pacnew`, and rewrites the packages' entries in pacman's database. Then the system boots, and rescue's last line tells you how to finish with the regular tools:
 
-That's what makes a broken pacman repairable without a live USB. It works with both systemd-based and busybox initramfs images, and needs the static binary the archix package installs at `/usr/lib/archix/archix-static`. In CI, a QEMU VM with OVMF firmware deletes libalpm to break pacman, boots the rescue entry, and checks that pacman works again.
+```
+36 packages restored; boot normally, then run `sudo archix rollback 43` to put everything else back
+```
+
+Rolling back to the current generation puts back whatever differs from it, packages, files and services alike. If a switch was interrupted, run `sudo archix recover` instead.
+
+That's what makes a broken pacman repairable without a live USB. It works with both systemd-based and busybox initramfs images. The rescue hook copies the static binary that the `archix` and `archix-bin` AUR packages install at `/usr/lib/archix/archix-static`; rescue entries are only built when that file exists. If you installed archix another way, build it yourself from the source tree:
+
+```console
+$ cargo build --release --target x86_64-unknown-linux-musl
+$ sudo install -Dm755 target/x86_64-unknown-linux-musl/release/archix /usr/lib/archix/archix-static
+``` In CI, a QEMU VM with OVMF firmware deletes libalpm to break pacman, boots the rescue entry, and checks that pacman works again.
 
 ### From a live USB
 

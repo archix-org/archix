@@ -108,7 +108,7 @@ Third-party repos such as CachyOS's are declared with [`custom_repos`](#custom_r
 
 What switch does with installed packages that aren't in the lock: remove them, or only list them.
 
-With `"remove"`, a package you installed with `pacman -S` and never declared is removed on the next switch, so the system is exactly what the config says. With `"warn"`, archix keeps it and lists it in `archix diff` and `archix switch`.
+With `"remove"`, the next switch offers to declare explicit packages you installed with plain pacman or an AUR helper (`declare them in installed.lua? (no removes them)`), and removes every other package that isn't in the lock, so the system is exactly what the config says. `--noconfirm` declares them. With `"warn"`, archix keeps undeclared packages and lists them in `archix diff` and `archix switch`.
 
 `"warn"` is a good setting while you move an existing system into your config. Switch back to the default once nothing is listed any more. See [pacman and yay](/docs/concepts/pacman-and-yay/).
 
@@ -388,7 +388,7 @@ Users archix creates and keeps in step; ones it created are removed (home kept) 
 | `description` | `str` | `""` | The GECOS field. |
 | `system` | `bool` | `false` | A system user: low uid, no home directory. |
 
-Declaring a user that already exists brings it in line with every field, defaults included: `groups` is the complete list of supplementary groups, and `shell` falls back to `/bin/bash`. Users that archix didn't create are never deleted.
+Declaring a user that already exists brings it in line with every field, defaults included: a declared user is authoritative, so `groups` is the complete list of supplementary groups, and `shell` falls back to `/bin/bash`. When you declare an existing user by hand, list all of its groups and its shell. `archix init` captures existing users with their real groups, shell, home and description, so declaring them changes nothing. Users that archix didn't create are never deleted.
 
 ```lua
 users = {
@@ -517,7 +517,11 @@ udev_rules = {
 
 ## Boot and kernel
 
-archix can write a boot entry for every generation, so you can pick an older generation from the boot menu. Each entry is a unified kernel image, built with `ukify` from a fresh `mkinitcpio` initramfs, and placed in `EFI/Linux` on the ESP as `archix-<n>.efi`, where systemd-boot finds it. Booting an older entry rolls the system back to that generation. Install `mkinitcpio` and `systemd-ukify`, and `sbctl` for Secure Boot.
+archix can write a boot entry for every generation, so you can pick an older generation from the boot menu. Each entry is a unified kernel image, built with `ukify` from a fresh `mkinitcpio` initramfs, and placed in `EFI/Linux` on the ESP as `archix-<n>.efi`, where systemd-boot finds it. Booting an older entry rolls the system back to that generation.
+
+With `boot.loader` set, archix declares the packages it needs for this itself: the `boot.kernel` package, `mkinitcpio` and `systemd-ukify`, plus `sbctl` when `boot.secure_boot = true`. You don't list them in `packages`. With the default `secure_boot = null`, signing depends on sbctl being installed with keys, so keep `sbctl` declared yourself if you rely on that.
+
+The newest two generations also get a rescue entry when the static binary `/usr/lib/archix/archix-static` exists, which the `archix` and `archix-bin` AUR packages install. See [Safety](/docs/concepts/safety/#rescue-mode).
 
 ```lua
 boot = { loader = "systemd-boot", microcode = { "amd-ucode.img" } },
@@ -564,7 +568,7 @@ Where the EFI system partition is mounted.
 | Default | `"linux"` |
 | Declared in | `<archix>/boot.lua` |
 
-The kernel package boot entries use, such as `linux-lts` or `linux-zen`. Each entry keeps a copy of its kernel's modules, so an older entry still boots after the kernel package was upgraded.
+The kernel package boot entries use, such as `linux-lts` or `linux-zen`. archix declares it for you. Each entry keeps a copy of its kernel's modules, so an older entry still boots after the kernel package was upgraded.
 
 ### `boot.microcode`
 
@@ -596,7 +600,7 @@ How many of the newest generations keep a boot entry; fewer if the ESP runs out 
 
 Sign boot entries with sbctl; by default, whenever sbctl has keys.
 
-When signing, archix also signs systemd-boot's own binary. Changing this records a new generation, so turning Secure Boot on re-signs.
+`true` also declares the `sbctl` package. When signing, archix also signs systemd-boot's own binary. Changing this records a new generation, so turning Secure Boot on re-signs.
 
 ### `boot.snapshots`
 
@@ -659,7 +663,7 @@ Files in the user's home, keyed by path relative to it (a leading `~/` is allowe
 | `link` | `null or str` | `null` | Make the file a symlink to this target. |
 | `executable` | `bool` | `false` | Write the file with mode `0755` instead of `0644`. |
 
-Give exactly one of `text`, `source` and `link`. A `source` is copied, and a directory `source` needs `live = true`. Paths can't leave the home or the config directory. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
+Give exactly one of `text`, `source` and `link`. A `source` is copied, and a directory `source` needs `live = true`. `live` only works with `source`; with `text` or `link` it's an error: `home.files.<path>: live = true needs source, the file in the config to link to`. Paths can't leave the home or the config directory. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
 
 ```lua
 home = {

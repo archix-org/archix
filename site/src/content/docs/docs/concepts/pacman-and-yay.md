@@ -7,7 +7,7 @@ sidebar:
 
 archix doesn't lock you out of your own system. `pacman` and `yay` keep working, on your live mirrors, exactly as before. You can `pacman -Syu` at 2 a.m. to get a fix, `pacman -S` something to try it, or follow an Arch news item to the letter.
 
-What archix adds is memory. It notices those changes and, on the next switch, asks what you want to do with them.
+What archix adds is memory. It notices those changes and, on the next switch, asks what you want to do with them: adopt upgrades into the lock, and declare new packages in your config.
 
 ## The pacman hook
 
@@ -101,13 +101,26 @@ archix imports it automatically whenever it exists, so you don't have to. `archi
 
 ## Undeclared packages
 
-Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/) option decides what happens to it, and `archix init` asks you to choose.
+Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/) option decides what happens to it, and `archix init` asks you to choose: `Later, when you install something with plain pacman or yay`.
 
-**`"remove"`** is the default. On switch, packages that aren't in the lock are removed. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful.
+**`"remove"`** is the default: `switch offers to declare it, and removes it if you say no`. The next switch lists the explicitly installed packages the pacman hook saw arrive since the last switch, and asks:
+
+```console
+$ sudo pacman -S htop ncdu
+...
+$ sudo archix switch
+installed with pacman or an AUR helper but not declared: htop ncdu
+declare them in installed.lua? (no removes them) [Y/n]
+```
+
+- **Yes** adds them to [`installed.lua`](#installedlua) and switches with them in the lock, the same as if you'd run `archix install`.
+- **No** removes them.
+
+`--noconfirm` declares them. Anything else that isn't in the lock, such as a package installed before the hook could see it or one that `archix install --temp` installed, is removed on switch. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful.
 
 This covers packages only. Changes to `/etc` files and services that archix never managed are left alone; see [Safety](/docs/concepts/safety/#managed-files-backups-and-hand-edits).
 
-**`"warn"`** keeps undeclared packages and lists them in `archix diff` and `archix switch` instead:
+**`"warn"`** is `switch leaves it installed and only lists it`. Undeclared packages are listed in `archix diff` and `archix switch` instead:
 
 ```lua title="lua/hosts/desktop/init.lua"
 return {
@@ -124,7 +137,7 @@ not declared, kept because undeclared_packages = "warn": htop ncdu
 
 To keep one, add it to `packages` or run `archix install htop`. To get rid of it, remove it with pacman or switch back to `"remove"`.
 
-To try something without declaring it, `sudo archix install --temp <pkg>` installs it as undeclared on purpose. The next switch removes it unless you've declared it by then.
+To try something without declaring it, `sudo archix install --temp <pkg>` installs it as undeclared on purpose. archix ran that transaction itself, so the hook doesn't record it and switch doesn't offer to declare it: the next switch removes it unless you've declared it by then.
 
 ## Ignoring packages everywhere
 

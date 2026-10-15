@@ -19,49 +19,97 @@ You don't write your first config by hand. `archix init` reads your running syst
 $ sudo archix init
 ```
 
-It asks a handful of questions. `sudo archix init --defaults` takes every default without asking.
+It works through the system one section at a time. `✓` lines are what it captured, `·` lines are notes, `!` lines need your attention, and in between it asks a few questions. `sudo archix init --defaults` takes every default without asking, and skips the dotfile import. Here's a typical run:
+
+```
+  archix init  describe this machine as a config
+  · nothing on the system changes; init only writes the config and its lock
+
+── Config ──────────────────────────────────────
+  · any directory works, such as a clone of your own repo; /etc/archix then links to it
+✔ Where should the config live? · /etc/archix
+✔ Make it a git repository? · no
+
+── Packages ────────────────────────────────────
+  ✓ repos core, extra, multilib
+  ✓ 86 packages declared, 3 from the AUR
+  · 2 dependencies that nothing needs any more: python-pip, rust
+✔ What should happen to them? · keep them (listed in ignored_packages)
+  · everything installed now is declared, so the first switch removes nothing
+✔ Later, when you install something with plain pacman or yay · switch offers to declare it, and removes it if you say no (recommended)
+✔ Show each AUR build recipe and ask before trusting it? · yes
+✔ If a locked AUR version can't be built any more · ask, defaulting to the nearest newer version (recommended)
+
+── System ──────────────────────────────────────
+  ✓ hostname desktop, timezone Europe/Berlin
+  ✓ 1 user: me
+  · passwords stay where they are; archix never manages them
+  ✓ 4 services that differ from their preset
+
+── Config files ────────────────────────────────
+  · 3 files that hold secrets stay out of the config
+  ✓ 4 config files worth managing: /etc/fstab, /etc/mkinitcpio.conf, /etc/pacman.d/mirrorlist, /etc/sysctl.d/80-swappiness.conf
+  · 2 files more, mostly edited by package scripts: /etc/shells, /etc/xdg/reflector/reflector.conf
+✔ Which config files should archix manage? · the 4 worth managing (recommended)
+  ✓ 4 files copied into files/desktop/
+
+── Boot ────────────────────────────────────────
+  · / isn't btrfs, so there are no snapshots; packages, config and boot entries still roll back
+  · systemd-boot is installed on /boot
+✔ Let archix write a boot entry for each generation? · yes
+  ✓ boot entries on /boot, kernel linux
+
+── Generations ─────────────────────────────────
+✔ How many generations should gc always keep? · 10
+✔ And any generation younger than how many days? · 30
+  ✓ gc keeps the newest 10 generations and any younger than 30 days
+
+── Dotfiles ────────────────────────────────────
+✔ Bring some dotfiles into the config too? · no
+
+── Lock ────────────────────────────────────────
+  · finding the archive snapshot closest to what's installed
+  ✓ 212 packages locked to the 2026-10-09 snapshot
+  · held at their installed version instead: mesa
+
+── Result ──────────────────────────────────────
+  ✓ the system matches the lock and the config: the first switch changes nothing
+
+  Config written to /etc/archix
+    init.lua                          loads this host
+    lua/hosts/desktop/init.lua        settings, users, services and files
+    lua/hosts/desktop/installed.lua   packages; archix -S and -R edit it
+    files/desktop/                    copies of the managed config files
+    archix.lock                       the exact package versions
+
+  Next: look it over, then run sudo archix switch
+```
+
+What each section does:
 
 <Steps>
 
-1. **Config location.** `/etc/archix` by default, or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Then it asks whether to make the directory a git repository (default: no).
+1. **Config.** The config can live in `/etc/archix` or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Making it a git repository runs `git init` and `git add`; nothing is committed.
 
-2. **Third-party repos.** If your `pacman.conf` has repos beyond the official ones, such as CachyOS's or chaotic-aur, they're declared as they are, mirrorlists included. archix then asks what to do when a locked package disappears from one of them: ask each time (the default, and that prompt defaults to falling back), fall back without asking, or fail. See [Third-party repos](/docs/guides/third-party-repos/).
+2. **Packages.** Your explicitly installed packages, from the repos and the AUR, are declared in `installed.lua`. Third-party repos in your `pacman.conf`, such as CachyOS's or chaotic-aur, are declared as they are, and init asks what to do if a locked package disappears from one (see [Third-party repos](/docs/guides/third-party-repos/)). Foreign packages that aren't on the AUR go into `ignored_packages`, with a `!` line. Orphaned dependencies can be kept in `ignored_packages` or left for the first switch to remove. Then init asks what should happen later to packages you install with plain pacman or yay; that sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). With AUR packages, it also asks about review and [missing versions](/docs/concepts/lockfile/#missing-versions).
 
-3. **Orphans.** If there are any, packages installed as dependencies that nothing needs any more can be kept, listed in `ignored_packages` (the default), or left for the first switch to remove.
+3. **System.** Hostname, timezone, locales and keymap, but only where the option would write exactly what's on disk now. Regular users (uid 1000 to 59999) with their real groups, shell, home and description, so declaring them changes nothing, and regular groups. Services whose enabled state differs from their preset.
 
-4. **Undeclared packages.** This sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). By default, packages that aren't declared are removed on switch, so the config is the whole truth. The alternative only lists them.
+4. **Config files.** The `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Files that hold secrets are never shown or copied, only counted. The rest are split into the ones worth managing, such as `/etc/fstab` and anything hand-written, and the others, which are mostly edited by package scripts. Answer `the N worth managing (recommended)`, `let me pick` for a checklist with those ticked, or `none for now`. See [Safety](/docs/concepts/safety/#what-init-captures-and-never-captures).
 
-5. **AUR.** If you have AUR packages, archix asks whether to show each build recipe for review before trusting it (default: yes), and what to do when a locked AUR version can't be built any more (default: ask, preferring the nearest newer version).
+5. **Boot.** On a btrfs root, init asks whether to snapshot `/` before every switch as an extra recovery point. If systemd-boot is installed and your kernel command line has `root=`, it asks whether to write a boot entry for each generation.
 
-6. **Config files.** archix lists the `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known config directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Ticked files are copied into the config and managed. Files that may hold secrets start unticked. See [Safety](/docs/concepts/safety/#what-init-never-captures).
+6. **Generations.** How many generations `gc` always keeps, and how many days it keeps every generation.
 
-7. **Booting.** On a btrfs root, archix asks whether to snapshot `/` before every switch as an extra recovery point. If systemd-boot is installed and your kernel command line has `root=`, it asks whether to write a signed boot entry for each generation (default: yes).
+7. **Dotfiles.** Opt-in. Pick a user, then entries from `~/.config` and top-level dotfiles. They're copied into the config's `home/` and declared as live links. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/#bringing-your-existing-dotfiles-in).
 
-8. **Generations.** How many generations `gc` always keeps (10) and how many days it keeps every generation (30).
+8. **Lock.** init finds the Arch Linux Archive snapshot that matches the most installed versions, and pins every package that differs from it, older ones included, so the lock is exactly what you have. See [The lockfile](/docs/concepts/lockfile/#how-init-picks-the-snapshot).
 
-9. **Dotfiles.** Opt-in. Pick a user, then entries from `~/.config` and top-level dotfiles. They're copied into the config and declared as live links, and the first switch backs up the originals. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
+9. **Result.** What the first switch would change, which should be nothing.
 
 </Steps>
 
-Packages, services, users, groups, hostname, timezone, locales and keymap are captured without asking. Then archix picks the lock. It finds the Arch Linux Archive snapshot that matches the most installed versions, and pins every package that differs from it, older ones included, so the lock is exactly what you have. See [The lockfile](/docs/concepts/lockfile/#how-init-picks-the-snapshot).
-
-It ends by showing what a switch would change, which should be nothing:
-
-```console
-finding the archive snapshot closest to what's installed
-locking 86 declared packages to the snapshot that fits what's installed
-+ acl 2.3.2-1
-+ archix 1.0.0-1
-...
-212 packages locked
-wrote /etc/archix/archix.lock
-
-what `archix switch` would change now:
-snapshot 2026-10-09: 212 packages
-the system matches the lock and the config
-
-the config is in /etc/archix; read it over, then run `sudo archix switch` to make this the first generation
-```
+There are two exceptions to an empty Result. Dotfiles you imported are listed, because the first switch backs up the originals and replaces them with links into the config. And if you let archix write boot entries, it declares the boot tooling it needs, `mkinitcpio` and `systemd-ukify`, so the Result lists them as installs if they're missing. Either way, the section starts with `! the first switch would still change these:`.
 
 ## Look at what you got
 
@@ -94,11 +142,13 @@ return {
   repos = { "core", "extra", "multilib" },
   ignored_packages = { "nvidia-dkms-custom" },
   users = {
-    me = { uid = 1000, groups = { "wheel" }, shell = "/usr/bin/zsh", home = "/home/me" },
+    me = { uid = 1000, groups = { "wheel" }, shell = "/usr/bin/zsh", description = "Me" },
   },
   services = { ["bluetooth.service"] = true, ["sshd.service"] = true },
   files = {
+    ["/etc/fstab"] = { source = "files/desktop/etc/fstab" },
     ["/etc/sysctl.d/80-swappiness.conf"] = { source = "files/desktop/etc/sysctl.d/80-swappiness.conf" },
+    -- ...
   },
   kernel_params = { "root=UUID=0a3c5e1f-6b2d-4f7a-9c8e-1d2b3a4c5e6f", "rw", "quiet" },
   boot = { loader = "systemd-boot", microcode = { "amd-ucode.img" } },
@@ -113,7 +163,7 @@ Your explicitly installed packages, from the repos and the AUR, are in `installe
 [hosts.desktop]
 date = "2026-10-09"
 repos = ["core", "extra", "multilib"]
-declared = ["archix", "base", "firefox", "neovim", "steam"]
+declared = ["archix", "base", "firefox", "linux", "mkinitcpio", "neovim", "steam", "systemd-ukify"]
 pinned = ["mesa"]
 
 [hosts.desktop.packages]
@@ -140,7 +190,7 @@ apply 1 changes? [Y/n]
 switched to generation 1 (snapshot 2026-10-09)
 ```
 
-No packages change. On a machine where archix writes boot entries, the only change is generation 1's boot entry. Without boot entries, the switch prints `generation 1 is current (snapshot 2026-10-09, no package changes)` instead. Either way, your system looks the same as before, but now it's described, locked and reversible.
+No packages change. On a machine where archix writes boot entries, the only change is generation 1's boot entry. Without boot entries, the switch prints `switched to generation 1 (snapshot 2026-10-09); no package changes were needed`. Either way, the files archix took over are backed up first, so taking one out of the config later puts the original back. Your system looks the same as before, but now it's described, locked and reversible.
 
 ## Make a change
 

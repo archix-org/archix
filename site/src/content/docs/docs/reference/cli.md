@@ -39,21 +39,32 @@ Write a config that describes this machine as it is, and a lock pinned to exactl
 $ sudo archix init
 ```
 
-`init` asks a series of questions: where the config should live, whether to make it a git repository, what to do with undeclared and orphaned packages, which config files to manage, whether to write boot entries, how many generations to keep, and whether to bring in dotfiles. Then it writes the config and the lock, and shows what a switch would change:
+`init` works in sections (Config, Packages, System, Config files, Boot, Generations, Dotfiles, Lock, Result), with `✓` lines for what it captured, `·` notes and `!` warnings. It asks where the config should live, whether to make it a git repository, what to do with orphaned packages and with packages you later install with plain pacman or yay, which config files to manage, whether to write boot entries, how many generations to keep, and whether to bring in dotfiles. Then it writes the config and the lock, and shows what the first switch would change:
 
-```console
-what `archix switch` would change now:
-snapshot 2026-10-09: 212 packages
-the system matches the lock and the config
+```
+── Lock ────────────────────────────────────────
+  · finding the archive snapshot closest to what's installed
+  ✓ 212 packages locked to the 2026-10-09 snapshot
+  · held at their installed version instead: mesa
 
-the config is in /etc/archix; read it over, then run `sudo archix switch` to make this the first generation
+── Result ──────────────────────────────────────
+  ✓ the system matches the lock and the config: the first switch changes nothing
+
+  Config written to /etc/archix
+    init.lua                          loads this host
+    lua/hosts/desktop/init.lua        settings, users, services and files
+    lua/hosts/desktop/installed.lua   packages; archix -S and -R edit it
+    files/desktop/                    copies of the managed config files
+    archix.lock                       the exact package versions
+
+  Next: look it over, then run sudo archix switch
 ```
 
-`init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. See the [quick start](/docs/quick-start/) for every question and what it captures.
+`init` changes nothing on the system except the config directory. The first `sudo archix switch` creates generation 1 without changing any packages. Imported dotfiles are the exception: the first switch replaces them with links, and the Result section lists them under `! the first switch would still change these:`. Secret files are never shown or copied, only counted. See the [quick start](/docs/quick-start/) for every section and question.
 
 | Flag | Description |
 | --- | --- |
-| `--defaults` | Take every question's default without asking. Without it, `init` needs a terminal. |
+| `--defaults` | Take every question's default without asking: the recommended config files, no dotfiles, no git. Without it, `init` needs a terminal. |
 
 `init` refuses to run if the config directory already has an `init.lua`.
 
@@ -91,7 +102,7 @@ switched to generation 2 (snapshot 2026-10-09)
 
 `switch` re-locks at the locked date if the config changed, lists the package, file, user, group and service changes, and asks before applying them. Then it builds AUR packages in a clean chroot, downloads every package to `/var/cache/archix/pkg` (each file checked against the lock's `sha256`) and applies the steps above from a [journal](/docs/concepts/safety/#the-journal).
 
-If the system already matches, it prints `nothing to do: the system matches generation 2 (snapshot 2026-10-09)`. If only settings changed, such as `ignored_packages`, it records a new generation without touching packages: `generation 3 is current (snapshot 2026-10-09, no package changes)`.
+If the system already matches, it prints `nothing to do: the system matches generation 2 (snapshot 2026-10-09)`. If only settings changed, such as `ignored_packages`, and archix doesn't manage booting, it records a new generation without running the apply steps: `switched to generation 3 (snapshot 2026-10-09); no package changes were needed`. That's also what the first switch after `archix init` usually prints. Files archix takes over unchanged are backed up either way.
 
 `switch` refuses to start while pacman is running, while a stale pacman lock (`/var/lib/pacman/db.lck`) exists, or while an earlier switch is unfinished. If installed packages are newer than the lock because of pacman or an AUR helper, it offers to adopt them first:
 
@@ -100,11 +111,18 @@ the system is newer than the lock for 3 packages (linux, mesa, vulkan-radeon), p
 adopt them into the lock? (no reverts them to the lock) [Y/n]
 ```
 
+With the default `undeclared_packages = "remove"`, it also offers to declare explicit packages you installed with plain pacman or an AUR helper since the last switch. Yes adds them to `installed.lua` and switches with them; no removes them:
+
+```console
+installed with pacman or an AUR helper but not declared: htop ncdu
+declare them in installed.lua? (no removes them) [Y/n]
+```
+
 See [pacman and yay](/docs/concepts/pacman-and-yay/#adopting) and [Safety](/docs/concepts/safety/).
 
 | Flag | Description |
 | --- | --- |
-| `--noconfirm` | Don't ask. Applies without the `apply N changes?` question, adopts newer packages, trusts new AUR build recipes without showing them, falls back when a third-party package is gone, and takes the nearest newer version when a locked AUR version can't be built. |
+| `--noconfirm` | Don't ask. Applies without the `apply N changes?` question, adopts newer packages, declares packages installed with pacman or yay, trusts new AUR build recipes without showing them, falls back when a third-party package is gone, and takes the nearest newer version when a locked AUR version can't be built. |
 | `--accept-nearest newer\|older` | When a locked AUR version can't be built, take the nearest newer or older one without asking. Overrides the `missing_versions` option. |
 
 ### `upgrade`, `-Syu`
@@ -145,7 +163,7 @@ The names go into `lua/hosts/<host>/installed.lua`, a file archix owns and impor
 | Flag | Description |
 | --- | --- |
 | `--path <dir>` | Edit the `installed.lua` in this directory instead. It must be inside the config's `lua/` directory, or archix refuses. archix prints the module name to import, such as `modules.dev.installed`, since only the host's own `installed.lua` is imported automatically. |
-| `--temp` | Install without declaring anything. The package shows up as undeclared, and the next `switch` removes it unless you declare it by then. |
+| `--temp` | Install without declaring anything. The package shows up as undeclared, and the next `switch` removes it unless you declare it by then. Unlike a plain `pacman -S`, it isn't offered for declaring. |
 | `--noconfirm` | Don't ask. |
 
 ```console
@@ -187,7 +205,7 @@ roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n]
 rolled back to generation 41 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-Packages are reinstalled at the generation's exact versions, from the cache when they're there and from the Arch Linux Archive otherwise. `rollback` doesn't evaluate the config, so it works even when the config is broken. `archix rollback 42` moves forward again. It runs through the same journal as a switch, and refuses while a switch is unfinished; use `archix recover --rollback` for that. See [Generations and rollback](/docs/concepts/generations/).
+Packages are reinstalled at the generation's exact versions, from the cache when they're there and from the Arch Linux Archive otherwise. `rollback` doesn't evaluate the config, so it works even when the config is broken. `archix rollback 42` moves forward again. Naming the current generation repairs it: `generation 42 is current; putting back whatever differs from it`, which reinstalls drifted packages and rewrites changed files, users and services. It runs through the same journal as a switch, and refuses while a switch is unfinished; use `archix recover --rollback` for that. See [Generations and rollback](/docs/concepts/generations/).
 
 | Argument or flag | Description |
 | --- | --- |
@@ -244,7 +262,9 @@ restored pacman 7.0.0.r7.g1f38429-1
 36 packages restored; boot normally, then run `sudo archix rollback 42` to put everything else back
 ```
 
-It unpacks glibc, pacman, systemd, the kernel, archix itself and the rest of the core set straight from the cache, keeps edited config files (the package's version is saved as `.pacnew`) and rewrites their entries in pacman's database. See [Safety](/docs/concepts/safety/#rescue-mode).
+It unpacks glibc, pacman, systemd, the kernel, archix itself and the rest of the core set straight from the cache, keeps edited config files (the package's version is saved as `.pacnew`) and rewrites their entries in pacman's database. Then `sudo archix rollback 42`, as the last line says, repairs everything else.
+
+`/usr/lib/archix/archix-static` is the static binary the `archix` and `archix-bin` AUR packages install, and the one rescue boot entries carry. See [Safety](/docs/concepts/safety/#rescue-mode).
 
 | Flag | Default | Description |
 | --- | --- | --- |

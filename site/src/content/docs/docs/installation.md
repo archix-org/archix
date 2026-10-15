@@ -15,8 +15,8 @@ Both install the same tool, plus the static `archix` binary that [rescue mode](/
 ## Requirements
 
 - **An Arch-based system on x86_64.** Arch Linux, CachyOS and EndeavourOS are supported. CachyOS is the primary target, so its repos get special care (see [Third-party repos](/docs/guides/third-party-repos/)).
-- **systemd-boot**, if you want a boot entry per generation, rollback from the boot menu and rescue entries. Entries are unified kernel images (UKIs) built with `mkinitcpio` and `ukify` (from `systemd-ukify`). GRUB and Limine are not supported: on those bootloaders archix still manages your system and `archix rollback` still works from a running system, but you don't get generation boot entries.
-- **sbctl keys**, optional. If `sbctl` has keys, archix signs every UKI and systemd-boot itself, so Secure Boot stays on.
+- **systemd-boot**, if you want a boot entry per generation, rollback from the boot menu and rescue entries. Entries are unified kernel images (UKIs) built with `mkinitcpio` and `ukify`. You don't install those yourself: with `boot.loader` set, archix declares the kernel, `mkinitcpio` and `systemd-ukify`, plus `sbctl` with `boot.secure_boot = true`, and the next switch installs whatever is missing. GRUB and Limine are not supported: on those bootloaders archix still manages your system and `archix rollback` still works from a running system, but you don't get generation boot entries.
+- **sbctl keys**, optional. If `sbctl` has keys, or you set `boot.secure_boot = true`, archix signs every UKI and systemd-boot itself, so Secure Boot stays on.
 - **Any filesystem.** Rollback reinstalls a generation's exact packages and files from the cache, which works the same on ext4, btrfs or anything else. On a btrfs root, archix also takes a read-only snapshot of `/` before every switch, as an extra recovery point you can use by hand. See [Generations and rollback](/docs/concepts/generations/#btrfs-snapshots).
 - **base-devel and git** for the bootstrap below, and **devtools** for AUR builds later, which run in a clean chroot with `makechrootpkg`.
 
@@ -54,7 +54,14 @@ Don't update it with `makepkg` again.
 
 ## The static rescue binary
 
-The package installs a statically linked archix at `/usr/lib/archix/archix-static`. When archix manages booting and that binary is present, archix adds an mkinitcpio hook that copies it into the initramfs, and gives the newest two generations an `archix rescue` boot entry. That entry repairs a system pacman can't repair, without a live USB.
+Both AUR packages also install a statically linked archix at `/usr/lib/archix/archix-static`. When archix manages booting, it adds an mkinitcpio hook that copies that binary into the initramfs, and gives the newest two generations an `archix rescue` boot entry. That entry repairs a system pacman can't repair, without a live USB.
+
+Rescue entries are only built when `/usr/lib/archix/archix-static` exists. If you installed archix some other way, build the static binary from the source tree yourself:
+
+```console
+$ cargo build --release --target x86_64-unknown-linux-musl
+$ sudo install -Dm755 target/x86_64-unknown-linux-musl/release/archix /usr/lib/archix/archix-static
+```
 
 The same binary also works from a live USB against the mounted system, since it has no dependencies:
 

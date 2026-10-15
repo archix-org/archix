@@ -17,7 +17,7 @@ Generations live in `/var/lib/archix/generations/<n>/generation.json`, and `/var
 - **The config's git commit**, if your config directory is a git repo, and whether the tree had uncommitted changes.
 - **Its btrfs snapshot**, on a btrfs root.
 
-A switch that only changes settings, such as `ignored_packages` or a boot option, still creates a generation, so turning on Secure Boot gives you newly signed entries. A switch that changes nothing prints `nothing to do: the system matches generation 42 (snapshot 2026-10-15)` and creates none.
+A switch that only changes settings, such as `ignored_packages` or a boot option, still creates a generation, so turning on Secure Boot gives you newly signed entries. A switch that changes nothing prints `nothing to do: the system matches generation 42 (snapshot 2026-10-15)` and creates none. A switch with nothing to apply but a new generation to record, such as the first one after `archix init` when archix doesn't manage booting, prints `switched to generation 1 (snapshot 2026-10-09); no package changes were needed`.
 
 ```console
 $ archix generations
@@ -49,6 +49,8 @@ To go to a specific generation, name it. That works forwards too:
 $ sudo archix rollback 40
 $ sudo archix rollback 42
 ```
+
+Naming the current generation repairs it. `archix rollback 42` with 42 current prints `generation 42 is current; putting back whatever differs from it`, then reinstalls drifted packages and rewrites changed files, users and services. That's also how you finish after [rescue mode](/docs/concepts/safety/#rescue-mode).
 
 `rollback` doesn't evaluate your config, so it works even when the config is broken. It refuses while a switch is unfinished; `archix recover --rollback` is the way back from that.
 
@@ -86,12 +88,12 @@ If a switch was interrupted, the boot service only reports it and changes nothin
 
 ## Boot entries
 
-Set `boot.loader = "systemd-boot"` (`archix init` offers it when systemd-boot is installed) and archix writes a boot entry for each generation. Your `kernel_params` must contain `root=`.
+Set `boot.loader = "systemd-boot"` (`archix init` offers it when systemd-boot is installed) and archix writes a boot entry for each generation. Your `kernel_params` must contain `root=`. archix declares the packages it needs for this, the `boot.kernel` package, `mkinitcpio` and `systemd-ukify`, plus `sbctl` with `boot.secure_boot = true`, so you don't list them yourself.
 
 - Each entry is a unified kernel image (UKI) built with `ukify` from a fresh `mkinitcpio` initramfs, at `/boot/EFI/Linux/archix-42.efi`. Its title comes from its embedded os-release: "Arch Linux (archix, generation 42)", with `IMAGE_VERSION=42`.
 - The entry is written in the step before the generation becomes current, after the result has been verified, so a switch that fails never gets one.
 - Only the newest [`boot.entries`](/docs/reference/options/) generations (5 by default) keep an entry, and fewer if the ESP runs short of space. `gc` prunes the rest.
-- The newest two generations also get a rescue entry, `archix-42-rescue.efi`, titled "Arch Linux (archix rescue, generation 42)".
+- The newest two generations also get a rescue entry, `archix-42-rescue.efi`, titled "Arch Linux (archix rescue, generation 42)". Rescue entries need the static binary at `/usr/lib/archix/archix-static`, which the AUR packages install; see [Installation](/docs/installation/#the-static-rescue-binary).
 
 GRUB and Limine are not supported. With them, rollback from a running system still works, but archix doesn't write generation boot entries.
 

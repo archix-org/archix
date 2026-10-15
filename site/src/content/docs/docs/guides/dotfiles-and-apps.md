@@ -40,7 +40,7 @@ home = {
 | --- | --- |
 | `text` | The file's contents, written as given. |
 | `source` | A file in the config directory, copied in. The path is relative to the config directory and can't leave it. |
-| `live` | With `source`: link to the file or directory in the config instead of copying it. |
+| `live` | With `source`: link to the file or directory in the config instead of copying it. With `text` or `link` it's an error. |
 | `link` | Make the path a symlink to this target. |
 | `executable` | Mode `0755` instead of `0644`. |
 
@@ -69,7 +69,11 @@ home = {
 },
 ```
 
-A `source` that's a directory has to be live; archix only copies single files.
+A `source` that's a directory has to be live; archix only copies single files. `live` needs a `source` to link to, so `live = true` with `text` or `link` makes `diff` and `switch` stop:
+
+```console
+error: home.files..config/nvim: live = true needs source, the file in the config to link to
+```
 
 ## User units
 
@@ -210,7 +214,7 @@ A weekly job compares Home Manager's upstream modules and tests with the commit 
 
 ## Bringing your existing dotfiles in
 
-`archix init` can import the dotfiles you already have. It's opt-in: after capturing the system, init asks whether to bring some dotfiles into the config, whose (one of the users it captured), and which ones. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
+`archix init` can import the dotfiles you already have. It's opt-in, and `--defaults` skips it: after capturing the system, init asks `Bring some dotfiles into the config too?`, whose (one of the users it captured), and which ones. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
 
 Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
 
@@ -228,7 +232,15 @@ return {
 }
 ```
 
-The first switch backs up the originals and replaces them with links into the config, so from then on editing a dotfile edits your repo.
+The first switch backs up the originals and replaces them with links into the config, so from then on editing a dotfile edits your repo. That makes imported dotfiles the one thing the first switch after `init` changes. init's Result section lists them:
+
+```
+── Result ──────────────────────────────────────
+  ! the first switch would still change these:
+      replace    /home/me/.config/hypr
+      replace    /home/me/.config/nvim
+      replace    /home/me/.zshrc
+```
 
 ## Which layer to use
 
