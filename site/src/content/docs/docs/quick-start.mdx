@@ -27,7 +27,7 @@ It walks through nine steps.
 
 2. **Config location.** Choose between `/etc/archix` (root-owned, the default) and a repo you own, for example `~/archix`, with `/etc/archix` linked to it. Pick your own repo if you want to edit without `sudo` and push the config to GitHub. archix finds the config through `/etc/archix` either way.
 
-3. **Strict or warn mode.** In strict mode, anything not in your config is removed or reverted on switch: undeclared packages, modified `/etc` files, enabled services. In warn mode, archix lists them in `archix diff` with a hint on how to adopt them, and leaves them alone. Strict is the default and gives you the real declarative guarantee. Warn is gentler while you're getting used to it. See [pacman and yay](/docs/concepts/pacman-and-yay/#strict-and-warn-mode).
+3. **Undeclared packages.** This sets the `undeclared_packages` option. With `"remove"`, the default, packages that aren't in your config are removed on switch, which gives you the real declarative guarantee. With `"warn"`, archix keeps them and lists them in `archix diff`, which is gentler while you're getting used to it. See [pacman and yay](/docs/concepts/pacman-and-yay/#undeclared-packages).
 
 4. **Capture.** archix reads what makes your system yours: explicitly installed packages (official and AUR), enabled services that aren't enabled by default, `/etc` files that differ from their package versions (found with `pacman -Qkk`), users and groups, and kernel parameters. Each one becomes a declaration in your config. Dependencies are not listed; the lock records them.
 
@@ -73,11 +73,11 @@ $ tree /etc/archix
 [hosts.desktop]
 date = "2026-10-14"
 repos = ["core", "extra", "multilib"]
+declared = ["firefox", "neovim", "steam"]
 
-[hosts.desktop.packages.firefox]
-version = "144.0-1"
-repo = "extra"
-file = "firefox-144.0-1-x86_64.pkg.tar.zst"
+[hosts.desktop.packages]
+firefox = { version = "144.0-1", repo = "extra", file = "firefox-144.0-1-x86_64.pkg.tar.zst", sha256 = "37895f9d195203f4981ee730bec23c4079d10b5b53fc2c3e69db37c1bfed1257", explicit = true }
+# ...
 ```
 
 git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If you chose your own repo in step 2, commit now:
@@ -105,7 +105,8 @@ Ask archix what that would do before doing it:
 
 ```console
 $ archix diff
-note: archix.lock is out of date for desktop; showing a fresh resolution (run `archix lock` to save it)
+resolving 86 declared packages against the 2026-10-14 snapshot
+note: archix.lock is out of date for desktop; showing a fresh resolution
 snapshot 2026-10-14: 1213 packages
 install    htop 3.4.1-1
 ```
@@ -116,14 +117,20 @@ Now switch:
 
 ```console
 $ sudo archix switch
-resolving 85 declared packages against the 2026-10-14 snapshot
+resolving 86 declared packages against the 2026-10-14 snapshot
 + htop 3.4.1-1
 1213 packages locked
-prepare   1 package downloaded, 0 files rendered
-apply     generation 2 is live
+wrote /etc/archix/archix.lock
+install    htop 3.4.1-1
+apply 1 changes? [Y/n]
+:: installing packages
+:: removing packages
+:: setting install reasons
+:: verifying the result
+switched to snapshot 2026-10-14
 ```
 
-`switch` updated the lock for you, prepared everything, and applied it. You're on generation 2. Commit the change:
+`switch` updated the lock for you, showed the changes, and applied them once you said yes. You're on generation 2. Commit the change:
 
 ```console
 $ git commit -am "Add htop"

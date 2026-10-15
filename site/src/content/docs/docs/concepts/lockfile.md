@@ -22,24 +22,21 @@ date = "2026-10-14"
 repos = ["core", "extra", "multilib"]
 declared = ["firefox", "git", "neovim", "steam"]
 
-[hosts.desktop.packages.git]
-version = "2.51.0-1"
-repo = "extra"
-file = "git-2.51.0-1-x86_64.pkg.tar.zst"
-sha256 = "e6674e96c7bbc318a40c1fd0008a6b00688683ce3d1b324544ebc9380885d098"
-explicit = true
-
-[hosts.desktop.packages.zlib]
-version = "1:1.3.1-2"
-repo = "core"
-file = "zlib-1:1.3.1-2-x86_64.pkg.tar.zst"
-sha256 = "314d62041028cade4a3f33c1e6ee79c950c08ca13e7ebd7f6467297ba94125dc"
-explicit = false
+[hosts.desktop.packages]
+git = { version = "2.51.0-1", repo = "extra", file = "git-2.51.0-1-x86_64.pkg.tar.zst", sha256 = "e6674e96c7bbc318a40c1fd0008a6b00688683ce3d1b324544ebc9380885d098", explicit = true }
+glibc = { version = "2.44+r50+g1848099f063e-1", repo = "core", file = "glibc-2.44+r50+g1848099f063e-1-x86_64.pkg.tar.zst", sha256 = "fe91fe5179f421e133eb3026c3d84c0be076041f526d247f81226fddc5ff216b", explicit = false }
+zlib = { version = "1:1.3.1-2", repo = "core", file = "zlib-1:1.3.1-2-x86_64.pkg.tar.zst", sha256 = "314d62041028cade4a3f33c1e6ee79c950c08ca13e7ebd7f6467297ba94125dc", explicit = false }
 
 [hosts.laptop]
 date = "2026-10-09"
+repos = ["core", "extra"]
+declared = ["firefox", "git", "neovim", "tlp"]
+
+[hosts.laptop.packages]
 # ...
 ```
+
+Each package is one inline table on one line, sorted by name, so a lock diff in git shows exactly which packages changed. Host and package names that aren't plain letters, digits, `-` and `_` are quoted, as in `[hosts."my.laptop"]` or `"gtk+" = { ... }`.
 
 | Field | Meaning |
 | --- | --- |
@@ -47,7 +44,7 @@ date = "2026-10-09"
 | `date` | The Arch Linux Archive snapshot the host's official packages come from. |
 | `repos` | The official repos the host resolved against, in priority order. This is your `repos` option. |
 | `declared` | The packages you declared, sorted. archix compares it with your config to see whether the lock is out of date. |
-| `packages.<name>` | One entry per installed package, dependencies included. |
+| `packages` | One inline table per installed package, dependencies included, keyed by package name. |
 | `version`, `repo`, `file` | The exact package version, the repo it came from, and its package file. |
 | `sha256` | The checksum of the package file. A file that doesn't match is never installed. |
 | `explicit` | Whether pacman marks it as explicitly installed or as a dependency. |
@@ -77,10 +74,8 @@ The same mechanism handles packages you upgraded with pacman when they don't mat
 An AUR package is a git repo of build files on `aur.archlinux.org`, so archix locks it by commit:
 
 ```toml
-[hosts.desktop.packages.zen-browser-bin]
-version = "1.16.3b-1"
-repo = "aur"
-commit = "cd6266c6847e61c71facdd7dbf869b5cf64359be"
+[hosts.desktop.packages]
+zen-browser-bin = { version = "1.16.3b-1", repo = "aur", commit = "cd6266c6847e61c71facdd7dbf869b5cf64359be" }
 ```
 
 The build runs in a clean chroot at the host's snapshot date, so its dependencies are locked too. The built package is cached by PKGBUILD commit and snapshot date. See [The AUR](/docs/guides/aur/).
@@ -90,11 +85,8 @@ The build runs in a clean chroot at the host's snapshot date, so its dependencie
 Third-party repos like CachyOS and chaotic-aur have no dated archive. archix keeps a content-addressed copy of every package file it installs from them, and the lock refers to it by checksum:
 
 ```toml
-[hosts.desktop.packages.linux-cachyos]
-version = "6.17.2-2"
-repo = "cachyos-core-v3"
-file = "linux-cachyos-6.17.2-2-x86_64_v3.pkg.tar.zst"
-sha256 = "037c07941f32cbc6746bf10bda7f2f6dbd00a6035eb46ab98fa5c000baf2197b"
+[hosts.desktop.packages]
+linux-cachyos = { version = "6.17.2-2", repo = "cachyos-core-v3", file = "linux-cachyos-6.17.2-2-x86_64_v3.pkg.tar.zst", sha256 = "037c07941f32cbc6746bf10bda7f2f6dbd00a6035eb46ab98fa5c000baf2197b", explicit = true }
 ```
 
 On the machine that made the lock, that's as solid as an ALA snapshot. On a fresh machine it may not be, because the repo may no longer have that version. [Third-party repos](/docs/guides/third-party-repos/) explains what happens then.
@@ -135,6 +127,12 @@ wrote /etc/archix/archix.lock
 ```
 
 `+` is a new package, `~` a changed version, `-` a package that's no longer needed. The newest snapshot is the newest one the archive has published, so right after midnight it may still be yesterday's.
+
+To move to a specific day instead, pass `--to`. It works in both directions, which makes it a quick way to step a whole host back to a day you know was good:
+
+```console
+$ archix update --to 2026-10-01
+```
 
 You rarely need `lock` on its own: `archix switch` locks first when the config changed. Run it when you want to review and commit the lock before switching, or to lock another host with `--host`.
 

@@ -59,11 +59,10 @@ Arch is a rolling release. "Install git" means something different every day. ar
 [hosts.desktop]
 date = "2026-10-14"
 repos = ["core", "extra", "multilib"]
+declared = ["firefox", "git", "neovim", "steam"]
 
-[hosts.desktop.packages.git]
-version = "2.51.0-1"
-repo = "extra"
-file = "git-2.51.0-1-x86_64.pkg.tar.zst"
+[hosts.desktop.packages]
+git = { version = "2.51.0-1", repo = "extra", file = "git-2.51.0-1-x86_64.pkg.tar.zst", sha256 = "e6674e96c7bbc318a40c1fd0008a6b00688683ce3d1b324544ebc9380885d098", explicit = true }
 ```
 
 You move forward when you choose to, with `archix update`. Read more in [The lockfile](/docs/concepts/lockfile/).

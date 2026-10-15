@@ -1,6 +1,6 @@
 ---
 title: pacman and yay
-description: How archix handles packages installed or upgraded outside it, how adopting works, and what strict and warn mode do with undeclared state.
+description: How archix handles packages installed or upgraded outside it, how adopting works, and how undeclared and ignored packages are treated.
 sidebar:
   order: 4
 ---
@@ -52,33 +52,49 @@ It updates from the live mirrors, like `pacman -Syu`, and adopts the result into
 
 Compare it with `archix update`, which moves the lock to the newest archive snapshot without touching the live mirrors. Both get you current. `-Syu` is the newest your mirror has; `update` is a whole, consistent day of the archive.
 
-## Strict and warn mode
+## Undeclared packages
 
-Adopting covers packages archix already tracks. It doesn't cover things you added that aren't in your config at all: a package you `pacman -S`'d, an `/etc` file you edited, a service you enabled with `systemctl enable`. archix calls that undeclared state, and you choose how to treat it during onboarding.
+Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/#undeclared_packages) option decides what happens to it, and onboarding asks you to choose.
 
-**Strict mode** is the default. On switch, undeclared packages are removed, undeclared changes to `/etc` files are reverted, and undeclared enabled services are disabled. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful.
+**`"remove"`** is the default. On switch, packages that aren't in the lock are removed. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful. The same goes for undeclared changes to `/etc` files, which are reverted, and undeclared enabled services, which are disabled.
 
-**Warn mode** leaves undeclared state alone and lists it in `archix diff` with a hint on how to declare it:
+**`"warn"`** keeps them and lists them in `archix diff` and `archix switch` instead:
+
+```lua title="lua/hosts/desktop.lua"
+return {
+  undeclared_packages = "warn",
+}
+```
 
 ```console
 $ archix diff
 snapshot 2026-10-15: 1214 packages
 the system matches the lock
-undeclared:
-  package    htop 3.4.1-1 (explicitly installed)
-  service    sshd.service (enabled)
-  file       /etc/pacman.d/mirrorlist (modified)
-  adopt them by declaring them in your config, or run `archix install htop` for packages
+not declared, kept because undeclared_packages = "warn": htop ncdu
 ```
 
-Warn mode is a good way to start while you move things into your config. Switch to strict once `diff` is quiet.
+To keep one, add it to `packages` or run `archix install htop`. To get rid of it, remove it with pacman or switch back to `"remove"`.
+
+`"warn"` is a good way to start while you move an existing system into your config. Switch back to `"remove"` once that line is gone.
+
+## Ignoring packages everywhere
+
+Some packages you manage by hand on purpose. List them in [`ignored_packages`](/docs/reference/options/#ignored_packages), and archix never touches or reports them, whatever `undeclared_packages` says:
+
+```lua title="lua/modules/common.lua"
+return {
+  ignored_packages = { "nvidia-dkms-custom" },
+}
+```
+
+Because it's in your config, the decision is visible, committed and the same on every machine that imports the module.
 
 ## "Don't ask again"
 
 When archix asks about something undeclared, you can tell it not to ask again. That decision is stored only on that machine, in `/var/lib/archix`. It isn't part of your config, so it doesn't follow you to your other machines or to a reinstall.
 
-That's on purpose: a one-off decision on one machine shouldn't silently change every machine. To ignore something everywhere, say so explicitly in your config, where it's visible and committed.
+That's on purpose: a one-off decision on one machine shouldn't silently change every machine. To ignore a package everywhere, use `ignored_packages`.
 
 ## When a switch is unfinished
 
-If an archix switch was interrupted, archix refuses to run anything except `recover`, `rollback` and `status` until you deal with it. pacman and yay still work, but the hook warns you that a switch is unfinished. See [Safety](/docs/concepts/safety/).
+If an archix switch was interrupted, `switch`, `lock` and `update` refuse to run until you deal with it with `archix recover`. Read-only commands like `diff` and `status` still work, and so do pacman and yay, but the hook warns you that a switch is unfinished. See [Safety](/docs/concepts/safety/#unfinished-switches).

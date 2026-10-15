@@ -77,7 +77,7 @@ Encrypted secrets, agenix- or sops-style, are not supported.
 
 ### pacman still works
 
-On NixOS, imperative changes mostly don't stick. On archix they're allowed. `pacman -Syu` and `yay` keep working, a pacman hook records what they did, and the next switch asks whether to adopt the change into the lock or revert it. In strict mode undeclared packages are still removed on switch, so the declarative guarantee holds; you just aren't forbidden from experimenting. See [pacman and yay](/docs/concepts/pacman-and-yay/).
+On NixOS, imperative changes mostly don't stick. On archix they're allowed. `pacman -Syu` and `yay` keep working, a pacman hook records what they did, and the next switch asks whether to adopt the change into the lock or revert it. With the default `undeclared_packages = "remove"`, packages that aren't in your config are still removed on switch, so the declarative guarantee holds; you just aren't forbidden from experimenting. See [pacman and yay](/docs/concepts/pacman-and-yay/).
 
 ### One machine at a time
 

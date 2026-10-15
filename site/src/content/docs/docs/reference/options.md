@@ -50,7 +50,9 @@ Options with no default have `"default": null` in JSON and no `default:` line in
 
 Packages from the official repositories. Their dependencies are installed too and recorded in `archix.lock`.
 
-List only what you want; dependencies are resolved and locked for you, and marked as dependencies in pacman's database. Names are checked offline against the sync databases and the AUR metadata, so a misspelled name fails before anything is downloaded. AUR package names go in the same list. `archix install` adds names here through its own data file.
+List only what you want; dependencies are resolved and locked for you, and marked as dependencies in pacman's database. Names are checked offline against the sync databases and the AUR metadata, so a misspelled name fails before anything is downloaded. `archix install` adds names here through its own data file.
+
+AUR package names go in the same list. archix looks each name up in your configured repos first, third-party repos included, and only then in the AUR. There's no ambiguity with the official repos: the AUR doesn't accept packages whose names exist there.
 
 Like every list, `packages` concatenates across modules in definition order. Duplicates are harmless.
 
@@ -91,6 +93,53 @@ If several modules set `repos`, their lists concatenate in definition order, and
 Duplicate entries are ignored, and an empty list is an error: packages need at least one repository.
 
 Third-party repos such as CachyOS's are declared separately; see [Third-party repos](/docs/guides/third-party-repos/).
+
+## `undeclared_packages`
+
+| | |
+| --- | --- |
+| Type | `one of "remove", "warn"` |
+| Default | `"remove"` |
+| Declared in | `<archix>/packages.lua` |
+
+What switch does with installed packages that aren't in the lock: remove them, or only list them.
+
+With `"remove"`, a package you installed with `pacman -S` and never declared is removed on the next switch, so the system is exactly what the config says. With `"warn"`, archix keeps it and lists it in `archix diff` and `archix switch`:
+
+```console
+$ archix diff
+snapshot 2026-10-15: 1214 packages
+the system matches the lock
+not declared, kept because undeclared_packages = "warn": htop ncdu
+```
+
+`"warn"` is a good setting while you move an existing system into your config. Switch back to the default once that line is gone. See [pacman and yay](/docs/concepts/pacman-and-yay/#undeclared-packages).
+
+```lua title="lua/hosts/desktop.lua"
+return {
+  undeclared_packages = "warn",
+}
+```
+
+## `ignored_packages`
+
+| | |
+| --- | --- |
+| Type | `list of str` |
+| Default | `[]` |
+| Declared in | `<archix>/packages.lua` |
+
+Installed packages archix leaves alone and never reports as undeclared.
+
+Use it for packages you deliberately manage by hand on every machine that uses the config, such as a driver you build yourself or a tool you test from a local checkout. An ignored package is never removed, whatever `undeclared_packages` says, and never shows up in `diff`. Like `packages`, the list concatenates across modules.
+
+```lua title="lua/modules/common.lua"
+return {
+  ignored_packages = { "nvidia-dkms-custom" },
+}
+```
+
+Ignoring only affects packages that aren't in the lock. A package you also declare in `packages` is managed as usual.
 
 ## `programs.<name>`
 

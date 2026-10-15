@@ -133,6 +133,11 @@ gaming.enable
     default: false
     Install Steam and friends
     declared in lua/modules/gaming.lua
+ignored_packages
+    type: list of str
+    default: []
+    Installed packages archix leaves alone and never reports as undeclared.
+    declared in <archix>/packages.lua
 packages
     type: list of str
     default: []
