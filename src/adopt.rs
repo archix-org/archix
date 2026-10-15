@@ -12,6 +12,7 @@ use crate::fetch::{Wanted, fetch_all, sha256};
 use crate::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, Locked};
 use crate::pacman::{LocalPkg, vercmp};
 use crate::paths::Paths;
+use crate::repos::Repo;
 use crate::resolve::{Aur, resolve};
 
 /// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves.
@@ -33,6 +34,7 @@ pub fn adopt(
     paths: &Paths,
     lock: &HostLock,
     installed: &BTreeMap<String, LocalPkg>,
+    repos: &[Repo],
     aur: Option<&Aur>,
 ) -> Result<HostLock> {
     let newer = newer_than_lock(lock, installed);
@@ -49,7 +51,7 @@ pub fn adopt(
 
     let mut best: Option<(usize, HostLock)> = None;
     for date in candidates {
-        let mut resolved = match resolve(archive, cache, date, &lock.repos, &lock.declared, aur) {
+        let mut resolved = match resolve(archive, cache, date, repos, &lock.declared, aur) {
             Ok(resolved) => resolved,
             Err(e) => {
                 eprintln!("skipping snapshot {date}: {e:#}");

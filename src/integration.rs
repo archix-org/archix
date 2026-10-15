@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::apply::TRANSACTION_ENV;
 use crate::paths::Paths;
+use crate::repos::{Repo, is_official};
+
+const BEFORE_BEGIN: &str = "# BEGIN archix custom repos (before the official repos)";
+const BEFORE_END: &str = "# END archix custom repos (before the official repos)";
+const AFTER_BEGIN: &str = "# BEGIN archix custom repos (after the official repos)";
+const AFTER_END: &str = "# END archix custom repos (after the official repos)";
 
 /// Packages changed by one pacman or AUR-helper transaction that archix didn't run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +56,80 @@ pub fn ensure(paths: &Paths) -> Result<()> {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         }
         fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// pacman.conf with archix's custom-repo blocks replaced by `repos`' custom ones, placed around the official repos.
+pub fn with_custom_repos(conf: &str, repos: &[Repo]) -> String {
+    let mut lines: Vec<&str> = Vec::new();
+    let mut skipping = false;
+    for line in conf.lines() {
+        if line == BEFORE_BEGIN || line == AFTER_BEGIN {
+            skipping = true;
+        } else if line == BEFORE_END || line == AFTER_END {
+            skipping = false;
+        } else if !skipping {
+            lines.push(line);
+        }
+    }
+    let block = |begin: &str, end: &str, before: bool| -> Vec<String> {
+        let mut out = Vec::new();
+        for repo in repos {
+            let Some(custom) = repo.custom.as_ref().filter(|c| c.before_official == before) else {
+                continue;
+            };
+            out.push(format!("[{}]", repo.name));
+            out.push(format!("SigLevel = {}", custom.sig_level));
+            out.extend(custom.servers.iter().map(|server| format!("Server = {server}")));
+            out.push(String::new());
+        }
+        if out.is_empty() {
+            return out;
+        }
+        let mut wrapped = vec![begin.to_string()];
+        wrapped.extend(out);
+        wrapped.push(end.to_string());
+        wrapped
+    };
+    let before = block(BEFORE_BEGIN, BEFORE_END, true);
+    let after = block(AFTER_BEGIN, AFTER_END, false);
+    let first_official = lines.iter().position(|line| {
+        line.trim()
+            .strip_prefix('[')
+            .and_then(|l| l.strip_suffix(']'))
+            .is_some_and(is_official)
+    });
+    let mut out: Vec<String> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if Some(i) == first_official {
+            out.extend(before.iter().cloned());
+        }
+        out.push(line.to_string());
+    }
+    if first_official.is_none() {
+        out.extend(before);
+    }
+    if !after.is_empty() {
+        if out.last().is_some_and(|l| !l.is_empty()) {
+            out.push(String::new());
+        }
+        out.extend(after);
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// Keeps /etc/pacman.conf's archix-managed repo sections in step with the config.
+pub fn sync_pacman_conf(paths: &Paths, repos: &[Repo]) -> Result<()> {
+    let current =
+        fs::read_to_string(&paths.pacman_conf).with_context(|| format!("reading {}", paths.pacman_conf.display()))?;
+    let wanted = with_custom_repos(&current, repos);
+    if wanted != current {
+        let tmp = paths.pacman_conf.with_extension("conf.archix");
+        fs::write(&tmp, &wanted)?;
+        fs::rename(&tmp, &paths.pacman_conf).with_context(|| format!("writing {}", paths.pacman_conf.display()))?;
     }
     Ok(())
 }
@@ -112,6 +192,39 @@ mod tests {
         assert_eq!(changes[1].packages, ["lemon", "sqlite"]);
         clear_outside_changes(&paths).unwrap();
         assert!(outside_changes(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn custom_repo_blocks_go_around_the_official_repos_and_are_replaced() {
+        use crate::repos::Custom;
+        let custom = |before: bool| Custom {
+            servers: vec!["https://example/$repo".into()],
+            keys: vec![],
+            keyserver: String::new(),
+            sig_level: "Optional".into(),
+            before_official: before,
+        };
+        let repos = vec![
+            Repo {
+                name: "cachyos".into(),
+                custom: Some(custom(true)),
+            },
+            Repo::official("core"),
+            Repo {
+                name: "late".into(),
+                custom: Some(custom(false)),
+            },
+        ];
+        let conf = "[options]\nHoldPkg = pacman\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        let once = with_custom_repos(conf, &repos);
+        let cachyos = once.find("[cachyos]").unwrap();
+        assert!(cachyos < once.find("[core]").unwrap() && once.find("[late]").unwrap() > once.find("[core]").unwrap());
+        assert_eq!(with_custom_repos(&once, &repos), once, "rewriting is idempotent");
+        assert_eq!(
+            with_custom_repos(&once, &repos[1..2]).trim_end(),
+            conf.trim_end(),
+            "removing repos removes blocks"
+        );
     }
 
     #[test]

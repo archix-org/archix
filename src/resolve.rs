@@ -14,6 +14,7 @@ use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
 use crate::lock::{AUR_REPO, HostLock, Locked};
 use crate::pacman::read_sync_db;
+use crate::repos::{Repo, fetch_db};
 
 /// Where AUR packages come from while resolving, and the previous lock whose AUR commits are kept.
 pub struct Aur<'a> {
@@ -44,20 +45,39 @@ impl<'a> Aur<'a> {
 }
 
 /// A pacman config and db directory for one archive snapshot; `local/` is empty, so it resolves as if from scratch.
-pub fn snapshot_conf(archive: &Archive, cache: &Path, date: Date, repos: &[String]) -> Result<(PathBuf, PathBuf)> {
-    let db = archive.snapshot_db(cache, date, repos)?;
+pub fn snapshot_conf(archive: &Archive, cache: &Path, date: Date, repos: &[Repo]) -> Result<(PathBuf, PathBuf)> {
+    let official: Vec<String> = repos
+        .iter()
+        .filter(|r| r.custom.is_none())
+        .map(|r| r.name.clone())
+        .collect();
+    let db = archive.snapshot_db(cache, date, &official)?;
+    for repo in repos.iter().filter(|r| r.custom.is_some()) {
+        fetch_db(archive, repo, &db.join("sync").join(format!("{}.db", repo.name)))?;
+    }
     let conf = db.join("pacman.conf");
     fs::write(&conf, pacman_conf(archive, date, repos)).with_context(|| format!("writing {}", conf.display()))?;
     Ok((conf, db))
 }
 
-/// The pacman.conf that serves exactly one archive snapshot.
-pub fn pacman_conf(archive: &Archive, date: Date, repos: &[String]) -> String {
+/// The pacman.conf serving one archive snapshot of the official repos, plus custom repos as they are now.
+pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
     let mut text = format!(
         "[options]\nArchitecture = {ARCH}\nSigLevel = Required DatabaseOptional\nLocalFileSigLevel = Optional\n"
     );
     for repo in repos {
-        let _ = write!(text, "\n[{repo}]\nServer = {}\n", archive.repo_url(date, repo));
+        let _ = write!(text, "\n[{}]\n", repo.name);
+        match &repo.custom {
+            None => {
+                let _ = writeln!(text, "Server = {}", archive.repo_url(date, &repo.name));
+            }
+            Some(custom) => {
+                let _ = writeln!(text, "SigLevel = {}", custom.sig_level);
+                for server in &custom.servers {
+                    let _ = writeln!(text, "Server = {server}");
+                }
+            }
+        }
     }
     text
 }
@@ -67,7 +87,7 @@ pub fn resolve(
     archive: &Archive,
     cache: &Path,
     date: Date,
-    repos: &[String],
+    repos: &[Repo],
     declared: &[String],
     aur: Option<&Aur>,
 ) -> Result<HostLock> {
@@ -77,7 +97,7 @@ pub fn resolve(
     }
     let mut lock = HostLock {
         date,
-        repos: repos.to_vec(),
+        repos: repos.iter().map(|r| r.name.clone()).collect(),
         declared: declared.to_vec(),
         pinned: Vec::new(),
         packages: BTreeMap::new(),
@@ -116,7 +136,8 @@ pub fn resolve(
         };
         let mut sync = BTreeMap::new();
         for repo in repos {
-            sync.insert(repo.clone(), read_sync_db(&db.join("sync").join(format!("{repo}.db")))?);
+            let path = db.join("sync").join(format!("{}.db", repo.name));
+            sync.insert(repo.name.clone(), read_sync_db(&path)?);
         }
         for (name, version, repo) in closure {
             let Some(pkg) = sync.get(&repo).and_then(|packages| packages.get(&name)) else {

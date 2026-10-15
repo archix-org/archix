@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io;
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -8,23 +10,26 @@ use archix::adopt::{adopt, newer_than_lock};
 use archix::apply;
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::aur::build::Builder;
-use archix::aur::install::{BuildFailed, Installer, nearest};
+use archix::aur::index::Index;
+use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
-use archix::fetch::sha256;
+use archix::fetch::{Wanted, fetch_all, sha256};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
 use archix::journal::{Journal, Kind};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
-use archix::pacman::read_local_db;
+use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
 use archix::plan::Change;
+use archix::repos::{Repo, fetch_db};
+use archix::resolve::snapshot_conf;
 
 use super::lock::{current_lock, save_lock};
 use super::{
-    Declared, Nearest, Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, declared, print_warned,
-    refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
+    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm, declared,
+    print_warned, refuse_if_unfinished, require_root, select_changes, transaction_for, user_cache,
 };
 
 pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>) -> Result<()> {
@@ -53,7 +58,15 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
             let git = aur_git(&declared)?;
             let previous = lock.clone();
             let aur = aur_source(&git, &declared, &archive, Some(&previous), false);
-            let adopted = adopt(&archive, &user_cache()?, &paths, &previous, &installed, Some(&aur))?;
+            let adopted = adopt(
+                &archive,
+                &user_cache()?,
+                &paths,
+                &previous,
+                &installed,
+                &declared.repos,
+                Some(&aur),
+            )?;
             let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
             save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
             drop(aur);
@@ -94,7 +107,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     print_warned(&warned);
     if changes.is_empty() {
         if let Some(current) = current.filter(|current| current.same_system(&generation)) {
-            finish(&paths)?;
+            finish(&paths, &declared.repos)?;
             println!(
                 "nothing to do: the system matches generation {} (snapshot {})",
                 current.number, lock.date
@@ -103,7 +116,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
         }
         let created = store.create(generation)?;
         store.activate(created.number)?;
-        finish(&paths)?;
+        finish(&paths, &declared.repos)?;
         println!(
             "generation {} is current (snapshot {}, no package changes)",
             created.number, lock.date
@@ -115,6 +128,20 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     }
     if !noconfirm && !confirm(&format!("apply {} changes?", changes.len()))? {
         bail!("aborted; nothing was changed");
+    }
+
+    import_keys(&declared.repos)?;
+    let mut changes = changes;
+    if third_party_fallback(target, &declared, &paths, &archive, &mut lock, &changes, noconfirm)? {
+        changes = select_changes(
+            &lock.packages,
+            &installed,
+            declared.remove_undeclared,
+            &declared.ignored,
+        )
+        .0;
+        generation.packages = lock.packages.clone();
+        carry_aur_hashes(&mut generation.packages, current.as_ref());
     }
 
     let aur_names: Vec<String> = changes
@@ -164,14 +191,22 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>)
     }
     generation.date = lock.date;
 
-    let transaction = transaction_for(&archive, &paths, lock.date, &lock.packages, &changes, &built)?;
+    let transaction = transaction_for(
+        &archive,
+        &paths,
+        lock.date,
+        &lock.packages,
+        &changes,
+        &built,
+        &declared.repos,
+    )?;
     let created = store.create(generation)?;
     let name = format!("generation {} (snapshot {})", created.number, lock.date);
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
     journal.save(&paths.journal())?;
     apply::run(&paths, &mut journal, false)?;
-    finish(&paths)?;
+    finish(&paths, &declared.repos)?;
     println!("switched to {name}");
     Ok(())
 }
@@ -269,10 +304,163 @@ fn build_aur(
     }
 }
 
+/// Imports and locally signs custom repos' signing keys that pacman's keyring doesn't have yet.
+fn import_keys(repos: &[Repo]) -> Result<()> {
+    for repo in repos {
+        let Some(custom) = &repo.custom else { continue };
+        for key in &custom.keys {
+            let known = Command::new("pacman-key")
+                .args(["--list-keys", key])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if known {
+                continue;
+            }
+            eprintln!(":: importing {}'s signing key {key}", repo.name);
+            for args in [
+                vec!["--keyserver", custom.keyserver.as_str(), "--recv-keys", key],
+                vec!["--lsign-key", key],
+            ] {
+                let status = Command::new("pacman-key")
+                    .args(&args)
+                    .status()
+                    .context("running pacman-key")?;
+                if !status.success() {
+                    bail!("pacman-key {} failed for {}'s key {key}", args.join(" "), repo.name);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replaces locked custom-repo packages that are gone (not cached, not on the servers) per `third_party_fallback`.
+fn third_party_fallback(
+    target: &Target,
+    declared: &Declared,
+    paths: &Paths,
+    archive: &Archive,
+    lock: &mut HostLock,
+    changes: &[Change],
+    noconfirm: bool,
+) -> Result<bool> {
+    let old = lock.clone();
+    let mut replaced = false;
+    for change in changes {
+        let (Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. }) = change
+        else {
+            continue;
+        };
+        let pkg = lock.packages[name].clone();
+        let Some(repo) = declared.repo(&pkg.repo).filter(|repo| repo.custom.is_some()) else {
+            continue;
+        };
+        let wanted = Wanted {
+            name: name.clone(),
+            file: pkg.file.clone(),
+            urls: repo.urls(&pkg.file),
+            sha256: Some(pkg.sha256.clone()),
+        };
+        if fetch_all(
+            archive,
+            &paths.packages(),
+            std::slice::from_ref(&paths.pacman_cache),
+            &[wanted],
+        )
+        .is_ok()
+        {
+            continue;
+        }
+        println!("{name} {} is gone from {}", pkg.version, repo.name);
+        let fall_back = match declared.third_party_fallback {
+            ThirdPartyFallback::Fail => bail!(
+                "{name} {} is gone from {}; third_party_fallback = \"fail\"",
+                pkg.version,
+                repo.name
+            ),
+            ThirdPartyFallback::Fallback => true,
+            ThirdPartyFallback::Ask => {
+                noconfirm || confirm("fall back to its current version, the AUR, or the official repos?")?
+            }
+        };
+        if !fall_back {
+            bail!("aborted; nothing was changed");
+        }
+        let mut replacement = fallback_source(declared, archive, lock.date, repo, name)?;
+        replacement.explicit = pkg.explicit;
+        println!("using {name} {} from {}", replacement.version, replacement.repo);
+        lock.packages.insert(name.clone(), replacement);
+        lock.pinned.retain(|pinned| pinned != name);
+        replaced = true;
+    }
+    if replaced {
+        let git = aur_git(declared)?;
+        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
+        let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+        save_lock(target, &mut lockfile, Some(&old), lock)?;
+    }
+    Ok(replaced)
+}
+
+/// The next source down the chain: the custom repo's current version, then the AUR, then the official repos.
+fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Repo, name: &str) -> Result<Locked> {
+    let cache = user_cache()?;
+    let fresh = cache.join("custom-dbs");
+    fs::create_dir_all(&fresh)?;
+    let db = fresh.join(format!("{}.db", repo.name));
+    if fetch_db(archive, repo, &db).is_ok()
+        && let Some(pkg) = read_sync_db(&db)?.remove(name)
+    {
+        return Ok(Locked {
+            version: pkg.version,
+            repo: repo.name.clone(),
+            file: pkg.filename,
+            sha256: pkg.sha256,
+            ..Default::default()
+        });
+    }
+    let index = Index::load(archive, &declared.aur_url, &cache, false)?;
+    if let Some(entry) = index.get(name) {
+        let git = aur_git(declared)?;
+        let base = entry.package_base.clone();
+        git.sync(&base)?;
+        let commit = git.head(&base)?;
+        let info = read_srcinfo(&git, &base, &commit)?;
+        if let Some(pkg) = info.package(name) {
+            return Ok(Locked {
+                version: info.version.clone(),
+                repo: AUR_REPO.to_string(),
+                file: info.file(pkg),
+                base: Some(base),
+                commit: Some(commit),
+                ..Default::default()
+            });
+        }
+    }
+    let official: Vec<Repo> = declared.repos.iter().filter(|r| r.custom.is_none()).cloned().collect();
+    let (_, db) = snapshot_conf(archive, &cache, date, &official)?;
+    for repo in &official {
+        if let Some(pkg) = read_sync_db(&db.join("sync").join(format!("{}.db", repo.name)))?.remove(name) {
+            return Ok(Locked {
+                version: pkg.version,
+                repo: repo.name.clone(),
+                file: pkg.filename,
+                sha256: pkg.sha256,
+                ..Default::default()
+            });
+        }
+    }
+    bail!(
+        "{name} is gone from {} and is in neither the AUR nor the official repos",
+        repo.name
+    )
+}
+
 /// After a successful switch: outside changes are reconciled, integration files are in place, old garbage goes.
-fn finish(paths: &Paths) -> Result<()> {
+fn finish(paths: &Paths, repos: &[Repo]) -> Result<()> {
     integration::clear_outside_changes(paths)?;
     integration::ensure(paths)?;
+    integration::sync_pacman_conf(paths, repos)?;
     match gc::collect(paths, &user_cache()?) {
         Ok(report) => print_gc(&report, false),
         Err(e) => eprintln!("warning: garbage collection failed: {e:#}"),
@@ -349,6 +537,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool) -> Result<()> {
         &generation.packages,
         &changes,
         &BTreeMap::new(),
+        &[],
     )?;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);

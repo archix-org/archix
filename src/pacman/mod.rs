@@ -60,11 +60,18 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
     File::open(path)
         .and_then(|mut f| f.read_to_end(&mut bytes))
         .with_context(|| format!("reading {}", path.display()))?;
-    if !bytes.starts_with(&[0x1f, 0x8b]) {
-        bail!("{} is not a gzip-compressed sync database", path.display());
-    }
+    let decoder: Box<dyn Read> = if bytes.starts_with(&[0x1f, 0x8b]) {
+        Box::new(GzDecoder::new(bytes.as_slice()))
+    } else if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        Box::new(zstd::Decoder::new(bytes.as_slice()).with_context(|| format!("reading {}", path.display()))?)
+    } else {
+        bail!(
+            "{} is neither a gzip- nor a zstd-compressed sync database",
+            path.display()
+        );
+    };
     let mut packages = BTreeMap::new();
-    let mut archive = tar::Archive::new(GzDecoder::new(bytes.as_slice()));
+    let mut archive = tar::Archive::new(decoder);
     for entry in archive
         .entries()
         .with_context(|| format!("reading {}", path.display()))?

@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use tempfile::TempDir;
 
 /// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
@@ -138,4 +141,120 @@ pub fn cached_file(dir: &Path, name: &str) -> PathBuf {
             file.starts_with(&format!("{name}-")) && file.ends_with(".pkg.tar.zst")
         })
         .unwrap_or_else(|| panic!("no cached {name} package in {}", dir.display()))
+}
+
+/// A package published to the local test AUR.
+pub struct TestPkg<'a> {
+    pub name: &'a str,
+    pub version: &'a str,
+    pub depends: &'a [&'a str],
+    pub makedepends: &'a [&'a str],
+    pub build: &'a str,
+    pub package: &'a str,
+}
+
+impl<'a> TestPkg<'a> {
+    pub fn new(name: &'a str, version: &'a str) -> Self {
+        TestPkg {
+            name,
+            version,
+            depends: &[],
+            makedepends: &[],
+            build: "true",
+            package: "",
+        }
+    }
+}
+
+/// An AUR served from local bare git repos plus a metadata dump, so AUR tests don't depend on aur.archlinux.org.
+pub struct LocalAur {
+    dir: TempDir,
+    published: Vec<(String, String)>,
+}
+
+impl LocalAur {
+    pub fn new() -> LocalAur {
+        LocalAur {
+            dir: TempDir::new().unwrap(),
+            published: Vec::new(),
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("file://{}", self.dir.path().display())
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-c", "user.name=test", "-c", "user.email=test@example.com", "-C"])
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    pub fn publish(&mut self, pkg: TestPkg) {
+        let bare = self.dir.path().join(format!("{}.git", pkg.name));
+        let work = self.dir.path().join("work").join(pkg.name);
+        if !bare.exists() {
+            fs::create_dir_all(&bare).unwrap();
+            LocalAur::git(&bare, &["init", "--quiet", "--bare", "-b", "master"]);
+            fs::create_dir_all(&work).unwrap();
+            LocalAur::git(&work, &["init", "--quiet", "-b", "master"]);
+            LocalAur::git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        }
+        let list = |items: &[&str]| items.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(" ");
+        let pkgbuild = format!(
+            "pkgname={name}\npkgver={version}\npkgrel=1\npkgdesc='archix test package {name}'\narch=('any')\n\
+             license=('MIT')\ndepends=({depends})\nmakedepends=({makedepends})\n\
+             build() {{\n  {build}\n}}\n\
+             package() {{\n  install -d \"$pkgdir/usr/share/{name}\"\n  echo {version} > \"$pkgdir/usr/share/{name}/version\"\n  {package}\n}}\n",
+            name = pkg.name,
+            version = pkg.version,
+            depends = list(pkg.depends),
+            makedepends = list(pkg.makedepends),
+            build = pkg.build,
+            package = pkg.package,
+        );
+        let mut srcinfo = format!(
+            "pkgbase = {name}\n\tpkgdesc = archix test package {name}\n\tpkgver = {version}\n\tpkgrel = 1\n\tarch = any\n\tlicense = MIT\n",
+            name = pkg.name,
+            version = pkg.version
+        );
+        for dep in pkg.makedepends {
+            srcinfo.push_str(&format!("\tmakedepends = {dep}\n"));
+        }
+        for dep in pkg.depends {
+            srcinfo.push_str(&format!("\tdepends = {dep}\n"));
+        }
+        srcinfo.push_str(&format!("\npkgname = {}\n", pkg.name));
+        fs::write(work.join("PKGBUILD"), pkgbuild).unwrap();
+        fs::write(work.join(".SRCINFO"), srcinfo).unwrap();
+        LocalAur::git(&work, &["add", "."]);
+        LocalAur::git(
+            &work,
+            &["commit", "--quiet", "-m", &format!("{} {}", pkg.name, pkg.version)],
+        );
+        LocalAur::git(&work, &["push", "--quiet", "origin", "master"]);
+
+        self.published.retain(|(name, _)| name != pkg.name);
+        self.published
+            .push((pkg.name.to_string(), format!("{}-1", pkg.version)));
+        let entries: Vec<serde_json::Value> = self
+            .published
+            .iter()
+            .map(|(name, version)| {
+                serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Popularity": 0.0 })
+            })
+            .collect();
+        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+        gz.write_all(serde_json::to_string(&entries).unwrap().as_bytes())
+            .unwrap();
+        fs::write(
+            self.dir.path().join("packages-meta-ext-v1.json.gz"),
+            gz.finish().unwrap(),
+        )
+        .unwrap();
+    }
 }

@@ -14,6 +14,7 @@ use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all};
 use crate::pacman::read_sync_db;
 use crate::paths::Paths;
+use crate::repos::{Repo, is_official};
 use crate::resolve::{pacman_conf, print_targets, snapshot_conf};
 
 /// The unprivileged user AUR packages are built as; makepkg refuses to run as root.
@@ -134,7 +135,7 @@ impl Builder<'_> {
         let marker = chroot.join("snapshot");
         let conf = chroot.join("pacman.conf");
         fs::create_dir_all(&chroot)?;
-        fs::write(&conf, pacman_conf(self.archive, date, repos))?;
+        fs::write(&conf, pacman_conf(self.archive, date, &official(repos)))?;
         if !root.join(".arch-chroot").exists() {
             if root.exists() {
                 fs::remove_dir_all(&root)?;
@@ -196,7 +197,7 @@ impl Builder<'_> {
         let installed_before = crate::pacman::read_local_db(&self.paths.local_db())?;
         let mut files: Vec<PathBuf> = inputs.to_vec();
         if !missing.is_empty() {
-            let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, repos)?;
+            let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, &official(repos))?;
             let needed: Vec<(String, String, String)> = print_targets(&conf, &db, &missing, false)?
                 .into_iter()
                 .filter(|(name, _, _)| !installed_before.contains_key(name))
@@ -246,6 +247,15 @@ impl Builder<'_> {
         }
         built
     }
+}
+
+/// The chroot only gets the official repos; custom repos would need their signing keys inside it too.
+fn official(repos: &[String]) -> Vec<Repo> {
+    repos
+        .iter()
+        .filter(|name| is_official(name))
+        .map(|name| Repo::official(name))
+        .collect()
 }
 
 fn devtools(program: &str) -> Command {

@@ -21,6 +21,7 @@ use archix::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, Locked};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
+use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
@@ -51,7 +52,8 @@ pub enum RecoverMode {
 /// The package-related settings from the evaluated config.
 struct Declared {
     packages: Vec<String>,
-    repos: Vec<String>,
+    repos: Vec<Repo>,
+    third_party_fallback: ThirdPartyFallback,
     remove_undeclared: bool,
     ignored: BTreeSet<String>,
     keep: u32,
@@ -60,6 +62,23 @@ struct Declared {
     aur_review: bool,
     build_on_host: BTreeSet<String>,
     missing_versions: Option<Nearest>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ThirdPartyFallback {
+    Ask,
+    Fallback,
+    Fail,
+}
+
+impl Declared {
+    fn repo_names(&self) -> Vec<String> {
+        self.repos.iter().map(|repo| repo.name.clone()).collect()
+    }
+
+    fn repo(&self, name: &str) -> Option<&Repo> {
+        self.repos.iter().find(|repo| repo.name == name)
+    }
 }
 
 /// Which version to take when a locked AUR version can't be built any more.
@@ -90,15 +109,48 @@ fn declared(config: &Value) -> Result<Declared> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let mut repos = Vec::new();
+    let mut official = Vec::new();
     for repo in strings("repos") {
-        if !repos.contains(&repo) {
-            repos.push(repo);
+        if !official.contains(&repo) {
+            official.push(repo);
         }
     }
-    if repos.is_empty() {
+    if official.is_empty() {
         bail!("`repos` is empty; packages need at least one repository");
     }
+    let mut custom = Vec::new();
+    if let Some(Value::List(entries)) = map.get("custom_repos") {
+        for entry in entries {
+            let Value::Map(entry) = entry else { continue };
+            let text = |key: &str| match entry.get(key) {
+                Some(Value::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let list = |key: &str| match entry.get(key) {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let name = text("name");
+            if is_official(&name) || custom.iter().any(|(existing, _)| *existing == name) {
+                bail!("custom repo `{name}` clashes with an official or another custom repo");
+            }
+            let repo = Custom {
+                servers: list("servers"),
+                keys: list("keys"),
+                keyserver: text("keyserver"),
+                sig_level: text("sig_level"),
+                before_official: entry.get("before_official") == Some(&Value::Bool(true)),
+            };
+            custom.push((name, repo));
+        }
+    }
+    let repos = ordered(&official, custom);
     let generation_limit = |key: &str, default: u32| match map.get("generations") {
         Some(Value::Map(limits)) => match limits.get(key) {
             Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(default),
@@ -109,6 +161,11 @@ fn declared(config: &Value) -> Result<Declared> {
     Ok(Declared {
         packages,
         repos,
+        third_party_fallback: match map.get("third_party_fallback") {
+            Some(Value::Str(policy)) if policy == "fallback" => ThirdPartyFallback::Fallback,
+            Some(Value::Str(policy)) if policy == "fail" => ThirdPartyFallback::Fail,
+            _ => ThirdPartyFallback::Ask,
+        },
         remove_undeclared: map.get("undeclared_packages") != Some(&Value::Str("warn".into())),
         ignored: strings("ignored_packages").into_iter().collect(),
         keep: generation_limit("keep", 10),
@@ -181,6 +238,7 @@ fn transaction_for(
     packages: &BTreeMap<String, Locked>,
     changes: &[Change],
     built: &BTreeMap<String, PathBuf>,
+    repos: &[Repo],
 ) -> Result<Transaction> {
     let mut wanted = Vec::new();
     let mut remove = Vec::new();
@@ -203,10 +261,15 @@ fn transaction_for(
                     });
                     continue;
                 }
-                let mut urls = vec![archive.package_url(name, &pkg.file)];
-                if pkg.repo != ARCHIVE_REPO {
-                    urls.insert(0, format!("{}/{}", archive.repo_url(date, &pkg.repo), pkg.file));
-                }
+                let custom = repos.iter().find(|repo| repo.name == pkg.repo && repo.custom.is_some());
+                let urls = match custom {
+                    Some(repo) => repo.urls(&pkg.file),
+                    None if pkg.repo == ARCHIVE_REPO => vec![archive.package_url(name, &pkg.file)],
+                    None => vec![
+                        format!("{}/{}", archive.repo_url(date, &pkg.repo), pkg.file),
+                        archive.package_url(name, &pkg.file),
+                    ],
+                };
                 wanted.push(Wanted {
                     name: name.clone(),
                     file: pkg.file.clone(),

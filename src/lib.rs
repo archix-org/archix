@@ -14,5 +14,6 @@ pub mod options;
 pub mod pacman;
 pub mod paths;
 pub mod plan;
+pub mod repos;
 pub mod resolve;
 pub mod value;
