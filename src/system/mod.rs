@@ -248,7 +248,9 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             bail!("files: {path:?} must be an absolute file path");
         }
         if FORBIDDEN.iter().any(|prefix| path.starts_with(prefix)) && !path.starts_with("/usr/local/") {
-            bail!("files: {path} is in a directory archix doesn't write to (home files come with step 6's dotfiles)");
+            bail!(
+                "files: {path} is in a directory archix doesn't write to; home files go in home.files, and boot entries in boot.extra_entries"
+            );
         }
         let mut mode = u32::from_str_radix(str_of(spec, "mode").unwrap_or("0644"), 8)
             .with_context(|| format!("files.{path}.mode must be octal, like \"0644\""))?;
@@ -364,6 +366,15 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         b.text("/etc/vconsole.conf", &format!("KEYMAP={keymap}\n"));
     }
     render_environment(&mut b, root("environment"));
+    if let Some(boot) = root("boot") {
+        let esp = str_of(boot, "esp").unwrap_or("/boot").trim_end_matches('/').to_string();
+        for (name, text) in map(boot, "extra_entries").into_iter().flatten() {
+            if !name.ends_with(".conf") {
+                bail!("boot.extra_entries: {name:?} must end in .conf, as systemd-boot reads only those");
+            }
+            b.text(&format!("{esp}/loader/entries/{}", unit_name(name)?), &lines(text));
+        }
+    }
     if let Some(rules) = firewall::ruleset(root("firewall").unwrap_or(&Value::Null))? {
         b.text(firewall::RULES, &rules);
         b.text(&format!("/etc/systemd/system/{}", firewall::UNIT), &firewall::unit());

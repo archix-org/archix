@@ -25,6 +25,11 @@ return {
         default = archix.null,
         description = "Sign boot entries with sbctl; by default, whenever sbctl has keys.",
       },
+      extra_entries = archix.option {
+        type = t.attrs_of(t.lines),
+        default = {},
+        description = "More systemd-boot entries archix writes to the ESP's loader/entries, keyed by file name, such as [\"memtest86+.conf\"] = \"title Memtest86+\\nefi /memtest86+/memtest.efi\". With Secure Boot on, whatever they start must be signed too.",
+      },
       protected_entry = archix.option {
         type = t.bool,
         default = false,
