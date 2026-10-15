@@ -5,78 +5,128 @@ sidebar:
   order: 3
 ---
 
-Every successful `archix switch` creates a generation: a numbered, complete record of what the system looked like after that switch. Rolling back means making the system match an older generation again.
+Every `archix switch` that changes something creates a generation: a numbered, complete record of what the system looked like after that switch. Rolling back means making the system match an older generation again.
 
 ## What a generation contains
 
-- **The lock.** Every package's exact version and file, for this host.
-- **The rendered managed files.** Every `/etc` file, dotfile and unit archix wrote, stored content-addressed, so identical files across generations are stored once.
-- **The package files it references.** Kept in the package cache for as long as the generation is kept, so rolling back never needs the network.
-- **The config's git commit**, if your config directory is a git repo. You can always see which version of your config built a generation.
+Generations live in `/var/lib/archix/generations/<n>/generation.json`, and `/var/lib/archix/current` points at the current one. Each one records:
 
-Each generation also keeps its own kernel and modules, and gets its own boot entry.
+- **The packages.** The snapshot date and every package's exact version, file and sha256, including the sha256 of each AUR package it built.
+- **The managed files, users, groups and services.** File contents are stored once by sha256 in `/var/lib/archix/blobs`, so identical files across generations cost nothing extra.
+- **The settings it was applied with.** `undeclared_packages`, `ignored_packages`, the generation limits and the boot settings, so rollback and `gc` work without evaluating your config.
+- **The config's git commit**, if your config directory is a git repo, and whether the tree had uncommitted changes.
+- **Its btrfs snapshot**, on a btrfs root.
+
+A switch that only changes settings, such as `ignored_packages` or a boot option, still creates a generation, so turning on Secure Boot gives you newly signed entries. A switch that changes nothing prints `nothing to do: the system matches generation 42 (snapshot 2026-10-15)` and creates none.
+
+```console
+$ archix generations
+    40  2026-10-02 18:40 UTC  snapshot 2026-10-02  210 packages  config 8c1f0e2a7b
+    41  2026-10-09 09:12 UTC  snapshot 2026-10-09  212 packages  config 3f2a9c1e07
+*   42  2026-10-15 08:55 UTC  snapshot 2026-10-15  214 packages  config 5d7b21c4e9+uncommitted
+```
+
+`*` marks the current generation. A generation only becomes current in the last step of a switch, after everything else succeeded, by atomically replacing the `current` link. An interrupted switch never becomes current.
 
 ## Rolling back from a running system
 
 ```console
 $ sudo archix rollback
+downgrade  linux 7.2.9.arch1-1 -> 7.2.8.arch1-1
+downgrade  mesa 1:25.3.1-1 -> 1:25.3.0-1
+roll back to generation 41 (snapshot 2026-10-09) with 2 changes? [Y/n]
+:: installing packages
+...
+:: making the new generation current
+rolled back to generation 41 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-This makes the system match the previous generation: its packages are reinstalled from the cache, its files are written back, and its services are enabled or disabled to match. It goes through the same prepare-and-apply steps as a switch, so an interrupted rollback is as recoverable as an interrupted switch. See [Safety](/docs/concepts/safety/).
+This makes the system match the previous generation: its exact package versions are reinstalled, from the cache when they're there and from the Arch Linux Archive otherwise, and its files, users, groups and services are applied again. It goes through the same journal as a switch, so an interrupted rollback is as recoverable as an interrupted switch. See [Safety](/docs/concepts/safety/).
 
-Rollback changes the system, not your config. Your `init.lua` and `archix.lock` still describe the newer generation, so the next `archix switch` will apply them again. That's deliberate: archix never rewrites your config behind your back. Before switching again, fix the config, revert it in git, or [pin](/docs/concepts/lockfile/#pins) the package that caused trouble.
+To go to a specific generation, name it. That works forwards too:
+
+```console
+$ sudo archix rollback 40
+$ sudo archix rollback 42
+```
+
+`rollback` doesn't evaluate your config, so it works even when the config is broken. It refuses while a switch is unfinished; `archix recover --rollback` is the way back from that.
+
+Rollback changes the system, not your config. Your `init.lua` and `archix.lock` still describe the newer generation, so the next `archix switch` will apply them again. That's deliberate: archix never rewrites your config behind your back. Before switching again, fix the config, revert the lock in git, or move it back with `archix update --to`.
 
 ## Rolling back from the boot menu
 
-When a generation won't boot, or boots to a broken desktop, pick an older one in systemd-boot:
+When archix manages booting, every generation gets its own boot entry. When a generation won't boot, or boots to a broken desktop, pick an older one in systemd-boot:
 
 ```
-  archix · generation 42 · Oct 15
-› archix · generation 41 · Oct 09
-  archix · generation 40 · Oct 02
-  archix rescue · generation 42
+  Arch Linux (archix, generation 42)
+› Arch Linux (archix, generation 41)
+  Arch Linux (archix, generation 40)
+  Arch Linux (archix rescue, generation 42)
+  Arch Linux (archix rescue, generation 41)
 ```
 
-What happens next depends on your filesystem.
+The entry starts generation 41's kernel with `archix.generation=41` on its command line. Early in boot, before most of the system starts, `archix-boot.service` sees that 42 is current and rolls back to 41 from the cache, exactly like `archix rollback 41`:
 
-### btrfs: the fast path
+```
+archix: booted generation 41, but 42 is current; rolling back to 41
+```
 
-On a btrfs root, archix takes a snapshot before every apply. That snapshot is the generation's rollback point. Booting an older entry boots its snapshot, so the system is exactly as it was, instantly. Nothing is reinstalled.
+You land in generation 41, and it stays current until your next switch. This works the same on every filesystem.
 
-This is why onboarding recommends btrfs.
+### Older kernels keep booting
 
-### ext4 and everything else: the baseline
+An older entry needs its kernel's modules, which pacman deletes when it upgrades the kernel. archix keeps a hardlinked copy of each entry's modules in `/var/lib/archix/kernels`, and the boot service puts the booted kernel's modules back before anything loads them.
 
-Without snapshots, archix still keeps everything a generation needs: its kernel image on the ESP, its kernel modules, and its packages and files in the cache. Booting an older entry starts that generation's kernel, then an early-boot service reinstalls the generation's packages and files from the cache before your desktop starts. You wait a little longer, then land in the old generation.
+### When pacman itself is broken
 
-This path needs a working pacman and glibc to reinstall packages. If a bad update broke those, boot the generation's **archix rescue** entry instead. Rescue mode unpacks the core packages itself, without pacman, then hands over to the normal repair. That's what makes ext4 safe without a live USB. [Safety](/docs/concepts/safety/#rescue-mode) has the details.
+Rolling back at boot needs a working pacman and glibc to reinstall packages. If a bad update broke those, boot the generation's **archix rescue** entry instead. Rescue mode restores the core packages from the cache without pacman, in the initramfs, before the system starts. [Safety](/docs/concepts/safety/#rescue-mode) has the details.
 
-## Boot entries and Secure Boot
+If a switch was interrupted, the boot service only reports it and changes nothing; run `sudo archix recover`.
 
-archix supports systemd-boot. Each generation gets a unified kernel image (UKI) and a boot entry, and the newest successful generation is the default. The default entry only moves after a switch has fully succeeded, so a failed switch never leaves you booting into it.
+## Boot entries
 
-If `sbctl` keys are present, every UKI is signed, so rollback works with Secure Boot enabled.
+Set `boot.loader = "systemd-boot"` (`archix init` offers it when systemd-boot is installed) and archix writes a boot entry for each generation. Your `kernel_params` must contain `root=`.
 
-GRUB and Limine are not supported. With them, runtime rollback still works, but archix doesn't write generation boot entries.
+- Each entry is a unified kernel image (UKI) built with `ukify` from a fresh `mkinitcpio` initramfs, at `/boot/EFI/Linux/archix-42.efi`. Its title comes from its embedded os-release: "Arch Linux (archix, generation 42)", with `IMAGE_VERSION=42`.
+- The entry is written in the step before the generation becomes current, after the result has been verified, so a switch that fails never gets one.
+- Only the newest [`boot.entries`](/docs/reference/options/) generations (5 by default) keep an entry, and fewer if the ESP runs short of space. `gc` prunes the rest.
+- The newest two generations also get a rescue entry, `archix-42-rescue.efi`, titled "Arch Linux (archix rescue, generation 42)".
+
+GRUB and Limine are not supported. With them, rollback from a running system still works, but archix doesn't write generation boot entries.
+
+### Secure Boot
+
+archix signs every UKI with `sbctl` when `boot.secure_boot` is `true`, or by default whenever `sbctl` has keys. It also signs systemd-boot itself, so you can keep Secure Boot enforcing without lanzaboote or a hand-written hook. Turning Secure Boot on counts as a settings change, so the next switch writes a newly signed entry.
+
+Booting older generations, Secure Boot enforcing and the rescue entry are tested by booting archix-managed generations in a QEMU VM with OVMF firmware in CI.
+
+## btrfs snapshots
+
+On a btrfs root, archix takes a read-only snapshot of `/` right before applying each switch, in `/.archix-snapshots/<generation>-<time>`. Turn it off with `boot.snapshots = false`.
+
+These snapshots are manual recovery points. Rollback, at the command line or from the boot menu, never restores them; it reinstalls packages and files the same way on every filesystem. A snapshot is there for when you want something back by hand: copy a file out of it, or, from a live USB, make a writable snapshot of it and boot that as your root. It only covers the subvolume mounted at `/`, not nested ones such as a separate `/home`. Each snapshot is deleted with its generation.
 
 ## Limits and `gc`
 
-Generations cost disk space, mostly in the package cache. archix cleans up after itself with these defaults:
+Generations cost disk space, mostly in the package cache. archix cleans up after itself:
 
 | What | Default |
 | --- | --- |
-| Boot entries | 5, and fewer if the ESP runs out of space |
-| Generations kept | The last 10, or the last 30 days, whichever keeps more |
-| Package cache | Only files referenced by kept generations |
-| btrfs snapshots | Cleaned up with their generation |
+| Generations kept | The current one, the newest 10, and every one younger than 30 days |
+| Boot entries | The newest 5, and fewer if the ESP runs out of space |
+| Rescue entries | The newest 2 |
+| Package cache, managed-file contents, snapshot databases | Only what kept generations need |
+| Preserved kernel modules | Only the kernels of kept boot entries |
+| btrfs snapshots | Deleted with their generation |
 | When | `gc` runs after every switch |
 
-Onboarding asks about the important ones, and you can change them in your config later.
-
-To clean up by hand, for example after lowering a limit:
+Set [`generations.keep`](/docs/reference/options/) and `generations.keep_days` to change the limits; `archix init` asks about them. To clean up by hand, for example after lowering a limit:
 
 ```console
 $ sudo archix gc
+deleted generations 30, 31
+freed 812.4 MiB: 46 cached package files, 3 snapshot databases
 ```
 
-`gc` only removes generations outside the limits, and never the current one. A generation that has been collected can't be rolled back to, because its package files may be gone. If you want to keep one indefinitely, raise the limits before it ages out.
+`gc` never removes the current generation. A generation that has been collected can't be rolled back to, because its package files may be gone. If you want to keep one longer, raise the limits before it ages out.

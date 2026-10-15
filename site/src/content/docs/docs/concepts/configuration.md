@@ -15,9 +15,16 @@ The layout follows neovim: an entry point at the top, and modules under `lua/`.
 /etc/archix
 ├── init.lua
 ├── archix.lock
+├── files
+│   └── desktop
+│       └── etc
+│           └── sysctl.d
+│               └── 80-swappiness.conf
 └── lua
     ├── hosts
-    │   ├── desktop.lua
+    │   ├── desktop
+    │   │   ├── init.lua
+    │   │   └── installed.lua
     │   └── laptop.lua
     └── modules
         ├── common.lua
@@ -27,8 +34,10 @@ The layout follows neovim: an entry point at the top, and modules under `lua/`.
 ```
 
 - `init.lua` is the entry point. It usually does nothing but import other modules.
-- `lua/hosts/<host>.lua` holds what's specific to one machine.
+- `lua/hosts/<host>/init.lua`, or just `lua/hosts/<host>.lua`, holds what's specific to one machine. `archix init` writes the directory form.
+- `lua/hosts/<host>/installed.lua` belongs to archix: `archix install` and `archix remove` edit it, and archix imports it automatically when it exists. See [pacman and yay](/docs/concepts/pacman-and-yay/#installedlua).
 - `lua/modules/...` holds what you share between machines.
+- `files/` holds files that options such as `files` and `home.files` copy with `source`. `archix init` puts the `/etc` files it captures under `files/<host>/`, and the dotfiles you let it import under `home/`.
 - `archix.lock` is generated. Commit it next to `init.lua`.
 
 Module names are dotted paths under `lua/`. `"modules.common"` loads `lua/modules/common.lua`, and `"modules.desktop"` loads `lua/modules/desktop/init.lua` if there's no `lua/modules/desktop.lua`.
@@ -83,7 +92,7 @@ return {
 
 Most modules only set options, so there's a shortcut. A table with none of those three keys is treated as `config`:
 
-```lua title="lua/hosts/desktop.lua"
+```lua title="lua/hosts/desktop/init.lua"
 return {
   gaming = { enable = true },
   packages = { "obs-studio" },
@@ -118,7 +127,7 @@ Options make the config checkable. Every key you set must be declared somewhere,
 
 ```console
 $ archix eval
-error: `programs.kity`: option does not exist (set in lua/hosts/desktop.lua); did you mean `programs.kitty`?
+error: `programs.kity`: option does not exist (set in lua/hosts/desktop/init.lua); did you mean `programs.kitty`?
 error: `gaming.enable`: expected bool, got string "yes" in lua/hosts/laptop.lua
 ```
 
@@ -141,7 +150,7 @@ ignored_packages
 packages
     type: list of str
     default: []
-    Packages from the official repositories. Their dependencies are installed too and recorded in archix.lock.
+    Packages to install: from the configured repositories, else from the AUR. Their dependencies are installed too and recorded in archix.lock.
     declared in <archix>/packages.lua
 ...
 ```
@@ -176,14 +185,14 @@ return {
 }
 ```
 
-the definitions are taken from `init.lua`, then `modules.common` and its imports, then `hosts.desktop` and its imports.
+the definitions are taken from `init.lua`, then `modules.common` and its imports, then `hosts.desktop` and its imports. The host's `installed.lua` comes last.
 
 Order matters for lists. List options concatenate every definition in that order:
 
 ```lua
 -- modules/common.lua
 packages = { "git", "neovim" }
--- hosts/desktop.lua
+-- hosts/desktop/init.lua
 packages = { "steam" }
 ```
 
@@ -204,9 +213,9 @@ $ archix eval | jq .packages
 When two modules set the same scalar to different values, archix doesn't guess:
 
 ```console
-error: `programs.kitty.settings.font_size`: conflicting definitions:
-    12 in lua/modules/common.lua
-    11 in lua/hosts/laptop.lua
+error: `timezone`: conflicting definitions:
+    "Europe/Berlin" in lua/modules/common.lua
+    "America/New_York" in lua/hosts/laptop.lua
   use archix.force() on the one that should win
 ```
 
@@ -224,7 +233,7 @@ So the laptop wins with:
 
 ```lua title="lua/hosts/laptop.lua"
 return {
-  programs = { kitty = { settings = { font_size = archix.force(11) } } },
+  timezone = archix.force("America/New_York"),
 }
 ```
 
@@ -232,11 +241,11 @@ Use `archix.default` in shared modules for values a host should be able to repla
 
 ```lua title="lua/modules/common.lua"
 return {
-  programs = { kitty = { enable = true, settings = { font_size = archix.default(12) } } },
+  timezone = archix.default("Europe/Berlin"),
 }
 ```
 
-Wrapping a table applies the priority to every option inside it, so `archix.force { font_size = 11, background_opacity = "0.9" }` forces both. You can't nest wrappers.
+Wrapping a table applies the priority to every option inside it, so `generations = archix.force { keep = 3, keep_days = 7 }` forces both. You can't nest wrappers.
 
 Priorities apply to lists too, and that's how you replace a list instead of extending it. Only the lowest-numbered definitions are kept, so a forced list drops every plain one:
 
@@ -265,7 +274,7 @@ Two escape hatches are declared:
 local motd = archix.read_file("files/motd")
 ```
 
-Anything with side effects, like running a command, belongs in an activation hook. Hooks run at switch time, after evaluation, so they can't make two evaluations disagree.
+Anything with side effects, like running a command, belongs in a systemd unit you declare with `units` and `services`. It runs at switch time, after evaluation, so it can't make two evaluations disagree.
 
 ## Where the config lives
 
@@ -276,10 +285,10 @@ $ archix --config ~/src/archix diff
 $ export ARCHIX_CONFIG=~/src/archix
 ```
 
-`archix init` offers to keep the config in a repo you own, with `/etc/archix` linked to it. That way you edit as yourself, and `sudo archix switch` still finds it.
+`archix init` lets you keep the config in any directory, such as a repo you own, with `/etc/archix` linked to it. That way you edit as yourself, and `sudo archix switch` still finds it.
 
-`eval`, `options`, `lock` and `diff` don't need root. Only commands that change the system do.
+`eval`, `options`, `diff`, `status`, `generations` and `search` don't need root, and neither do `lock` and `update` if you can write to the config directory. Only commands that change the system do.
 
 ### git
 
-git is optional. When the config directory is a git repo, each generation records the commit it was built from, and archix warns when you switch with uncommitted changes. It never refuses to run because of git: you can switch a dirty tree, and the warning reminds you that the generation won't match any commit exactly.
+git is optional. When the config directory is a git repo, each generation records the commit it was built from, and archix warns when you switch with uncommitted changes (`warning: /etc/archix has uncommitted changes`). It never refuses to run because of git: you can switch a dirty tree, and `archix generations` marks that generation `+uncommitted`, since it won't match any commit exactly.

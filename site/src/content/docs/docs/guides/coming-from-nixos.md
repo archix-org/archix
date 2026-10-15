@@ -16,6 +16,7 @@ You already know the ideas behind archix: a declarative config, a lockfile, gene
 | `flake.lock` | `archix.lock` |
 | `nixos-rebuild switch` | `archix switch` |
 | `nixos-rebuild switch --rollback` | `archix rollback` |
+| `nix-env --list-generations` | `archix generations` |
 | `nixos-rebuild dry-activate` | `archix diff` |
 | `nix flake update` | `archix update` |
 | `nix eval` of a config | `archix eval` |
@@ -29,7 +30,10 @@ You already know the ideas behind archix: a declarative config, a lockfile, gene
 | `builtins.readFile ./x` | `archix.read_file("x")` |
 | `networking.hostName` per host | `archix.hostname`, from the machine |
 | Home Manager `programs.*` | `programs.*`, ported from Home Manager |
-| `home.file` | `files` |
+| `home.file` | `home.files` |
+| `environment.etc` | `files` |
+| `systemd.services`, `systemd.user.services` | `units`, `services`, `home.systemd` |
+| `users.users` | `users` |
 | `nix-collect-garbage` | `archix gc` |
 | nixpkgs | The Arch repos, the AUR and third-party repos |
 | Generations in the boot menu | Generations in the systemd-boot menu |
@@ -42,7 +46,7 @@ The priorities use the same numbers: option defaults are 1500, `default` is 1000
 
 archix installs Arch's binary packages. There's no store, no derivations, no build closure to evaluate, and nothing to wait for while nixpkgs catches up. The filesystem is a normal FHS layout, so binaries from the internet, language toolchains and proprietary apps just work.
 
-The flip side: you can't override how a package is built from your config, the way `overrideAttrs` does. If you need a custom build, use a local PKGBUILD or an AUR package. archix builds those in a clean chroot and locks them like everything else.
+The flip side: you can't override how a package is built from your config, the way `overrideAttrs` does. If you need a custom build, publish it to the AUR or to a repo of your own declared in `custom_repos`. archix locks those like everything else, and builds AUR packages in a clean chroot.
 
 ### A lock of versions, not of inputs
 
@@ -71,7 +75,7 @@ Evaluation is still pure. The sandbox has no `io` or `os`, `pairs` iterates in s
 
 ### Mutable passwords
 
-archix never manages passwords. That matches NixOS's default of `users.mutableUsers = true`: users and groups are declared, passwords are set with `passwd`. Onboarding runs `passwd` for users it creates. There's no equivalent of `hashedPassword`.
+archix never manages passwords. That matches NixOS's default of `users.mutableUsers = true`: users and groups are declared, passwords are set with `passwd`. When archix creates a user, it reminds you to run `passwd`. There's no equivalent of `hashedPassword`.
 
 Encrypted secrets, agenix- or sops-style, are not supported.
 
@@ -85,7 +89,11 @@ On NixOS, imperative changes mostly don't stick. On archix they're allowed. `pac
 
 ### Bootloaders
 
-systemd-boot only. GRUB and Limine are not supported. Each generation gets a UKI, signed with sbctl if you have keys, so Secure Boot works without lanzaboote.
+systemd-boot only. GRUB and Limine are not supported. Each generation gets a UKI, signed with sbctl if you have keys, so Secure Boot works without lanzaboote. Picking an older generation in the boot menu rolls the system back to it early in boot, by reinstalling that generation's packages and files from the cache rather than switching a store path, so it works on any filesystem.
+
+### No store, so rollback reinstalls
+
+NixOS rolls back by pointing at an older closure that's still in the store. archix has no store: a rollback reinstalls the older generation's exact package files from its cache, then puts its files, users and services back. That's why `gc` keeps the package files of every kept generation, and why a collected generation can't be rolled back to.
 
 ## Porting a config
 
@@ -97,7 +105,7 @@ The NixOS config ports by hand, module by module. These tips make it go faster.
 
 **Translate package names.** Most names match between nixpkgs and Arch, but not all. `pkgs.python3` is `python`, and many nixpkgs sets like `pythonPackages.requests` are `python-requests`. `archix search` finds the Arch name. Anything only in the AUR is still just a name in `packages`.
 
-**Home Manager config ports almost directly.** archix's `programs.*` modules take their option names, types and defaults from Home Manager, and `settings` passes through, so most `programs.<name>` blocks become Lua tables with the same keys:
+**Home Manager config ports almost directly.** archix's `programs.*` modules take their option names from Home Manager, in snake_case, and `settings` passes through, so most `programs.<name>` blocks become Lua tables with the same keys. Like Home Manager's per-user config, they apply to one user, which you name with `home.user`:
 
 ```nix
 programs.kitty = {
@@ -107,6 +115,8 @@ programs.kitty = {
 ```
 
 ```lua
+users = { me = { groups = { "wheel" } } },
+home = { user = "me" },
 programs = {
   kitty = {
     enable = true,
@@ -129,4 +139,4 @@ return {
 }
 ```
 
-**Leave services for last.** Packages and dotfiles are easy wins. Services, `/etc` files and kernel parameters touch the boot path, so port them once the rest is stable, and keep the previous generation's boot entry around while you do.
+**Leave services for last.** Packages and dotfiles are easy wins. Services, `/etc` files and kernel parameters touch the boot path, so port them once the rest is stable, and keep the previous generation's boot entry around while you do. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/) for the ported `programs.*` modules.

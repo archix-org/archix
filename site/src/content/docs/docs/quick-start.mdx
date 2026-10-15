@@ -7,47 +7,61 @@ sidebar:
 
 import { Steps, Aside } from '@astrojs/starlight/components';
 
-This page takes you from a freshly installed archix to a declared, locked system with two generations, one of which you've rolled back from. It takes about fifteen minutes, most of it reading what `archix init` found.
+This page takes you from a freshly installed archix to a declared, locked system with a few generations, one of which you've rolled back from. It takes about fifteen minutes, most of it reading what `archix init` found.
 
 You need archix installed ([Installation](/docs/installation/)) and root access.
 
 ## Capture your system with `archix init`
 
-`archix init` is a terminal UI that reads your running system and writes a config that describes it exactly. Nothing changes on the machine until the very last step, and even then the first switch changes nothing, because the config matches what's already there.
+You don't write your first config by hand. `archix init` reads your running system and writes a config and a lock that describe it exactly, down to the version of every installed package. It changes nothing on the machine except the config directory.
 
 ```console
 $ sudo archix init
 ```
 
-It walks through nine steps.
+It asks a handful of questions. `sudo archix init --defaults` takes every default without asking.
 
 <Steps>
 
-1. **Filesystem.** archix detects the filesystem of `/`. On btrfs it tells you it will snapshot before every switch. On anything else it shows a disclaimer: rollback works, but it reinstalls packages from the cache instead of booting a snapshot, which is slower and has more ways to fail. You can continue either way.
+1. **Config location.** `/etc/archix` by default, or any directory, such as a clone of your own repo. If you pick another directory, `/etc/archix` becomes a symlink to it, and a config in a directory you own is handed over to you, so you can edit it without `sudo`. Then it asks whether to make the directory a git repository (default: no).
 
-2. **Config location.** Choose between `/etc/archix` (root-owned, the default) and a repo you own, for example `~/archix`, with `/etc/archix` linked to it. Pick your own repo if you want to edit without `sudo` and push the config to GitHub. archix finds the config through `/etc/archix` either way.
+2. **Third-party repos.** If your `pacman.conf` has repos beyond the official ones, such as CachyOS's or chaotic-aur, they're declared as they are, mirrorlists included. archix then asks what to do when a locked package disappears from one of them: ask each time (the default, and that prompt defaults to falling back), fall back without asking, or fail. See [Third-party repos](/docs/guides/third-party-repos/).
 
-3. **Undeclared packages.** This sets the `undeclared_packages` option. With `"remove"`, the default, packages that aren't in your config are removed on switch, which gives you the real declarative guarantee. With `"warn"`, archix keeps them and lists them in `archix diff`, which is gentler while you're getting used to it. See [pacman and yay](/docs/concepts/pacman-and-yay/#undeclared-packages).
+3. **Orphans.** If there are any, packages installed as dependencies that nothing needs any more can be kept, listed in `ignored_packages` (the default), or left for the first switch to remove.
 
-4. **Capture.** archix reads what makes your system yours: explicitly installed packages (official and AUR), enabled services that aren't enabled by default, `/etc` files that differ from their package versions (found with `pacman -Qkk`), users and groups, and kernel parameters. Each one becomes a declaration in your config. Dependencies are not listed; the lock records them.
+4. **Undeclared packages.** This sets [`undeclared_packages`](/docs/concepts/pacman-and-yay/#undeclared-packages). By default, packages that aren't declared are removed on switch, so the config is the whole truth. The alternative only lists them.
 
-5. **Dotfiles.** An opt-in picker shows config files in your home directory. Tick the ones you want archix to manage. Leave it empty if you'd rather add dotfiles later.
+5. **AUR.** If you have AUR packages, archix asks whether to show each build recipe for review before trusting it (default: yes), and what to do when a locked AUR version can't be built any more (default: ask, preferring the nearest newer version).
 
-6. **Third-party repos.** If your `pacman.conf` has repos beyond the official ones, such as CachyOS's or chaotic-aur, archix asks whether to declare them. Then it asks what to do when a locked third-party version can't be restored. The default is "ask every time", and that prompt defaults to falling back. On CachyOS, read [Third-party repos](/docs/guides/third-party-repos/) before you answer.
+6. **Config files.** archix lists the `/etc` files you changed: package config files edited since they were installed, and files nobody owns in well-known config directories such as `/etc/systemd/system`, `/etc/sysctl.d` and `/etc/udev/rules.d`. Ticked files are copied into the config and managed. Files that may hold secrets start unticked. See [Safety](/docs/concepts/safety/#what-init-never-captures).
 
-7. **Secure Boot.** If `sbctl` keys exist, archix offers to sign every generation's kernel image. Without keys, this step is skipped.
+7. **Booting.** On a btrfs root, archix asks whether to snapshot `/` before every switch as an extra recovery point. If systemd-boot is installed and your kernel command line has `root=`, it asks whether to write a signed boot entry for each generation (default: yes).
 
-8. **Limits.** How many boot entries to keep (default 5, also capped by free space on the ESP) and how long to keep generations (default: the last 10 or the last 30 days, whichever keeps more). The package cache only keeps what kept generations reference.
+8. **Generations.** How many generations `gc` always keeps (10) and how many days it keeps every generation (30).
 
-9. **Dry run and first switch.** archix runs `archix diff` of the generated config against the live system. This diff must be empty: the config describes exactly what you have. If it isn't, archix shows the difference and goes back so you can fix it. When it's empty, archix makes the first switch.
+9. **Dotfiles.** Opt-in. Pick a user, then entries from `~/.config` and top-level dotfiles. They're copied into the config and declared as live links, and the first switch backs up the originals. See [Dotfiles and apps](/docs/guides/dotfiles-and-apps/).
 
 </Steps>
 
-The first switch creates generation 1. Your system looks the same as before, but now it's described, locked and reversible.
+Packages, services, users, groups, hostname, timezone, locales and keymap are captured without asking. Then archix picks the lock. It finds the Arch Linux Archive snapshot that matches the most installed versions, and pins every package that differs from it, older ones included, so the lock is exactly what you have. See [The lockfile](/docs/concepts/lockfile/#how-init-picks-the-snapshot).
 
-<Aside type="tip">
-	Newly created users get a `passwd` prompt during onboarding. archix never manages passwords, so this is the only time it asks.
-</Aside>
+It ends by showing what a switch would change, which should be nothing:
+
+```console
+finding the archive snapshot closest to what's installed
+locking 86 declared packages to the snapshot that fits what's installed
++ acl 2.3.2-1
++ archix 1.0.0-1
+...
+212 packages locked
+wrote /etc/archix/archix.lock
+
+what `archix switch` would change now:
+snapshot 2026-10-09: 212 packages
+the system matches the lock and the config
+
+the config is in /etc/archix; read it over, then run `sudo archix switch` to make this the first generation
+```
 
 ## Look at what you got
 
@@ -58,46 +72,85 @@ $ tree /etc/archix
 /etc/archix
 ├── archix.lock
 ├── init.lua
+├── files
+│   └── desktop
+│       └── etc
+│           └── sysctl.d
+│               └── 80-swappiness.conf
 └── lua
-    ├── hosts
-    │   └── desktop.lua
-    └── modules
-        └── ...
+    └── hosts
+        └── desktop
+            ├── init.lua
+            └── installed.lua
 ```
 
-`init.lua` imports the host file that matches your hostname. Open your host file, `lua/hosts/<hostname>.lua`, and you'll see your packages, services and the rest of what step 4 captured.
+`init.lua` imports the host that matches your hostname. `lua/hosts/<hostname>/init.lua` holds what init captured:
 
-`archix.lock` holds the snapshot date and every installed package's exact version:
+```lua title="lua/hosts/desktop/init.lua"
+-- Written by `archix init` from this machine; edit it freely.
+return {
+  hostname = "desktop",
+  timezone = "Europe/Berlin",
+  repos = { "core", "extra", "multilib" },
+  ignored_packages = { "nvidia-dkms-custom" },
+  users = {
+    me = { uid = 1000, groups = { "wheel" }, shell = "/usr/bin/zsh", home = "/home/me" },
+  },
+  services = { ["bluetooth.service"] = true, ["sshd.service"] = true },
+  files = {
+    ["/etc/sysctl.d/80-swappiness.conf"] = { source = "files/desktop/etc/sysctl.d/80-swappiness.conf" },
+  },
+  kernel_params = { "root=UUID=0a3c5e1f-6b2d-4f7a-9c8e-1d2b3a4c5e6f", "rw", "quiet" },
+  boot = { loader = "systemd-boot", microcode = { "amd-ucode.img" } },
+}
+```
+
+Your explicitly installed packages, from the repos and the AUR, are in `installed.lua`, which `archix install` and `archix remove` edit. Dependencies aren't listed; the lock records them.
+
+`archix.lock` holds the snapshot date and every package's exact version. Packages that didn't match the snapshot are listed under `pinned`:
 
 ```toml title="archix.lock"
 [hosts.desktop]
-date = "2026-10-14"
+date = "2026-10-09"
 repos = ["core", "extra", "multilib"]
-declared = ["firefox", "neovim", "steam"]
+declared = ["archix", "base", "firefox", "neovim", "steam"]
+pinned = ["mesa"]
 
 [hosts.desktop.packages]
 firefox = { version = "144.0-1", repo = "extra", file = "firefox-144.0-1-x86_64.pkg.tar.zst", sha256 = "37895f9d195203f4981ee730bec23c4079d10b5b53fc2c3e69db37c1bfed1257", explicit = true }
 # ...
 ```
 
-git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If you chose your own repo in step 2, commit now:
+git is optional, but worth it. When the config directory is a git repo, every generation records the commit it was built from. If you said yes to git, `init` already ran `git init` and `git add`, so commit now, from the config directory (with `sudo` if it's the root-owned `/etc/archix`):
 
 ```console
-$ cd ~/archix
-$ git init && git add -A && git commit -m "Capture desktop with archix init"
+$ git add -A && git commit -m "Capture desktop with archix init"
 ```
+
+## The first switch
+
+```console
+$ sudo archix switch
+boot entry for the new generation
+apply 1 changes? [Y/n]
+:: installing packages
+...
+:: writing the boot entry
+:: making the new generation current
+switched to generation 1 (snapshot 2026-10-09)
+```
+
+No packages change. On a machine where archix writes boot entries, the only change is generation 1's boot entry. Without boot entries, the switch prints `generation 1 is current (snapshot 2026-10-09, no package changes)` instead. Either way, your system looks the same as before, but now it's described, locked and reversible.
 
 ## Make a change
 
-Add a package to your host file:
+Add a package to your host file. Lists from every module are concatenated, so this adds to what's in `installed.lua`:
 
-```lua title="lua/hosts/desktop.lua" ins={3}
+```lua title="lua/hosts/desktop/init.lua" ins={3}
 return {
-  packages = {
-    "htop",
-    "firefox",
-    "neovim",
-  },
+  hostname = "desktop",
+  packages = { "htop" },
+  -- ...
 }
 ```
 
@@ -105,32 +158,33 @@ Ask archix what that would do before doing it:
 
 ```console
 $ archix diff
-resolving 86 declared packages against the 2026-10-14 snapshot
+resolving 87 declared packages against the 2026-10-09 snapshot
 note: archix.lock is out of date for desktop; showing a fresh resolution
-snapshot 2026-10-14: 1213 packages
+snapshot 2026-10-09: 213 packages
 install    htop 3.4.1-1
 ```
 
-The lock still has your old package set, so `diff` resolves the new one on the fly. `htop` comes from the same 2026-10-14 snapshot as everything else, so adding it doesn't upgrade anything else. That is the point of the snapshot.
+The lock still has your old package set, so `diff` resolves the new one on the fly. `htop` comes from the same 2026-10-09 snapshot as everything else, so adding it doesn't upgrade anything else. That is the point of the snapshot.
 
 Now switch:
 
 ```console
 $ sudo archix switch
-resolving 86 declared packages against the 2026-10-14 snapshot
+resolving 87 declared packages against the 2026-10-09 snapshot
 + htop 3.4.1-1
-1213 packages locked
+213 packages locked
 wrote /etc/archix/archix.lock
 install    htop 3.4.1-1
-apply 1 changes? [Y/n]
+boot entry for the new generation
+apply 2 changes? [Y/n]
+downloading htop-3.4.1-1-x86_64.pkg.tar.zst
 :: installing packages
-:: removing packages
-:: setting install reasons
-:: verifying the result
-switched to snapshot 2026-10-14
+...
+:: making the new generation current
+switched to generation 2 (snapshot 2026-10-09)
 ```
 
-`switch` updated the lock for you, showed the changes, and applied them once you said yes. You're on generation 2. Commit the change:
+`switch` updated the lock for you, showed the changes, and applied them once you said yes. `sudo archix install htop` would have done the same, writing the name to `installed.lua` instead of your host file. Commit the change:
 
 ```console
 $ git commit -am "Add htop"
@@ -138,19 +192,22 @@ $ git commit -am "Add htop"
 
 ## Update everything
 
-To move to today's packages, update the lock to the newest archive snapshot and switch:
+To move to today's packages, update the lock to the newest archive snapshot, then switch. `update` only rewrites the lock; nothing is installed until you switch:
 
 ```console
-$ archix update
-snapshot 2026-10-14 -> 2026-10-15
-~ firefox 144.0-1 -> 144.0.1-1
+$ sudo archix update
+resolving 87 declared packages against the 2026-10-15 snapshot
+snapshot 2026-10-09 -> 2026-10-15
+~ linux 7.2.8.arch1-1 -> 7.2.9.arch1-1
 ~ mesa 1:25.3.0-1 -> 1:25.3.1-1
-1213 packages locked
+214 packages locked
 wrote /etc/archix/archix.lock
 $ sudo archix switch
+...
+switched to generation 3 (snapshot 2026-10-15)
 ```
 
-You can also use `archix -Syu`, or just `archix`, which updates from the live mirrors like yay does and adopts the result into the lock.
+You can also use `sudo archix -Syu`, or just `sudo archix`, which upgrades from your live mirrors like yay does and adopts the result into the lock. See [pacman and yay](/docs/concepts/pacman-and-yay/#archix--syu).
 
 ## Roll back
 
@@ -158,16 +215,23 @@ Say the new mesa breaks your games. Go back:
 
 ```console
 $ sudo archix rollback
+downgrade  linux 7.2.9.arch1-1 -> 7.2.8.arch1-1
+downgrade  mesa 1:25.3.1-1 -> 1:25.3.0-1
+roll back to generation 2 (snapshot 2026-10-09) with 2 changes? [Y/n]
+...
+rolled back to generation 2 (snapshot 2026-10-09); archix.lock is unchanged, so the next `archix switch` returns to the config
 ```
 
-archix makes the system match the previous generation again: the old packages from the cache, the old files, the old services. No downloads, no rebuilds.
+archix makes the system match generation 2 again: its exact package versions from the cache, its files, users and services. No rebuilds.
 
-Rollback changes the system, not your config. Your `archix.lock` still says 2026-10-15, so the next `archix switch` would apply it again. Before you switch next, revert the lock in git, or hold mesa back with a [pin](/docs/concepts/lockfile/#pins).
+Rollback changes the system, not your config. Your `archix.lock` still says 2026-10-15, so the next `archix switch` would apply it again. To stay back, revert the lock in git, or move it with `archix update --to 2026-10-09`.
 
-If the system won't boot at all, pick the previous generation in the systemd-boot menu instead. See [Generations and rollback](/docs/concepts/generations/).
+<Aside type="tip">
+	If the system won't boot at all, pick generation 2 in the systemd-boot menu. archix rolls back to it early in boot. See [Generations and rollback](/docs/concepts/generations/#rolling-back-from-the-boot-menu).
+</Aside>
 
 ## Next steps
 
 - [Configuration](/docs/concepts/configuration/) explains modules, imports and priorities, so you can split your host file into shared modules.
-- [The AUR](/docs/guides/aur/) shows `archix install` and the chroot builds.
+- [The AUR](/docs/guides/aur/) shows `archix install`, review and the chroot builds.
 - [Dotfiles and apps](/docs/guides/dotfiles-and-apps/) covers `programs.*` and format writers.

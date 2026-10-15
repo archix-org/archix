@@ -1,6 +1,6 @@
 ---
 title: Safety and recovery
-description: How archix prepares before it applies, journals every step, and recovers from failed or interrupted switches without a live USB.
+description: How archix prepares before it applies, journals every step, manages files without losing your edits, and recovers from failed or interrupted switches without a live USB.
 sidebar:
   order: 5
 ---
@@ -13,36 +13,46 @@ The goal is simple: no failure during a switch, including pulling the power cord
 
 **Prepare** does everything that can fail without touching the system:
 
-- evaluates the config,
-- resolves the lock,
-- downloads every package,
-- builds every AUR package,
-- renders every managed file,
-- checks pacman dependencies and conflicts.
+- evaluates the config and renders every managed file,
+- resolves the lock with pacman itself, so dependencies are consistent, and shows new AUR build recipes for review,
+- offers to adopt packages that are newer than the lock,
+- lists the changes and asks you to confirm,
+- builds every AUR package in a clean chroot,
+- downloads every package and checks it against the lock.
 
-If anything fails here, a typo, a network error, an AUR build that won't compile, a file conflict, archix stops and the system is exactly as it was. Most problems surface in this phase.
+If anything fails here, a typo, a network error, an AUR build that won't compile, a declined prompt, archix stops and the packages, files and services are exactly as they were. Most problems surface in this phase.
 
-**Apply** changes the system: the package transaction, files, users, units, boot entries. By the time it starts, everything it needs is already on disk.
+Packages are downloaded to `/var/cache/archix/pkg`, and every file is checked against the `sha256` in the lock before it's used. Files already in pacman's own cache are reused. A file that doesn't match its checksum stops the switch here.
 
-Packages are downloaded to `/var/cache/archix/pkg`, and every file is checked against the `sha256` in the lock before it's used. Files already in pacman's own cache are reused. A file that doesn't match its checksum stops the switch in prepare.
+**Apply** changes the system, in a fixed order of steps:
 
 ```console
 $ sudo archix switch
-upgrade    firefox 144.0-1 -> 144.0.1-1
+upgrade    linux 7.2.8.arch1-1 -> 7.2.9.arch1-1
 upgrade    mesa 1:25.3.0-1 -> 1:25.3.1-1
-apply 2 changes? [Y/n]
+boot entry for the new generation
+apply 3 changes? [Y/n]
 :: installing packages
 :: removing packages
 :: setting install reasons
+:: updating users and groups
+:: stopping and disabling services
+:: writing managed files
+:: reloading systemd, sysctl, udev and locales
+:: enabling and starting services
 :: verifying the result
-switched to snapshot 2026-10-15
+:: writing the boot entry
+:: making the new generation current
+switched to generation 42 (snapshot 2026-10-15)
 ```
+
+Services are stopped and disabled while their unit files still exist, and enabled and started only after `systemctl daemon-reload` has seen the new ones.
 
 archix also checks pacman before it starts. If pacman is running, or a `db.lck` is left over with no pacman running, `switch` refuses and tells you why, rather than fight another package manager.
 
 ## The journal
 
-Before apply starts, archix writes `/var/lib/archix/journal.json`. It records the target, the package set from before the switch, the exact package transaction and the list of steps. Each step is marked done as it completes. The package steps are installing packages, removing packages, setting install reasons and verifying the result.
+Before apply starts, archix writes `/var/lib/archix/journal.json`, fsynced and renamed into place. It records the target generation, the package set from before the switch, the exact transaction, and which of the steps above are done. Each step is marked done as it completes.
 
 Every step is idempotent. A step doesn't mean "upgrade mesa from A to B"; it means "make the system match the target". Running a step twice is harmless, which is what makes it safe to continue an interrupted switch from wherever it stopped.
 
@@ -50,16 +60,42 @@ When every step is done, the journal is deleted. A journal on disk always means 
 
 ## Atomic writes
 
-Managed files are written to a temporary file and renamed into place. A rename is atomic, so a file is either the old version or the new one, never half of each.
+Managed files are written to a temporary file and renamed into place, with their mode and owner already set. A rename is atomic, so a file is either the old version or the new one, never half of each.
 
-The two things that decide what "current" means only change at the very end, after every step has succeeded:
+The two things that decide what "current" means only change at the very end, after the verify step has confirmed the result:
 
-- the current-generation pointer,
-- the default boot entry.
+- the boot entry for the new generation, written in the second-to-last step;
+- the current-generation pointer, replaced atomically in the last step.
 
-Until then, a reboot lands in the previous generation.
+Until then, the previous generation is current, and a reboot lands in it.
 
-On btrfs, archix also takes a snapshot right before apply. That snapshot becomes the generation's rollback point, and it's cleaned up under the normal [generation limits](/docs/concepts/generations/#limits-and-gc).
+On btrfs, archix also takes a read-only snapshot of `/` right before apply. It's a manual recovery point, not something rollback uses; see [btrfs snapshots](/docs/concepts/generations/#btrfs-snapshots).
+
+## Managed files, backups and hand edits
+
+Everything archix manages on disk, from `files` and `units` to `sysctl`, `hostname`, `locales` and dotfiles, becomes a managed file. archix is careful never to lose a file it didn't write:
+
+- **A file archix replaces** is moved to `/var/lib/archix/backups/<path>` first. When the file leaves your config, the original comes back.
+- **A file archix takes over unchanged**, such as `/etc/fstab` after `archix init` captured it, is copied to the same place when archix first manages it. Unmanaging it later restores it instead of deleting it.
+- **A managed file you edited by hand** is saved to `/var/lib/archix/edited/<time>/<path>` before archix overwrites it, with a warning. `archix diff` flags it beforehand:
+
+  ```console
+  update     /etc/issue (edited outside archix; your version gets saved)
+  ```
+
+- **A file archix created** is deleted when it leaves your config, but only if it still has the contents archix wrote.
+
+Users and groups archix created are removed when they leave the config, and their home directories are kept. archix never touches passwords: a new user gets a hint instead, ``created user me; set a password with `passwd me` ``.
+
+archix is strict about what *it* manages, and only that. It doesn't revert changes to `/etc` files it never managed, and it doesn't disable services it never managed. Doing that blindly could, for example, delete users that packages create. `archix init` captures the files and services you'd changed, which makes them managed.
+
+### What init never captures
+
+`archix init` copies the `/etc` files you changed into your config: package config files edited since they were installed, and files nobody owns in well-known directories such as `/etc/systemd/system`, `/etc/sudoers.d`, `/etc/sysctl.d`, `/etc/modprobe.d`, `/etc/udev/rules.d` and `/etc/X11/xorg.conf.d`.
+
+It never captures files that archix or other tools own: `/etc/pacman.conf`, `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow` and their backups, `/etc/machine-id`, `/etc/resolv.conf`, `/etc/mtab`, `/etc/ld.so.cache`, `/etc/kernel/cmdline`, pacman's keyring, the extracted CA certificates, and archix's own files.
+
+Files that may hold secrets start unticked: anything that isn't world-readable, SSH host keys, NetworkManager connections, wpa_supplicant, iwd and WireGuard configs, `/etc/ssl/private`, `krb5.keytab`, and names containing `secret`, `password`, `.key` or `.pem`. With `--defaults` they stay unmanaged, and init lists them. Tick one only if you're happy for it to live in your config directory, and in its git history.
 
 ## Hard and soft failures
 
@@ -69,33 +105,36 @@ Not every failure during apply means the same thing.
 
 ```console
 :: installing packages
-error: installing packages failed; the switch is unfinished, run `archix recover`: ...
+error: installing packages failed; the switch is unfinished, run `archix recover`: pacman exited with exit status: 1
 ```
 
-**Soft failures** don't: a systemd unit that fails to start. The new generation is kept, archix lists the failed units and exits non-zero, like NixOS does. A broken unit is usually a config problem you fix and switch again, and undoing the whole generation for it would be worse.
+**Soft failures** don't: a service that fails to start, or a reload such as `sysctl --system` that fails. The new generation becomes current, archix lists what failed and exits non-zero, like NixOS does. A broken unit is usually a config problem you fix and switch again, and undoing the whole generation for it would be worse.
 
 ```console
-$ sudo archix switch
-apply     generation 43 is live
-warning: 1 unit failed to start:
-  nginx.service
-  see `journalctl -u nginx.service`
+:: enabling and starting services
+:: verifying the result
+:: writing the boot entry
+:: making the new generation current
+switched to generation 43 (snapshot 2026-10-15)
+failed: systemctl enable --now nginx.service: Job for nginx.service failed because the control process exited with error code.
+error: the new generation is current, but 1 services or reloads failed (listed above)
 ```
 
 ## Unfinished switches
 
 archix never acts on an unfinished switch automatically. Guessing wrong after a crash could make things worse, so a human decides.
 
-- Unattended runs, `--noconfirm`, and the boot-time service report the unfinished switch, print cleanup instructions and change nothing.
-- `switch`, `lock` and `update` refuse to run, and say which switch is unfinished. Read-only commands such as `diff` and `status` keep working, so you can look around first.
-- pacman and yay keep working. The pacman hook only warns.
-- You're told at login, by a message from `/etc/profile.d` and a desktop notification.
+- `archix-boot.service` reports the unfinished switch at boot and changes nothing.
+- `switch`, `upgrade`, `install`, `remove`, `rollback`, `lock`, `update` and `gc` refuse to run, and say which switch is unfinished. Read-only commands such as `diff` and `status` keep working, so you can look around first.
+- pacman and yay keep working. The pacman hook adds a warning after each transaction.
+- You're told at login, by a message from `/etc/profile.d/archix.sh` and a desktop notification.
 
 ```console
 $ archix status
-the switch to snapshot 2026-10-15 (started at unix time 1792051200) was interrupted while installing packages
+the switch to generation 43 (snapshot 2026-10-15) (started at unix time 1792051200) was interrupted while installing packages
 run `archix recover` to deal with it
-desktop is locked to snapshot 2026-10-15 (1214 packages)
+current generation: 42 (snapshot 2026-10-09)
+desktop is locked to snapshot 2026-10-15 (214 packages)
 12 changes pending; see `archix diff`
 ```
 
@@ -104,14 +143,14 @@ desktop is locked to snapshot 2026-10-15 (1214 packages)
 `recover` shows what was interrupted and at which step, then offers three ways out:
 
 - **continue** reruns the steps that hadn't completed and finishes the switch.
-- **rollback** returns to the package set from before the switch.
+- **rollback** returns to the package set from before the switch, and undoes its changes to files, users and services. Packages come from pacman's cache or the Arch Linux Archive, and anything the transaction touched is reinstalled.
 - **abandon** changes nothing. It shows how the installed packages differ from the switch's target, runs `pacman -Qk` on the packages the switch touched, then closes the journal, so you see the real state of the system and fix it by hand.
 
 ```console
 $ sudo archix recover
-the switch to snapshot 2026-10-15 (started at unix time 1792051200) was interrupted while installing packages
+the switch to generation 43 (snapshot 2026-10-15) (started at unix time 1792051200) was interrupted while installing packages
 [c]ontinue it, [r]oll back, [a]bandon (close the journal without changes), or [q]uit? c
-finished the interrupted switch to snapshot 2026-10-15
+finished the interrupted switch to generation 43 (snapshot 2026-10-15)
 ```
 
 To skip the prompt, pass the choice:
@@ -122,9 +161,9 @@ $ sudo archix recover --rollback
 $ sudo archix recover --abandon
 ```
 
-Pick continue if the interruption was something outside archix, like a power cut. Pick rollback if you don't trust the new package set. Pick abandon if you want to inspect and fix things by hand; afterwards `archix diff` shows how the system differs from the lock, and the next `archix switch` reinstalls whatever the lock needs.
+Pick continue if the interruption was something outside archix, like a power cut. Pick rollback if you don't trust the new package set. Pick abandon if you want to inspect and fix things by hand; afterwards `archix diff` shows how the system differs from the lock, and the next `archix switch` reinstalls whatever the lock needs. Rollback and abandon both delete the generation the interrupted switch had created, since it never became current.
 
-A rollback is journaled too. If it gets interrupted in turn, `archix recover` picks it up the same way.
+A recovery rollback is journaled too. If it gets interrupted in turn, `archix recover` picks it up the same way.
 
 ## Interrupted pacman transactions
 
@@ -134,26 +173,29 @@ Power loss in the middle of a pacman transaction is the classic way to break Arc
 
 ## Rescue mode
 
-Some breakage stops pacman itself: a half-installed glibc, a broken pacman. Then nothing that relies on pacman can repair the system.
+Some breakage stops pacman itself: a half-installed glibc, a deleted libalpm. Then nothing that relies on pacman can repair the system, including rollback.
 
-For that, every generation's initramfs carries a static archix, and each generation gets an extra boot entry:
+For that, when archix manages booting, the initramfs carries a static archix, and the newest two generations get a rescue entry:
 
 ```
-  archix · generation 43 · Oct 15
-  archix · generation 42 · Oct 09
-› archix rescue · generation 43
+  Arch Linux (archix, generation 43)
+  Arch Linux (archix, generation 42)
+› Arch Linux (archix rescue, generation 43)
+  Arch Linux (archix rescue, generation 42)
 ```
 
-Rescue mode unpacks that generation's core packages straight from the cache, without pacman: glibc, pacman, systemd, kernel modules and archix itself. Then it repairs pacman's local database. The normal system boots and finishes the repair with the regular tools.
+Booting it adds `archix.rescue` to the kernel command line. Before switching to the real root, the initramfs runs `archix rescue`, which unpacks the current generation's core packages straight from the cache, without pacman: glibc, pacman and its libraries, systemd, bash, coreutils, the kernel, archix itself and the rest of the core set. It keeps config files you edited, saving the package's version as `.pacnew`, and rewrites the packages' entries in pacman's database. Then the system boots, and you finish with the regular tools: `archix diff` shows what still differs from the lock, `sudo archix switch` puts it back, and `sudo archix recover` deals with a switch that was interrupted.
 
-This is what makes ext4 safe without a live USB. On btrfs you usually just boot the previous generation's snapshot, but rescue mode is there too.
+That's what makes a broken pacman repairable without a live USB. It works with both systemd-based and busybox initramfs images, and needs the static binary the archix package installs at `/usr/lib/archix/archix-static`. In CI, a QEMU VM with OVMF firmware deletes libalpm to break pacman, boots the rescue entry, and checks that pacman works again.
 
-### The last resort
+### From a live USB
 
-The static `archix` on [GitHub Releases](https://github.com/archix-org/archix/releases) does the same from outside, against a mounted root:
+If the machine can't boot any of its own entries, the same static binary works from a live USB against the mounted system:
 
 ```console
-# ./archix rollback --root /mnt
+# mount /dev/nvme0n1p2 /mnt
+# mount /dev/nvme0n1p1 /mnt/boot
+# /mnt/usr/lib/archix/archix-static rescue --root /mnt
 ```
 
-You shouldn't need it. It's a fallback for accidents the built-in boot entries can't cover, not a normal recovery path.
+`--generation N` restores another generation's core packages, and `--package NAME` adds packages beyond the core set. You shouldn't need it often. It's a fallback for accidents the built-in boot entries can't cover, not a normal recovery path.

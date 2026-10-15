@@ -7,30 +7,94 @@ sidebar:
 
 archix manages your home directory with the same switch that manages the system. Dotfiles become part of the generation, so a rollback takes your configs back too.
 
-## Real files, with hashes
+## Pick the user
 
-archix writes dotfiles as real files, not symlinks into a store. Apps see ordinary files they can read, watch and even write. archix records the hash of every file it writes.
+archix manages one user's home per machine. Name that user in `home.user`, and declare it in `users` so archix creates the account before writing its files:
 
-That hash is how archix notices out-of-band edits. If you, or an app, change a managed file, `archix diff` shows it, and archix never silently overwrites the change on the next switch:
-
-```console
-$ archix diff
-snapshot 2026-10-15: 1214 packages
-the system matches the lock
-file       ~/.config/foot/foot.ini (changed outside archix)
+```lua title="lua/modules/common.lua"
+return {
+  users = { me = { groups = { "wheel" }, shell = "/usr/bin/zsh" } },
+  home = { user = "me" },
+}
 ```
 
-Move the change into your config, or let the switch put the declared version back.
+The home directory is `users.me.home` if you set one, else `/home/me`; `home.directory` overrides both. Everything on this page, `home.files`, `home.systemd` and every `programs.*` module, applies to that user, and setting any of it without `home.user` is an error.
 
-## Live symlinks for app-written configs
+archix runs as root, but files it writes in the home, and the directories it creates for them, belong to the user.
 
-Some files are written by apps on purpose. matugen regenerates color files from your wallpaper; settings dialogs save their state. Managing those as declared content would fight the app on every switch.
+## Home files
 
-For those, archix keeps a live symlink instead: the file in your home links to a file in your config directory, the app writes through the link, and the change lands in your config repo where git can see it. Nothing is reported as drift, because the config is the file.
+`home.files` is keyed by a path relative to the home; a leading `~/` is allowed. Each entry gives exactly one of `text`, `source` or `link`:
 
-## Homes of every declared user
+```lua
+home = {
+  files = {
+    [".config/user-dirs.dirs"] = { source = "home/user-dirs.dirs" },
+    ["bin/backup"] = { text = "#!/bin/sh\nrestic backup ~/notes\n", executable = true },
+    [".local/bin/vim"] = { link = "/usr/bin/nvim" },
+  },
+},
+```
 
-archix manages the home of every user declared in your config. It runs as root, but drops to each user before touching their home, so files are created with that user's ownership and permissions.
+| Field | Meaning |
+| --- | --- |
+| `text` | The file's contents, written as given. |
+| `source` | A file in the config directory, copied in. The path is relative to the config directory and can't leave it. |
+| `live` | With `source`: link to the file or directory in the config instead of copying it. |
+| `link` | Make the path a symlink to this target. |
+| `executable` | Mode `0755` instead of `0644`. |
+
+Copies are real files, not links into a store, so apps see ordinary files they can read and watch. archix stores their contents with the generation and knows exactly what it wrote. If you, or an app, edit a managed file, `archix diff` flags it before the next switch:
+
+```
+update     /home/me/.config/kitty/kitty.conf (edited outside archix; your version gets saved)
+```
+
+The switch then writes the declared version, and saves yours under `/var/lib/archix/edited/` so nothing is lost. Move the change into your config to keep it.
+
+When archix first takes over a path that already exists, it backs up the original to `/var/lib/archix/backups`. If the entry later leaves the config, archix deletes the file, or puts that original back. See [Safety](/docs/concepts/safety/).
+
+## Live links for app-written configs
+
+Some files are written by apps on purpose. matugen regenerates color files from your wallpaper; settings dialogs save their state. Managing those as copies would fight the app on every switch.
+
+For those, set `live = true`. The path in your home becomes a symlink into your config directory, the app writes through the link, and the change lands in your config repo where git can see it. Nothing is reported as drift, because the config is the file.
+
+```lua
+home = {
+  files = {
+    [".config/nvim"] = { source = "home/.config/nvim", live = true },
+    [".config/matugen"] = { source = "home/.config/matugen", live = true },
+  },
+},
+```
+
+A `source` that's a directory has to be live; archix only copies single files.
+
+## User units
+
+`home.systemd` writes the user's own systemd units into `~/.config/systemd/user`, by kind and name. Each unit is a table of sections, rendered like Home Manager's `systemd.user.*`. `Install.WantedBy` creates the `.wants` link, so the unit is enabled without running `systemctl --user enable`:
+
+```lua
+home = {
+  systemd = {
+    services = {
+      ["notes-sync"] = {
+        Unit = { Description = "Sync notes" },
+        Service = { Type = "oneshot", ExecStart = "/usr/bin/rclone sync notes: %h/notes" },
+      },
+    },
+    timers = {
+      ["notes-sync"] = {
+        Timer = { OnCalendar = "hourly", Persistent = true },
+        Install = { WantedBy = { "timers.target" } },
+      },
+    },
+  },
+},
+```
+
+The kinds are `services`, `timers`, `sockets`, `paths`, `targets`, `slices`, `mounts` and `automounts`. For units every user gets, use the system-wide `user_units` and `user_services` options.
 
 ## Three layers
 
@@ -38,15 +102,21 @@ How much you write depends on how much help an app needs. archix gives you three
 
 ### 1. Format writers
 
-Any app, no module needed. Pick the writer for the app's config format, give it a Lua table, and assign the result to a path in `files`:
+Any app, no module needed. Pick the writer for the app's config format from `archix.formats`, give it a Lua table, and use the result as a file's `text`:
 
-```lua title="lua/modules/foot.lua"
+```lua title="lua/modules/fuzzel.lua"
+local f = archix.formats
+
 return {
-  packages = { "foot" },
-  files = {
-    ["~/.config/foot/foot.ini"] = archix.ini {
-      main = { font = "JetBrains Mono:size=11", pad = "8x8" },
-      colors = { alpha = 0.95 },
+  packages = { "fuzzel" },
+  home = {
+    files = {
+      [".config/fuzzel/fuzzel.ini"] = {
+        text = f.ini {
+          main = { font = "JetBrains Mono:size=11", terminal = "foot" },
+          colors = { background = "1e1e2eff" },
+        },
+      },
     },
   },
 }
@@ -54,92 +124,115 @@ return {
 
 renders:
 
-```ini title="~/.config/foot/foot.ini"
+```ini title="~/.config/fuzzel/fuzzel.ini"
 [colors]
-alpha=0.95
+background=1e1e2eff
 
 [main]
 font=JetBrains Mono:size=11
-pad=8x8
+terminal=foot
 ```
 
-Keys come out sorted, because evaluation iterates tables in sorted order. That keeps the rendered file, and its hash, identical on every run.
+Keys come out sorted, so the rendered file is identical on every run. The writers are `toml`, `json`, `yaml`, `ini`, `systemd`, `git_ini`, `key_value`, `kconfig` (KDE's format) and `kdl`, each matching the generator Home Manager uses. See [Format writers](/docs/reference/lua-api/#format-writers) for their options and quirks, such as numbers in INI files.
 
-Writers exist for `toml`, `json`, `yaml`, `ini`, `kdl`, `key-value` and `kconfig` (KDE's format):
-
-```lua
-files = {
-  ["~/.config/alacritty/alacritty.toml"] = archix.toml { window = { opacity = 0.9 } },
-  ["~/.config/kdeglobals"] = archix.kconfig { General = { ColorScheme = "BreezeDark" } },
-}
-```
-
-For a file that's easier to keep as-is, read it from your config directory:
-
-```lua
-files = {
-  ["~/.config/nvim/init.lua"] = archix.read_file("dotfiles/nvim/init.lua"),
-}
-```
+For a file that's easier to keep as it is, copy it with `source`, or link it with `live = true`.
 
 ### 2. `archix.program`
 
 When you configure the same app on several machines, give it a module. `archix.program` defines one in a single line:
 
-```lua title="lua/modules/foot.lua"
-return archix.program "foot" { package = "foot", file = "~/.config/foot/foot.ini", format = "ini" }
+```lua title="lua/modules/fuzzel.lua"
+return archix.program "fuzzel" { file = ".config/fuzzel/fuzzel.ini", format = "ini" }
 ```
 
-Import it, and every host gets a `programs.foot` option:
+Import it, and every host gets `programs.fuzzel`:
 
 ```lua title="lua/hosts/laptop.lua"
 return {
+  imports = { "modules.fuzzel" },
   programs = {
-    foot = {
+    fuzzel = {
       enable = true,
-      settings = {
-        main = { font = "JetBrains Mono:size=10" },
-        colors = { alpha = 0.9 },
-      },
+      settings = { main = { font = "JetBrains Mono:size=10", terminal = "foot" } },
     },
   },
 }
 ```
 
-`enable` installs the package and writes the file. `settings` passes straight through to the writer, so any key the app understands works, including ones added in the app's latest release. Because it's a real option, priorities work: a shared module can set `settings` with `archix.default`, and a host can override one value with `archix.force`.
+`enable` installs the package, which defaults to the program's name, and writes the file. `settings` passes straight through to the writer, so any key the app understands works, including ones added in the app's latest release. `extra_config` appends raw text. Because these are real options, priorities work: a shared module can set `settings` with `archix.default`, and a host can override one value with `archix.force`.
 
-Only use `archix.program` for apps archix doesn't already ship a module for. Declaring an option twice is an error.
+archix ships alacritty, foot and mpv this way. Only define a program archix doesn't already ship; declaring an option twice is an error.
 
 ### 3. Ported Home Manager modules
 
-Some apps need more than pass-through: options that interact, or values worth validating. For those, archix ships hand-written `programs.*` modules ported from [Home Manager](https://github.com/nix-community/home-manager) (MIT, credited), such as git, zsh, ssh, kitty, starship and fastfetch.
+Some apps need more than pass-through: options that interact, or files that depend on each other. For those, archix ships `programs.*` modules ported from [Home Manager](https://github.com/nix-community/home-manager) (MIT, credited):
+
+| Module | Writes |
+| --- | --- |
+| `programs.kitty` | `~/.config/kitty/kitty.conf`, plus `diff.conf` and `quick-access-terminal.conf` |
+| `programs.git` | `~/.config/git/config`, `ignore`, `attributes`, `allowed_signers` |
+| `programs.zsh` | `~/.zshrc`, `~/.zshenv`, and `~/.zprofile`, `~/.zlogin`, `~/.zlogout` when used |
+| `programs.starship` | `~/.config/starship.toml` |
+| `programs.fastfetch` | `~/.config/fastfetch/config.jsonc` |
+| `mime_apps` | `~/.config/mimeapps.list` |
+| `home.systemd` | User units and their `.wants` links |
 
 ```lua title="lua/modules/common.lua"
 return {
   programs = {
-    kitty = {
-      enable = true,
-      settings = { font_size = 11, background_opacity = "0.95", confirm_os_window_close = 0 },
+    kitty = { enable = true, font = { name = "JetBrainsMono Nerd Font", size = 12 } },
+    git = { enable = true, settings = { user = { name = "Me", email = "me@example.com" } } },
+    zsh = { enable = true, autosuggestion = { enable = true } },
+    starship = { enable = true },
+  },
+}
+```
+
+The modules work together the way they do in Home Manager. kitty's and starship's shell integrations go into `programs.zsh.init_content` when zsh is enabled, and zsh's plugins come from Arch's own packages in `/usr/share/zsh/plugins`, installed for you. Parts that only make sense on Nix are left out.
+
+If you're coming from Home Manager, your config translates closely. Option names are snake_case versions of Home Manager's, and the structure is the same:
+
+| Home Manager | archix |
+| --- | --- |
+| `programs.kitty.mouseBindings` | `programs.kitty.mouse_bindings` |
+| `programs.kitty.shellIntegration.mode` | `programs.kitty.shell_integration.mode` |
+| `programs.git.signing.signByDefault` | `programs.git.signing.sign_by_default` |
+| `programs.zsh.initContent` | `programs.zsh.init_content` |
+| `xdg.mimeApps.defaultApplications` | `mime_apps.default_applications` |
+| `systemd.user.timers.<name>` | `home.systemd.timers.<name>` |
+| `home.file.<path>` | `home.files.<path>` |
+
+`archix options` lists every option, and the [options reference](/docs/reference/options/#programs) documents them all.
+
+Ports are checked, not just translated. archix's test suite carries Home Manager's own test cases for these modules, with Home Manager's expected output files copied verbatim. archix renders the same input config with its port and compares the result byte for byte. The few differences that are inherent, such as Nix store paths becoming `/usr/bin` paths, are spelled out per case.
+
+A weekly job compares Home Manager's upstream modules and tests with the commit each port was made from. When one changes, it opens an issue listing the upstream commits and files, so the port can be brought up to date and checked against the new tests. Because `settings` passes through, new app keys need no archix change at all.
+
+## Bringing your existing dotfiles in
+
+`archix init` can import the dotfiles you already have. It's opt-in: after capturing the system, init asks whether to bring some dotfiles into the config, whose (one of the users it captured), and which ones. It offers each entry in `~/.config` and the top-level dotfiles in the home, leaving out caches, shell histories, `~/.ssh`, `~/.gnupg` and anything that looks like a secret.
+
+Each one you pick is copied into the config's `home/` directory, owned by that user, and declared as a live link:
+
+```lua title="lua/hosts/desktop/init.lua"
+return {
+  -- everything else init captured stays above
+  home = {
+    user = "me",
+    files = {
+      [".config/hypr"] = { source = "home/.config/hypr", live = true },
+      [".config/nvim"] = { source = "home/.config/nvim", live = true },
+      [".zshrc"] = { source = "home/.zshrc", live = true },
     },
   },
 }
 ```
 
-If you're coming from Home Manager, the option names, types and defaults are taken from Home Manager's own option definitions, so your config translates closely. `archix options` lists everything available on your system:
-
-```console
-$ archix options | grep -A3 '^programs.kitty.enable'
-programs.kitty.enable
-    type: bool
-    default: false
-    Whether to enable kitty.
-```
-
-Ports are checked, not just translated. Each module's Home Manager test cases, an input config plus the expected rendered file, are ported along with it, and a module only ships when archix renders byte-identical output for the same input. A scheduled job watches Home Manager upstream, and when a ported module or its tests change, the port is updated against the new tests. Because `settings` passes through, new app keys need no archix change at all.
+The first switch backs up the originals and replaces them with links into the config, so from then on editing a dotfile edits your repo.
 
 ## Which layer to use
 
-- One machine, one file, no logic: a format writer in `files`.
+- One machine, one file, no logic: a format writer in `home.files`, or `source`.
+- A file an app rewrites itself: a live link.
 - The same app on several machines, with per-host tweaks: `archix.program`, or the shipped module if there is one.
-- An app archix ships a module for: use the module. It knows the app's defaults and catches invalid values.
-- A file an app rewrites itself: a live symlink.
+- An app archix ships a module for: use the module. It knows how the app's files fit together and renders them exactly as Home Manager would.

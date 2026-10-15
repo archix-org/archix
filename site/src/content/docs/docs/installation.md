@@ -10,22 +10,22 @@ archix ships as two AUR packages:
 - `archix` builds from source.
 - `archix-bin` installs a prebuilt binary.
 
-Both install the same tool. Pick `archix-bin` if you'd rather not compile Rust on a fresh machine.
+Both install the same tool, plus the static `archix` binary that [rescue mode](/docs/concepts/safety/#rescue-mode) puts in the initramfs. Pick `archix-bin` if you'd rather not compile Rust on a fresh machine.
 
 ## Requirements
 
 - **An Arch-based system on x86_64.** Arch Linux, CachyOS and EndeavourOS are supported. CachyOS is the primary target, so its repos get special care (see [Third-party repos](/docs/guides/third-party-repos/)).
-- **systemd-boot**, if you want boot entries per generation and boot-time rollback. archix writes one entry per generation, plus a rescue entry. GRUB and Limine are not supported. On those bootloaders archix still manages your system and `archix rollback` still works from a running system, but you don't get generation boot entries.
-- **btrfs on `/`**, recommended. With a btrfs root, archix snapshots before every switch and rolls back by booting the snapshot. On ext4 and other filesystems, rollback reinstalls the old generation's packages and files from the cache instead. Both work; btrfs is faster and has fewer ways to fail. See [Generations and rollback](/docs/concepts/generations/).
-- **sbctl keys**, optional. If you've enrolled Secure Boot keys with `sbctl`, archix signs every generation's unified kernel image (UKI).
-- **base-devel and git** for the bootstrap below. AUR builds later run in a clean chroot with devtools' `makechrootpkg`.
+- **systemd-boot**, if you want a boot entry per generation, rollback from the boot menu and rescue entries. Entries are unified kernel images (UKIs) built with `mkinitcpio` and `ukify` (from `systemd-ukify`). GRUB and Limine are not supported: on those bootloaders archix still manages your system and `archix rollback` still works from a running system, but you don't get generation boot entries.
+- **sbctl keys**, optional. If `sbctl` has keys, archix signs every UKI and systemd-boot itself, so Secure Boot stays on.
+- **Any filesystem.** Rollback reinstalls a generation's exact packages and files from the cache, which works the same on ext4, btrfs or anything else. On a btrfs root, archix also takes a read-only snapshot of `/` before every switch, as an extra recovery point you can use by hand. See [Generations and rollback](/docs/concepts/generations/#btrfs-snapshots).
+- **base-devel and git** for the bootstrap below, and **devtools** for AUR builds later, which run in a clean chroot with `makechrootpkg`.
 
 ## Bootstrap from the AUR
 
 You don't have an AUR helper yet, or you're about to replace the one you have. Build archix the way you'd build yay for the first time:
 
 ```console
-$ sudo pacman -S --needed base-devel git
+$ sudo pacman -S --needed base-devel git devtools
 $ git clone https://aur.archlinux.org/archix.git && cd archix && makepkg -si
 ```
 
@@ -44,21 +44,23 @@ $ archix --version
 archix 1.0.0
 ```
 
-Then run `sudo archix init` to capture your system. The [quick start](/docs/quick-start/) walks through it.
+Then run `sudo archix init` to capture your system into a config and a lock that match it exactly, so the first `archix diff` is empty. The [quick start](/docs/quick-start/) walks through it.
 
 ## Updates to archix itself
 
-After the first switch, archix is a package in your lock like any other. It updates through its own lock: when you run `archix update` and `archix switch`, the new archix version is resolved, built and installed in the same transaction as everything else. If an archix update turns out bad, rolling back the generation rolls back archix too.
+archix is an AUR package on your system, so `archix init` declares it in `installed.lua` like your other explicitly installed packages, and locks it by AUR commit. From then on it updates like everything else: `archix update` and `archix switch`, or `archix -Syu`, build the new version in a clean chroot and install it in the same transaction as the rest. If an archix update turns out bad, rolling back the generation rolls back archix too.
 
-You don't need to declare archix in `packages`, and you shouldn't update it with `makepkg` again.
+Don't update it with `makepkg` again.
 
 ## The static rescue binary
 
-Every [GitHub release](https://github.com/archix-org/archix/releases) includes a static `archix` binary. It is a rescue tool, not an install path. It has no dependencies, so it runs from a live USB against a mounted system:
+The package installs a statically linked archix at `/usr/lib/archix/archix-static`. When archix manages booting and that binary is present, archix adds an mkinitcpio hook that copies it into the initramfs, and gives the newest two generations an `archix rescue` boot entry. That entry repairs a system pacman can't repair, without a live USB.
+
+The same binary also works from a live USB against the mounted system, since it has no dependencies:
 
 ```console
 # mount /dev/nvme0n1p2 /mnt
-# ./archix rollback --root /mnt
+# /mnt/usr/lib/archix/archix-static rescue --root /mnt
 ```
 
-You should never need it. Every generation already carries a static archix in its initramfs and gets an `archix rescue` boot entry, which repairs a broken system without a live USB. The release binary is the last resort when the machine can't boot any of its own entries. See [Safety](/docs/concepts/safety/#rescue-mode).
+You should rarely need that. See [Safety](/docs/concepts/safety/#rescue-mode).

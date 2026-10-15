@@ -1,6 +1,6 @@
 ---
 title: pacman and yay
-description: How archix handles packages installed or upgraded outside it, how adopting works, and how undeclared and ignored packages are treated.
+description: How archix handles packages installed or upgraded outside it, how adopting works, the pacman-style commands, and how undeclared and ignored packages are treated.
 sidebar:
   order: 4
 ---
@@ -11,56 +11,105 @@ What archix adds is memory. It notices those changes and, on the next switch, as
 
 ## The pacman hook
 
-archix installs a pacman `PostTransaction` hook. Whenever pacman finishes a transaction that archix didn't run, the hook records it in `/var/lib/archix`. It doesn't block or change the transaction; it only takes notes.
-
-## Adopting
-
-On the next `archix switch`, if the system is ahead of the lock, archix asks:
+archix installs `/etc/pacman.d/hooks/archix.hook`, which runs `archix hook-record` after every pacman transaction. archix's own pacman runs are marked, so only changes made outside archix are recorded, in `/var/lib/archix/outside-changes.json`:
 
 ```console
 $ sudo pacman -Syu
-:: Synchronizing package databases...
-:: Starting full system upgrade...
+...
+:: Running post-transaction hooks...
+(1/1) Recording package changes for archix...
+archix: recorded 3 packages changed outside archix; `archix switch` will offer to adopt them
+```
+
+The hook never fails or changes a pacman transaction; it only takes notes. `archix status` reports them, and the next successful switch clears them.
+
+## Adopting
+
+On the next `archix switch`, if installed packages are newer than the lock, archix asks:
+
+```console
 $ sudo archix switch
-System is newer than the lock: adopt? [Y/n]
+the system is newer than the lock for 3 packages (linux, mesa, vulkan-radeon), probably from pacman or an AUR helper
+adopt them into the lock? (no reverts them to the lock) [Y/n]
 ```
 
 - **Yes** moves the lock to match the system. The switch then proceeds from there, and the upgrade you did with pacman becomes part of a generation you can roll back.
 - **No** reverts the system to the lock. Packages go back to their locked versions.
 
-`--noconfirm` adopts.
+`--noconfirm` adopts. `archix diff` mentions it ahead of time: ``3 packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading``.
 
-Adopting picks the ALA snapshot date closest to the pacman transaction, then records any packages that don't match that snapshot as exact-version entries. Live mirrors don't update in lockstep with the archive, so a `pacman -Syu` rarely matches one day exactly. Exact-version entries cover the difference, and every one of them can still be fetched from the ALA's `/packages/`.
+Adopting re-resolves your config at the lock's date and at the days around your manual upgrade, and keeps the snapshot that matches the most installed versions. Live mirrors don't update in lockstep with the archive, so a `pacman -Syu` rarely matches one day exactly. Anything still newer is [pinned](/docs/concepts/lockfile/#pins) to its exact installed version, fetched from the Arch Linux Archive's per-package history and listed under `pinned`. Nothing is downgraded.
 
 ```console
-System is newer than the lock: adopt? [Y/n] y
+adopt them into the lock? (no reverts them to the lock) [Y/n] y
 snapshot 2026-10-09 -> 2026-10-15
-~ linux 6.17.1.arch1-1 -> 6.17.2.arch1-1
+~ linux 7.2.8.arch1-1 -> 7.2.9.arch1-1
 ~ mesa 1:25.3.0-1 -> 1:25.3.1-1
-exact versions: 2 packages don't match the 2026-10-15 snapshot
+~ vulkan-radeon 1:25.3.0-1 -> 1:25.3.1-1
+214 packages locked
+wrote /etc/archix/archix.lock
 ```
 
-## `archix -Syu`
+AUR packages upgraded by yay or paru are adopted too: archix finds the commit whose build recipe builds the installed version, and locks that.
 
-If you want the pacman experience without the question, use the pacman-style alias:
+Pins survive `archix lock` at the same date. `archix update` to a new snapshot drops them.
+
+## The pacman-style commands
+
+archix is also an AUR helper, with the flags you already type:
+
+| Command | Same as |
+| --- | --- |
+| `archix -S <pkg>` | `archix install <pkg>` |
+| `archix -Ss <terms>` | `archix search <terms>` |
+| `archix -R <pkg>` | `archix remove <pkg>` |
+| `archix -Syu` | `archix upgrade` |
+| `archix -Syu <pkg>` | `archix upgrade`, also installing `<pkg>` |
+| `archix` | `archix upgrade` |
+
+`-Sy` on its own, and `-S` or `-Ss` without arguments, fail with a hint: archix never syncs databases without upgrading. See the [CLI reference](/docs/reference/cli/#install--s) for every flag.
+
+### `archix -Syu`
+
+If you want the yay experience without the question, use the full upgrade:
 
 ```console
 $ sudo archix -Syu
 ```
 
-It updates from the live mirrors, like `pacman -Syu`, and adopts the result into the lock automatically. Running `archix` with no arguments does the same full update, the way `yay` does.
+It runs `pacman -Syu` from your live mirrors, adopts the result into the lock without asking, moves AUR packages to the newest commit of their build recipes (showing each changed recipe for review), and switches. Running `archix` with no arguments does the same, the way `yay` does.
 
-Compare it with `archix update`, which moves the lock to the newest archive snapshot without touching the live mirrors. Both get you current. `-Syu` is the newest your mirror has; `update` is a whole, consistent day of the archive.
+Compare it with `archix update`, which moves the lock to the newest archive snapshot and applies nothing until you `archix switch`. Both get you current. `-Syu` is the newest your mirror has; `update` is a whole, consistent day of the archive.
+
+### `installed.lua`
+
+`archix install` declares before it installs. The package name goes into `lua/hosts/<host>/installed.lua`, a file archix owns:
+
+```lua title="lua/hosts/desktop/installed.lua"
+-- Managed by `archix install` and `archix remove`.
+return {
+  packages = {
+    "htop",
+    "zen-browser-bin",
+  },
+}
+```
+
+archix imports it automatically whenever it exists, so you don't have to. `archix remove` takes names out of it. archix never rewrites your own Lua: a package you declared elsewhere is refused by `remove`, with a pointer to where it's declared. `archix init` puts the packages it captures in this file, so `install` and `remove` work on them from day one.
+
+`archix install --path <dir>` edits the `installed.lua` in another directory under `lua/`, for example a module shared by several hosts. Import it yourself; archix prints the name to use.
 
 ## Undeclared packages
 
-Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/#undeclared_packages) option decides what happens to it, and onboarding asks you to choose.
+Adopting covers packages archix already tracks. It doesn't cover a package you `pacman -S`'d that isn't in your config at all. It's installed, but it isn't in the lock. The [`undeclared_packages`](/docs/reference/options/) option decides what happens to it, and `archix init` asks you to choose.
 
-**`"remove"`** is the default. On switch, packages that aren't in the lock are removed. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful. The same goes for undeclared changes to `/etc` files, which are reverted, and undeclared enabled services, which are disabled.
+**`"remove"`** is the default. On switch, packages that aren't in the lock are removed. The system is exactly what the config says, which is the guarantee that makes rollback and a fresh reinstall meaningful.
 
-**`"warn"`** keeps them and lists them in `archix diff` and `archix switch` instead:
+This covers packages only. Changes to `/etc` files and services that archix never managed are left alone; see [Safety](/docs/concepts/safety/#managed-files-backups-and-hand-edits).
 
-```lua title="lua/hosts/desktop.lua"
+**`"warn"`** keeps undeclared packages and lists them in `archix diff` and `archix switch` instead:
+
+```lua title="lua/hosts/desktop/init.lua"
 return {
   undeclared_packages = "warn",
 }
@@ -68,18 +117,18 @@ return {
 
 ```console
 $ archix diff
-snapshot 2026-10-15: 1214 packages
-the system matches the lock
+snapshot 2026-10-15: 214 packages
+the system matches the lock and the config
 not declared, kept because undeclared_packages = "warn": htop ncdu
 ```
 
 To keep one, add it to `packages` or run `archix install htop`. To get rid of it, remove it with pacman or switch back to `"remove"`.
 
-`"warn"` is a good way to start while you move an existing system into your config. Switch back to `"remove"` once that line is gone.
+To try something without declaring it, `sudo archix install --temp <pkg>` installs it as undeclared on purpose. The next switch removes it unless you've declared it by then.
 
 ## Ignoring packages everywhere
 
-Some packages you manage by hand on purpose. List them in [`ignored_packages`](/docs/reference/options/#ignored_packages), and archix never touches or reports them, whatever `undeclared_packages` says:
+Some packages you manage by hand on purpose. List them in [`ignored_packages`](/docs/reference/options/), and archix never touches or reports them, whatever `undeclared_packages` says:
 
 ```lua title="lua/modules/common.lua"
 return {
@@ -87,14 +136,39 @@ return {
 }
 ```
 
-Because it's in your config, the decision is visible, committed and the same on every machine that imports the module.
+Because it's in your config, the decision is visible, committed and the same on every machine that imports the module. `archix init` lists installed packages that are in neither the repos nor the AUR here, and, if you choose, orphaned dependencies.
 
-## "Don't ask again"
+## Third-party repos in `pacman.conf`
 
-When archix asks about something undeclared, you can tell it not to ask again. That decision is stored only on that machine, in `/var/lib/archix`. It isn't part of your config, so it doesn't follow you to your other machines or to a reinstall.
+So that plain pacman sees the same repos as archix, archix keeps your declared [third-party repos](/docs/guides/third-party-repos/) in `/etc/pacman.conf`, inside marked blocks around the official repos:
 
-That's on purpose: a one-off decision on one machine shouldn't silently change every machine. To ignore a package everywhere, use `ignored_packages`.
+```ini title="/etc/pacman.conf"
+[options]
+HoldPkg = pacman glibc
+Architecture = auto
+
+# BEGIN archix custom repos (before the official repos)
+[cachyos]
+SigLevel = Required DatabaseOptional
+Server = https://mirror.cachyos.org/repo/$arch/$repo
+
+# END archix custom repos (before the official repos)
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+# BEGIN archix custom repos (after the official repos)
+[chaotic-aur]
+SigLevel = Required DatabaseOptional
+Server = https://cdn-mirror.chaotic.cx/$repo/$arch
+
+# END archix custom repos (after the official repos)
+```
+
+Repos with `before_official = true` go in the first block, the rest in the second. archix rewrites only these blocks, after each successful switch. A hand-written section for a repo your config declares is taken over, so it's never listed twice. Removing a repo from your config removes it from `pacman.conf`. Everything else in the file, including the official repos and their mirrorlists, is yours.
 
 ## When a switch is unfinished
 
-If an archix switch was interrupted, `switch`, `lock` and `update` refuse to run until you deal with it with `archix recover`. Read-only commands like `diff` and `status` still work, and so do pacman and yay, but the hook warns you that a switch is unfinished. See [Safety](/docs/concepts/safety/#unfinished-switches).
+If an archix switch was interrupted, `switch`, `lock`, `update` and the other commands that change things refuse to run until you deal with it with `archix recover`. Read-only commands like `diff` and `status` still work, and so do pacman and yay, but the hook warns you after every transaction that a switch is unfinished. See [Safety](/docs/concepts/safety/#unfinished-switches).
