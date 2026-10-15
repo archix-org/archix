@@ -21,6 +21,7 @@ pub fn resolve(archive: &Archive, cache: &Path, date: Date, repos: &[String], de
         date,
         repos: repos.to_vec(),
         declared: declared.to_vec(),
+        pinned: Vec::new(),
         packages: BTreeMap::new(),
     };
     if declared.is_empty() {

@@ -9,6 +9,8 @@ use serde::Deserialize;
 use crate::date::Date;
 
 pub const LOCK_FILE: &str = "archix.lock";
+/// The `repo` of entries pinned to an exact version from the archive's per-package history.
+pub const ARCHIVE_REPO: &str = "archive";
 const LOCK_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -22,6 +24,9 @@ pub struct HostLock {
     pub date: Date,
     pub repos: Vec<String>,
     pub declared: Vec<String>,
+    /// Packages held at a version other than the snapshot's, e.g. after adopting a manual upgrade.
+    #[serde(default)]
+    pub pinned: Vec<String>,
     #[serde(default)]
     pub packages: BTreeMap<String, Locked>,
 }
@@ -47,6 +52,30 @@ impl HostLock {
     /// Whether this lock was resolved for the same declared packages and repos.
     pub fn matches(&self, declared: &[String], repos: &[String]) -> bool {
         self.declared == declared && self.repos == repos
+    }
+
+    pub fn pin(&mut self, name: &str, locked: Locked) {
+        self.packages.insert(name.to_string(), locked);
+        if !self.pinned.iter().any(|p| p == name) {
+            self.pinned.push(name.to_string());
+            self.pinned.sort();
+        }
+    }
+
+    /// Carries `old`'s pins over to a fresh resolution at the same date, for packages still in the closure.
+    pub fn keep_pins(&mut self, old: &HostLock) {
+        if old.date != self.date {
+            return;
+        }
+        for name in &old.pinned {
+            if let (Some(pinned), Some(fresh)) = (old.packages.get(name), self.packages.get(name)) {
+                let locked = Locked {
+                    explicit: fresh.explicit,
+                    ..pinned.clone()
+                };
+                self.pin(name, locked);
+            }
+        }
     }
 }
 
@@ -84,6 +113,9 @@ impl Lockfile {
             let _ = writeln!(out, "date = \"{}\"", lock.date);
             let _ = writeln!(out, "repos = {}", array(&lock.repos));
             let _ = writeln!(out, "declared = {}", array(&lock.declared));
+            if !lock.pinned.is_empty() {
+                let _ = writeln!(out, "pinned = {}", array(&lock.pinned));
+            }
             let _ = writeln!(out, "\n[hosts.{host}.packages]");
             for (name, pkg) in &lock.packages {
                 let _ = writeln!(
@@ -158,6 +190,7 @@ mod tests {
             date: "2026-10-14".parse().unwrap(),
             repos: vec!["core".into(), "extra".into()],
             declared: vec!["gtk+".into()],
+            pinned: vec!["zlib".into()],
             packages,
         };
         Lockfile {

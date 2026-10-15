@@ -7,12 +7,14 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use archix::adopt::{adopt, newer_than_lock};
 use archix::apply::{self, PacmanLock};
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
+use archix::integration;
 use archix::journal::{Journal, Kind, Step, Transaction};
-use archix::lock::{HostLock, LOCK_FILE, Lockfile};
+use archix::lock::{ARCHIVE_REPO, HostLock, LOCK_FILE, Lockfile};
 use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
@@ -107,7 +109,10 @@ fn current_lock(target: &Target, declared: &Declared, snapshot: Snapshot, save: 
         "resolving {} declared packages against the {date} snapshot",
         declared.packages.len()
     );
-    let new = resolve(&archive, &user_cache()?, date, &declared.repos, &declared.packages)?;
+    let mut new = resolve(&archive, &user_cache()?, date, &declared.repos, &declared.packages)?;
+    if let Some(old) = old {
+        new.keep_pins(old);
+    }
     if !save {
         eprintln!(
             "note: {LOCK_FILE} is out of date for {}; showing a fresh resolution",
@@ -115,13 +120,20 @@ fn current_lock(target: &Target, declared: &Declared, snapshot: Snapshot, save: 
         );
         return Ok((new, true));
     }
-    for line in summarize(old, &new) {
+    let old = old.cloned();
+    save_lock(target, &mut lockfile, old.as_ref(), &new)?;
+    Ok((new, true))
+}
+
+fn save_lock(target: &Target, lockfile: &mut Lockfile, old: Option<&HostLock>, new: &HostLock) -> Result<()> {
+    for line in summarize(old, new) {
         println!("{line}");
     }
+    let path = target.config_dir.join(LOCK_FILE);
     lockfile.hosts.insert(target.host.to_string(), new.clone());
     lockfile.save(&path)?;
     println!("wrote {}", path.display());
-    Ok((new, true))
+    Ok(())
 }
 
 pub fn lock(target: &Target, snapshot: Snapshot) -> Result<()> {
@@ -162,6 +174,12 @@ pub fn diff(target: &Target) -> Result<()> {
     let installed = read_local_db(&paths.local_db())?;
     let (changes, warned) = changes_for(&lock, &declared, &installed);
     println!("snapshot {}: {} packages", lock.date, lock.packages.len());
+    let newer = newer_than_lock(&lock, &installed).len();
+    if newer > 0 {
+        println!(
+            "{newer} packages are newer than the lock; `archix switch` will offer to adopt them instead of downgrading"
+        );
+    }
     if changes.is_empty() {
         println!("the system matches the lock");
     }
@@ -187,11 +205,34 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, true)?;
+    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true)?;
     let installed = read_local_db(&paths.local_db())?;
+    let archive = Archive::new(ARCHIVE_URL);
+
+    let newer: Vec<String> = newer_than_lock(&lock, &installed)
+        .iter()
+        .map(|pkg| pkg.name.clone())
+        .collect();
+    if !newer.is_empty() {
+        let shown: Vec<&str> = newer.iter().take(8).map(String::as_str).collect();
+        let more = if newer.len() > shown.len() { ", ..." } else { "" };
+        println!(
+            "the system is newer than the lock for {} packages ({}{more}), probably from pacman or an AUR helper",
+            newer.len(),
+            shown.join(", ")
+        );
+        if noconfirm || confirm("adopt them into the lock? (no reverts them to the lock)")? {
+            let adopted = adopt(&archive, &user_cache()?, &paths, &lock, &installed)?;
+            let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+            save_lock(target, &mut lockfile, Some(&lock), &adopted)?;
+            lock = adopted;
+        }
+    }
+
     let (changes, warned) = changes_for(&lock, &declared, &installed);
     print_warned(&warned);
     if changes.is_empty() {
+        finish_switch(&paths)?;
         println!("nothing to do: the system matches snapshot {}", lock.date);
         return Ok(());
     }
@@ -202,20 +243,20 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
         bail!("aborted; nothing was changed");
     }
 
-    let archive = Archive::new(ARCHIVE_URL);
     let mut wanted = Vec::new();
     let mut remove = Vec::new();
     for change in &changes {
         match change {
             Change::Install { name, .. } | Change::Upgrade { name, .. } | Change::Downgrade { name, .. } => {
                 let pkg = &lock.packages[name];
+                let mut urls = vec![archive.package_url(name, &pkg.file)];
+                if pkg.repo != ARCHIVE_REPO {
+                    urls.insert(0, format!("{}/{}", archive.repo_url(lock.date, &pkg.repo), pkg.file));
+                }
                 wanted.push(Wanted {
                     name: name.clone(),
                     file: pkg.file.clone(),
-                    urls: vec![
-                        format!("{}/{}", archive.repo_url(lock.date, &pkg.repo), pkg.file),
-                        archive.package_url(name, &pkg.file),
-                    ],
+                    urls,
                     sha256: Some(pkg.sha256.clone()),
                 });
             }
@@ -247,8 +288,36 @@ pub fn switch(target: &Target, noconfirm: bool) -> Result<()> {
     let mut journal = Journal::new(Kind::Switch, target.host, target_name, installed, transaction);
     journal.save(&paths.journal())?;
     apply::run(&paths, &mut journal, false)?;
+    finish_switch(&paths)?;
     println!("switched to snapshot {}", lock.date);
     Ok(())
+}
+
+/// After a successful switch: outside changes are reconciled, and the hook and login notices are in place.
+fn finish_switch(paths: &Paths) -> Result<()> {
+    integration::clear_outside_changes(paths)?;
+    integration::ensure(paths)
+}
+
+/// Run by archix's pacman hook after every transaction; never fails, so it can't break a pacman run.
+pub fn hook_record() {
+    let paths = Paths::system();
+    let packages: Vec<String> = io::stdin()
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    match integration::record(&paths, packages) {
+        Ok(Some(change)) => println!(
+            "archix: recorded {} packages changed outside archix; `archix switch` will offer to adopt them",
+            change.packages.len()
+        ),
+        Ok(None) => {}
+        Err(e) => println!("archix: could not record this transaction: {e:#}"),
+    }
+    if paths.journal().exists() {
+        println!("archix: a switch is unfinished; run `sudo archix recover`");
+    }
 }
 
 pub fn recover(mode: Option<RecoverMode>) -> Result<()> {
@@ -393,6 +462,15 @@ pub fn status(target: &Target) -> Result<()> {
             describe_unfinished(&journal)
         ),
         None => println!("no unfinished switch"),
+    }
+    let outside = integration::outside_changes(&paths)?;
+    if !outside.is_empty() {
+        let packages: BTreeSet<&String> = outside.iter().flat_map(|change| &change.packages).collect();
+        println!(
+            "{} packages were changed outside archix in {} transactions since the last switch",
+            packages.len(),
+            outside.len()
+        );
     }
     let lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
     let Some(lock) = lockfile.hosts.get(target.host) else {

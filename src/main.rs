@@ -64,6 +64,9 @@ enum Command {
     },
     /// Show the lock, pending changes and any unfinished switch
     Status,
+    /// Called by archix's pacman hook to record transactions archix didn't run
+    #[command(hide = true)]
+    HookRecord,
 }
 
 #[derive(Serialize)]
@@ -89,6 +92,10 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if let Command::HookRecord = cli.command {
+        packages::hook_record();
+        return Ok(ExitCode::SUCCESS);
+    }
     if let Command::Recover {
         cont,
         rollback,
@@ -132,7 +139,7 @@ fn run() -> Result<ExitCode> {
         Command::Diff => packages::diff(&target)?,
         Command::Switch { noconfirm } => packages::switch(&target, noconfirm)?,
         Command::Status => packages::status(&target)?,
-        Command::Recover { .. } => unreachable!("recover runs before the config is evaluated"),
+        Command::Recover { .. } | Command::HookRecord => unreachable!("handled before the config is evaluated"),
     }
     Ok(ExitCode::SUCCESS)
 }

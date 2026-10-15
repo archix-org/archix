@@ -27,6 +27,9 @@ pub struct LocalPkg {
     pub version: String,
     pub arch: String,
     pub explicit: bool,
+    /// Unix time pacman installed this version, from `%INSTALLDATE%`.
+    #[serde(default)]
+    pub installed_at: Option<u64>,
 }
 
 /// Parses a pacman `desc` file: `%KEY%` headers, each followed by value lines up to a blank line.
@@ -113,6 +116,7 @@ pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
         };
         let explicit = first(&fields, "REASON").is_none_or(|reason| reason == "0");
         let arch = first(&fields, "ARCH").unwrap_or_else(|| "x86_64".to_string());
+        let installed_at = first(&fields, "INSTALLDATE").and_then(|secs| secs.parse().ok());
         packages.insert(
             name.clone(),
             LocalPkg {
@@ -120,6 +124,7 @@ pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
                 version,
                 arch,
                 explicit,
+                installed_at,
             },
         );
     }

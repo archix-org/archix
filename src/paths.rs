@@ -7,6 +7,9 @@ pub struct Paths {
     pub pacman_cache: PathBuf,
     pub state: PathBuf,
     pub cache: PathBuf,
+    pub pacman_hooks: PathBuf,
+    pub profile_d: PathBuf,
+    pub autostart: PathBuf,
 }
 
 impl Paths {
@@ -16,6 +19,9 @@ impl Paths {
             pacman_cache: PathBuf::from("/var/cache/pacman/pkg"),
             state: PathBuf::from("/var/lib/archix"),
             cache: PathBuf::from("/var/cache/archix"),
+            pacman_hooks: PathBuf::from("/etc/pacman.d/hooks"),
+            profile_d: PathBuf::from("/etc/profile.d"),
+            autostart: PathBuf::from("/etc/xdg/autostart"),
         }
     }
 
@@ -29,6 +35,10 @@ impl Paths {
 
     pub fn journal(&self) -> PathBuf {
         self.state.join("journal.json")
+    }
+
+    pub fn outside_changes(&self) -> PathBuf {
+        self.state.join("outside-changes.json")
     }
 
     pub fn packages(&self) -> PathBuf {

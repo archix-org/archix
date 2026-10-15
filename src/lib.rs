@@ -1,8 +1,10 @@
+pub mod adopt;
 pub mod apply;
 pub mod archive;
 pub mod date;
 pub mod eval;
 pub mod fetch;
+pub mod integration;
 pub mod journal;
 pub mod lock;
 pub mod options;

@@ -28,7 +28,7 @@ impl Setup {
             .into_values()
             .filter(|pkg| pkg.explicit)
             .map(|pkg| pkg.name)
-            .filter(|name| name != "tree")
+            .filter(|name| name != "tree" && name != "lemon")
             .collect();
         packages.extend(extra.iter().map(|p| p.to_string()));
         let quoted: Vec<String> = packages.iter().map(|p| format!("{p:?}")).collect();
@@ -46,6 +46,34 @@ impl Setup {
             .args(args)
             .output()
             .unwrap()
+    }
+
+    fn answering(&self, input: &str, args: &[&str]) -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let output = child.wait_with_output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "archix {args:?} failed:\n{text}");
+        text
+    }
+
+    fn lock(&self) -> archix::lock::HostLock {
+        archix::lock::Lockfile::load(&self.dir.path().join("archix.lock"))
+            .unwrap()
+            .hosts["box"]
+            .clone()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -222,4 +250,82 @@ fn interrupted_switch_blocks_until_recovered() {
     assert!(out.contains("tree") && out.contains("is not installed"), "{out}");
     assert!(installed("tree").is_none(), "abandon changes nothing");
     assert!(!paths.journal().exists());
+}
+
+/// Installs lemon 3.54.0 from a later snapshot with plain pacman, the way `pacman -Syu` or yay would.
+fn upgrade_lemon_behind_archix() {
+    let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");
+    if !file.exists() {
+        let url = "https://archive.archlinux.org/repos/2026/10/14/core/os/x86_64/lemon-3.54.0-1-x86_64.pkg.tar.zst";
+        assert!(
+            archix::archive::Archive::new(archix::archive::ARCHIVE_URL)
+                .fetch(url, &file)
+                .unwrap()
+        );
+    }
+    pacman(&["-U", file.to_str().unwrap()]);
+}
+
+#[test]
+#[ignore]
+fn manual_upgrades_are_recorded_and_adopted_as_pins() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+    assert!(
+        setup.paths.pacman_hooks.join("archix.hook").is_file(),
+        "switch installs the pacman hook"
+    );
+
+    upgrade_lemon_behind_archix();
+    assert!(setup.ok(&["status"]).contains("changed outside archix"));
+    assert!(setup.ok(&["diff"]).contains("newer than the lock"));
+
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("the system is newer than the lock for 1 packages (lemon)"),
+        "{out}"
+    );
+    let lock = setup.lock();
+    assert_eq!(
+        lock.date.to_string(),
+        IMAGE_SNAPSHOT,
+        "the rest of the system still matches the old snapshot"
+    );
+    assert_eq!(lock.pinned, ["lemon"]);
+    assert_eq!(lock.packages["lemon"].version, "3.54.0-1");
+    assert_eq!(
+        installed("lemon").as_deref(),
+        Some("3.54.0-1"),
+        "adopting never downgrades"
+    );
+    assert!(
+        !setup.ok(&["status"]).contains("changed outside archix"),
+        "a switch clears the record"
+    );
+
+    setup.ok(&["lock"]);
+    assert_eq!(
+        setup.lock().pinned,
+        ["lemon"],
+        "pins survive re-locking at the same date"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn declining_adoption_reverts_to_the_lock() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    upgrade_lemon_behind_archix();
+    let out = setup.answering("n\ny\n", &["switch"]);
+    assert!(out.contains("downgrade  lemon 3.54.0-1 -> 3.53.4-1"), "{out}");
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+    assert!(setup.lock().pinned.is_empty());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }

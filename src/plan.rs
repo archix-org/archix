@@ -116,6 +116,7 @@ mod tests {
                     version: version.to_string(),
                     arch: "x86_64".into(),
                     explicit: *explicit,
+                    installed_at: None,
                 };
                 (name.to_string(), pkg)
             })

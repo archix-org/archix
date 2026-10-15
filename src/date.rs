@@ -13,11 +13,19 @@ pub struct Date {
 impl Date {
     pub fn today_utc() -> Date {
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        Date::from_unix(secs)
+    }
+
+    pub fn from_unix(secs: u64) -> Date {
         Date::from_days((secs / 86_400) as i64)
     }
 
     pub fn previous(self) -> Date {
         Date::from_days(self.days() - 1)
+    }
+
+    pub fn next(self) -> Date {
+        Date::from_days(self.days() + 1)
     }
 
     /// Days since 1970-01-01, using Howard Hinnant's civil calendar algorithm.

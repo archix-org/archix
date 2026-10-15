@@ -1,0 +1,129 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::apply::TRANSACTION_ENV;
+use crate::paths::Paths;
+
+/// Packages changed by one pacman or AUR-helper transaction that archix didn't run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutsideChange {
+    pub at: u64,
+    pub packages: Vec<String>,
+}
+
+/// The files archix installs so the rest of the system tells it (and you) about things.
+pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
+    let journal = paths.journal();
+    let journal = journal.display();
+    let hook = format!(
+        "[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Package\nTarget = *\n\n\
+         [Action]\nDescription = Recording package changes for archix...\nWhen = PostTransaction\n\
+         Exec = {} hook-record\nNeedsTargets\n",
+        archix.display()
+    );
+    let profile = format!(
+        "if [ -e {journal} ]; then\n  echo \"archix: a switch was interrupted; run 'sudo archix recover'\" >&2\nfi\n"
+    );
+    let autostart = format!(
+        "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
+         Exec=sh -c '[ -e {journal} ] && command -v notify-send >/dev/null && notify-send -u critical archix \"A switch was interrupted. Run: sudo archix recover\"'\n"
+    );
+    vec![
+        (paths.pacman_hooks.join("archix.hook"), hook),
+        (paths.profile_d.join("archix.sh"), profile),
+        (paths.autostart.join("archix-status.desktop"), autostart),
+    ]
+}
+
+/// Writes the integration files that are missing or out of date.
+pub fn ensure(paths: &Paths) -> Result<()> {
+    let archix = std::env::current_exe().context("finding the archix binary")?;
+    for (path, content) in files(paths, &archix) {
+        if fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
+            continue;
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Called by the pacman hook with the transaction's package names; archix's own transactions are skipped.
+pub fn record(paths: &Paths, packages: Vec<String>) -> Result<Option<OutsideChange>> {
+    if std::env::var_os(TRANSACTION_ENV).is_some() || packages.is_empty() {
+        return Ok(None);
+    }
+    let at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let change = OutsideChange { at, packages };
+    let mut changes = outside_changes(paths)?;
+    changes.push(change.clone());
+    let path = paths.outside_changes();
+    fs::create_dir_all(&paths.state)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&changes)?)?;
+    fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(change))
+}
+
+pub fn outside_changes(paths: &Paths) -> Result<Vec<OutsideChange>> {
+    let path = paths.outside_changes();
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Forgets recorded outside changes once a switch has reconciled them with the lock.
+pub fn clear_outside_changes(paths: &Paths) -> Result<()> {
+    match fs::remove_file(paths.outside_changes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_paths(root: &Path) -> Paths {
+        let mut paths = Paths::system();
+        paths.state = root.join("state");
+        paths.pacman_hooks = root.join("hooks");
+        paths.profile_d = root.join("profile.d");
+        paths.autostart = root.join("autostart");
+        paths
+    }
+
+    #[test]
+    fn records_accumulate_until_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = temp_paths(dir.path());
+        record(&paths, vec!["zlib".into()]).unwrap();
+        record(&paths, vec!["lemon".into(), "sqlite".into()]).unwrap();
+        let changes = outside_changes(&paths).unwrap();
+        assert_eq!(changes.len(), 2);
+        assert_eq!(changes[1].packages, ["lemon", "sqlite"]);
+        clear_outside_changes(&paths).unwrap();
+        assert!(outside_changes(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn hook_runs_this_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = temp_paths(dir.path());
+        let files = files(&paths, Path::new("/opt/archix/bin/archix"));
+        assert!(
+            files[0]
+                .1
+                .contains("Exec = /opt/archix/bin/archix hook-record\nNeedsTargets")
+        );
+        assert!(files[1].1.contains("state/journal.json"));
+    }
+}
