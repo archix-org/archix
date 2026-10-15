@@ -24,6 +24,10 @@ options=('!lto')
 
 prepare() {
   cd "$pkgname-$pkgver"
+  # With rustup instead of pacman's rust, the musl target comes from rustup rather than rust-musl.
+  if command -v rustup >/dev/null; then
+    rustup target add x86_64-unknown-linux-musl
+  fi
   cargo fetch --locked
 }
 
