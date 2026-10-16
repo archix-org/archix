@@ -299,6 +299,25 @@ fn packages_shipping_the_same_file_are_refused_before_anything_changes() {
     );
     assert!(installed("archix-test-one").is_none() && installed("archix-test-two").is_none());
     assert!(!std::path::Path::new("/var/lib/archix/journal.json").exists());
+
+    let conflicting =
+        recipe("archix-test-two", "1", "", ships).replace("depends=()", "depends=()\nconflicts=(archix-test-one)");
+    fs::write(setup.dir.path().join("pkgbuilds/two/PKGBUILD"), &conflicting).unwrap();
+    let init = setup.dir.path().join("init.lua");
+    let original = fs::read_to_string(&init).unwrap();
+    let without = |drop: &str| {
+        original
+            .replace(&format!(", \"{drop}\""), "")
+            .replace("return {", "return { undeclared_packages = \"warn\",")
+    };
+    fs::write(&init, without("archix-test-two")).unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    fs::write(&init, without("archix-test-one")).unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        installed("archix-test-two").is_some() && installed("archix-test-one").is_none(),
+        "a package that conflicts with a kept one replaces it, as pacman does"
+    );
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }

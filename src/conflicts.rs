@@ -8,8 +8,16 @@ use flate2::read::GzDecoder;
 
 use crate::pacman::parse_desc;
 
-/// A package file's name and the files (not directories) it installs, read from the .PKGINFO and .MTREE at the start of the archive.
-pub fn contents(path: &Path) -> Result<(String, Vec<String>)> {
+/// What a package file is and installs, from the .PKGINFO and .MTREE at the start of the archive.
+pub struct Contents {
+    pub name: String,
+    /// Packages it conflicts with or replaces, which pacman removes to install it.
+    pub displaces: Vec<String>,
+    /// Files and links, not directories.
+    pub files: Vec<String>,
+}
+
+pub fn contents(path: &Path) -> Result<Contents> {
     let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
     let decoder: Box<dyn Read> = if path.to_string_lossy().ends_with(".zst") {
         Box::new(zstd::Decoder::new(file)?)
@@ -17,7 +25,7 @@ pub fn contents(path: &Path) -> Result<(String, Vec<String>)> {
         bail!("{} isn't a .pkg.tar.zst", path.display());
     };
     let mut archive = tar::Archive::new(decoder);
-    let (mut name, mut files) = (None, None);
+    let (mut name, mut files, mut displaces) = (None, None, Vec::new());
     for entry in archive.entries()? {
         let mut entry = entry?;
         let entry_path = entry.path()?.to_string_lossy().into_owned();
@@ -29,6 +37,14 @@ pub fn contents(path: &Path) -> Result<(String, Vec<String>)> {
                     .lines()
                     .find_map(|line| line.strip_prefix("pkgname = "))
                     .map(str::to_string);
+                displaces = text
+                    .lines()
+                    .filter_map(|line| {
+                        line.strip_prefix("conflict = ")
+                            .or_else(|| line.strip_prefix("replaces = "))
+                    })
+                    .map(|dep| crate::aur::srcinfo::dep_name(dep).to_string())
+                    .collect();
             }
             ".MTREE" => {
                 let mut text = String::new();
@@ -39,7 +55,11 @@ pub fn contents(path: &Path) -> Result<(String, Vec<String>)> {
             _ => {}
         }
         if let (Some(name), Some(files)) = (&name, &files) {
-            return Ok((name.clone(), files.clone()));
+            return Ok(Contents {
+                name: name.clone(),
+                displaces: displaces.clone(),
+                files: files.clone(),
+            });
         }
     }
     bail!("{} has no .PKGINFO and .MTREE", path.display())
@@ -101,11 +121,12 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
     for path in install {
         incoming.push(contents(path)?);
     }
-    let mut replaced: BTreeSet<String> = incoming.iter().map(|(name, _)| name.clone()).collect();
+    let mut replaced: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
+    replaced.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
     replaced.extend(removed.iter().cloned());
     let mut owners = kept_files(local_db, &replaced);
     let mut clashes = BTreeSet::new();
-    for (name, files) in &incoming {
+    for Contents { name, files, .. } in &incoming {
         for file in files {
             match owners.get(file) {
                 Some(other) if other != name => {
