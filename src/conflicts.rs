@@ -92,17 +92,22 @@ fn unescape(path: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Files installed packages that the transaction keeps own, from pacman's local database.
-fn kept_files(local_db: &Path, replaced: &BTreeSet<String>) -> BTreeMap<String, String> {
+/// Files installed packages that the transaction keeps own, from pacman's local database; one that conflicts with an incoming package is removed by pacman, so it isn't kept.
+fn kept_files(local_db: &Path, replaced: &BTreeSet<String>, incoming: &BTreeSet<String>) -> BTreeMap<String, String> {
     let mut owners = BTreeMap::new();
     for entry in fs::read_dir(local_db).into_iter().flatten().flatten() {
         let Ok(desc) = fs::read_to_string(entry.path().join("desc")) else {
             continue;
         };
-        let Some(name) = parse_desc(&desc).get("NAME").and_then(|n| n.first()).cloned() else {
+        let desc = parse_desc(&desc);
+        let Some(name) = desc.get("NAME").and_then(|n| n.first()).cloned() else {
             continue;
         };
-        if replaced.contains(&name) {
+        let displaced = ["CONFLICTS", "REPLACES"]
+            .iter()
+            .flat_map(|key| desc.get(*key).into_iter().flatten())
+            .any(|dep| incoming.contains(crate::aur::srcinfo::dep_name(dep)));
+        if replaced.contains(&name) || displaced {
             continue;
         }
         let files = fs::read_to_string(entry.path().join("files"))
@@ -124,7 +129,8 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
     let mut replaced: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
     replaced.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
     replaced.extend(removed.iter().cloned());
-    let mut owners = kept_files(local_db, &replaced);
+    let names: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
+    let mut owners = kept_files(local_db, &replaced, &names);
     let mut clashes = BTreeSet::new();
     for Contents { name, files, .. } in &incoming {
         for file in files {

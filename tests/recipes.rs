@@ -318,6 +318,12 @@ fn packages_shipping_the_same_file_are_refused_before_anything_changes() {
         installed("archix-test-two").is_some() && installed("archix-test-one").is_none(),
         "a package that conflicts with a kept one replaces it, as pacman does"
     );
+    fs::write(&init, without("archix-test-two")).unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        installed("archix-test-one").is_some() && installed("archix-test-two").is_none(),
+        "a kept package that conflicts with an incoming one is replaced too"
+    );
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
