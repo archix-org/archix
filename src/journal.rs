@@ -91,13 +91,9 @@ pub struct Transaction {
     /// Some install is a rebuild at the installed version, so pacman mustn't skip up-to-date packages.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reinstall: bool,
-    /// Off for boot-time rollbacks, which run before the services they would restart have started.
-    #[serde(default = "yes")]
-    pub restart: bool,
-}
-
-fn yes() -> bool {
-    true
+    /// A boot-time rollback, which runs before sysinit.target: units are queued with --no-block instead of waited for, and nothing is restarted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub at_boot: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

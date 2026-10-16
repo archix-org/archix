@@ -922,7 +922,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     }
     let rewritten = system::apply::out_of_date(&system_change)?;
     transaction.system = Some(system_change.clone());
-    transaction.restart = online;
+    transaction.at_boot = !online;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
     journal.save(&paths.journal())?;
@@ -1047,7 +1047,11 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
 pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String]) -> Result<()> {
     require_root("rescue")?;
     let store = Store::new(&Paths::under(root));
-    let number = match generation {
+    // A rescue entry carries its own generation on the command line; restoring the current one couldn't undo a bad switch.
+    let booted = fs::read_to_string("/proc/cmdline")
+        .ok()
+        .and_then(|cmdline| system::boot::booted_generation(&cmdline));
+    let number = match generation.or(booted) {
         Some(number) => number,
         None => store
             .current()?
@@ -1068,6 +1072,15 @@ pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String])
     println!(
         "{} restored; boot normally, then run `sudo archix rollback {number}` to put everything else back",
         count(rescued.restored.len(), "package", "packages")
+    );
+    let record = Paths::under(root).state.join("last-rescue");
+    let _ = fs::write(
+        &record,
+        format!(
+            "generation {number}, {} packages restored, at unix time {}\n",
+            rescued.restored.len(),
+            now()
+        ),
     );
     Ok(())
 }

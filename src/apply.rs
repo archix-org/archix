@@ -67,7 +67,7 @@ fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Re
     let (tx, generation) = (&journal.transaction, journal.generation);
     let system = tx.system.as_ref();
     match step {
-        Step::Restart if !tx.restart => Ok(Vec::new()),
+        Step::Restart if tx.at_boot => Ok(Vec::new()),
         Step::Restart => {
             let changed: BTreeSet<String> = journal
                 .before
@@ -90,8 +90,12 @@ fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Re
             .map_or(Ok(()), |change| crate::system::apply::files(paths, change))
             .map(|()| Vec::new()),
         Step::Reload => Ok(system.map_or_else(Vec::new, crate::system::apply::reload)),
-        Step::StopServices => Ok(system.map_or_else(Vec::new, crate::system::apply::stop_services)),
-        Step::Services => Ok(system.map_or_else(Vec::new, crate::system::apply::start_services)),
+        Step::StopServices => Ok(system.map_or_else(Vec::new, |change| {
+            crate::system::apply::stop_services(change, tx.at_boot)
+        })),
+        Step::Services => Ok(system.map_or_else(Vec::new, |change| {
+            crate::system::apply::start_services(change, tx.at_boot)
+        })),
         Step::Boot => match &tx.boot {
             Some(plan) => crate::system::boot::write_entry(paths, plan).map(|_| Vec::new()),
             None => Ok(Vec::new()),

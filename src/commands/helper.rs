@@ -164,7 +164,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         .collect();
     let transaction = Transaction {
         reinstall: false,
-        restart: true,
+        at_boot: false,
         system: None,
         boot: None,
         install: full.install,

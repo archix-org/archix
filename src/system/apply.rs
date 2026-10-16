@@ -698,12 +698,14 @@ pub fn reload(change: &SystemChange) -> Vec<String> {
     failures
 }
 
-fn systemctl_attempts() -> (Vec<String>, impl FnMut(&[&str], &mut Vec<String>)) {
-    let attempt = |args: &[&str], failures: &mut Vec<String>| {
-        if let Err(e) = run(
-            Command::new("systemctl").args(args),
-            &format!("systemctl {}", args.join(" ")),
-        ) {
+/// systemctl calls whose failures are collected; at boot, before sysinit.target, jobs are only queued, since waiting for a unit that waits for sysinit would deadlock.
+fn systemctl_attempts(at_boot: bool) -> (Vec<String>, impl FnMut(&[&str], &mut Vec<String>)) {
+    let attempt = move |args: &[&str], failures: &mut Vec<String>| {
+        let mut cmd = Command::new("systemctl");
+        if at_boot {
+            cmd.arg("--no-block");
+        }
+        if let Err(e) = run(cmd.args(args), &format!("systemctl {}", args.join(" "))) {
             failures.push(format!("{e:#}"));
         }
     };
@@ -711,8 +713,8 @@ fn systemctl_attempts() -> (Vec<String>, impl FnMut(&[&str], &mut Vec<String>)) 
 }
 
 /// Stops and disables units turned off or leaving the config, while their unit files still exist.
-pub fn stop_services(change: &SystemChange) -> Vec<String> {
-    let (mut failures, mut attempt) = systemctl_attempts();
+pub fn stop_services(change: &SystemChange, at_boot: bool) -> Vec<String> {
+    let (mut failures, mut attempt) = systemctl_attempts(at_boot);
     for (unit, enabled) in &change.to.services {
         if !*enabled && is_enabled(unit, false) {
             attempt(&["disable", "--now", unit], &mut failures);
@@ -743,9 +745,9 @@ pub fn stop_services(change: &SystemChange) -> Vec<String> {
 }
 
 /// Enables and starts units, restarting changed ones; failures are reported, not fatal, so a broken unit can't undo a switch.
-pub fn start_services(change: &SystemChange) -> Vec<String> {
+pub fn start_services(change: &SystemChange, at_boot: bool) -> Vec<String> {
     let changed = change.changed_paths();
-    let (mut failures, mut attempt) = systemctl_attempts();
+    let (mut failures, mut attempt) = systemctl_attempts(at_boot);
     for (unit, enabled) in &change.to.services {
         if *enabled && !is_enabled(unit, false) {
             attempt(&["enable", "--now", unit], &mut failures);

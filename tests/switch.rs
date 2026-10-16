@@ -32,7 +32,7 @@ fn fake_interrupted_switch(paths: &Paths) {
         system: None,
         boot: None,
         reinstall: false,
-        restart: true,
+        at_boot: false,
         install: vec![tree],
         remove: vec![],
         versions,
