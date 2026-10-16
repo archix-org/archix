@@ -83,6 +83,7 @@ fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Re
                 &paths.local_db(),
                 &changed,
                 &overrides,
+                journal.started,
             )))
         }
         Step::Users => system.map_or(Ok(()), crate::system::apply::users).map(|()| Vec::new()),

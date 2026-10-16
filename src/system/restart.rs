@@ -235,7 +235,48 @@ fn unit_paths(unit: &str, user: Option<&str>) -> Vec<String> {
 }
 
 /// What to restart after `changed` packages were installed, upgraded, downgraded or removed.
-pub fn plan(db: &Path, changed: &BTreeSet<String>, overrides: &BTreeMap<String, bool>) -> Plan {
+/// What to restart after a switch that began at unix time `started`: never the unit archix itself runs in, nor units that already (re)started since.
+pub fn plan(db: &Path, changed: &BTreeSet<String>, overrides: &BTreeMap<String, bool>, started: u64) -> Plan {
+    let mut plan = find(db, changed, overrides);
+    let own = fs::read_to_string("/proc/self/cgroup")
+        .ok()
+        .and_then(|c| c.lines().find_map(|l| l.strip_prefix("0::").map(str::to_string)))
+        .map(|cgroup| owner(&cgroup));
+    if let Some(Owner::Unit(uid, unit)) = own {
+        match uid.and_then(user_name) {
+            Some(user) => {
+                plan.user.entry(user).or_default().remove(&unit);
+            }
+            None => {
+                plan.system.remove(&unit);
+            }
+        }
+    }
+    plan.system.retain(|unit| !fresh(unit, None, started));
+    for (user, units) in plan.user.iter_mut() {
+        units.retain(|unit| !fresh(unit, Some(user), started));
+    }
+    plan.user.retain(|_, units| !units.is_empty());
+    plan
+}
+
+/// Whether a unit became active at or after `started`, so it already runs what the switch installed.
+fn fresh(unit: &str, user: Option<&str>, started: u64) -> bool {
+    systemctl(user)
+        .args(["show", "--timestamp=unix", "-P", "ActiveEnterTimestamp", unit])
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .trim_start_matches('@')
+                .parse::<u64>()
+                .ok()
+        })
+        .is_some_and(|at| at >= started)
+}
+
+fn find(db: &Path, changed: &BTreeSet<String>, overrides: &BTreeMap<String, bool>) -> Plan {
     let mut plan = Plan::default();
     let display_manager = display_manager();
     let mut users: BTreeSet<String> = BTreeSet::new();
