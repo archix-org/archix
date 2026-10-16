@@ -362,6 +362,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &built,
         &declared.repos,
     )?;
+    archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
     let rewritten = system::apply::out_of_date(&system_change)?;
     transaction.system = Some(system_change.clone());
     let mut created = store.create(generation)?;
@@ -916,6 +917,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
         &BTreeMap::new(),
         &[],
     )?;
+    if online {
+        archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
+    }
     let rewritten = system::apply::out_of_date(&system_change)?;
     transaction.system = Some(system_change.clone());
     transaction.restart = online;

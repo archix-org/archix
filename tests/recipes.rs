@@ -277,3 +277,28 @@ fn services_using_replaced_files_or_changed_interpreted_code_restart() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn packages_shipping_the_same_file_are_refused_before_anything_changes() {
+    let _system = lock_system();
+    let ships = "  mkdir -p \"$pkgdir/usr/share/archix-test\"\n  echo x > \"$pkgdir/usr/share/archix-test/same\"";
+    let setup = Setup::with_files(
+        &["archix-test-one", "archix-test-two"],
+        "",
+        &[
+            ("pkgbuilds/one/PKGBUILD", &recipe("archix-test-one", "1", "", ships)),
+            ("pkgbuilds/two/PKGBUILD", &recipe("archix-test-two", "1", "", ships)),
+        ],
+    );
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("usr/share/archix-test/same is in both archix-test-one and archix-test-two")
+            && err.contains("nothing was changed"),
+        "{err}"
+    );
+    assert!(installed("archix-test-one").is_none() && installed("archix-test-two").is_none());
+    assert!(!std::path::Path::new("/var/lib/archix/journal.json").exists());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

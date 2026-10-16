@@ -3,6 +3,7 @@ pub mod apply;
 pub mod archive;
 pub mod aur;
 pub mod capture;
+pub mod conflicts;
 pub mod date;
 pub mod downgrade;
 pub mod eval;
