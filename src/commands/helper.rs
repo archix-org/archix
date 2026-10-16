@@ -91,7 +91,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
+    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
     let archive = Archive::new(ARCHIVE_URL);
     let git = aur_git(&declared)?;
     let recipes = recipes(target, &declared)?;
@@ -356,7 +356,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
     }
 
     let declared = declared(target.config)?;
-    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm)?;
+    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     let archive = Archive::new(ARCHIVE_URL);
     let git = aur_git(&declared)?;
     let installed = read_local_db(&paths.local_db())?;

@@ -424,3 +424,31 @@ fn a_second_archix_waits_its_turn() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn a_lock_made_for_a_newer_cpu_is_refused_not_rewritten() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    let path = setup.dir.path().join("archix.lock");
+    let text = fs::read_to_string(&path).unwrap();
+    let foreign = text.replace("x86_64.pkg.tar.zst", "x86_64_v9.pkg.tar.zst");
+    assert_ne!(text, foreign);
+    fs::write(&path, &foreign).unwrap();
+
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("newer CPU level") && err.contains("archix lock"), "{err}");
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        foreign,
+        "switch doesn't rewrite the lock it applies"
+    );
+
+    setup.ok(&["lock"]);
+    assert!(
+        !fs::read_to_string(&path).unwrap().contains("x86_64_v9"),
+        "archix lock re-resolves it for this CPU"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

@@ -28,6 +28,7 @@ pub(super) fn current_lock(
     snapshot: Snapshot,
     save: bool,
     noconfirm: bool,
+    for_this_cpu: bool,
 ) -> Result<(HostLock, bool)> {
     let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
     let old = lockfile.hosts.get(target.host).cloned();
@@ -48,13 +49,15 @@ pub(super) fn current_lock(
             &declared.repo_names(),
             &recipes.fingerprints(&old.local_recipes())?,
         )
-        && archix::archive::beyond_cpu(
-            old.packages
-                .iter()
-                .map(|(name, pkg)| (name.as_str(), pkg.file.as_str())),
-            &archix::archive::architectures(),
-        )
-        .is_empty()
+        // Only `archix lock` re-resolves a lock made for a newer CPU; switch refuses it instead of rewriting the lock it applies.
+        && (!for_this_cpu
+            || archix::archive::beyond_cpu(
+                old.packages
+                    .iter()
+                    .map(|(name, pkg)| (name.as_str(), pkg.file.as_str())),
+                &archix::archive::architectures(),
+            )
+            .is_empty())
     {
         return Ok((old.clone(), false));
     }
@@ -115,7 +118,7 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
         .get(target.host)
         .map(|lock| lock.flatpak.clone())
         .unwrap_or_default();
-    let (mut lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm)?;
+    let (mut lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm, true)?;
     for app in settle_flatpak(target, &declared, &mut lock, true, refresh)? {
         println!("note: {app}; the next `archix switch` locks it");
     }
@@ -170,7 +173,7 @@ pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> 
 pub fn diff(target: &Target) -> Result<()> {
     let paths = Paths::system();
     let declared = declared(target.config)?;
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true)?;
+    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
     let installed = read_local_db(&paths.local_db())?;
     println!(
         "snapshot {}: {}",

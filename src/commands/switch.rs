@@ -79,7 +79,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     check_pacman_free(&paths)?;
     clean_up_kept_modules(&paths);
     let declared = declared(target.config)?;
-    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm)?;
+    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     let installed = read_local_db(&paths.local_db())?;
     let archive = Archive::new(ARCHIVE_URL);
     let beyond = archix::archive::beyond_cpu(
