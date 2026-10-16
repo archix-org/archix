@@ -38,6 +38,8 @@ pub struct Job<'a> {
     pub date: Date,
     pub repos: &'a [String],
     pub inputs: &'a [PathBuf],
+    /// The dependencies (build and of `inputs`) that come from the repos rather than the AUR.
+    pub repo_deps: &'a [String],
     pub on_host: bool,
 }
 
@@ -70,6 +72,7 @@ impl Builder<'_> {
             date,
             repos,
             inputs,
+            repo_deps,
             on_host,
         } = job;
         let record = self.record(base, commit, date);
@@ -112,6 +115,7 @@ impl Builder<'_> {
                     Ok(())
                 } else {
                     self.ensure_chroot(date, repos)
+                        .and_then(|()| self.prefetch(date, repos, repo_deps))
                 }
             })
             .map_err(|e| anyhow::Error::new(SetupFailed(format!("{e:#}"))));
@@ -192,6 +196,34 @@ impl Builder<'_> {
         }
         fs::write(&marker, date.to_string())?;
         Ok(())
+    }
+
+    /// Downloads what makepkg will install in the chroot into pacman's cache, which devtools binds in, so a slow archive connection gets archix's retries.
+    fn prefetch(&self, date: Date, repos: &[String], deps: &[String]) -> Result<()> {
+        if deps.is_empty() {
+            return Ok(());
+        }
+        let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, &official(repos))?;
+        // A dependency the snapshot can't satisfy is the recipe's problem, which makepkg reports in the build itself.
+        let Ok(targets) = print_targets(&conf, &db, deps, false, &[]) else {
+            return Ok(());
+        };
+        let installed = crate::pacman::read_local_db(&self.chroot().join("root/var/lib/pacman/local"))?;
+        let mut wanted = Vec::new();
+        for (name, version, repo) in targets {
+            if installed.get(&name).is_some_and(|pkg| pkg.version == version) {
+                continue;
+            }
+            let sync = read_sync_db(&db.join("sync").join(format!("{repo}.db")))?;
+            let pkg = &sync[&name];
+            wanted.push(Wanted {
+                name,
+                file: pkg.filename.clone(),
+                urls: vec![format!("{}/{}", self.archive.repo_url(date, &repo), pkg.filename)],
+                sha256: Some(pkg.sha256.clone()),
+            });
+        }
+        fetch_all(self.archive, &self.paths.pacman_cache, &[], &wanted).map(|_| ())
     }
 
     /// The keyring makepkg checks source signatures against, owned by the build user.

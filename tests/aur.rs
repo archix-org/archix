@@ -55,7 +55,16 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
         "repo dependencies of AUR packages come from the repos"
     );
 
-    setup.ok(&["switch", "--noconfirm"]);
+    for entry in fs::read_dir("/var/cache/pacman/pkg").unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("jq-") {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("downloading jq-"),
+        "archix fetches the chroot's repo dependencies itself, with retries:\n{out}"
+    );
     assert_eq!(installed("archix-test-app").as_deref(), Some("2.0-1"));
     assert_eq!(installed("archix-test-lib").as_deref(), Some("1.0-1"));
     assert!(installed("jq").is_some());

@@ -134,8 +134,12 @@ impl<'a> Installer<'a> {
             .cloned()
             .collect();
         let mut inputs = Vec::new();
+        let mut repo_deps = Vec::new();
         for dep in deps {
-            let Some(name) = self.aur_satisfier(&dep) else { continue };
+            let Some(name) = self.aur_satisfier(&dep) else {
+                repo_deps.push(dep);
+                continue;
+            };
             if self.base_of(&name)? == base {
                 continue;
             }
@@ -147,8 +151,13 @@ impl<'a> Installer<'a> {
                     .find(|(n, _)| *n == needed)
                     .map(|(_, f)| f.clone());
                 inputs.extend(file);
+                if let Some(pkg) = self.infos[&needed_base].1.package(&needed) {
+                    repo_deps.extend(pkg.depends.iter().filter(|d| self.aur_satisfier(d).is_none()).cloned());
+                }
             }
         }
+        repo_deps.sort();
+        repo_deps.dedup();
         let on_host = info.packages.iter().any(|pkg| self.on_host.contains(&pkg.name));
         let job = Job {
             base,
@@ -158,6 +167,7 @@ impl<'a> Installer<'a> {
             date: self.lock.date,
             repos: &self.lock.repos,
             inputs: &inputs,
+            repo_deps: &repo_deps,
             on_host,
         };
         let files = self.builder.build(job).map_err(|error| {
