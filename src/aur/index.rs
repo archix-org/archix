@@ -131,7 +131,7 @@ impl Index {
 }
 
 /// The operator and version of a dependency like `java-environment>=21`, if it has one.
-fn constraint(dep: &str) -> Option<(&str, &str)> {
+pub(crate) fn constraint(dep: &str) -> Option<(&str, &str)> {
     let at = dep.find(['<', '>', '='])?;
     let rest = &dep[at..];
     let op_len = if rest.starts_with(">=") || rest.starts_with("<=") {
@@ -143,7 +143,7 @@ fn constraint(dep: &str) -> Option<(&str, &str)> {
 }
 
 /// Whether a provided version meets a constraint the way pacman decides it: no version meets only an unversioned dependency, and a wanted version without a pkgrel compares against the pkgver alone.
-fn meets(have: Option<&str>, wanted: Option<(&str, &str)>) -> bool {
+pub(crate) fn meets(have: Option<&str>, wanted: Option<(&str, &str)>) -> bool {
     let Some((op, want)) = wanted else { return true };
     let Some(have) = have else { return false };
     let have = if want.contains('-') {

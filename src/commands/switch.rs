@@ -82,6 +82,21 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm)?;
     let installed = read_local_db(&paths.local_db())?;
     let archive = Archive::new(ARCHIVE_URL);
+    let beyond = archix::archive::beyond_cpu(
+        lock.packages
+            .iter()
+            .map(|(name, pkg)| (name.as_str(), pkg.file.as_str())),
+        &archix::archive::architectures(),
+    );
+    if !beyond.is_empty() {
+        let shown: Vec<&str> = beyond.iter().take(6).map(String::as_str).collect();
+        bail!(
+            "archix.lock for {} has packages built for a newer CPU level than this machine runs, so it was locked elsewhere: {}{}. Run `archix lock` on this machine; nothing was changed",
+            target.host,
+            shown.join(", "),
+            if beyond.len() > shown.len() { ", ..." } else { "" }
+        );
+    }
 
     let newer: Vec<String> = newer_than_lock(&lock, &installed)
         .iter()

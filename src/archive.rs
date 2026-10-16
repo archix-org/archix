@@ -20,6 +20,17 @@ pub fn architectures() -> String {
     levels(&report)
 }
 
+/// Locked package files built for an x86-64 level `supported` (as from `architectures`) doesn't include, as "name (level)".
+pub fn beyond_cpu<'a>(files: impl Iterator<Item = (&'a str, &'a str)>, supported: &str) -> Vec<String> {
+    files
+        .filter_map(|(name, file)| {
+            let arch = file.strip_suffix(".pkg.tar.zst")?.rsplit_once('-')?.1;
+            (arch.starts_with("x86_64_v") && !supported.split(' ').any(|a| a == arch))
+                .then(|| format!("{name} ({arch})"))
+        })
+        .collect()
+}
+
 fn levels(report: &str) -> String {
     let mut arches = vec![ARCH.to_string()];
     for level in ["v2", "v3", "v4"] {
@@ -184,5 +195,19 @@ mod level_tests {
     fn only_supported_levels_are_accepted() {
         let report = "Subdirectories of glibc-hwcaps directories, in priority order:\n  x86-64-v4\n  x86-64-v3 (supported, searched)\n  x86-64-v2 (supported, searched)\n";
         assert_eq!(super::levels(report), "x86_64 x86_64_v2 x86_64_v3");
+    }
+
+    #[test]
+    fn packages_beyond_the_cpu_are_named() {
+        let files = [
+            ("zlib", "zlib-1:1.3.2-4.1-x86_64_v4.pkg.tar.zst"),
+            ("bash", "bash-5.3-1-x86_64_v3.pkg.tar.zst"),
+            ("tzdata", "tzdata-2026a-1-any.pkg.tar.zst"),
+            ("glibc", "glibc-2.42-1-x86_64.pkg.tar.zst"),
+        ];
+        assert_eq!(
+            super::beyond_cpu(files.into_iter(), "x86_64 x86_64_v2 x86_64_v3"),
+            ["zlib (x86_64_v4)"]
+        );
     }
 }

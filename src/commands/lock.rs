@@ -48,6 +48,13 @@ pub(super) fn current_lock(
             &declared.repo_names(),
             &recipes.fingerprints(&old.local_recipes())?,
         )
+        && archix::archive::beyond_cpu(
+            old.packages
+                .iter()
+                .map(|(name, pkg)| (name.as_str(), pkg.file.as_str())),
+            &archix::archive::architectures(),
+        )
+        .is_empty()
     {
         return Ok((old.clone(), false));
     }

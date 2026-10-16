@@ -121,18 +121,29 @@ impl Recipes {
     }
 
     /// The local recipe building a package that satisfies `dep`, and that package.
+    /// The local recipe building a package that satisfies `dep`, version constraint included, the way AUR packages are matched.
     pub fn satisfier(&self, dep: &str) -> Option<(&Recipe, &SrcPkg)> {
+        use crate::aur::index::{constraint, meets};
         let wanted = dep_name(dep);
-        let by_name = self
-            .local
-            .values()
-            .find_map(|r| r.info.packages.iter().find(|p| p.name == wanted).map(|p| (r, p)));
+        let version = constraint(dep);
+        let by_name = self.local.values().find_map(|r| {
+            r.info
+                .packages
+                .iter()
+                .find(|p| p.name == wanted && meets(Some(&r.info.version), version))
+                .map(|p| (r, p))
+        });
         by_name.or_else(|| {
             self.local.values().find_map(|r| {
                 r.info
                     .packages
                     .iter()
-                    .find(|p| p.provides.iter().any(|provided| dep_name(provided) == wanted))
+                    .find(|p| {
+                        p.provides
+                            .iter()
+                            .filter(|provided| dep_name(provided) == wanted)
+                            .any(|provided| meets(provided.split_once('=').map(|(_, v)| v), version))
+                    })
                     .map(|p| (r, p))
             })
         })
