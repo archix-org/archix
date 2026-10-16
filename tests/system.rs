@@ -286,6 +286,37 @@ fn the_firewall_and_environment_come_from_the_config() {
 
 #[test]
 #[ignore]
+fn files_on_fat_are_not_edited_just_because_fat_has_no_modes() {
+    let _system = lock_system();
+    let dir = tempfile::tempdir().unwrap();
+    let (image, esp) = (dir.path().join("esp.img"), "/mnt/archix-test-esp");
+    let run = |cmd: &str, args: &[&str]| {
+        assert!(
+            Command::new(cmd).args(args).status().unwrap().success(),
+            "{cmd} {args:?}"
+        )
+    };
+    run("truncate", &["-s", "64M", image.to_str().unwrap()]);
+    run("mkfs.fat", &["-F", "32", image.to_str().unwrap()]);
+    fs::create_dir_all(esp).unwrap();
+    run("mount", &["-o", "loop,fmask=0022", image.to_str().unwrap(), esp]);
+    let setup = Setup::new(
+        &[],
+        &format!("files = {{ [\"{esp}/loader/entries/extra.conf\"] = {{ text = \"title extra\" }} }}"),
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let again = setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    run("umount", &[esp]);
+    assert!(
+        again.contains("nothing to do") && !again.contains("edited outside archix"),
+        "FAT reports 0755 root for every file, which isn't an edit:\n{again}"
+    );
+}
+
+#[test]
+#[ignore]
 fn a_symlink_over_a_mounted_file_is_left_for_later() {
     let _system = lock_system();
     let before = read("/etc/resolv.conf");

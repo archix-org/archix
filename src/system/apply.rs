@@ -106,10 +106,24 @@ fn matches(path: &Path, disk: &OnDisk, want: &ManagedFile) -> bool {
             },
             None,
         ) => {
-            *sha256 == want.sha256 && *mode == want.mode && Some(*u) == uid(&want.owner) && Some(*g) == gid(&want.group)
+            *sha256 == want.sha256
+                && (!keeps_modes(path)
+                    || (*mode == want.mode && Some(*u) == uid(&want.owner) && Some(*g) == gid(&want.group)))
         }
         _ => false,
     }
+}
+
+/// FAT and exFAT (the ESP) report the mount's fmask and uid for every file, whatever archix set.
+fn keeps_modes(path: &Path) -> bool {
+    const MSDOS_SUPER_MAGIC: i64 = 0x4d44;
+    const EXFAT_SUPER_MAGIC: i64 = 0x2011_bab0;
+    let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return true;
+    };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    let found = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) == 0 };
+    !found || ![MSDOS_SUPER_MAGIC, EXFAT_SUPER_MAGIC].contains(&(stat.f_type as i64))
 }
 
 fn c_text(ptr: *const libc::c_char) -> String {
