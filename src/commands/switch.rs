@@ -1017,6 +1017,13 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
     let release = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     if system::boot::restore_modules(&paths, release.trim())? {
         println!("archix: restored the modules of kernel {}", release.trim());
+        // udev and modules-load already ran without them, so devices whose drivers were missing get another go.
+        let _ = Command::new("systemctl")
+            .args(["restart", "systemd-modules-load.service"])
+            .status();
+        let _ = Command::new("udevadm")
+            .args(["trigger", "--action=add", "--type=devices"])
+            .status();
     }
     if let Some(journal) = Journal::load(&paths.journal())? {
         println!(

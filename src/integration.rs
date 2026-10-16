@@ -62,7 +62,7 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
         .unwrap_or(Path::new("/"));
     let unit = format!(
         "[Unit]\nDescription=archix: match the booted generation\nDefaultDependencies=no\nAfter=local-fs.target\n\
-         Before=sysinit.target systemd-udev-trigger.service systemd-modules-load.service\nConditionKernelCommandLine=archix.generation\n\n\
+         Before=sysinit.target\nConditionKernelCommandLine=archix.generation\n\n\
          [Service]\nType=oneshot\nExecStart={} boot-check\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
         archix.display()
     );

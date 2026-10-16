@@ -29,6 +29,8 @@ cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/mirrorlist
 install -Dm755 /work/archix /mnt/usr/bin/archix
 install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
 bootctl --esp-path=/mnt/boot --no-variables install >/dev/null
+# The ESP in fstab, as on any real install: early boot units must not wait on it in a cycle.
+echo "UUID=$(blkid -s UUID -o value "$esp") /boot vfat defaults 0 2" >> /mnt/etc/fstab
 printf 'timeout 2\nconsole-mode keep\n' > /mnt/boot/loader/loader.conf
 
 mkdir -p /mnt/etc/archix
