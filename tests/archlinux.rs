@@ -55,6 +55,24 @@ fn lock_records_the_full_closure_with_declared_providers() {
 
 #[test]
 #[ignore]
+fn a_dependency_on_a_real_package_gets_that_package_not_a_stand_in() {
+    let dir = config(&["jre-openjdk-headless", "python-certifi", "rustup", "maturin"]);
+    stdout(&archix(dir.path(), &["lock"]));
+    let host = &Lockfile::load(&dir.path().join(LOCK_FILE)).unwrap().hosts["box"];
+    for name in ["ca-certificates", "ca-certificates-mozilla"] {
+        assert!(
+            host.packages.get(name).is_some_and(|pkg| !pkg.explicit),
+            "python-certifi needs {name}, not just ca-certificates-utils, which provides the name but no certificates"
+        );
+    }
+    assert!(
+        !host.packages.contains_key("rust"),
+        "the declared rustup still provides maturin's rust"
+    );
+}
+
+#[test]
+#[ignore]
 fn lock_keeps_the_date_until_update() {
     let dir = config(&["base"]);
     stdout(&archix(dir.path(), &["lock"]));

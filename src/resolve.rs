@@ -166,7 +166,20 @@ pub fn resolve(
             .collect::<Vec<_>>(),
     );
     if !targets.is_empty() {
-        let closure = print_targets(&conf, &db, &targets, false, &from_aur.provides)?;
+        let mut closure = print_targets(&conf, &db, &targets, false, &from_aur.provides)?;
+        let chosen: Vec<String> = official.iter().chain(prefer).cloned().collect();
+        for _ in 0..5 {
+            let missing = shadowed(&sync, &closure, &from_aur, &chosen);
+            if missing.is_empty() {
+                break;
+            }
+            targets.extend(missing);
+            // A set pacman can't resolve together keeps the providers it picked before.
+            match print_targets(&conf, &db, &targets, false, &from_aur.provides) {
+                Ok(fuller) => closure = fuller,
+                Err(_) => break,
+            }
+        }
         let explicit: BTreeSet<String> = if official.is_empty() {
             BTreeSet::new()
         } else {
@@ -277,6 +290,45 @@ fn provider(sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>, dep: &str, prefe
         .find(|name| candidates.contains(name))
         .cloned()
         .unwrap_or_else(|| dep.to_string())
+}
+
+/// Dependencies on a real package that pacman met with a provider already in the transaction, like ca-certificates-utils (no certificates) for ca-certificates.
+fn shadowed(
+    sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
+    closure: &[(String, String, String)],
+    aur: &AurClosure,
+    chosen: &[String],
+) -> Vec<String> {
+    let picked: Vec<&SyncPkg> = closure
+        .iter()
+        .filter_map(|(name, _, repo)| sync.get(repo)?.get(name))
+        .collect();
+    let provides = |pkg: &SyncPkg, name: &str| pkg.provides.iter().any(|p| srcinfo::dep_name(p) == name);
+    let clashes = |a: &SyncPkg, b: &SyncPkg| {
+        a.conflicts
+            .iter()
+            .map(|c| srcinfo::dep_name(c))
+            .any(|c| c == b.name || provides(b, c))
+    };
+    let mut missing = BTreeSet::new();
+    for dep in picked.iter().flat_map(|pkg| &pkg.depends).chain(&aur.repo_deps) {
+        let name = srcinfo::dep_name(dep);
+        if picked.iter().any(|pkg| pkg.name == name) || aur.provides.iter().any(|p| srcinfo::dep_name(p) == name) {
+            continue;
+        }
+        let Some(real) = sync.values().find_map(|packages| packages.get(name)) else {
+            continue;
+        };
+        if picked
+            .iter()
+            .any(|pkg| provides(pkg, name) && chosen.contains(&pkg.name))
+            || picked.iter().any(|pkg| clashes(real, pkg) || clashes(pkg, real))
+        {
+            continue;
+        }
+        missing.insert(name.to_string());
+    }
+    missing.into_iter().collect()
 }
 
 #[derive(Default)]

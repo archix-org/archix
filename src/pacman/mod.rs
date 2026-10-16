@@ -21,6 +21,10 @@ pub struct SyncPkg {
     pub description: String,
     /// `%PROVIDES%`: virtual names this package satisfies, possibly with `=version`.
     pub provides: Vec<String>,
+    /// `%DEPENDS%`, possibly with version constraints.
+    pub depends: Vec<String>,
+    /// `%CONFLICTS%`, possibly with version constraints.
+    pub conflicts: Vec<String>,
     /// `%BASE%`: the pkgbase whose recipe builds it; the name itself when the entry has none.
     pub base: String,
 }
@@ -108,6 +112,8 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
                 sha256,
                 description: first(&fields, "DESC").unwrap_or_default(),
                 provides: fields.get("PROVIDES").cloned().unwrap_or_default(),
+                depends: fields.get("DEPENDS").cloned().unwrap_or_default(),
+                conflicts: fields.get("CONFLICTS").cloned().unwrap_or_default(),
                 base: first(&fields, "BASE").unwrap_or_else(|| name.clone()),
                 name,
             },
@@ -185,6 +191,8 @@ mod tests {
                 sha256: "abc123".into(),
                 description: String::new(),
                 provides: Vec::new(),
+                depends: vec!["glibc".into(), "libattr".into()],
+                conflicts: Vec::new(),
                 base: "acl".into(),
             }
         );
