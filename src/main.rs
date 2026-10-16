@@ -302,6 +302,36 @@ fn needs_root(command: &Command) -> Option<&'static str> {
     }
 }
 
+/// The lock that keeps two archix runs from changing the system at once; held until the process exits.
+static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
+
+fn hold_exclusive() -> Result<()> {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd;
+    let dir = archix::paths::Paths::system().state;
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("running");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let who = fs::read_to_string(&path).unwrap_or_default();
+        anyhow::bail!(
+            "another archix is already running ({}); wait for it to finish",
+            who.trim()
+        );
+    }
+    file.set_len(0)?;
+    let args: Vec<String> = std::env::args().collect();
+    write!(file, "pid {}, `{}`", std::process::id(), args.join(" "))?;
+    let _ = RUNNING.set(file);
+    Ok(())
+}
+
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
@@ -312,6 +342,10 @@ fn run() -> Result<ExitCode> {
             "`archix {name}` changes the system, so it needs root; run it with sudo: {}",
             with_sudo()
         );
+    }
+    let changes_things = needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. });
+    if changes_things {
+        hold_exclusive()?;
     }
     match command {
         Command::HookRecord => {

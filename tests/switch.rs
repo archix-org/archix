@@ -390,3 +390,37 @@ fn bare_terms_search_and_install_the_picks_like_yay() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn a_second_archix_waits_its_turn() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    let mut first = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args([
+            "--config",
+            setup.dir.path().to_str().unwrap(),
+            "--host",
+            "box",
+            "switch",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("another archix is already running") && err.contains("switch"),
+        "{err}"
+    );
+    use std::io::Write;
+    first.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    assert!(
+        !first.wait_with_output().unwrap().status.success(),
+        "the first one was declined"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
