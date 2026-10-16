@@ -283,3 +283,25 @@ fn the_firewall_and_environment_come_from_the_config() {
     );
     assert!(!std::path::Path::new("/etc/profile.d/archix-environment.sh").exists());
 }
+
+#[test]
+#[ignore]
+fn a_symlink_over_a_mounted_file_is_left_for_later() {
+    let _system = lock_system();
+    let before = read("/etc/resolv.conf");
+    let setup = Setup::new(
+        &[],
+        r#"files = { ["/etc/resolv.conf"] = { link = "/run/systemd/resolve/stub-resolv.conf" } }"#,
+    );
+    let output = setup.run(&["switch", "--noconfirm"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("/etc/resolv.conf is mounted over here"), "{stderr}");
+    assert_eq!(
+        read("/etc/resolv.conf"),
+        before,
+        "Docker's mounted resolv.conf is untouched"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

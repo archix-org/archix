@@ -165,6 +165,17 @@ fn under(root: &Path, path: &str) -> PathBuf {
     root.join(path.trim_start_matches('/'))
 }
 
+/// Whether something is mounted on `path` itself, like the /etc/resolv.conf Docker and arch-chroot bind-mount; it can be written through but not replaced by a symlink.
+fn mount_point(path: &Path) -> bool {
+    let Ok(info) = fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    let wanted = path.to_string_lossy();
+    info.lines()
+        .filter_map(|line| line.split_whitespace().nth(4))
+        .any(|mounted| mounted.replace("\\040", " ") == wanted)
+}
+
 /// Target files that are missing or differ on disk, so applying `change` rewrites them.
 pub fn out_of_date(change: &SystemChange) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
@@ -458,6 +469,12 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
     for (path, want) in &change.to.files {
         let target = Path::new(path);
         let disk = on_disk(target)?;
+        if want.link.is_some() && mount_point(target) && !matches(target, &disk, want) {
+            eprintln!(
+                "warning: {path} is mounted over here (a container or arch-chroot does that), so it's left alone; the next switch outside replaces it"
+            );
+            continue;
+        }
         if let Some(merge) = &want.merge {
             if !matches(target, &disk, want) {
                 write_merged(target, want, merge).with_context(|| format!("setting keys in {path}"))?;
@@ -748,7 +765,8 @@ pub fn start_services(change: &SystemChange) -> Vec<String> {
 pub fn mismatches(change: &SystemChange) -> Result<Vec<String>> {
     let mut problems = Vec::new();
     for (path, want) in &change.to.files {
-        if !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
+        let unreplaceable = want.link.is_some() && mount_point(Path::new(path));
+        if !unreplaceable && !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
             problems.push(format!("{path} doesn't have its managed contents"));
         }
     }
