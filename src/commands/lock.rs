@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use anyhow::Result;
 
 use archix::adopt::newer_than_lock;
-use archix::archive::{ARCHIVE_URL, Archive};
+use archix::archive::Archive;
 use archix::aur::review::review;
 use archix::flatpak;
 use archix::generations::Store;
@@ -32,7 +32,7 @@ pub(super) fn current_lock(
 ) -> Result<(HostLock, bool)> {
     let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
     let old = lockfile.hosts.get(target.host).cloned();
-    let archive = Archive::new(ARCHIVE_URL);
+    let archive = Archive::new(&declared.archive_url);
     let updating = !matches!(snapshot, Snapshot::Locked);
     let date = match (snapshot, &old) {
         (Snapshot::On(date), _) => date,

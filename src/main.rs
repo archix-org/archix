@@ -168,6 +168,9 @@ enum Command {
         /// Also restore these packages, beyond the core set
         #[arg(long = "package")]
         packages: Vec<String>,
+        /// Run by every boot's initramfs: without archix.rescue on the command line, only repair a switch a crash cut off inside pacman
+        #[arg(long, hide = true)]
+        initrd: bool,
     },
     /// Run at boot by archix-boot.service: switch to the generation whose boot entry was chosen
     #[command(hide = true)]
@@ -376,8 +379,9 @@ fn run() -> Result<ExitCode> {
             root,
             generation,
             packages,
+            initrd,
         } => {
-            commands::rescue(&root, generation, &packages)?;
+            commands::rescue(&root, generation, &packages, initrd)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::BootCheck { cmdline } => {

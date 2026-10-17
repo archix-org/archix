@@ -74,20 +74,21 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
                 "#!/bin/bash\n\nbuild() {{\n    add_binary {STATIC_BINARY} /usr/bin/archix\n    add_runscript\n    \
                  add_file /usr/lib/archix/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n    \
                  add_symlink /usr/lib/systemd/system/initrd.target.wants/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n}}\n\n\
-                 help() {{\n    echo \"archix rescue: restores core packages from the cache when archix.rescue is on the kernel command line\"\n}}\n"
+                 help() {{\n    echo \"archix rescue: restores core packages from the cache when archix.rescue is on the kernel command line, or when a switch was cut off inside pacman\"\n}}\n"
             ),
         ));
         files.push((
             root.join("etc/initcpio/hooks/archix-rescue"),
-            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline; then\n        \
-             mount -o remount,rw /new_root\n        /usr/bin/archix rescue --root /new_root\n    fi\n}\n"
+            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline || [ -e /new_root/var/lib/archix/journal.json ]; then\n        \
+             mount -o remount,rw /new_root\n        /usr/bin/archix rescue --root /new_root --initrd\n    fi\n}\n"
                 .to_string(),
         ));
         files.push((
             root.join("usr/lib/archix/archix-rescue.service"),
-            "[Unit]\nDescription=archix rescue: restore core packages\nDefaultDependencies=no\nConditionKernelCommandLine=archix.rescue\n\
+            "[Unit]\nDescription=archix rescue: restore core packages\nDefaultDependencies=no\n\
+             ConditionKernelCommandLine=|archix.rescue\nConditionPathExists=|/sysroot/var/lib/archix/journal.json\n\
              After=initrd-root-fs.target\nBefore=initrd-parse-etc.service initrd-switch-root.target\n\n\
-             [Service]\nType=oneshot\nExecStartPre=/usr/bin/mount -o remount,rw /sysroot\nExecStart=/usr/bin/archix rescue --root /sysroot\n\
+             [Service]\nType=oneshot\nExecStartPre=/usr/bin/mount -o remount,rw /sysroot\nExecStart=/usr/bin/archix rescue --root /sysroot --initrd\n\
              StandardOutput=journal+console\n"
                 .to_string(),
         ));

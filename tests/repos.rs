@@ -104,7 +104,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
     let mut aur = LocalAur::new();
     aur.publish(TestPkg::new("archix-test-unrelated", "1.0"));
     let body = format!(
-        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\", before_official = true }} }}, aur = {{ url = {:?} }}",
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\", before_official = true }} }}, third_party_fallback = \"fallback\", aur = {{ url = {:?} }}",
         repo.server(),
         aur.url()
     );
@@ -161,7 +161,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
     assert_ne!(tree, "9.9-1", "last: the official repos");
     assert_ne!(setup.lock().packages["tree"].repo, "archix-third");
 
-    let strict = body.replace("aur = {", "third_party_fallback = \"fail\", aur = {");
+    let strict = body.replace("\"fallback\"", "\"fail\"");
     setup.set_body(&["archix-test-third", "tree"], &strict);
     repo.publish("archix-test-third", "3.0");
     setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
@@ -170,6 +170,19 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
         setup
             .fails(&["switch", "--noconfirm"])
             .contains("third_party_fallback = \"fail\"")
+    );
+
+    let ask = body.replace("third_party_fallback = \"fallback\", ", "");
+    setup.set_body(&["archix-test-third", "tree"], &ask);
+    repo.publish("archix-test-third", "4.0");
+    setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    repo.withdraw("archix-test-third");
+    let refused = setup.fails(&["switch", "--noconfirm"]);
+    assert!(refused.contains("Run without --noconfirm"), "{refused}");
+    assert_eq!(
+        setup.lock().packages["archix-test-third"].version,
+        "4.0-1",
+        "with nobody to ask, a vanished package is never swapped and the lock never rewritten"
     );
 
     setup.set_body(&[], "");

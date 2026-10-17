@@ -10,6 +10,23 @@ use crate::date::Date;
 pub const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 pub const ARCH: &str = "x86_64";
 
+/// The archive `switch` last used, which rollback and recover follow since they don't evaluate the config.
+pub fn configured(state: &Path) -> String {
+    fs::read_to_string(state.join("archive-url"))
+        .map(|url| url.trim().to_string())
+        .ok()
+        .filter(|url| !url.is_empty())
+        .unwrap_or_else(|| ARCHIVE_URL.to_string())
+}
+
+pub fn remember(state: &Path, url: &str) -> Result<()> {
+    if configured(state) == url {
+        return Ok(());
+    }
+    fs::create_dir_all(state)?;
+    fs::write(state.join("archive-url"), format!("{url}\n")).with_context(|| format!("writing {}", state.display()))
+}
+
 /// The package architectures this CPU can run: x86_64 plus each x86-64 level the dynamic loader reports as supported, for CachyOS's x86_64_v3/v4 repos.
 pub fn architectures() -> String {
     let report = std::process::Command::new("/lib/ld-linux-x86-64.so.2")

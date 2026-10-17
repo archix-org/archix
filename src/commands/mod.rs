@@ -96,6 +96,7 @@ struct Declared {
     keep_days: u32,
     aur_url: String,
     aur_review: bool,
+    archive_url: String,
     build_on_host: BTreeSet<String>,
     missing_versions: Option<Nearest>,
     boot: Option<BootSettings>,
@@ -231,6 +232,10 @@ fn declared(config: &Value) -> Result<Declared> {
                 _ => aur::DEFAULT_URL.to_string(),
             },
             _ => aur::DEFAULT_URL.to_string(),
+        },
+        archive_url: match map.get("archive_url") {
+            Some(Value::Str(url)) if !url.is_empty() => url.trim_end_matches('/').to_string(),
+            _ => archix::archive::ARCHIVE_URL.to_string(),
         },
         aur_review: !matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("review") == Some(&Value::Bool(false))),
         build_on_host: match map.get("aur") {
@@ -468,6 +473,7 @@ fn transaction_for(
     Ok(Transaction {
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
         at_boot: false,
+        repair: false,
         install,
         remove,
         system: None,

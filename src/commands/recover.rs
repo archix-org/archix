@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use archix::apply::{self, PacmanLock};
-use archix::archive::{ARCHIVE_URL, Archive};
+use archix::archive::Archive;
 use archix::fetch::{Wanted, fetch_all};
 use archix::generations::Store;
 use archix::journal::{Journal, Kind, Step, Transaction};
@@ -40,6 +40,22 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
         }
         PacmanLock::Free => {}
     }
+    let mut torn = Vec::new();
+    if !matches!(mode, RecoverMode::Abandon) {
+        reregister_torn(&paths, &journal)?;
+        let aside = paths.state.join("torn-db").join(journal.started.to_string());
+        torn = archix::pacman::set_aside_torn(&paths.local_db(), &aside)?;
+    }
+    if !torn.is_empty() {
+        println!(
+            "pacman's database entries for {} were torn by the crash; moved them to {} and reinstalling those packages over their files",
+            torn.join(", "),
+            paths.state.join("torn-db").display()
+        );
+        journal.transaction.repair = true;
+        journal.done.retain(|step| *step != Step::Install);
+        journal.save(&paths.journal())?;
+    }
     let kind = kind_name(journal.kind);
     match mode {
         RecoverMode::Continue => {
@@ -49,7 +65,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
             return finish_with_hooks(&paths, &journal, failures, &format!("{} is current", journal.target));
         }
         RecoverMode::Rollback => {
-            let archive = Archive::new(ARCHIVE_URL);
+            let archive = Archive::new(&archix::archive::configured(&paths.state));
             let installed = read_local_db(&paths.local_db())?;
             let changes: Vec<Change> = journal
                 .before
@@ -70,7 +86,8 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
                 .map(|change| merged(&change.from.unsafe_downgrades, &change.to.unsafe_downgrades))
                 .unwrap_or_default();
             guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
-            let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
+            let mut transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
+            transaction.repair = !torn.is_empty();
             apply::check_packages(&transaction)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
@@ -162,6 +179,7 @@ fn rollback_transaction(
     Ok(Transaction {
         reinstall: false,
         at_boot: false,
+        repair: false,
         system: journal.transaction.system.as_ref().map(SystemChange::reversed),
         boot: None,
         install,
@@ -215,4 +233,59 @@ fn ask_mode() -> Result<RecoverMode> {
         "a" | "abandon" => Ok(RecoverMode::Abandon),
         _ => bail!("nothing done"),
     }
+}
+
+/// Rewrites the pacman database entries a crash tore from the package files the interrupted switch was installing, so pacman can finish or undo them.
+fn reregister_torn(paths: &Paths, journal: &Journal) -> Result<()> {
+    let Ok(entries) = fs::read_dir(paths.local_db()) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let desc = archix::pacman::parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default());
+        if desc.contains_key("NAME") && desc.contains_key("VERSION") {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        let name = archix::pacman::name_from_entry(&dir_name);
+        let prefix = format!("{dir_name}-");
+        let named = |path: &std::path::Path| {
+            path.file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .is_some_and(|file| {
+                    file.ends_with(".pkg.tar.zst")
+                        && (file.starts_with(&prefix) || file.get(13..).is_some_and(|rest| rest.starts_with(&prefix)))
+                })
+        };
+        let cached = || {
+            [paths.packages(), paths.pacman_cache.clone()]
+                .into_iter()
+                .filter_map(|dir| fs::read_dir(dir).ok())
+                .flat_map(|dir| dir.flatten().map(|e| e.path()))
+                .find(|path| named(path))
+        };
+        let Some(file) = journal
+            .transaction
+            .install
+            .iter()
+            .find(|path| named(path))
+            .cloned()
+            .or_else(cached)
+        else {
+            continue;
+        };
+        let explicit = journal
+            .transaction
+            .reasons
+            .get(name)
+            .copied()
+            .or_else(|| journal.before.get(name).map(|pkg| pkg.explicit))
+            .unwrap_or(true);
+        archix::system::rescue::register(std::path::Path::new("/"), &file, explicit)
+            .with_context(|| format!("rewriting the torn database entry {dir_name}"))?;
+        println!(
+            "pacman's database entry for {dir_name} was torn by the crash; rewrote it from {}",
+            file.display()
+        );
+    }
+    Ok(())
 }

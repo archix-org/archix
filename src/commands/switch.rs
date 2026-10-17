@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use archix::adopt::{adopt, newer_than_lock};
 use archix::apply;
-use archix::archive::{ARCHIVE_URL, Archive};
+use archix::archive::Archive;
 use archix::aur::build::Builder;
 use archix::aur::build::built_version;
 use archix::aur::index::Index;
@@ -22,7 +22,7 @@ use archix::flatpak::{self, LockedApp};
 use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
-use archix::journal::{Journal, Kind};
+use archix::journal::{Journal, Kind, Step};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
@@ -81,7 +81,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let declared = declared(target.config)?;
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     let installed = read_local_db(&paths.local_db())?;
-    let archive = Archive::new(ARCHIVE_URL);
+    let archive = Archive::new(&declared.archive_url);
+    archix::archive::remember(&paths.state, &declared.archive_url)?;
     let beyond = archix::archive::beyond_cpu(
         lock.packages
             .iter()
@@ -693,9 +694,12 @@ fn third_party_fallback(
                 repo.name
             ),
             ThirdPartyFallback::Fallback => true,
-            ThirdPartyFallback::Ask => {
-                noconfirm || confirm("fall back to its current version, the AUR, or the official repos?")?
-            }
+            ThirdPartyFallback::Ask if noconfirm => bail!(
+                "{name} {} is gone from {}; nothing was changed. Run without --noconfirm to choose a replacement, or set third_party_fallback = \"fallback\"",
+                pkg.version,
+                repo.name
+            ),
+            ThirdPartyFallback::Ask => confirm("fall back to its current version, the AUR, or the official repos?")?,
         };
         if !fall_back {
             bail!("aborted; nothing was changed");
@@ -923,7 +927,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     {
         bail!("aborted; nothing was changed");
     }
-    let archive = Archive::new(ARCHIVE_URL);
+    let archive = Archive::new(&archix::archive::configured(&paths.state));
     let mut transaction = transaction_for(
         &archive,
         &paths,
@@ -1061,13 +1065,37 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
 }
 
 /// Restores a generation's core packages under `root` without pacman, for a system that no longer boots.
-pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String]) -> Result<()> {
+/// Whether a switch under `root` stopped inside pacman (its Remove or Install step), which can leave the next boot without a working systemd; true once per such switch.
+fn cut_off_in_pacman(root: &std::path::Path) -> Result<bool> {
+    let paths = Paths::under(root);
+    let Some(journal) = Journal::load(&paths.journal())? else {
+        return Ok(false);
+    };
+    if !matches!(journal.next_step(), Some(Step::Remove | Step::Install)) {
+        return Ok(false);
+    }
+    let marker = paths.state.join("auto-rescue");
+    let started = journal.started.to_string();
+    if fs::read_to_string(&marker).is_ok_and(|text| text.trim() == started) {
+        return Ok(false);
+    }
+    archix::durable::write(&marker, started.as_bytes())?;
+    println!(
+        "archix: {}, inside pacman; restoring the core packages first so the system can boot",
+        super::describe_unfinished(&journal)
+    );
+    Ok(true)
+}
+
+pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String], initrd: bool) -> Result<()> {
     require_root("rescue")?;
     let store = Store::new(&Paths::under(root));
+    let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    if initrd && !cmdline.split_whitespace().any(|word| word == "archix.rescue") && !cut_off_in_pacman(root)? {
+        return Ok(());
+    }
     // A rescue entry carries its own generation on the command line; restoring the current one couldn't undo a bad switch.
-    let booted = fs::read_to_string("/proc/cmdline")
-        .ok()
-        .and_then(|cmdline| system::boot::booted_generation(&cmdline));
+    let booted = system::boot::booted_generation(&cmdline);
     let number = match generation.or(booted) {
         Some(number) => number,
         None => store

@@ -56,6 +56,8 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
                 step.describe()
             )
         })?);
+        // pacman doesn't fsync, so a step is only recorded as done once what it wrote is on disk.
+        unsafe { libc::sync() };
         journal.done.push(step);
         journal.save(&path)?;
     }
@@ -133,6 +135,9 @@ fn run_package_step(
             ];
             if !reinstall && !tx.reinstall {
                 args.push(OsStr::new("--needed"));
+            }
+            if tx.repair {
+                args.extend([OsStr::new("--overwrite"), OsStr::new("*")]);
             }
             args.extend(tx.install.iter().map(|path| path.as_os_str()));
             pacman(&args)?;

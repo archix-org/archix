@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -94,6 +93,9 @@ pub struct Transaction {
     /// A boot-time rollback, which runs before sysinit.target: units are queued with --no-block instead of waited for, and nothing is restarted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub at_boot: bool,
+    /// Recovery after a crash tore pacman's database: the Install step overwrites the files the torn entries owned.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repair: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -156,18 +158,7 @@ impl Journal {
 
     /// Written via temp file, fsync and rename, so a power cut leaves either the old or the new journal.
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        file.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
-        file.sync_all()?;
-        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
-        if let Some(dir) = path.parent() {
-            File::open(dir)?.sync_all()?;
-        }
-        Ok(())
+        crate::durable::write(path, serde_json::to_string_pretty(self)?.as_bytes())
     }
 
     pub fn delete(path: &Path) -> Result<()> {

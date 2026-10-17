@@ -62,8 +62,8 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
     }
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
-        out.contains("downloading jq-"),
-        "archix fetches the chroot's repo dependencies itself, with retries:\n{out}"
+        out.contains("downloading jq-") && !out.contains("Retrieving packages"),
+        "archix fetches the chroot and its repo dependencies itself, with retries, so pacman in the chroot downloads nothing:\n{out}"
     );
     assert_eq!(installed("archix-test-app").as_deref(), Some("2.0-1"));
     assert_eq!(installed("archix-test-lib").as_deref(), Some("1.0-1"));

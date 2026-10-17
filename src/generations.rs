@@ -89,7 +89,11 @@ impl Store {
         for entry in entries {
             let entry = entry?;
             if entry.file_name().to_string_lossy().parse::<u32>().is_ok() {
-                generations.push(read(&entry.path())?);
+                // A generation a power cut tore before archix wrote it durably shouldn't hide all the others.
+                match read(&entry.path()) {
+                    Ok(generation) => generations.push(generation),
+                    Err(e) => eprintln!("warning: skipping {}: {e:#}", entry.path().display()),
+                }
             }
         }
         generations.sort_by_key(|generation| generation.number);
@@ -130,18 +134,21 @@ impl Store {
             fs::remove_dir_all(&tmp)?;
         }
         fs::create_dir_all(&tmp)?;
-        fs::write(tmp.join(GENERATION_FILE), serde_json::to_string_pretty(&generation)?)?;
+        crate::durable::write(
+            &tmp.join(GENERATION_FILE),
+            serde_json::to_string_pretty(&generation)?.as_bytes(),
+        )?;
         fs::rename(&tmp, self.path(generation.number))
             .with_context(|| format!("storing generation {}", generation.number))?;
+        crate::durable::sync_dir(&self.path(generation.number))?;
         Ok(generation)
     }
 
     /// Rewrites a stored generation, such as after its snapshot was taken.
     pub fn update(&self, generation: &Generation) -> Result<()> {
         let path = self.path(generation.number).join(GENERATION_FILE);
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(generation)?)?;
-        fs::rename(&tmp, &path).with_context(|| format!("updating generation {}", generation.number))
+        crate::durable::write(&path, serde_json::to_string_pretty(generation)?.as_bytes())
+            .with_context(|| format!("updating generation {}", generation.number))
     }
 
     /// Points `current` at a generation by renaming a fresh symlink over it, which is atomic.
@@ -149,7 +156,8 @@ impl Store {
         let tmp = self.current.with_extension("new");
         let _ = fs::remove_file(&tmp);
         symlink(Path::new("generations").join(number.to_string()), &tmp)?;
-        fs::rename(&tmp, &self.current).with_context(|| format!("activating generation {number}"))
+        fs::rename(&tmp, &self.current).with_context(|| format!("activating generation {number}"))?;
+        crate::durable::sync_dir(&self.current)
     }
 
     pub fn delete(&self, number: u32) -> Result<()> {

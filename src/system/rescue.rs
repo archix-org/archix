@@ -147,6 +147,46 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
             path
         });
     }
+    write_entry(root, paths, file, &info, &files, explicit)
+}
+
+/// Writes the pacman database entry for a package file without unpacking it, such as over an entry a crash tore; returns the package name.
+pub fn register(root: &Path, file: &Path, explicit: bool) -> Result<String> {
+    let mut info: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut archive = tar::Archive::new(decoder(file)?);
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().into_owned();
+        if path == ".PKGINFO" {
+            let mut text = String::new();
+            entry.read_to_string(&mut text)?;
+            for line in text.lines() {
+                if let Some((key, value)) = line.split_once(" = ") {
+                    info.entry(key.to_string()).or_default().push(value.to_string());
+                }
+            }
+        } else if !path.starts_with('.') {
+            let is_dir = entry.header().entry_type().is_dir();
+            files.push(if is_dir && !path.ends_with('/') {
+                format!("{path}/")
+            } else {
+                path
+            });
+        }
+    }
+    write_entry(root, &Paths::under(root), file, &info, &files, explicit)?;
+    Ok(info.get("pkgname").and_then(|v| v.first()).cloned().unwrap_or_default())
+}
+
+fn write_entry(
+    root: &Path,
+    paths: &Paths,
+    file: &Path,
+    info: &BTreeMap<String, Vec<String>>,
+    files: &[String],
+    explicit: bool,
+) -> Result<()> {
     let first = |key: &str| info.get(key).and_then(|v| v.first()).cloned().unwrap_or_default();
     let (name, version) = (first("pkgname"), first("pkgver"));
     if name.is_empty() || version.is_empty() {
@@ -160,7 +200,11 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
     }
     for entry in fs::read_dir(&local)?.flatten() {
         let desc = fs::read_to_string(entry.path().join("desc")).unwrap_or_default();
-        if desc.lines().skip_while(|l| *l != "%NAME%").nth(1) == Some(name.as_str()) {
+        // A torn desc names nothing, but pacman still lists the entry by its directory name.
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        if desc.lines().skip_while(|l| *l != "%NAME%").nth(1) == Some(name.as_str())
+            || crate::pacman::name_from_entry(&dir_name) == name
+        {
             fs::remove_dir_all(entry.path())?;
         }
     }
@@ -211,8 +255,8 @@ fn install(root: &Path, paths: &Paths, file: &Path, explicit: bool) -> Result<()
     }
     let dir = local.join(format!("{name}-{version}"));
     fs::create_dir_all(&dir)?;
-    fs::write(dir.join("desc"), desc)?;
-    fs::write(dir.join("files"), list)?;
+    crate::durable::write(&dir.join("desc"), desc.as_bytes())?;
+    crate::durable::write(&dir.join("files"), list.as_bytes())?;
     Ok(())
 }
 

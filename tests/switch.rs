@@ -33,6 +33,7 @@ fn fake_interrupted_switch(paths: &Paths) {
         boot: None,
         reinstall: false,
         at_boot: false,
+        repair: false,
         install: vec![tree],
         remove: vec![],
         versions,
@@ -90,6 +91,29 @@ fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_removed() {
     assert!(installed("tree").is_some() && installed("lemon").is_none());
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn archive_url_points_locking_at_a_mirror() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&["tree"], r#"archive_url = "http://127.0.0.1:9/""#);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        archix::archive::configured(&setup.paths.state),
+        "http://127.0.0.1:9",
+        "switch records the archive for rollback and recover, which don't evaluate the config"
+    );
+    let err = setup.fails(&["update", "--to", "2026-09-09", "--noconfirm"]);
+    assert!(err.contains("127.0.0.1:9/repos/2026/09/09/"), "{err}");
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        archix::archive::configured(&setup.paths.state),
+        archix::archive::ARCHIVE_URL
+    );
 }
 
 #[test]
@@ -155,6 +179,36 @@ fn interrupted_switch_blocks_until_recovered() {
     assert!(out.contains("tree") && out.contains("is not installed"), "{out}");
     assert!(installed("tree").is_none(), "abandon changes nothing");
     assert!(!paths.journal().exists());
+
+    // A power cut mid-pacman leaves the half-written entry's desc empty, as a VM test saw.
+    for rollback in [false, true] {
+        fake_interrupted_switch(paths);
+        pacman(&["-U", cached_file(&paths.packages(), "tree").to_str().unwrap()]);
+        let entry = fs::read_dir(paths.local_db())
+            .unwrap()
+            .flatten()
+            .find(|e| archix::pacman::name_from_entry(&e.file_name().to_string_lossy()) == "tree")
+            .unwrap();
+        fs::write(entry.path().join("desc"), "").unwrap();
+        assert!(setup.fails(&["status"]).contains("archix recover"));
+        let mode = if rollback { "--rollback" } else { "--continue" };
+        let out = setup.ok(&["recover", mode]);
+        assert!(out.contains("was torn by the crash; rewrote it"), "{out}");
+        assert!(!paths.journal().exists());
+        assert_eq!(installed("tree").is_some(), !rollback, "{mode} after a torn entry");
+        assert_eq!(
+            fs::exists("/usr/bin/tree").unwrap(),
+            !rollback,
+            "{mode} leaves no unowned files behind"
+        );
+        assert!(
+            read_local_db(&paths.local_db()).is_ok(),
+            "{mode} leaves pacman's database readable"
+        );
+        if !rollback {
+            pacman(&["-R", "tree"]);
+        }
+    }
 }
 
 /// Installs lemon 3.54.0 from a later snapshot with plain pacman, the way `pacman -Syu` or yay would.

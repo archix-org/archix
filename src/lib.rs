@@ -6,6 +6,7 @@ pub mod capture;
 pub mod conflicts;
 pub mod date;
 pub mod downgrade;
+pub mod durable;
 pub mod eval;
 pub mod fetch;
 pub mod flatpak;

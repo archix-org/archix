@@ -172,6 +172,7 @@ impl Builder<'_> {
                 fs::remove_dir_all(&root)?;
             }
             eprintln!(":: creating the build chroot at the {date} snapshot");
+            self.prefetch(date, repos, &["base-devel".to_string()])?;
             with_retries("creating the build chroot", || {
                 if root.exists() {
                     fs::remove_dir_all(&root)?;
@@ -183,6 +184,8 @@ impl Builder<'_> {
             })?;
         } else if fs::read_to_string(&marker).ok().as_deref() != Some(&date.to_string()) {
             eprintln!(":: moving the build chroot to the {date} snapshot");
+            let installed = crate::pacman::read_local_db(&root.join("var/lib/pacman/local")).unwrap_or_default();
+            self.prefetch(date, repos, &installed.into_keys().collect::<Vec<_>>())?;
             with_retries("moving the build chroot", || {
                 run(
                     devtools("arch-nspawn")
@@ -198,7 +201,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// Downloads what makepkg will install in the chroot into pacman's cache, which devtools binds in, so a slow archive connection gets archix's retries.
+    /// Downloads what mkarchroot or makepkg will install in the chroot into pacman's cache, which devtools uses, so a slow archive connection gets archix's retries.
     fn prefetch(&self, date: Date, repos: &[String], deps: &[String]) -> Result<()> {
         if deps.is_empty() {
             return Ok(());
@@ -208,14 +211,18 @@ impl Builder<'_> {
         let Ok(targets) = print_targets(&conf, &db, deps, false, &[]) else {
             return Ok(());
         };
-        let installed = crate::pacman::read_local_db(&self.chroot().join("root/var/lib/pacman/local"))?;
+        let installed =
+            crate::pacman::read_local_db(&self.chroot().join("root/var/lib/pacman/local")).unwrap_or_default();
+        let mut syncs = std::collections::BTreeMap::new();
         let mut wanted = Vec::new();
         for (name, version, repo) in targets {
             if installed.get(&name).is_some_and(|pkg| pkg.version == version) {
                 continue;
             }
-            let sync = read_sync_db(&db.join("sync").join(format!("{repo}.db")))?;
-            let pkg = &sync[&name];
+            if !syncs.contains_key(&repo) {
+                syncs.insert(repo.clone(), read_sync_db(&db.join("sync").join(format!("{repo}.db")))?);
+            }
+            let pkg = &syncs[&repo][&name];
             wanted.push(Wanted {
                 name,
                 file: pkg.filename.clone(),

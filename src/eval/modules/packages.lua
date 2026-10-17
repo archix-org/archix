@@ -50,10 +50,15 @@ return {
       default = {},
       description = "Third-party repositories. They have no dated archive, so archix keeps a copy of every package it installs from them.",
     },
+    archive_url = archix.option {
+      type = t.str,
+      default = "https://archive.archlinux.org",
+      description = "The Arch Linux Archive, or a mirror of it with the same layout (repos/YYYY/MM/DD/...), that locks resolve and download from.",
+    },
     third_party_fallback = archix.option {
       type = t.enum { "ask", "fallback", "fail" },
       default = "ask",
-      description = "When a locked package from a custom repo is gone: ask (the answer defaults to falling back), fall back without asking, or fail. Falling back tries the repo's current version, then the AUR, then the official repos.",
+      description = "When a locked package from a custom repo is gone: ask (with --noconfirm, fail), fall back without asking, or fail. Falling back tries the repo's current version, then the AUR, then the official repos.",
     },
     undeclared_packages = archix.option {
       type = t.enum { "remove", "warn" },
