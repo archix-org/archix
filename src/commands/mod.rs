@@ -60,7 +60,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     }
     missing == 0
 }
-pub use switch::{boot_check, declare_and_switch, gc, generations, hook_record, rescue, rollback, switch};
+pub use switch::{boot_check, cache_push, declare_and_switch, gc, generations, hook_record, rescue, rollback, switch};
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
@@ -97,6 +97,8 @@ struct Declared {
     aur_url: String,
     aur_review: bool,
     archive_url: String,
+    lock_warn_after_days: u32,
+    package_caches: Vec<String>,
     build_on_host: BTreeSet<String>,
     skip_check: BTreeSet<String>,
     missing_versions: Option<Nearest>,
@@ -233,6 +235,11 @@ fn declared(config: &Value) -> Result<Declared> {
                 _ => aur::DEFAULT_URL.to_string(),
             },
             _ => aur::DEFAULT_URL.to_string(),
+        },
+        package_caches: strings("package_caches"),
+        lock_warn_after_days: match map.get("lock_warn_after_days") {
+            Some(Value::Int(days)) => u32::try_from(*days).unwrap_or(0),
+            _ => 30,
         },
         archive_url: match map.get("archive_url") {
             Some(Value::Str(url)) if !url.is_empty() => url.trim_end_matches('/').to_string(),
@@ -532,6 +539,17 @@ fn refuse_if_unfinished(paths: &Paths) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// A warning when the lock's snapshot is older than the config allows: fixes released since aren't installed.
+fn lock_age_warning(lock: &HostLock, warn_after_days: u32) -> Option<String> {
+    let age = lock.date.days_until(archix::date::Date::today_utc());
+    (warn_after_days > 0 && age > i64::from(warn_after_days)).then(|| {
+        format!(
+            "warning: archix.lock is at the {} snapshot, {age} days old; updates released since aren't installed. `archix update` moves it to the newest snapshot",
+            lock.date
+        )
+    })
 }
 
 fn check_pacman_free(paths: &Paths) -> Result<()> {

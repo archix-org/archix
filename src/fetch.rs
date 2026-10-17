@@ -64,10 +64,20 @@ fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wan
         }
     }
     let mut mismatched = Vec::new();
-    for url in &item.urls {
+    let caches = archive.cache_urls(&item.file);
+    let cached = caches.len();
+    let urls: Vec<String> = caches.into_iter().chain(item.urls.iter().cloned()).collect();
+    for (index, url) in urls.iter().enumerate() {
         eprintln!("downloading {}", item.file);
-        if !archive.fetch(url, &dest)? {
-            continue;
+        match archive.fetch(url, &dest) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            // A package cache that is down or misbehaving only costs its speedup; the archive is still there.
+            Err(e) if index < cached => {
+                eprintln!("warning: skipping the package cache at {url}: {e:#}");
+                continue;
+            }
+            Err(e) => return Err(e),
         }
         // Another source may still hold the right file, such as the archive's per-package copy when a dated repo's file differs from its database.
         if !matches(&dest, item)? {
@@ -85,7 +95,7 @@ fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wan
             mismatched.join(" or ")
         );
     }
-    bail!("{} is not available from {}", item.file, item.urls.join(" or "))
+    bail!("{} is not available from {}", item.file, urls.join(" or "))
 }
 
 fn matches(path: &Path, item: &Wanted) -> Result<bool> {

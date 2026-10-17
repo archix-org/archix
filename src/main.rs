@@ -184,9 +184,21 @@ enum Command {
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
+    /// Share package files and AUR builds with other machines through a package cache
+    #[command(subcommand)]
+    Cache(Cache),
     /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
     #[command(external_subcommand)]
     Pick(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum Cache {
+    /// Copy this machine's package files, signatures and AUR build records into a directory other machines list in package_caches
+    Push {
+        /// The cache directory, such as a NAS mount; serve it over HTTP to share it beyond the network share
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -380,6 +392,10 @@ fn run() -> Result<ExitCode> {
             commands::gc()?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::Cache(Cache::Push { dir }) => {
+            commands::cache_push(&dir)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Prefetch { url } => {
             commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
@@ -565,6 +581,7 @@ fn run() -> Result<ExitCode> {
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::SecureBoot(_)
+        | Command::Cache(_)
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }

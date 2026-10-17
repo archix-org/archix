@@ -15,6 +15,8 @@ pub struct Contents {
     pub displaces: Vec<String>,
     /// Files and links, not directories.
     pub files: Vec<String>,
+    /// Each file's size in bytes from .MTREE, in the order of `files`; links count 0.
+    pub sizes: Vec<u64>,
     /// Installed size in bytes, `size` in .PKGINFO.
     pub size: u64,
     /// Config files (`backup` in .PKGINFO), which pacman installs as .pacnew instead of refusing when one already exists.
@@ -63,16 +65,18 @@ pub fn contents(path: &Path) -> Result<Contents> {
             ".MTREE" => {
                 let mut text = String::new();
                 GzDecoder::new(entry).read_to_string(&mut text)?;
-                files = Some(mtree_files(&text));
+                files = Some(mtree_entries(&text));
             }
             _ if !entry_path.starts_with('.') => break,
             _ => {}
         }
-        if let (Some(name), Some(files)) = (&name, &files) {
+        if let (Some(name), Some(entries)) = (&name, &files) {
+            let (files, sizes): (Vec<String>, Vec<u64>) = entries.iter().cloned().unzip();
             return Ok(Contents {
                 name: name.clone(),
                 displaces: displaces.clone(),
-                files: files.clone(),
+                files,
+                sizes,
                 size,
                 backups: backups.clone(),
             });
@@ -82,12 +86,25 @@ pub fn contents(path: &Path) -> Result<Contents> {
 }
 
 /// Paths of everything but directories in an mtree listing, with its \ooo escapes decoded.
+#[cfg(test)]
 fn mtree_files(text: &str) -> Vec<String> {
+    mtree_entries(text).into_iter().map(|(path, _)| path).collect()
+}
+
+/// Everything but directories in an mtree listing, with each one's `size`.
+fn mtree_entries(text: &str) -> Vec<(String, u64)> {
     text.lines()
         .filter(|line| line.starts_with("./") && !line.contains(" type=dir"))
-        .filter_map(|line| line.split_whitespace().next())
-        .map(|path| unescape(path.trim_start_matches("./")))
-        .filter(|path| !path.starts_with('.'))
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let path = unescape(words.next()?.trim_start_matches("./"));
+            let size = words
+                .find_map(|word| word.strip_prefix("size="))
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            Some((path, size))
+        })
+        .filter(|(path, _)| !path.starts_with('.'))
         .collect()
 }
 
@@ -177,11 +194,76 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
             shown.join("\n  ")
         );
     }
-    let adds: u64 = incoming.iter().map(|c| c.size).sum();
     // Packages the switch drops are removed after the install, so only the versions the install replaces free space in time.
     let mut freed: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
     freed.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
-    check_space(root, adds, installed_size(local_db, &freed))
+    check_mounts(root, local_db, &incoming, &freed)
+}
+
+/// Like pacman's disk space check: what each mount gains from the incoming files, less what the replaced versions' files free there (nothing on btrfs, whose snapshot keeps them).
+fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTreeSet<String>) -> Result<()> {
+    let mounts = mount_points();
+    let mount_of = |file: &str| {
+        let path = root.join(file);
+        mounts
+            .iter()
+            .find(|mount| path.starts_with(mount))
+            .cloned()
+            .unwrap_or_else(|| root.to_path_buf())
+    };
+    let mut adds: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    for package in incoming {
+        for (file, size) in package.files.iter().zip(&package.sizes) {
+            *adds.entry(mount_of(file)).or_default() += size;
+        }
+    }
+    let mut frees: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    for entry in fs::read_dir(local_db).into_iter().flatten().flatten() {
+        let desc = parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default());
+        if !desc
+            .get("NAME")
+            .and_then(|n| n.first())
+            .is_some_and(|name| freed.contains(name))
+        {
+            continue;
+        }
+        let mut mtree = String::new();
+        let read = File::open(entry.path().join("mtree"))
+            .is_ok_and(|file| GzDecoder::new(file).read_to_string(&mut mtree).is_ok());
+        if read {
+            for (file, size) in mtree_entries(&mtree) {
+                *frees.entry(mount_of(&file)).or_default() += size;
+            }
+        } else if let Some(size) = desc
+            .get("SIZE")
+            .and_then(|s| s.first())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            *frees.entry(mount_of("usr")).or_default() += size;
+        }
+    }
+    for (mount, add) in adds {
+        let frees = if crate::capture::is_btrfs(&mount) {
+            0
+        } else {
+            frees.get(&mount).copied().unwrap_or(0)
+        };
+        check_space(&mount, add, frees)?;
+    }
+    Ok(())
+}
+
+/// Mount points from /proc/self/mounts, longest first so the first prefix match is the one a path lives on.
+fn mount_points() -> Vec<PathBuf> {
+    let mut mounts: Vec<PathBuf> = fs::read_to_string("/proc/self/mounts")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1))
+        .map(|mount| PathBuf::from(unescape(mount)))
+        .collect();
+    mounts.sort_by_key(|mount| std::cmp::Reverse(mount.as_os_str().len()));
+    mounts.dedup();
+    mounts
 }
 
 /// Each installed package's files (not directories), from pacman's local database.
@@ -232,10 +314,11 @@ const SPARE: u64 = 128 << 20;
 
 /// Refuses a transaction that adds `adds` bytes and frees `frees` when `root`'s filesystem can't hold the difference plus some spare.
 pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
-    let Some(free) = free_bytes(root) else {
+    let Some((free, total)) = space(root) else {
         return Ok(());
     };
-    let needed = adds.saturating_sub(frees) + SPARE;
+    // pacman keeps 5% of the filesystem as a cushion; a small ESP still takes a ucode update.
+    let needed = adds.saturating_sub(frees) + SPARE.min(total / 20);
     if free < needed {
         let mib = |bytes: u64| bytes.div_ceil(1 << 20);
         bail!(
@@ -248,27 +331,19 @@ pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
     Ok(())
 }
 
-fn free_bytes(path: &Path) -> Option<u64> {
+/// Bytes available to unprivileged users, as pacman counts them, and the filesystem's size.
+fn space(path: &Path) -> Option<(u64, u64)> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    (unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
+    (unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0).then(|| {
+        let block = stat.f_frsize as u64;
+        (stat.f_bavail as u64 * block, stat.f_blocks as u64 * block)
+    })
 }
 
-/// What the installed packages among `names` take up, from `%SIZE%` in pacman's local database.
-fn installed_size(local_db: &Path, names: &BTreeSet<String>) -> u64 {
-    fs::read_dir(local_db)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| fs::read_to_string(entry.path().join("desc")).ok())
-        .map(|text| parse_desc(&text))
-        .filter(|desc| {
-            desc.get("NAME")
-                .and_then(|n| n.first())
-                .is_some_and(|name| names.contains(name))
-        })
-        .filter_map(|desc| desc.get("SIZE")?.first()?.parse::<u64>().ok())
-        .sum()
+#[cfg(test)]
+fn free_bytes(path: &Path) -> Option<u64> {
+    space(path).map(|(free, _)| free)
 }
 
 #[cfg(test)]

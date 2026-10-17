@@ -67,7 +67,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
             return finish_with_hooks(&paths, &journal, failures, &format!("{} is current", journal.target));
         }
         RecoverMode::Rollback => {
-            let archive = Archive::new(&archix::archive::configured(&paths.state));
+            let archive = archix::archive::for_system(&paths.state);
             let installed = read_local_db(&paths.local_db())?;
             let changes: Vec<Change> = journal
                 .before

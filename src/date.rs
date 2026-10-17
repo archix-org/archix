@@ -28,6 +28,10 @@ impl Date {
         Date::from_days(self.days() + 1)
     }
 
+    pub fn days_until(self, later: Date) -> i64 {
+        later.days() - self.days()
+    }
+
     /// Days since 1970-01-01, using Howard Hinnant's civil calendar algorithm.
     fn days(self) -> i64 {
         let y = i64::from(self.year) - i64::from(self.month <= 2);

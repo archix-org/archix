@@ -619,3 +619,48 @@ fn a_lock_made_for_a_newer_cpu_is_refused_not_rewritten() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn a_full_mount_other_than_root_stops_the_switch() {
+    let _system = lock_system();
+    let recipe = "pkgname=archix-test-big\npkgver=1\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
+                  package() {\n  install -d \"$pkgdir/opt/archix-test-mount\"\n  head -c 4194304 /dev/zero > \"$pkgdir/opt/archix-test-mount/blob\"\n}\n";
+    let setup = Setup::with_files(
+        &["archix-test-big"],
+        "",
+        &[("pkgbuilds/archix-test-big/PKGBUILD", recipe)],
+    );
+    let mount = "/opt/archix-test-mount";
+    fs::create_dir_all(mount).unwrap();
+    let mounted = std::process::Command::new("mount")
+        .args(["-t", "tmpfs", "-o", "size=1m", "tmpfs", mount])
+        .status()
+        .unwrap();
+    assert!(mounted.success());
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    std::process::Command::new("umount").arg(mount).status().unwrap();
+    assert!(err.contains(mount) && err.contains("nothing was changed"), "{err}");
+    assert!(installed("archix-test-big").is_none());
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    fs::remove_dir(mount).ok();
+}
+
+#[test]
+#[ignore]
+fn an_old_lock_is_called_out() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "lock_warn_after_days = 1");
+    let status = setup.ok(&["status"]);
+    assert!(
+        status.contains("days old") && status.contains("archix update"),
+        "{status}"
+    );
+    setup.set_body(&["tree"], "");
+    assert!(
+        !setup.ok(&["status"]).contains("days old"),
+        "the default allows a month"
+    );
+}

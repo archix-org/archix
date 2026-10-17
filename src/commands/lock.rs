@@ -32,7 +32,7 @@ pub(super) fn current_lock(
 ) -> Result<(HostLock, bool)> {
     let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
     let old = lockfile.hosts.get(target.host).cloned();
-    let archive = Archive::new(&declared.archive_url);
+    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     let updating = !matches!(snapshot, Snapshot::Locked);
     let date = match (snapshot, &old) {
         (Snapshot::On(date), _) => date,
@@ -239,13 +239,21 @@ pub fn status(target: &Target) -> Result<()> {
         println!("{LOCK_FILE} has no entry for {}; run `archix lock`", target.host);
         return Ok(());
     };
+    let pins = if lock.pinned.is_empty() {
+        String::new()
+    } else {
+        format!(", {} off the snapshot", count(lock.pinned.len(), "pinned", "pinned"))
+    };
     println!(
-        "{} is locked to snapshot {} ({})",
+        "{} is locked to snapshot {} ({}{pins})",
         target.host,
         lock.date,
         count(lock.packages.len(), "package", "packages")
     );
     let declared = declared(target.config)?;
+    if let Some(warning) = super::lock_age_warning(lock, declared.lock_warn_after_days) {
+        println!("{warning}");
+    }
     let fingerprints = recipes(target, &declared)?.fingerprints(&lock.local_recipes())?;
     if !lock.matches(
         &declared.packages,

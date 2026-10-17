@@ -92,7 +92,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
-    let archive = Archive::new(&declared.archive_url);
+    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     let git = aur_git(&declared)?;
     let recipes = recipes(target, &declared)?;
     let aur = aur_source(&git, &declared, &archive, Some(&lock), false, &recipes);
@@ -273,7 +273,7 @@ fn selection(answer: &str, count: usize) -> Result<Vec<usize>> {
 
 fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
     let declared = declared(target.config)?;
-    let archive = Archive::new(&declared.archive_url);
+    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     let date = match Lockfile::load(&target.config_dir.join(LOCK_FILE))?
         .hosts
         .get(target.host)
@@ -360,7 +360,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
 
     let declared = declared(target.config)?;
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
-    let archive = Archive::new(&declared.archive_url);
+    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     let git = aur_git(&declared)?;
     let installed = read_local_db(&paths.local_db())?;
     if !newer_than_lock(&lock, &installed).is_empty() {

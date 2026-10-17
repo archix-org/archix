@@ -80,9 +80,13 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     clean_up_kept_modules(&paths);
     let declared = declared(target.config)?;
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
+    if let Some(warning) = super::lock_age_warning(&lock, declared.lock_warn_after_days) {
+        eprintln!("{warning}");
+    }
     let installed = read_local_db(&paths.local_db())?;
-    let archive = Archive::new(&declared.archive_url);
+    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     archix::archive::remember(&paths.state, &declared.archive_url)?;
+    archix::archive::remember_caches(&paths.state, &declared.package_caches)?;
     let beyond = archix::archive::beyond_cpu(
         lock.packages
             .iter()
@@ -1030,7 +1034,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     {
         bail!("aborted; nothing was changed");
     }
-    let archive = Archive::new(&archix::archive::configured(&paths.state));
+    let archive = archix::archive::for_system(&paths.state);
     let mut transaction = transaction_for(
         &archive,
         &paths,
@@ -1101,6 +1105,41 @@ pub fn generations() -> Result<()> {
             count(generation.packages.len(), "package", "packages")
         );
     }
+    Ok(())
+}
+
+/// Copies this machine's package files, their signatures and its AUR build records into a package cache directory, skipping what it already holds.
+pub fn cache_push(dir: &std::path::Path) -> Result<()> {
+    let paths = Paths::system();
+    let mut copied = 0;
+    let mut copy_dir = |from: &std::path::Path, to: &std::path::Path| -> Result<()> {
+        fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+        for entry in fs::read_dir(from).into_iter().flatten().flatten() {
+            let (source, dest) = (entry.path(), to.join(entry.file_name()));
+            if !source.is_file()
+                || dest
+                    .metadata()
+                    .is_ok_and(|have| source.metadata().is_ok_and(|want| want.len() == have.len()))
+            {
+                continue;
+            }
+            // Through a temporary name, so a machine reading the cache never sees half a file.
+            let tmp = to.join(format!(".{}.part", entry.file_name().to_string_lossy()));
+            fs::copy(&source, &tmp).with_context(|| format!("copying {}", source.display()))?;
+            fs::rename(&tmp, &dest)?;
+            copied += 1;
+        }
+        Ok(())
+    };
+    copy_dir(&paths.packages(), dir)?;
+    for base in fs::read_dir(paths.cache.join("aur-builds"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        copy_dir(&base.path(), &dir.join("aur-builds").join(base.file_name()))?;
+    }
+    println!("copied {} to {}", count(copied, "file", "files"), dir.display());
     Ok(())
 }
 

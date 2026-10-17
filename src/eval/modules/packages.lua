@@ -50,6 +50,16 @@ return {
       default = {},
       description = "Third-party repositories. They have no dated archive, so archix keeps a copy of every package it installs from them.",
     },
+    package_caches = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what `archix cache push` copied. Repo packages are checked against the lock's sha256; AUR builds are taken as the cache's build records say, so list only caches you control.",
+    },
+    lock_warn_after_days = archix.option {
+      type = t.int,
+      default = 30,
+      description = "Warn when archix.lock's snapshot is older than this many days, since fixes released after it aren't installed; 0 never warns.",
+    },
     archive_url = archix.option {
       type = t.str,
       default = "https://archive.archlinux.org",

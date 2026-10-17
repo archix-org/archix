@@ -19,6 +19,31 @@ pub fn configured(state: &Path) -> String {
         .unwrap_or_else(|| ARCHIVE_URL.to_string())
 }
 
+/// The package caches `switch` last used, for rollback and recover.
+pub fn configured_caches(state: &Path) -> Vec<String> {
+    fs::read_to_string(state.join("package-caches"))
+        .map(|text| {
+            text.lines()
+                .map(str::to_string)
+                .filter(|line| !line.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn remember_caches(state: &Path, caches: &[String]) -> Result<()> {
+    if configured_caches(state) == caches {
+        return Ok(());
+    }
+    fs::create_dir_all(state)?;
+    crate::durable::write(&state.join("package-caches"), caches.join("\n").as_bytes())
+}
+
+/// The archive and package caches `switch` last used, for commands that don't evaluate the config.
+pub fn for_system(state: &Path) -> Archive {
+    Archive::new(&configured(state)).with_caches(&configured_caches(state))
+}
+
 pub fn remember(state: &Path, url: &str) -> Result<()> {
     if configured(state) == url {
         return Ok(());
@@ -67,6 +92,8 @@ const SEARCH_DAYS: usize = 14;
 pub struct Archive {
     base: String,
     agent: ureq::Agent,
+    /// Package caches (directories or HTTP mirrors of archix's package store) tried before the archive.
+    caches: Vec<String>,
 }
 
 impl Archive {
@@ -82,7 +109,21 @@ impl Archive {
         Archive {
             base: base.trim_end_matches('/').to_string(),
             agent,
+            caches: Vec::new(),
         }
+    }
+
+    pub fn with_caches(mut self, caches: &[String]) -> Archive {
+        self.caches = caches
+            .iter()
+            .map(|cache| cache.trim_end_matches('/').to_string())
+            .collect();
+        self
+    }
+
+    /// Where each package cache would hold `path` (a package file, or `aur-builds/...` for a build record).
+    pub fn cache_urls(&self, path: &str) -> Vec<String> {
+        self.caches.iter().map(|cache| format!("{cache}/{path}")).collect()
     }
 
     pub fn repo_url(&self, date: Date, repo: &str) -> String {

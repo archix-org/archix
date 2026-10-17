@@ -98,6 +98,9 @@ impl Builder<'_> {
                 return Ok(files);
             }
         }
+        if let Some(files) = self.cached_build(base, commit, date, &record) {
+            return Ok(files);
+        }
 
         ensure_user()?;
         let dir = self
@@ -171,6 +174,46 @@ impl Builder<'_> {
         });
         let _ = fs::remove_dir_all(&dir);
         result
+    }
+
+    /// A build another machine made of the same recipe at the same snapshot, from a package cache: its record, then the files at the record's hashes.
+    fn cached_build(&self, base: &str, commit: &str, date: Date, record: &Path) -> Option<Vec<(String, PathBuf)>> {
+        let relative = format!("aur-builds/{base}/{commit}-{date}.json");
+        for url in self.archive.cache_urls(&relative) {
+            let fetched = record.with_extension("cached");
+            if let Some(dir) = fetched.parent() {
+                fs::create_dir_all(dir).ok()?;
+            }
+            if !self.archive.fetch(&url, &fetched).unwrap_or(false) {
+                continue;
+            }
+            let text = fs::read_to_string(&fetched).ok()?;
+            let _ = fs::remove_file(&fetched);
+            let Ok(cached) = serde_json::from_str::<Record>(&text) else {
+                continue;
+            };
+            if cached.sha256.len() != cached.files.len() {
+                continue;
+            }
+            let wanted: Vec<Wanted> = cached
+                .files
+                .iter()
+                .zip(&cached.sha256)
+                .map(|((name, file), sha256)| Wanted {
+                    name: name.clone(),
+                    file: file.clone(),
+                    urls: Vec::new(),
+                    sha256: Some(sha256.clone()),
+                })
+                .collect();
+            let Ok(paths) = fetch_all(self.archive, &self.paths.packages(), &[], &wanted) else {
+                continue;
+            };
+            crate::durable::write(record, text.as_bytes()).ok()?;
+            eprintln!(":: using {base}'s build from the package cache at {url}");
+            return Some(cached.files.into_iter().map(|(name, _)| name).zip(paths).collect());
+        }
+        None
     }
 
     /// Creates the chroot on first use and moves it to `date`'s snapshot when the lock needs another one.

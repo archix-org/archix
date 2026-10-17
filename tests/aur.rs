@@ -200,3 +200,45 @@ fn skip_check_builds_a_recipe_whose_tests_fail() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn a_package_cache_shares_builds_and_package_files_between_machines() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new("archix-test-cached", "1.0"));
+    let cache = TempDir::new().unwrap();
+    let body = |archive: &str| {
+        format!(
+            "aur = {{ url = {:?} }}, package_caches = {{ {:?} }}{archive}",
+            aur.url(),
+            format!("file://{}", cache.path().display())
+        )
+    };
+    let setup = Setup::new(&["archix-test-cached", "tree"], &body(""));
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.ok(&["cache", "push", cache.path().to_str().unwrap()]);
+
+    // Another machine: none of it built or downloaded locally, and the archive unreachable.
+    setup.set_body(&[], &body(""));
+    setup.ok(&["switch", "--noconfirm"]);
+    let _ = fs::remove_dir_all("/var/cache/archix/aur-builds");
+    for dir in ["/var/cache/archix/pkg", "/var/cache/pacman/pkg"] {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.contains("archix-test-cached") || name.starts_with("tree-") {
+                fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+    let offline = body(", archive_url = \"http://127.0.0.1:9\"");
+    setup.set_body(&["archix-test-cached", "tree"], &offline);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("build from the package cache"),
+        "the AUR build came from the cache:\n{out}"
+    );
+    assert!(installed("archix-test-cached").is_some() && installed("tree").is_some());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
