@@ -344,16 +344,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     let slots = plan.keep.saturating_sub(1) as usize;
     let mut kept: BTreeSet<u32> = keep.iter().rev().take(slots).copied().collect();
     kept.insert(plan.generation);
-    // Pruning must never take the entry this boot came from, nor the one a failed switch falls back to.
-    let protected: BTreeSet<u32> = [
-        crate::generations::Store::new(paths).current().ok().flatten(),
-        fs::read_to_string("/proc/cmdline")
-            .ok()
-            .and_then(|cmdline| booted_generation(&cmdline)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let protected = protected_generations(paths);
     kept.extend(&protected);
     let rescue_kept: BTreeSet<u32> = kept.iter().rev().take(2).copied().collect();
     for (number, rescue, path) in entries(&plan.esp) {
@@ -417,6 +408,19 @@ pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
     Ok(())
 }
 
+/// Generations whose entries pruning never takes: the one this boot came from and the current one, which a failed switch falls back to.
+pub fn protected_generations(paths: &Paths) -> BTreeSet<u32> {
+    [
+        crate::generations::Store::new(paths).current().ok().flatten(),
+        fs::read_to_string("/proc/cmdline")
+            .ok()
+            .and_then(|cmdline| booted_generation(&cmdline)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
 /// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.
 pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
     let existing = entries(esp);
@@ -439,8 +443,10 @@ pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
     let copies = 1 + u64::from(rescue) + u64::from(protected);
     let needed = newest * copies + MARGIN;
     let dir = linux_dir(esp);
+    let protected = protected_generations(&Paths::system());
     let reclaimable: u64 = existing
         .iter()
+        .filter(|(number, _, _)| !protected.contains(number))
         .filter_map(|(_, _, path)| fs::metadata(path).ok().map(|m| m.len()))
         .sum();
     let measured = dir.ancestors().find(|path| path.exists()).unwrap_or(Path::new("/"));
@@ -448,7 +454,7 @@ pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
     if free + reclaimable < needed {
         let mib = |bytes: u64| bytes / (1024 * 1024);
         bail!(
-            "the ESP at {esp} has {} MiB free ({} MiB more after removing every older archix entry), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set boot.entries lower",
+            "the ESP at {esp} has {} MiB free ({} MiB more after removing the older archix entries it may), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set boot.entries lower",
             mib(free),
             mib(reclaimable),
             mib(needed)

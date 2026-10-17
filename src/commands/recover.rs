@@ -90,6 +90,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
             guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
             let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
             set_aside_leftovers(&paths, &transaction.install, &journal)?;
+            archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
             apply::check_packages(&transaction)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
