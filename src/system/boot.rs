@@ -37,6 +37,11 @@ const MARGIN: u64 = 16 * 1024 * 1024;
 
 /// The installed version of a kernel package, from the pkgbase file pacman's kernels leave in their modules dir.
 pub fn kernel_version(kernel: &str) -> Result<String> {
+    if let Some(version) = owned_version(Path::new("/var/lib/pacman/local"), kernel)
+        && Path::new(MODULES).join(&version).join("vmlinuz").is_file()
+    {
+        return Ok(version);
+    }
     for entry in fs::read_dir(MODULES)
         .with_context(|| format!("reading {MODULES}"))?
         .flatten()
@@ -48,6 +53,19 @@ pub fn kernel_version(kernel: &str) -> Result<String> {
         }
     }
     bail!("the {kernel} kernel isn't installed (no {MODULES}/*/pkgbase names it)")
+}
+
+/// The modules dir the installed kernel package owns; the running kernel's modules that archix keeps until reboot carry the same pkgbase.
+fn owned_version(local_db: &Path, kernel: &str) -> Option<String> {
+    let entry = fs::read_dir(local_db)
+        .ok()?
+        .flatten()
+        .find(|entry| crate::pacman::name_from_entry(&entry.file_name().to_string_lossy()) == kernel)?;
+    let files = fs::read_to_string(entry.path().join("files")).ok()?;
+    files
+        .lines()
+        .find_map(|line| line.strip_prefix("usr/lib/modules/")?.strip_suffix("/vmlinuz"))
+        .map(str::to_string)
 }
 
 fn kernels(paths: &Paths) -> PathBuf {
@@ -435,6 +453,21 @@ pub fn booted_generation(cmdline: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kernel_version_is_the_one_pacman_owns_not_a_kept_one() {
+        let db = tempfile::tempdir().unwrap();
+        let entry = db.path().join("linux-7.2.9.arch1-1");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(
+            entry.join("files"),
+            "%FILES%\nusr/\nusr/lib/modules/7.2.9-arch1-1/\nusr/lib/modules/7.2.9-arch1-1/pkgbase\nusr/lib/modules/7.2.9-arch1-1/vmlinuz\n\n",
+        )
+        .unwrap();
+        fs::create_dir_all(db.path().join("linux-lts-6.12.1-1")).unwrap();
+        assert_eq!(owned_version(db.path(), "linux").as_deref(), Some("7.2.9-arch1-1"));
+        assert_eq!(owned_version(db.path(), "linux-zen"), None);
+    }
 
     #[test]
     fn reads_the_generation_from_the_command_line() {
