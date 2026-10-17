@@ -37,10 +37,10 @@ pub enum Step {
     Activate,
 }
 
-/// Removals come first: the lock is a complete set, so dropping what it leaves out can't strand anything it installs.
+/// Installs come first, so pacman and what it needs are never missing in between; dropping what the lock leaves out comes after.
 pub const STEPS: [Step; 12] = [
-    Step::Remove,
     Step::Install,
+    Step::Remove,
     Step::Reasons,
     Step::Users,
     Step::StopServices,
@@ -93,9 +93,6 @@ pub struct Transaction {
     /// A boot-time rollback, which runs before sysinit.target: units are queued with --no-block instead of waited for, and nothing is restarted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub at_boot: bool,
-    /// Recovery after a crash tore pacman's database: the Install step overwrites the files the torn entries owned.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub repair: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -161,12 +158,14 @@ impl Journal {
         crate::durable::write(path, serde_json::to_string_pretty(self)?.as_bytes())
     }
 
+    /// Durable like `save`: a power cut right after a finished switch must not bring its journal back.
     pub fn delete(path: &Path) -> Result<()> {
         match fs::remove_file(path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 Err(e).with_context(|| format!("removing {}", path.display()))
             }
-            _ => Ok(()),
+            Err(_) => Ok(()),
+            Ok(()) => crate::durable::sync_dir(path),
         }
     }
 }
@@ -186,12 +185,12 @@ mod tests {
             BTreeMap::new(),
             Transaction::default(),
         );
-        assert_eq!(journal.next_step(), Some(Step::Remove));
-        journal.done.push(Step::Remove);
+        assert_eq!(journal.next_step(), Some(Step::Install));
+        journal.done.push(Step::Install);
         journal.save(&path).unwrap();
         let loaded = Journal::load(&path).unwrap().unwrap();
         assert_eq!(loaded, journal);
-        assert_eq!(loaded.next_step(), Some(Step::Install));
+        assert_eq!(loaded.next_step(), Some(Step::Remove));
         Journal::delete(&path).unwrap();
         assert!(Journal::load(&path).unwrap().is_none());
     }

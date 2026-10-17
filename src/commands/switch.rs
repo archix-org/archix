@@ -26,7 +26,7 @@ use archix::journal::{Journal, Kind, Step};
 use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
-use archix::plan::{Change, rebuilds};
+use archix::plan::{Change, rebuilds, swapped_builds};
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
 use archix::system::boot::BootPlan;
@@ -197,6 +197,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         system: SystemState::default(),
         snapshot: None,
         flatpak: lock.flatpak.clone(),
+        rescue: Vec::new(),
     };
     let rendered = system::render(target.config, target.config_dir)?;
     generation.system = rendered.state.clone();
@@ -231,6 +232,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &installed,
         current.as_ref().map(|g| &g.packages),
     ));
+    let snapshot_moved = current.as_ref().is_some_and(|current| current.date != lock.date);
+    if snapshot_moved {
+        changes.extend(broken_builds(
+            &paths,
+            &archive,
+            &lock,
+            &installed,
+            &changes,
+            &declared.repos,
+        )?);
+    }
     print_warned(&warned);
     let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
     if changes.is_empty()
@@ -300,6 +312,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             &installed,
             current.as_ref().map(|g| &g.packages),
         ));
+        if snapshot_moved {
+            changes.extend(broken_builds(
+                &paths,
+                &archive,
+                &lock,
+                &installed,
+                &changes,
+                &declared.repos,
+            )?);
+        }
         generation.packages = lock.packages.clone();
         carry_aur_hashes(&mut generation.packages, current.as_ref());
     }
@@ -363,6 +385,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             let mut pkg = pkg.clone();
             if let Some(previous) = generation.packages.get(name) {
                 pkg.sha256 = previous.sha256.clone();
+                pkg.file = previous.file.clone();
             }
             generation.packages.insert(name.clone(), pkg);
         }
@@ -381,6 +404,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
     apply::check_packages(&transaction)?;
     let rewritten = system::apply::out_of_date(&system_change)?;
+    system::hooks::defer(
+        &paths.pending_on_change(),
+        &system::hooks::due(&system_change, &rewritten),
+    )?;
     transaction.system = Some(system_change.clone());
     let mut created = store.create(generation)?;
     if let Some(boot) = &declared.boot {
@@ -471,12 +498,80 @@ pub(super) fn run_hooks(paths: &Paths, change: &SystemChange, rewritten: &BTreeS
     // A script this switch is due to run for the same file is newer than the one a boot rollback left behind.
     let mut due = system::hooks::deferred(&pending);
     due.extend(system::hooks::due(change, rewritten));
-    let _ = fs::remove_file(&pending);
     if change.to.hooks.is_empty() && due.is_empty() {
         return Vec::new();
     }
     eprintln!(":: running activation hooks");
-    system::hooks::run(change, &due)
+    let failures = system::hooks::run(change, &due);
+    if let Err(e) = fs::remove_file(&pending)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("warning: could not clear {}: {e}", pending.display());
+    }
+    failures
+}
+
+/// Rebuilds for built packages that would lose a library they link once the snapshot moves; only the owners of those libraries are downloaded to check.
+fn broken_builds(
+    paths: &Paths,
+    archive: &Archive,
+    lock: &HostLock,
+    installed: &BTreeMap<String, archix::pacman::LocalPkg>,
+    changes: &[Change],
+    repos: &[archix::repos::Repo],
+) -> Result<Vec<Change>> {
+    let rebuilding: BTreeSet<&str> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Rebuild { name, .. }
+            | Change::Install { name, .. }
+            | Change::Upgrade { name, .. }
+            | Change::Downgrade { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let built: Vec<String> = lock
+        .packages
+        .iter()
+        .filter(|(name, pkg)| pkg.is_built() && !pkg.build_only && !rebuilding.contains(name.as_str()))
+        .filter(|(name, pkg)| installed.get(*name).is_some_and(|have| have.version == pkg.version))
+        .map(|(name, _)| name.clone())
+        .collect();
+    let changing: BTreeSet<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Upgrade { name, .. } | Change::Downgrade { name, .. } | Change::Remove { name, .. } => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let broken = archix::soname::broken_builds(
+        std::path::Path::new("/"),
+        &paths.local_db(),
+        &built,
+        &changing,
+        |owner| {
+            let Some(pkg) = lock.packages.get(owner) else {
+                return Ok(None);
+            };
+            let wanted = super::wanted_file(archive, lock.date, owner, pkg, repos);
+            let file = fetch_all(
+                archive,
+                &paths.packages(),
+                std::slice::from_ref(&paths.pacman_cache),
+                &[wanted],
+            )?;
+            Ok(Some(archix::conflicts::contents(&file[0])?.files))
+        },
+    )?;
+    Ok(broken
+        .into_iter()
+        .map(|name| Change::Rebuild {
+            version: lock.packages[&name].version.clone(),
+            name,
+        })
+        .collect())
 }
 
 /// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
@@ -850,6 +945,13 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
         &installed,
         Some(&current_generation.packages),
     ));
+    let swapped = swapped_builds(
+        &generation.packages,
+        &installed,
+        Some(&current_generation.packages),
+        &changes,
+    );
+    changes.extend(swapped);
     print_warned(&warned);
     let name = format!("generation {number} (snapshot {})", generation.date);
     let system_change = SystemChange {
@@ -937,11 +1039,16 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
         &BTreeMap::new(),
         &[],
     )?;
+    transaction.install = apply::without_signatures(&paths, &transaction.install)?;
     if online {
         archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
         apply::check_packages(&transaction)?;
     }
     let rewritten = system::apply::out_of_date(&system_change)?;
+    system::hooks::defer(
+        &paths.pending_on_change(),
+        &system::hooks::due(&system_change, &rewritten),
+    )?;
     transaction.system = Some(system_change.clone());
     transaction.at_boot = !online;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
@@ -1064,35 +1171,57 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
     }
 }
 
-/// Restores a generation's core packages under `root` without pacman, for a system that no longer boots.
-/// Whether a switch under `root` stopped inside pacman (its Remove or Install step), which can leave the next boot without a working systemd; true once per such switch.
-fn cut_off_in_pacman(root: &std::path::Path) -> Result<bool> {
+/// The unfinished switch under `root` when it stopped inside pacman (its Remove or Install step), which can tear any file pacman was writing; once per such switch.
+fn cut_off_in_pacman(root: &std::path::Path) -> Result<Option<Journal>> {
     let paths = Paths::under(root);
     let Some(journal) = Journal::load(&paths.journal())? else {
-        return Ok(false);
+        return Ok(None);
     };
     if !matches!(journal.next_step(), Some(Step::Remove | Step::Install)) {
-        return Ok(false);
+        return Ok(None);
     }
     let marker = paths.state.join("auto-rescue");
     let started = journal.started.to_string();
     if fs::read_to_string(&marker).is_ok_and(|text| text.trim() == started) {
-        return Ok(false);
+        return Ok(None);
     }
     archix::durable::write(&marker, started.as_bytes())?;
     println!(
-        "archix: {}, inside pacman; restoring the core packages first so the system can boot",
+        "archix: {}, inside pacman; restoring the packages it was changing so the system can boot",
         super::describe_unfinished(&journal)
     );
-    Ok(true)
+    Ok(Some(journal))
 }
 
+/// Packages an unfinished switch was changing or removing, the only ones whose files it can have left half-written.
+fn touched(journal: &Journal) -> impl Iterator<Item = String> + '_ {
+    journal
+        .before
+        .iter()
+        .filter(|(name, pkg)| journal.transaction.versions.get(*name) != Some(&pkg.version))
+        .map(|(name, _)| name.clone())
+}
+
+/// Restores a generation's core packages under `root` without pacman, for a system that no longer boots.
 pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String], initrd: bool) -> Result<()> {
     require_root("rescue")?;
     let store = Store::new(&Paths::under(root));
     let cmdline = fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if initrd && !cmdline.split_whitespace().any(|word| word == "archix.rescue") && !cut_off_in_pacman(root)? {
-        return Ok(());
+    let mut extra = extra.to_vec();
+    if initrd {
+        // An older generation's kernel finds its modules gone under a newer generation; mounts like a vfat /boot need them before the real root starts.
+        let release = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+        if system::boot::restore_into(&root.join("usr/lib/modules"), &Paths::under(root), release.trim())? {
+            println!("archix: restored the modules of kernel {}", release.trim());
+        }
+    }
+    if initrd && !cmdline.split_whitespace().any(|word| word == "archix.rescue") {
+        let Some(journal) = cut_off_in_pacman(root)? else {
+            return Ok(());
+        };
+        extra.extend(touched(&journal));
+    } else if let Ok(Some(journal)) = Journal::load(&Paths::under(root).journal()) {
+        extra.extend(touched(&journal));
     }
     // A rescue entry carries its own generation on the command line; restoring the current one couldn't undo a bad switch.
     let booted = system::boot::booted_generation(&cmdline);
@@ -1107,7 +1236,7 @@ pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String],
         "restoring the core packages of generation {number} under {}",
         root.display()
     );
-    let rescued = system::rescue::rescue(root, &generation, extra)?;
+    let rescued = system::rescue::rescue(root, &generation, &extra)?;
     for line in &rescued.restored {
         println!("restored {line}");
     }

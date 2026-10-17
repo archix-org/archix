@@ -250,6 +250,15 @@ struct OptionDoc {
 fn main() -> ExitCode {
     // Rust ignores SIGPIPE by default, which turns `archix diff | head` into a panic instead of a quiet exit.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    // archix reads pacman's and systemctl's messages, so they must be untranslated; the user's character set stays.
+    unsafe {
+        if let Some(all) = std::env::var_os("LC_ALL") {
+            std::env::set_var("LANG", all);
+            std::env::remove_var("LC_ALL");
+        }
+        std::env::set_var("LC_MESSAGES", "C");
+        std::env::remove_var("LANGUAGE");
+    }
     match run() {
         Ok(code) => code,
         Err(e) => {

@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::lock::{LOCAL_REPO, Locked};
@@ -135,6 +135,30 @@ pub fn rebuilds(
         .collect()
 }
 
+/// Built packages whose build in `target` differs from the one installed now, which a rollback must put back although the version is the same.
+pub fn swapped_builds(
+    target: &BTreeMap<String, Locked>,
+    installed: &BTreeMap<String, LocalPkg>,
+    current: Option<&BTreeMap<String, Locked>>,
+    changes: &[Change],
+) -> Vec<Change> {
+    let rebuilding: BTreeSet<&str> = changes.iter().map(change_name).collect();
+    target
+        .iter()
+        .filter(|(name, want)| want.is_built() && !want.build_only && !rebuilding.contains(name.as_str()))
+        .filter(|(name, want)| installed.get(*name).is_some_and(|have| have.version == want.version))
+        .filter(|(name, want)| {
+            current
+                .and_then(|current| current.get(*name))
+                .is_some_and(|have| !have.sha256.is_empty() && !want.sha256.is_empty() && have.sha256 != want.sha256)
+        })
+        .map(|(name, want)| Change::Rebuild {
+            name: name.clone(),
+            version: want.version.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +225,23 @@ mod tests {
     fn nothing_to_do_when_matching() {
         let lock = locked(&[("git", "2.51-1", true)]);
         assert!(plan(&lock, &installed(&[("git", "2.51-1", true)])).is_empty());
+    }
+
+    fn built(mut packages: BTreeMap<String, Locked>, names: &[&str]) -> BTreeMap<String, Locked> {
+        for name in names {
+            packages.get_mut(*name).unwrap().repo = crate::lock::AUR_REPO.into();
+        }
+        packages
+    }
+
+    #[test]
+    fn a_rollback_puts_back_its_own_build_of_the_same_version() {
+        let mut target = built(locked(&[("app", "1-1", true)]), &["app"]);
+        target.get_mut("app").unwrap().sha256 = "old".into();
+        let mut current = target.clone();
+        current.get_mut("app").unwrap().sha256 = "new".into();
+        let have = installed(&[("app", "1-1", true)]);
+        assert_eq!(swapped_builds(&target, &have, Some(&current), &[]).len(), 1);
+        assert!(swapped_builds(&target, &have, Some(&target), &[]).is_empty());
     }
 }

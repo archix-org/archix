@@ -33,7 +33,6 @@ fn fake_interrupted_switch(paths: &Paths) {
         boot: None,
         reinstall: false,
         at_boot: false,
-        repair: false,
         install: vec![tree],
         remove: vec![],
         versions,
@@ -95,6 +94,31 @@ fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_removed() {
 
 #[test]
 #[ignore]
+fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    fs::write("/usr/bin/tree", "mine").unwrap();
+    setup.set_body(&["tree"], "");
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("/usr/bin/tree from tree exists on disk") || err.contains("usr/bin/tree from tree exists on disk"),
+        "{err}"
+    );
+    assert!(installed("lemon").is_some(), "nothing was removed");
+    assert_eq!(
+        fs::read_to_string("/usr/bin/tree").unwrap(),
+        "mine",
+        "the user's file is untouched"
+    );
+    fs::remove_file("/usr/bin/tree").unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn archive_url_points_locking_at_a_mirror() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");
@@ -114,6 +138,62 @@ fn archive_url_points_locking_at_a_mirror() {
         archix::archive::configured(&setup.paths.state),
         archix::archive::ARCHIVE_URL
     );
+}
+
+#[test]
+#[ignore]
+fn the_initramfs_repair_restores_what_a_cut_off_switch_was_changing() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let paths = &setup.paths;
+    let before = read_local_db(&paths.local_db()).unwrap();
+    let mut versions: std::collections::BTreeMap<String, String> = before
+        .iter()
+        .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
+        .collect();
+    versions.remove("tree");
+    let transaction = Transaction {
+        remove: vec!["tree".into()],
+        versions,
+        ..Transaction::default()
+    };
+    Journal::new(Kind::Switch, "box", "snapshot 2026-10-10".into(), before, transaction)
+        .save(&paths.journal())
+        .unwrap();
+    fs::remove_file("/usr/bin/tree").unwrap();
+    // As if a newer tree had been half-installed: its entry lists a file the restored version doesn't ship.
+    let entry = fs::read_dir(paths.local_db())
+        .unwrap()
+        .flatten()
+        .find(|e| archix::pacman::name_from_entry(&e.file_name().to_string_lossy()) == "tree")
+        .unwrap()
+        .path();
+    let files = fs::read_to_string(entry.join("files")).unwrap();
+    fs::write(
+        entry.join("files"),
+        files.replacen("%FILES%\n", "%FILES%\nusr/share/archix-test-dropped\n", 1),
+    )
+    .unwrap();
+    fs::write("/usr/share/archix-test-dropped", "from the newer version").unwrap();
+
+    let out = setup.ok(&["rescue", "--initrd"]);
+    assert!(out.contains("restored tree"), "{out}");
+    assert!(
+        fs::exists("/usr/bin/tree").unwrap(),
+        "the half-removed package is whole again"
+    );
+    assert!(
+        !fs::exists("/usr/share/archix-test-dropped").unwrap(),
+        "files only the replaced version had are removed, or pacman later trips over them"
+    );
+    assert!(
+        !setup.ok(&["rescue", "--initrd"]).contains("restored"),
+        "the repair runs once per interrupted switch, not on every boot"
+    );
+    Journal::delete(&paths.journal()).unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -155,7 +235,7 @@ fn interrupted_switch_blocks_until_recovered() {
     assert!(
         setup
             .fails(&["switch", "--noconfirm"])
-            .contains("was interrupted while removing packages")
+            .contains("was interrupted while installing packages")
     );
     assert!(setup.fails(&["lock"]).contains("run `archix recover`"));
     assert!(setup.ok(&["status"]).contains("run `archix recover`"));
@@ -179,6 +259,14 @@ fn interrupted_switch_blocks_until_recovered() {
     assert!(out.contains("tree") && out.contains("is not installed"), "{out}");
     assert!(installed("tree").is_none(), "abandon changes nothing");
     assert!(!paths.journal().exists());
+
+    // A killed pacman leaves files of a package whose database entry it never wrote.
+    fake_interrupted_switch(paths);
+    fs::write("/usr/bin/tree", "half-written").unwrap();
+    let out = setup.ok(&["recover", "--continue"]);
+    assert!(out.contains("left behind by the interrupted pacman run"), "{out}");
+    assert!(installed("tree").is_some(), "the leftover no longer blocks the install");
+    pacman(&["-R", "tree"]);
 
     // A power cut mid-pacman leaves the half-written entry's desc empty, as a VM test saw.
     for rollback in [false, true] {

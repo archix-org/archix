@@ -17,6 +17,8 @@ pub struct Contents {
     pub files: Vec<String>,
     /// Installed size in bytes, `size` in .PKGINFO.
     pub size: u64,
+    /// Config files (`backup` in .PKGINFO), which pacman installs as .pacnew instead of refusing when one already exists.
+    pub backups: Vec<String>,
 }
 
 pub fn contents(path: &Path) -> Result<Contents> {
@@ -27,7 +29,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
         bail!("{} isn't a .pkg.tar.zst", path.display());
     };
     let mut archive = tar::Archive::new(decoder);
-    let (mut name, mut files, mut displaces, mut size) = (None, None, Vec::new(), 0);
+    let (mut name, mut files, mut displaces, mut size, mut backups) = (None, None, Vec::new(), 0, Vec::new());
     for entry in archive.entries()? {
         let mut entry = entry?;
         let entry_path = entry.path()?.to_string_lossy().into_owned();
@@ -46,6 +48,11 @@ pub fn contents(path: &Path) -> Result<Contents> {
                             .or_else(|| line.strip_prefix("replaces = "))
                     })
                     .map(|dep| crate::aur::srcinfo::dep_name(dep).to_string())
+                    .collect();
+                backups = text
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("backup = "))
+                    .map(str::to_string)
                     .collect();
                 size = text
                     .lines()
@@ -67,6 +74,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
                 displaces: displaces.clone(),
                 files: files.clone(),
                 size,
+                backups: backups.clone(),
             });
         }
     }
@@ -152,16 +160,71 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
             }
         }
     }
+    let root = local_db.ancestors().nth(4).unwrap_or(Path::new("/"));
+    let owned = owned_files(local_db);
+    for Contents {
+        name, files, backups, ..
+    } in &incoming
+    {
+        for file in unowned_on_disk(root, files, &owned).filter(|file| !backups.contains(file)) {
+            clashes.insert(format!("{file} from {name} exists on disk, and no package owns it"));
+        }
+    }
     if !clashes.is_empty() {
         let shown: Vec<String> = clashes.iter().take(10).cloned().collect();
         bail!(
-            "pacman would refuse these packages, which ship the same files; nothing was changed. Drop one of each pair from the config:\n  {}",
+            "pacman would refuse these packages over files that are already taken; nothing was changed. Drop one of each pair from the config, or move the stray files away:\n  {}",
             shown.join("\n  ")
         );
     }
-    let root = local_db.ancestors().nth(4).unwrap_or(Path::new("/"));
     let adds: u64 = incoming.iter().map(|c| c.size).sum();
-    check_space(root, adds, installed_size(local_db, &replaced))
+    // Packages the switch drops are removed after the install, so only the versions the install replaces free space in time.
+    let mut freed: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
+    freed.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
+    check_space(root, adds, installed_size(local_db, &freed))
+}
+
+/// Each installed package's files (not directories), from pacman's local database.
+pub fn owners(local_db: &Path) -> BTreeMap<String, Vec<String>> {
+    let mut owners = BTreeMap::new();
+    for entry in fs::read_dir(local_db).into_iter().flatten().flatten() {
+        let Some(name) = parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default())
+            .remove("NAME")
+            .and_then(|names| names.into_iter().next())
+        else {
+            continue;
+        };
+        let files = fs::read_to_string(entry.path().join("files"))
+            .map(|text| parse_desc(&text).remove("FILES").unwrap_or_default())
+            .unwrap_or_default();
+        owners.insert(name, files.into_iter().filter(|f| !f.ends_with('/')).collect());
+    }
+    owners
+}
+
+/// Every file some installed package owns, from pacman's local database.
+pub fn owned_files(local_db: &Path) -> std::collections::HashSet<String> {
+    let mut owned = std::collections::HashSet::new();
+    for entry in fs::read_dir(local_db).into_iter().flatten().flatten() {
+        let files = fs::read_to_string(entry.path().join("files"))
+            .map(|text| parse_desc(&text).remove("FILES").unwrap_or_default())
+            .unwrap_or_default();
+        owned.extend(files.into_iter().filter(|f| !f.ends_with('/')));
+    }
+    owned
+}
+
+/// Of `files`, those present under `root` that no package owns; archix's own copies of kernel modules don't count.
+pub fn unowned_on_disk<'a>(
+    root: &'a Path,
+    files: &'a [String],
+    owned: &'a std::collections::HashSet<String>,
+) -> impl Iterator<Item = &'a String> + 'a {
+    files.iter().filter(move |file| {
+        !file.starts_with("usr/lib/modules/")
+            && !owned.contains(*file)
+            && fs::symlink_metadata(root.join(file)).is_ok_and(|meta| !meta.is_dir())
+    })
 }
 
 /// pacman extracts file by file and the boot step writes initramfs images, so a switch keeps this much free beyond what it adds.

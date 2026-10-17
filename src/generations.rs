@@ -34,6 +34,9 @@ pub struct Generation {
     /// Flatpak apps this generation pinned, by id.
     #[serde(default)]
     pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
+    /// What rescue restores: the dependency closure of systemd, pacman, archix and the kernels, recorded at activation.
+    #[serde(default)]
+    pub rescue: Vec<String>,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -231,6 +234,7 @@ mod tests {
             system: SystemState::default(),
             snapshot: None,
             flatpak: BTreeMap::new(),
+            rescue: Vec::new(),
         }
     }
 

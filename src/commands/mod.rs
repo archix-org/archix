@@ -410,6 +410,33 @@ fn print_warned(warned: &[String]) {
     }
 }
 
+/// Where to get a locked package's file: archix's own build cache for built packages, else its repo at the lock's date and the archive's permanent copy.
+fn wanted_file(archive: &Archive, date: Date, name: &str, pkg: &Locked, repos: &[Repo]) -> Wanted {
+    if pkg.is_built() {
+        return Wanted {
+            name: name.to_string(),
+            file: pkg.file.clone(),
+            urls: Vec::new(),
+            sha256: (!pkg.sha256.is_empty()).then(|| pkg.sha256.clone()),
+        };
+    }
+    let custom = repos.iter().find(|repo| repo.name == pkg.repo && repo.custom.is_some());
+    let urls = match custom {
+        Some(repo) => repo.urls(&pkg.file),
+        None if pkg.repo == ARCHIVE_REPO => vec![archive.package_url(name, &pkg.file)],
+        None => vec![
+            format!("{}/{}", archive.repo_url(date, &pkg.repo), pkg.file),
+            archive.package_url(name, &pkg.file),
+        ],
+    };
+    Wanted {
+        name: name.to_string(),
+        file: pkg.file.clone(),
+        urls,
+        sha256: Some(pkg.sha256.clone()),
+    }
+}
+
 /// Downloads everything `changes` installs and builds the transaction that ends at exactly `packages`.
 fn transaction_for(
     archive: &Archive,
@@ -434,31 +461,7 @@ fn transaction_for(
                     install.push(path.clone());
                     continue;
                 }
-                if pkg.is_built() {
-                    let sha256 = (!pkg.sha256.is_empty()).then(|| pkg.sha256.clone());
-                    wanted.push(Wanted {
-                        name: name.clone(),
-                        file: pkg.file.clone(),
-                        urls: Vec::new(),
-                        sha256,
-                    });
-                    continue;
-                }
-                let custom = repos.iter().find(|repo| repo.name == pkg.repo && repo.custom.is_some());
-                let urls = match custom {
-                    Some(repo) => repo.urls(&pkg.file),
-                    None if pkg.repo == ARCHIVE_REPO => vec![archive.package_url(name, &pkg.file)],
-                    None => vec![
-                        format!("{}/{}", archive.repo_url(date, &pkg.repo), pkg.file),
-                        archive.package_url(name, &pkg.file),
-                    ],
-                };
-                wanted.push(Wanted {
-                    name: name.clone(),
-                    file: pkg.file.clone(),
-                    urls,
-                    sha256: Some(pkg.sha256.clone()),
-                });
+                wanted.push(wanted_file(archive, date, name, pkg, repos));
             }
             Change::Remove { name, .. } => remove.push(name.clone()),
             Change::Reason { .. } => {}
@@ -473,7 +476,6 @@ fn transaction_for(
     Ok(Transaction {
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
         at_boot: false,
-        repair: false,
         install,
         remove,
         system: None,

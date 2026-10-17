@@ -1,13 +1,14 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::generations::Store;
 use crate::journal::{Journal, Step, Transaction};
-use crate::pacman::read_local_db;
+use crate::pacman::{LocalPkg, read_local_db};
 use crate::paths::Paths;
 use crate::system::running::Running;
 
@@ -26,27 +27,35 @@ pub enum PacmanLock {
 }
 
 pub fn pacman_lock(paths: &Paths) -> PacmanLock {
-    if !paths.pacman_lock().exists() {
+    let lock = paths.pacman_lock();
+    if !lock.exists() {
         PacmanLock::Free
-    } else if pacman_running() {
+    } else if held_open(&lock) {
         PacmanLock::Running
     } else {
         PacmanLock::Stale
     }
 }
 
-fn pacman_running() -> bool {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return false;
+/// Whether any process has `path` open: libalpm keeps db.lck open while it holds the lock, whichever front end (pacman, pamac, PackageKit) took it.
+fn held_open(path: &Path) -> bool {
+    let Ok(processes) = fs::read_dir("/proc") else {
+        return true;
     };
-    entries
-        .flatten()
-        .any(|entry| fs::read_to_string(entry.path().join("comm")).is_ok_and(|comm| comm.trim() == "pacman"))
+    processes.flatten().any(|process| {
+        fs::read_dir(process.path().join("fd"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|fd| fs::read_link(fd.path()).is_ok_and(|target| target == path))
+    })
 }
 
 /// Runs the journal's remaining steps, saving progress after each; `reinstall` redoes installs after a crash.
 pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<String>> {
     let path = paths.journal();
+    // Downloads, copies and builds the switch prepared must be on disk before anything changes, or a power cut leaves recovery with empty package files.
+    unsafe { libc::sync() };
     let mut soft_failures = Vec::new();
     while let Some(step) = journal.next_step() {
         eprintln!(":: {}", step.describe());
@@ -88,13 +97,17 @@ fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Re
                 journal.started,
             )))
         }
-        Step::Users => system.map_or(Ok(()), crate::system::apply::users).map(|()| Vec::new()),
+        Step::Users => system
+            .map_or(Ok(()), |change| crate::system::apply::users(change, &paths.state))
+            .map(|()| Vec::new()),
         Step::Files => system
             .map_or(Ok(()), |change| crate::system::apply::files(paths, change))
             .map(|()| Vec::new()),
         Step::Reload => Ok(system.map_or_else(Vec::new, crate::system::apply::reload)),
         Step::StopServices => Ok(system.map_or_else(Vec::new, |change| {
-            crate::system::apply::stop_services(change, tx.at_boot)
+            let mut failures = crate::system::apply::stop_services(change, tx.at_boot);
+            failures.extend(crate::system::apply::remove_users(change));
+            failures
         })),
         Step::Services => Ok(system.map_or_else(Vec::new, |change| {
             crate::system::apply::start_services(change, tx.at_boot)
@@ -119,25 +132,38 @@ fn run_package_step(
             Ok(())
         }
         Step::Activate => match generation {
-            Some(number) => Store::new(paths).activate(number),
+            Some(number) => {
+                let store = Store::new(paths);
+                let mut activated = store.get(number)?;
+                activated.rescue = crate::system::rescue::closure(&paths.local_db());
+                store.update(&activated)?;
+                store.activate(number)?;
+                crate::system::boot::set_default_entry(paths, number)
+            }
             None => Ok(()),
         },
         Step::Install if tx.install.is_empty() => restore_running_modules(paths),
         Step::Install => {
             let installed = read_local_db(&paths.local_db())?;
             Running::new().keep(paths, tx, &installed)?;
+            let taken_over = removals_taken_over(paths, tx, &installed)?;
+            if !taken_over.is_empty() {
+                let mut args = vec!["-Rdd", "--noconfirm"];
+                args.extend(taken_over.iter().map(String::as_str));
+                pacman(&args)?;
+            }
+            // -dd: the lock is a complete set, and what still depends on old versions is removed by the Remove step that follows.
             let mut args = vec![
                 OsStr::new("-U"),
                 OsStr::new("--noconfirm"),
+                OsStr::new("--nodeps"),
+                OsStr::new("--nodeps"),
                 OsStr::new(ASK_REMOVE_CONFLICTS),
                 OsStr::new("--overwrite"),
                 OsStr::new(KERNEL_MODULES),
             ];
             if !reinstall && !tx.reinstall {
                 args.push(OsStr::new("--needed"));
-            }
-            if tx.repair {
-                args.extend([OsStr::new("--overwrite"), OsStr::new("*")]);
             }
             args.extend(tx.install.iter().map(|path| path.as_os_str()));
             pacman(&args)?;
@@ -155,7 +181,7 @@ fn run_package_step(
                 return Ok(());
             }
             Running::new().keep(paths, tx, &installed)?;
-            // -dd: what still depends on these is either removed too or replaced by the Install step that follows.
+            // -dd: whatever still depends on these is removed in the same run.
             let mut args = vec!["-Rdd", "--noconfirm"];
             args.extend(remove);
             pacman(&args)
@@ -223,6 +249,53 @@ pub fn check_packages(tx: &Transaction) -> Result<()> {
     Ok(())
 }
 
+/// Hard links to package files without the .sig beside them, for a rollback: each was verified by pacman when first installed and is checked against its pinned sha256, while today's keyring may have revoked its packager since.
+pub fn without_signatures(paths: &Paths, files: &[std::path::PathBuf]) -> Result<Vec<std::path::PathBuf>> {
+    let dir = paths.state.join("verified");
+    fs::create_dir_all(&dir)?;
+    let mut out = Vec::new();
+    for file in files {
+        let has_sig = file
+            .with_file_name(format!(
+                "{}.sig",
+                file.file_name().unwrap_or_default().to_string_lossy()
+            ))
+            .exists();
+        if !has_sig {
+            out.push(file.clone());
+            continue;
+        }
+        let link = dir.join(file.file_name().unwrap_or_default());
+        if !link.exists() && fs::hard_link(file, &link).is_err() {
+            fs::copy(file, &link).with_context(|| format!("staging {}", file.display()))?;
+        }
+        out.push(link);
+    }
+    Ok(out)
+}
+
+/// Packages the transaction removes that own a file an incoming package ships; pacman would refuse the install while they still hold it, so they go first.
+fn removals_taken_over(paths: &Paths, tx: &Transaction, installed: &BTreeMap<String, LocalPkg>) -> Result<Vec<String>> {
+    let removing: Vec<&String> = tx.remove.iter().filter(|name| installed.contains_key(*name)).collect();
+    if removing.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut incoming = std::collections::HashSet::new();
+    for path in &tx.install {
+        incoming.extend(crate::conflicts::contents(path)?.files);
+    }
+    let owners = crate::conflicts::owners(&paths.local_db());
+    Ok(removing
+        .into_iter()
+        .filter(|name| {
+            owners
+                .get(name.as_str())
+                .is_some_and(|files| files.iter().any(|file| incoming.contains(file)))
+        })
+        .cloned()
+        .collect())
+}
+
 fn restore_running_modules(paths: &Paths) -> Result<()> {
     if Running::new().restore(paths)? {
         eprintln!(":: kept the running kernel's modules, so they still load until you reboot");
@@ -271,4 +344,19 @@ fn pacman<S: AsRef<OsStr>>(args: &[S]) -> Result<()> {
         bail!("pacman exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lock_counts_as_held_only_while_a_process_has_it_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("db.lck");
+        let file = fs::File::create(&lock).unwrap();
+        assert!(held_open(&lock));
+        drop(file);
+        assert!(!held_open(&lock), "a lock left by a killed pacman is stale");
+    }
 }

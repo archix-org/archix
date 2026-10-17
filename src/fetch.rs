@@ -55,6 +55,7 @@ fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wan
         let candidate = other.join(&item.file);
         if candidate.is_file() && matches(&candidate, item)? {
             fs::copy(&candidate, &dest).with_context(|| format!("copying {}", candidate.display()))?;
+            File::open(&dest)?.sync_all()?;
             let sig = other.join(format!("{}.sig", item.file));
             if sig.is_file() {
                 fs::copy(&sig, dir.join(format!("{}.sig", item.file)))?;
@@ -62,17 +63,27 @@ fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wan
             return Ok(());
         }
     }
+    let mut mismatched = Vec::new();
     for url in &item.urls {
         eprintln!("downloading {}", item.file);
         if !archive.fetch(url, &dest)? {
             continue;
         }
+        // Another source may still hold the right file, such as the archive's per-package copy when a dated repo's file differs from its database.
         if !matches(&dest, item)? {
             fs::remove_file(&dest)?;
-            bail!("{url} does not match the sha256 in the lock");
+            mismatched.push(url.as_str());
+            continue;
         }
         archive.fetch(&format!("{url}.sig"), &dir.join(format!("{}.sig", item.file)))?;
         return Ok(());
+    }
+    if !mismatched.is_empty() {
+        bail!(
+            "{} doesn't match the sha256 the lock took from the repo database at {}; the archive holds a different file than its own database lists",
+            item.file,
+            mismatched.join(" or ")
+        );
     }
     bail!("{} is not available from {}", item.file, item.urls.join(" or "))
 }

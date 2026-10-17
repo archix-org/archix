@@ -286,6 +286,74 @@ fn the_firewall_and_environment_come_from_the_config() {
 
 #[test]
 #[ignore]
+fn changing_a_drop_in_restarts_its_service() {
+    let _system = lock_system();
+    let unit = "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c 'echo $X > /run/archix-test-dropin'\n[Install]\nWantedBy=multi-user.target";
+    let body = |x: &str| {
+        format!(
+            r#"units = {{ ["archix-test-dropin.service"] = {unit:?} }},
+            services = {{ ["archix-test-dropin.service"] = true }},
+            files = {{ ["/etc/systemd/system/archix-test-dropin.service.d/10-x.conf"] = {{ text = "[Service]\nEnvironment=X={x}\n" }} }}"#
+        )
+    };
+    let setup = Setup::new(&[], &body("1"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(read("/run/archix-test-dropin").trim(), "1");
+    setup.set_body(&[], &body("2"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        read("/run/archix-test-dropin").trim(),
+        "2",
+        "the service runs with its new drop-in"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn a_service_account_goes_away_after_its_service_stops() {
+    let _system = lock_system();
+    let unit = "[Service]\nUser=archixsvc\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target";
+    let setup = Setup::new(
+        &[],
+        &format!(
+            r#"units = {{ ["archix-test-user.service"] = {unit:?} }},
+            services = {{ ["archix-test-user.service"] = true }},
+            users = {{ archixsvc = {{ system = true }} }}"#
+        ),
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(systemctl(&["is-active", "archix-test-user.service"]), "active");
+    let uid = |name: &str| {
+        String::from_utf8_lossy(&Command::new("id").args(["-u", name]).output().unwrap().stdout)
+            .trim()
+            .to_string()
+    };
+    let first = uid("archixsvc");
+    setup.set_body(&[], "");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        !out.contains("userdel"),
+        "userdel ran while the service still held the account:\n{out}"
+    );
+    assert!(
+        !Command::new("id").arg("archixsvc").output().unwrap().status.success(),
+        "the account is gone"
+    );
+    setup.set_body(&[], "users = { archixsvc = { system = true } }");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        uid("archixsvc"),
+        first,
+        "a user created again gets its old uid, so its leftover files are still its own"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn files_on_fat_are_not_edited_just_because_fat_has_no_modes() {
     let _system = lock_system();
     let dir = tempfile::tempdir().unwrap();

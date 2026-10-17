@@ -110,7 +110,10 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
     });
     setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     aur.publish(TestPkg::new("archix-test-lib", "1.3"));
+    // As after a devtools upgrade that bumps CHROOT_VERSION: arch-nspawn would refuse the old chroot.
+    fs::write("/var/lib/archix/chroot/root/.arch-chroot", "v1\n").unwrap();
     let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("recreating the build chroot"), "{out}");
     assert!(out.contains("archix-test-lib 1.2-1 can't be built"), "{out}");
     assert_eq!(
         installed("archix-test-lib").as_deref(),

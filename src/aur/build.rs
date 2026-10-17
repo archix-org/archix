@@ -47,6 +47,9 @@ pub struct Job<'a> {
 #[derive(Serialize, Deserialize)]
 struct Record {
     files: Vec<(String, String)>,
+    /// sha256 of each file, so a file a crash tore is built again instead of reused.
+    #[serde(default)]
+    sha256: Vec<String>,
 }
 
 impl Builder<'_> {
@@ -84,7 +87,12 @@ impl Builder<'_> {
                 .into_iter()
                 .map(|(name, file)| (name, self.paths.packages().join(file)))
                 .collect();
-            if files.iter().all(|(_, path)| path.is_file()) {
+            let intact = record.sha256.len() == files.len()
+                && files
+                    .iter()
+                    .zip(&record.sha256)
+                    .all(|((_, path), sha)| crate::fetch::sha256(path).is_ok_and(|have| have == *sha));
+            if intact {
                 return Ok(files);
             }
         }
@@ -129,6 +137,7 @@ impl Builder<'_> {
         let result = built.and_then(|()| {
             fs::create_dir_all(self.paths.packages())?;
             let mut files = Vec::new();
+            let mut hashes = Vec::new();
             for pkg in &info.packages {
                 let expected = info.file(pkg);
                 // A VCS package (-git and the like) sets its version while building, so the file can differ from .SRCINFO's.
@@ -139,17 +148,20 @@ impl Builder<'_> {
                     bail!("building {base} did not produce {expected}");
                 };
                 let file = produced.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                // A changed local recipe can rebuild the same version, so its file name carries the recipe hash.
-                let file = match recipe {
-                    Some(_) => format!("{}-{file}", &crate::fetch::sha256_bytes(commit.as_bytes())[..12]),
-                    None => file,
-                };
+                // The same version is built again for another recipe or snapshot, and every generation must keep its own build.
+                let file = format!("{}-{file}", build_id(commit, date));
                 let dest = self.paths.packages().join(&file);
                 fs::rename(&produced, &dest).or_else(|_| fs::copy(&produced, &dest).map(|_| ()))?;
+                fs::File::open(&dest)?.sync_all()?;
+                hashes.push(crate::fetch::sha256(&dest)?);
                 files.push((pkg.name.clone(), file));
             }
-            fs::create_dir_all(record.parent().expect("record has a parent"))?;
-            fs::write(&record, serde_json::to_string(&Record { files: files.clone() })?)?;
+            crate::durable::sync_dir(&self.paths.packages().join("x"))?;
+            let text = serde_json::to_string(&Record {
+                files: files.clone(),
+                sha256: hashes,
+            })?;
+            crate::durable::write(&record, text.as_bytes())?;
             Ok(files
                 .into_iter()
                 .map(|(name, file)| (name, self.paths.packages().join(file)))
@@ -167,6 +179,12 @@ impl Builder<'_> {
         let conf = chroot.join("pacman.conf");
         fs::create_dir_all(&chroot)?;
         fs::write(&conf, pacman_conf(self.archive, date, &official(repos)))?;
+        if let Some(wanted) = devtools_chroot_version()
+            && fs::read_to_string(root.join(".arch-chroot")).is_ok_and(|have| have.trim() != wanted)
+        {
+            eprintln!(":: devtools changed its chroot format (now {wanted}); recreating the build chroot");
+            fs::remove_dir_all(&root)?;
+        }
         if !root.join(".arch-chroot").exists() {
             if root.exists() {
                 fs::remove_dir_all(&root)?;
@@ -369,6 +387,11 @@ impl Builder<'_> {
     }
 }
 
+/// Tells apart builds of one version from different recipes or against different snapshots.
+fn build_id(commit: &str, date: Date) -> String {
+    crate::fetch::sha256_bytes(format!("{commit}@{date}").as_bytes())[..12].to_string()
+}
+
 /// The package file a build produced for `name`, whatever version it gave itself.
 fn find_built(dir: &Path, name: &str) -> Option<PathBuf> {
     fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).find(|path| {
@@ -416,6 +439,15 @@ mod tests {
             None
         );
     }
+}
+
+/// The chroot format the installed devtools expects; arch-nspawn refuses a chroot made by another version.
+fn devtools_chroot_version() -> Option<String> {
+    fs::read_to_string("/usr/share/devtools/lib/archroot.sh")
+        .ok()?
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("CHROOT_VERSION="))
+        .map(|value| value.trim_matches(['\'', '"']).to_string())
 }
 
 /// The chroot only gets the official repos; custom repos would need their signing keys inside it too.

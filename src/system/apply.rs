@@ -304,13 +304,15 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Creates, updates and removes the users and groups archix manages; never touches passwords.
-pub fn users(change: &SystemChange) -> Result<()> {
+/// Creates and updates the users and groups archix manages; never touches passwords. Removal waits for `remove_users`.
+pub fn users(change: &SystemChange, state: &Path) -> Result<()> {
+    let mut ids = IdMap::load(state);
     for (name, group) in &change.to.groups {
         match gid(name) {
             None => {
                 let mut cmd = Command::new("groupadd");
-                if let Some(id) = group.gid {
+                // A group created again gets its old gid back, so files it owned still belong to it.
+                if let Some(id) = group.gid.or_else(|| ids.free_gid(name)) {
                     cmd.args(["-g", &id.to_string()]);
                 }
                 if group.system {
@@ -329,20 +331,86 @@ pub fn users(change: &SystemChange) -> Result<()> {
     }
     for (name, user) in &change.to.users {
         if uid(name).is_none() {
-            run(&mut useradd(name, user), &format!("useradd {name}"))?;
+            let mut revived = user.clone();
+            revived.uid = user.uid.or_else(|| ids.free_uid(name));
+            run(&mut useradd(name, &revived), &format!("useradd {name}"))?;
             eprintln!("created user {name}; set a password with `passwd {name}`");
         } else if change.from.users.get(name) != Some(user) && account_differs(name, user) {
             run(&mut usermod(name, user), &format!("usermod {name}"))?;
         }
     }
+    for name in change.to.groups.keys() {
+        ids.record_gid(name, gid(name));
+    }
+    for name in change.to.users.keys() {
+        ids.record_uid(name, uid(name));
+    }
+    ids.save(state)
+}
+
+/// Every uid and gid archix has given a name, kept after the account is removed, like NixOS's uid-map.
+#[derive(Default, Serialize, Deserialize)]
+struct IdMap {
+    uids: std::collections::BTreeMap<String, u32>,
+    gids: std::collections::BTreeMap<String, u32>,
+}
+
+impl IdMap {
+    fn path(state: &Path) -> PathBuf {
+        state.join("id-map.json")
+    }
+
+    fn load(state: &Path) -> IdMap {
+        fs::read_to_string(Self::path(state))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, state: &Path) -> Result<()> {
+        crate::durable::write(&Self::path(state), serde_json::to_string_pretty(self)?.as_bytes())
+    }
+
+    fn free_uid(&self, name: &str) -> Option<u32> {
+        self.uids
+            .get(name)
+            .copied()
+            .filter(|id| unsafe { libc::getpwuid(*id) }.is_null())
+    }
+
+    fn free_gid(&self, name: &str) -> Option<u32> {
+        self.gids
+            .get(name)
+            .copied()
+            .filter(|id| unsafe { libc::getgrgid(*id) }.is_null())
+    }
+
+    fn record_uid(&mut self, name: &str, id: Option<u32>) {
+        if let Some(id) = id {
+            self.uids.insert(name.to_string(), id);
+        }
+    }
+
+    fn record_gid(&mut self, name: &str, id: Option<u32>) {
+        if let Some(id) = id {
+            self.gids.insert(name.to_string(), id);
+        }
+    }
+}
+
+/// Deletes the users and groups the config dropped, once their services have stopped: userdel refuses an account a process still runs as.
+pub fn remove_users(change: &SystemChange) -> Vec<String> {
+    let mut failures = Vec::new();
     for name in change
         .from
         .users
         .keys()
         .filter(|name| !change.to.users.contains_key(*name))
     {
-        if uid(name).is_some() {
-            run(Command::new("userdel").arg(name), &format!("userdel {name}"))?;
+        if uid(name).is_some()
+            && let Err(e) = run(Command::new("userdel").arg(name), &format!("userdel {name}"))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
     for name in change
@@ -351,11 +419,13 @@ pub fn users(change: &SystemChange) -> Result<()> {
         .keys()
         .filter(|name| !change.to.groups.contains_key(*name))
     {
-        if gid(name).is_some() {
-            run(Command::new("groupdel").arg(name), &format!("groupdel {name}"))?;
+        if gid(name).is_some()
+            && let Err(e) = run(Command::new("groupdel").arg(name), &format!("groupdel {name}"))
+        {
+            failures.push(format!("{e:#}"));
         }
     }
-    Ok(())
+    failures
 }
 
 fn useradd(name: &str, user: &User) -> Command {
@@ -709,7 +779,64 @@ pub fn reload(change: &SystemChange) -> Vec<String> {
     if touched("/etc/locale.gen") {
         attempt(&mut Command::new("locale-gen"), "locale-gen");
     }
+    if touched("/etc/tmpfiles.d/") {
+        attempt(
+            Command::new("systemd-tmpfiles").arg("--create"),
+            "systemd-tmpfiles --create",
+        );
+    }
+    if touched("/etc/sysusers.d/") {
+        attempt(&mut Command::new("systemd-sysusers"), "systemd-sysusers");
+    }
+    if touched("/etc/modules-load.d/") {
+        attempt(
+            Command::new("systemctl").args(["restart", "systemd-modules-load.service"]),
+            "restarting systemd-modules-load",
+        );
+    }
+    // Reloaded, never restarted: restarting dbus or logind tears down every session.
+    let reloads = [
+        ("/etc/dbus-1/", "dbus.service"),
+        ("/etc/systemd/logind.conf", "systemd-logind.service"),
+    ];
+    for (prefix, unit) in reloads {
+        if touched(prefix) && unit_active(unit) {
+            attempt(
+                Command::new("systemctl").args(["reload", unit]),
+                &format!("reloading {unit}"),
+            );
+        }
+    }
+    if touched("/etc/systemd/user/") {
+        for user in logged_in_users() {
+            attempt(
+                Command::new("systemctl").args(["--user", "-M", &format!("{user}@"), "daemon-reload"]),
+                &format!("reloading {user}'s user units"),
+            );
+        }
+    }
     failures
+}
+
+fn unit_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Users with a running user manager, from /run/user/<uid>.
+fn logged_in_users() -> Vec<String> {
+    fs::read_dir("/run/user")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter_map(|id| {
+            let entry = unsafe { libc::getpwuid(id) };
+            (!entry.is_null()).then(|| c_text(unsafe { (*entry).pw_name }))
+        })
+        .collect()
 }
 
 /// systemctl calls whose failures are collected; at boot, before sysinit.target, jobs are only queued, since waiting for a unit that waits for sysinit would deadlock.
@@ -765,7 +892,12 @@ pub fn start_services(change: &SystemChange, at_boot: bool) -> Vec<String> {
     for (unit, enabled) in &change.to.services {
         if *enabled && !is_enabled(unit, false) {
             attempt(&["enable", "--now", unit], &mut failures);
-        } else if *enabled && changed.contains(format!("/etc/systemd/system/{unit}").as_str()) {
+        } else if *enabled
+            && changed.iter().any(|path| {
+                *path == format!("/etc/systemd/system/{unit}")
+                    || path.starts_with(&format!("/etc/systemd/system/{unit}.d/"))
+            })
+        {
             attempt(&["try-restart", unit], &mut failures);
         }
     }

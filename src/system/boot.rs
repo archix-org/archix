@@ -102,17 +102,38 @@ pub fn restore_modules(paths: &Paths, version: &str) -> Result<bool> {
     restore_into(Path::new(MODULES), paths, version)
 }
 
-pub(crate) fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool> {
+pub fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool> {
     let target = modules.join(version);
     let source = kernels(paths).join(version);
     if target.exists() || !source.exists() {
         return Ok(false);
     }
-    let status = Command::new("cp").arg("-a").arg(&source).arg(&target).status()?;
-    if !status.success() {
-        bail!("could not restore {version}'s modules");
+    let tmp = modules.join(format!(".{version}.restoring"));
+    if tmp.exists() {
+        fs::remove_dir_all(&tmp)?;
     }
+    link_tree(&source, &tmp).with_context(|| format!("restoring {version}'s modules"))?;
+    fs::rename(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
     Ok(true)
+}
+
+/// Recreates `from` at `to` with hard links (the preserved modules share the root filesystem), copying where linking fails; the initramfs has no cp.
+fn link_tree(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    fs::set_permissions(to, fs::metadata(from)?.permissions())?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            link_tree(&source, &target)?;
+        } else if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
+        } else if fs::hard_link(&source, &target).is_err() {
+            fs::copy(&source, &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// The kernel version each generation's boot entry was built with.
@@ -222,6 +243,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     let records = paths.state.join("boot");
     fs::create_dir_all(&records)?;
     fs::write(records.join(format!("{}.kernel", plan.generation)), &version)?;
+    crate::durable::write(&records.join("esp"), plan.esp.as_bytes())?;
 
     let initramfs = work.join("initramfs.img");
     run(
@@ -322,6 +344,17 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     let slots = plan.keep.saturating_sub(1) as usize;
     let mut kept: BTreeSet<u32> = keep.iter().rev().take(slots).copied().collect();
     kept.insert(plan.generation);
+    // Pruning must never take the entry this boot came from, nor the one a failed switch falls back to.
+    let protected: BTreeSet<u32> = [
+        crate::generations::Store::new(paths).current().ok().flatten(),
+        fs::read_to_string("/proc/cmdline")
+            .ok()
+            .and_then(|cmdline| booted_generation(&cmdline)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    kept.extend(&protected);
     let rescue_kept: BTreeSet<u32> = kept.iter().rev().take(2).copied().collect();
     for (number, rescue, path) in entries(&plan.esp) {
         if !kept.contains(&number) || (rescue && !rescue_kept.contains(&number)) {
@@ -336,7 +369,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     while free_bytes(&dir)? < needed {
         let oldest = entries(&plan.esp)
             .into_iter()
-            .find(|(number, _, _)| *number != plan.generation);
+            .find(|(number, _, _)| *number != plan.generation && !protected.contains(number));
         match oldest {
             Some((_, _, path)) => fs::remove_file(path)?,
             None => bail!("the ESP at {} has no room for a boot entry", plan.esp),
@@ -346,10 +379,42 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         let dest = dir.join(entry_name(plan.generation, variant));
         let tmp = dir.join(format!(".{}.tmp", entry_name(plan.generation, variant)));
         fs::copy(&path, &tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        fs::File::open(&tmp)?.sync_all()?;
         fs::rename(&tmp, &dest)?;
     }
+    crate::durable::sync_dir(&dir.join("x"))?;
     let _ = fs::remove_dir_all(&work);
     Ok(version)
+}
+
+/// Makes systemd-boot start `generation` by default, so a rollback survives the next reboot instead of booting the newest entry.
+pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
+    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
+        return Ok(());
+    };
+    let esp = esp.trim();
+    if !entries(esp)
+        .iter()
+        .any(|(number, extra, _)| *number == generation && !extra)
+    {
+        return Ok(());
+    }
+    let conf = Path::new(esp).join("loader/loader.conf");
+    let mut lines: Vec<String> = fs::read_to_string(&conf)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.split_whitespace().next() != Some("default"))
+        .map(str::to_string)
+        .collect();
+    lines.push(format!("default {}", entry_name(generation, Variant::Normal)));
+    crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())?;
+    // An EFI variable set by `bootctl set-default` would override loader.conf.
+    let _ = Command::new("bootctl")
+        .args(["set-default", ""])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    Ok(())
 }
 
 /// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.
@@ -453,6 +518,33 @@ pub fn booted_generation(cmdline: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rollback_becomes_the_default_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().join("esp");
+        fs::create_dir_all(esp.join("EFI/Linux")).unwrap();
+        fs::create_dir_all(esp.join("loader")).unwrap();
+        for name in ["archix-2.efi", "archix-3.efi"] {
+            fs::write(esp.join("EFI/Linux").join(name), "uki").unwrap();
+        }
+        fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-3.efi\n").unwrap();
+        let paths = Paths::under(&dir.path().join("root"));
+        fs::create_dir_all(paths.state.join("boot")).unwrap();
+        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
+        set_default_entry(&paths, 2).unwrap();
+        assert_eq!(
+            fs::read_to_string(esp.join("loader/loader.conf")).unwrap(),
+            "timeout 2\ndefault archix-2.efi\n"
+        );
+        set_default_entry(&paths, 7).unwrap();
+        assert!(
+            fs::read_to_string(esp.join("loader/loader.conf"))
+                .unwrap()
+                .contains("archix-2.efi"),
+            "a generation without an entry leaves the default alone"
+        );
+    }
 
     #[test]
     fn the_kernel_version_is_the_one_pacman_owns_not_a_kept_one() {

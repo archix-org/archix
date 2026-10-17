@@ -158,6 +158,10 @@ pub fn read_installed(local_db: &Path) -> Result<BTreeMap<String, Installed>> {
     Ok(out)
 }
 
+pub fn md5_bytes(bytes: &[u8]) -> String {
+    Md5::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 pub fn md5(path: &Path) -> Result<String> {
     let mut hasher = Md5::new();
     let mut file = File::open(path).with_context(|| format!("reading {}", path.display()))?;

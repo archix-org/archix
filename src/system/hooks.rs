@@ -75,22 +75,32 @@ pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeMap<Stri
         .collect()
 }
 
-/// Remembers the on_change scripts a boot-time rollback skipped, as that generation had them, adding to any already waiting.
+/// Records on_change scripts as pending until they have run, adding to any already waiting; written before a switch changes files, so a crash can't lose them.
 pub fn defer(path: &Path, due: &BTreeMap<String, Hook>) -> Result<()> {
     let mut pending = deferred(path);
     pending.extend(due.clone());
     if pending.is_empty() {
         return Ok(());
     }
-    fs::write(path, serde_json::to_string_pretty(&pending)?).with_context(|| format!("writing {}", path.display()))
+    crate::durable::write(path, serde_json::to_string_pretty(&pending)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
 }
 
-/// on_change scripts a boot-time rollback left for later, keyed by file.
+/// on_change scripts still waiting to run, keyed by file.
 pub fn deferred(path: &Path) -> BTreeMap<String, Hook> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
+    let Ok(text) = fs::read_to_string(path) else {
+        return BTreeMap::new();
+    };
+    serde_json::from_str(&text).unwrap_or_else(|e| {
+        let kept = path.with_extension("unreadable");
+        eprintln!(
+            "warning: {} is unreadable ({e}); its on_change scripts won't run, the file is kept as {}",
+            path.display(),
+            kept.display()
+        );
+        let _ = fs::rename(path, &kept);
+        BTreeMap::new()
+    })
 }
 
 /// Runs the on_change scripts in `due`, then every hook of the target; failures are returned, not fatal.

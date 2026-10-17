@@ -48,13 +48,15 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
     }
     if !torn.is_empty() {
         println!(
-            "pacman's database entries for {} were torn by the crash; moved them to {} and reinstalling those packages over their files",
+            "pacman's database entries for {} were torn by the crash; moved them to {} and reinstalling those packages",
             torn.join(", "),
             paths.state.join("torn-db").display()
         );
-        journal.transaction.repair = true;
         journal.done.retain(|step| *step != Step::Install);
         journal.save(&paths.journal())?;
+    }
+    if !matches!(mode, RecoverMode::Abandon) {
+        set_aside_leftovers(&paths, &journal.transaction.install, &journal)?;
     }
     let kind = kind_name(journal.kind);
     match mode {
@@ -86,8 +88,8 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
                 .map(|change| merged(&change.from.unsafe_downgrades, &change.to.unsafe_downgrades))
                 .unwrap_or_default();
             guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
-            let mut transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
-            transaction.repair = !torn.is_empty();
+            let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
+            set_aside_leftovers(&paths, &transaction.install, &journal)?;
             apply::check_packages(&transaction)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
@@ -157,29 +159,51 @@ fn rollback_transaction(
     installed: &BTreeMap<String, LocalPkg>,
 ) -> Result<Transaction> {
     let touched: BTreeSet<String> = touched(journal).into_iter().collect();
+    // What was installed before the switch is the current generation, which records each file and its sha256.
+    let store = Store::new(paths);
+    let current = store.current()?.and_then(|number| store.get(number).ok());
     let mut wanted = Vec::new();
+    let mut verified = Vec::new();
     for (name, pkg) in &journal.before {
         let changed = installed.get(name).is_none_or(|now| now.version != pkg.version);
-        if changed || touched.contains(name) {
-            let file = format!("{name}-{}-{}.pkg.tar.zst", pkg.version, pkg.arch);
-            wanted.push(Wanted {
-                name: name.clone(),
-                urls: vec![archive.package_url(name, &file)],
-                file,
-                sha256: None,
-            });
+        if !changed && !touched.contains(name) {
+            continue;
         }
+        let recorded = current
+            .as_ref()
+            .and_then(|generation| generation.packages.get(name))
+            .filter(|locked| locked.version == pkg.version && !locked.sha256.is_empty());
+        let (file, sha256) = match recorded {
+            Some(locked) => (locked.file.clone(), Some(locked.sha256.clone())),
+            None => (format!("{name}-{}-{}.pkg.tar.zst", pkg.version, pkg.arch), None),
+        };
+        if sha256.is_some() {
+            verified.push(file.clone());
+        }
+        wanted.push(Wanted {
+            name: name.clone(),
+            urls: vec![archive.package_url(name, &file)],
+            file,
+            sha256,
+        });
     }
-    let install = fetch_all(
+    let fetched = fetch_all(
         archive,
         &paths.packages(),
         std::slice::from_ref(&paths.pacman_cache),
         &wanted,
     )?;
+    // Only files whose sha256 the generation pinned may skip their signature; pacman checks the rest against the keyring.
+    let (pinned, unpinned): (Vec<_>, Vec<_>) = fetched.into_iter().partition(|path| {
+        verified
+            .iter()
+            .any(|file| path.file_name().is_some_and(|name| name == file.as_str()))
+    });
+    let mut install = apply::without_signatures(paths, &pinned)?;
+    install.extend(unpinned);
     Ok(Transaction {
         reinstall: false,
         at_boot: false,
-        repair: false,
         system: journal.transaction.system.as_ref().map(SystemChange::reversed),
         boot: None,
         install,
@@ -280,11 +304,44 @@ fn reregister_torn(paths: &Paths, journal: &Journal) -> Result<()> {
             .copied()
             .or_else(|| journal.before.get(name).map(|pkg| pkg.explicit))
             .unwrap_or(true);
-        archix::system::rescue::register(std::path::Path::new("/"), &file, explicit)
-            .with_context(|| format!("rewriting the torn database entry {dir_name}"))?;
+        // A package file the same crash tore can't be read; the entry is then moved aside like one without a file.
+        if let Err(e) = archix::system::rescue::register(std::path::Path::new("/"), &file, explicit) {
+            println!(
+                "could not rewrite the torn entry {dir_name} from {}: {e:#}",
+                file.display()
+            );
+            continue;
+        }
         println!(
             "pacman's database entry for {dir_name} was torn by the crash; rewrote it from {}",
             file.display()
+        );
+    }
+    Ok(())
+}
+
+/// Moves aside unowned files the given packages ship; switches refuse such files beforehand, so these are leftovers of the pacman run a crash cut off.
+fn set_aside_leftovers(paths: &Paths, packages: &[std::path::PathBuf], journal: &Journal) -> Result<()> {
+    let root = std::path::Path::new("/");
+    let owned = archix::conflicts::owned_files(&paths.local_db());
+    let aside = paths.state.join("crash-leftovers").join(journal.started.to_string());
+    let mut moved = 0;
+    for package in packages.iter().filter(|path| path.is_file()) {
+        let contents = archix::conflicts::contents(package)?;
+        for file in archix::conflicts::unowned_on_disk(root, &contents.files, &owned) {
+            let dest = aside.join(file);
+            if let Some(dir) = dest.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            fs::rename(root.join(file), &dest).with_context(|| format!("moving the leftover /{file} aside"))?;
+            moved += 1;
+        }
+    }
+    if moved > 0 {
+        println!(
+            "moved {} left behind by the interrupted pacman run to {}",
+            count(moved, "file", "files"),
+            aside.display()
         );
     }
     Ok(())
