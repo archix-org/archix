@@ -1,6 +1,7 @@
 return {
   packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "sbctl" },
   hostname = "archix-vm",
+  archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
   boot = { loader = "systemd-boot", esp = "/boot" },
   files = {

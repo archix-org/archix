@@ -3,7 +3,7 @@
 set -euo pipefail
 vars=/work/vars.fd
 [ -f "$vars" ] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"
-timeout 2400 qemu-system-x86_64 -enable-kvm -cpu host -m 3072 -smp 2 \
+timeout "${VM_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_MEM:-3072}" -smp "${VM_CPUS:-2}" \
   -machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on \
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd \
   -drive if=pflash,format=raw,unit=1,file="$vars" \

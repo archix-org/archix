@@ -1,0 +1,19 @@
+pkgname=archix-test-hello
+pkgver=1
+pkgrel=1
+pkgdesc="Records the glibc it was built against and links libfaac, whose soname moves between the test's snapshots"
+arch=(x86_64)
+license=(MIT)
+depends=(faac)
+
+build() {
+  printf 'int main(void) { return 0; }\n' > hello.c
+  # --no-as-needed keeps libfaac in DT_NEEDED without calling into its API, which changed between the snapshots.
+  gcc -o archix-test-hello hello.c -Wl,--no-as-needed -lfaac
+  ldd --version | head -1 | awk '{print $NF}' > built-with
+}
+
+package() {
+  install -Dm755 archix-test-hello "$pkgdir/usr/bin/archix-test-hello"
+  install -Dm644 built-with "$pkgdir/usr/share/archix-test-hello/built-with"
+}
