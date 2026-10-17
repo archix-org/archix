@@ -69,6 +69,31 @@ fn switch_installs_then_removes_and_is_idempotent() {
 
 #[test]
 #[ignore]
+fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_removed() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&["lemon"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let sig = format!("{}.sig", cached_file(&setup.paths.packages(), "tree").display());
+    fs::write(&sig, "not a signature").unwrap();
+    setup.set_body(&["tree"], "");
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("nothing was changed"), "{err}");
+    assert!(
+        installed("lemon").is_some(),
+        "the Remove step must not run when pacman would refuse the install"
+    );
+    assert!(!setup.paths.journal().exists(), "a refused switch leaves no journal");
+    fs::remove_file(&sig).unwrap();
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("tree").is_some() && installed("lemon").is_none());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn warn_mode_keeps_undeclared_packages() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");

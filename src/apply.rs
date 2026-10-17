@@ -185,6 +185,39 @@ fn run_package_step(
     }
 }
 
+/// Has pacman load every incoming package without installing it, so a bad signature or unknown key fails before the Remove step runs.
+pub fn check_packages(tx: &Transaction) -> Result<()> {
+    if tx.install.is_empty() {
+        return Ok(());
+    }
+    let output = Command::new("pacman")
+        .args([
+            "-U",
+            "--print",
+            "--noconfirm",
+            ASK_REMOVE_CONFLICTS,
+            "--nodeps",
+            "--nodeps",
+        ])
+        .args(&tx.install)
+        .env(TRANSACTION_ENV, "1")
+        .output()
+        .context("running pacman")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let errors: Vec<&str> = stderr.lines().filter(|line| line.starts_with("error:")).collect();
+        bail!(
+            "pacman refuses these packages, so nothing was changed:\n  {}",
+            if errors.is_empty() {
+                stderr.trim().to_string()
+            } else {
+                errors.join("\n  ")
+            }
+        );
+    }
+    Ok(())
+}
+
 fn restore_running_modules(paths: &Paths) -> Result<()> {
     if Running::new().restore(paths)? {
         eprintln!(":: kept the running kernel's modules, so they still load until you reboot");

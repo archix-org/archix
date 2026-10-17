@@ -176,6 +176,8 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             .collect(),
         reasons: new.iter().map(|name| ((*name).clone(), names.contains(name))).collect(),
     };
+    archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
+    apply::check_packages(&transaction)?;
     let what = format!("a temporary install of {}", names.join(" "));
     let mut journal = Journal::new(Kind::Switch, target.host, what, installed, transaction);
     journal.save(&paths.journal())?;

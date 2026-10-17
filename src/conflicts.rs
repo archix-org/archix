@@ -15,6 +15,8 @@ pub struct Contents {
     pub displaces: Vec<String>,
     /// Files and links, not directories.
     pub files: Vec<String>,
+    /// Installed size in bytes, `size` in .PKGINFO.
+    pub size: u64,
 }
 
 pub fn contents(path: &Path) -> Result<Contents> {
@@ -25,7 +27,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
         bail!("{} isn't a .pkg.tar.zst", path.display());
     };
     let mut archive = tar::Archive::new(decoder);
-    let (mut name, mut files, mut displaces) = (None, None, Vec::new());
+    let (mut name, mut files, mut displaces, mut size) = (None, None, Vec::new(), 0);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let entry_path = entry.path()?.to_string_lossy().into_owned();
@@ -45,6 +47,11 @@ pub fn contents(path: &Path) -> Result<Contents> {
                     })
                     .map(|dep| crate::aur::srcinfo::dep_name(dep).to_string())
                     .collect();
+                size = text
+                    .lines()
+                    .find_map(|line| line.strip_prefix("size = "))
+                    .and_then(|n| n.trim().parse().ok())
+                    .unwrap_or(0);
             }
             ".MTREE" => {
                 let mut text = String::new();
@@ -59,6 +66,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
                 name: name.clone(),
                 displaces: displaces.clone(),
                 files: files.clone(),
+                size,
             });
         }
     }
@@ -144,14 +152,60 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
             }
         }
     }
-    if clashes.is_empty() {
-        return Ok(());
+    if !clashes.is_empty() {
+        let shown: Vec<String> = clashes.iter().take(10).cloned().collect();
+        bail!(
+            "pacman would refuse these packages, which ship the same files; nothing was changed. Drop one of each pair from the config:\n  {}",
+            shown.join("\n  ")
+        );
     }
-    let shown: Vec<String> = clashes.iter().take(10).cloned().collect();
-    bail!(
-        "pacman would refuse these packages, which ship the same files; nothing was changed. Drop one of each pair from the config:\n  {}",
-        shown.join("\n  ")
-    )
+    let root = local_db.ancestors().nth(4).unwrap_or(Path::new("/"));
+    let adds: u64 = incoming.iter().map(|c| c.size).sum();
+    check_space(root, adds, installed_size(local_db, &replaced))
+}
+
+/// pacman extracts file by file and the boot step writes initramfs images, so a switch keeps this much free beyond what it adds.
+const SPARE: u64 = 128 << 20;
+
+/// Refuses a transaction that adds `adds` bytes and frees `frees` when `root`'s filesystem can't hold the difference plus some spare.
+pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
+    let Some(free) = free_bytes(root) else {
+        return Ok(());
+    };
+    let needed = adds.saturating_sub(frees) + SPARE;
+    if free < needed {
+        let mib = |bytes: u64| bytes.div_ceil(1 << 20);
+        bail!(
+            "{} has {} MiB free, but this needs about {} MiB; nothing was changed. Free some space (`archix gc`, `pacman -Sc`) and try again",
+            root.display(),
+            mib(free),
+            mib(needed)
+        );
+    }
+    Ok(())
+}
+
+fn free_bytes(path: &Path) -> Option<u64> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0).then(|| stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// What the installed packages among `names` take up, from `%SIZE%` in pacman's local database.
+fn installed_size(local_db: &Path, names: &BTreeSet<String>) -> u64 {
+    fs::read_dir(local_db)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| fs::read_to_string(entry.path().join("desc")).ok())
+        .map(|text| parse_desc(&text))
+        .filter(|desc| {
+            desc.get("NAME")
+                .and_then(|n| n.first())
+                .is_some_and(|name| names.contains(name))
+        })
+        .filter_map(|desc| desc.get("SIZE")?.first()?.parse::<u64>().ok())
+        .sum()
 }
 
 #[cfg(test)]
@@ -165,5 +219,15 @@ mod tests {
             mtree_files(mtree),
             ["usr/bin/foo", "usr/lib/libfoo.so", "usr/share/my app/x"]
         );
+    }
+
+    #[test]
+    fn space_counts_what_replaced_packages_free() {
+        let dir = tempfile::tempdir().unwrap();
+        let free = free_bytes(dir.path()).unwrap();
+        assert!(check_space(dir.path(), free * 2, 0).is_err());
+        assert!(check_space(dir.path(), free * 2, free * 2).is_ok() || free < SPARE);
+        let err = check_space(dir.path(), free + SPARE, 0).unwrap_err().to_string();
+        assert!(err.contains("nothing was changed"), "{err}");
     }
 }

@@ -71,6 +71,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
                 .unwrap_or_default();
             guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
             let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
+            apply::check_packages(&transaction)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
             rollback.save(&paths.journal())?;
