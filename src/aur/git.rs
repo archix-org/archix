@@ -79,9 +79,21 @@ impl AurGit {
         self.git(base, &["show", &format!("{commit}:{path}")])
     }
 
-    /// What changed between two commits, leaving out the generated .SRCINFO.
+    /// What changed between two commits, .SRCINFO included: archix takes dependencies, sources and keys from it.
     pub fn diff(&self, base: &str, from: &str, to: &str) -> Result<String> {
-        self.git(base, &["diff", from, to, "--", ".", ":(exclude).SRCINFO"])
+        self.git(base, &["diff", from, to])
+    }
+
+    /// Every file of a commit, PKGBUILD first and .SRCINFO last, so install scripts and patches are reviewed too.
+    pub fn show_all(&self, base: &str, commit: &str) -> Result<String> {
+        let listing = self.git(base, &["ls-tree", "-r", "--name-only", commit])?;
+        let mut files: Vec<&str> = listing.lines().collect();
+        files.sort_by_key(|file| (*file != "PKGBUILD", *file == ".SRCINFO", file.to_string()));
+        let mut shown = String::new();
+        for file in files {
+            shown.push_str(&format!("==> {file}\n{}\n", self.show(base, commit, file)?));
+        }
+        Ok(shown)
     }
 
     /// Commits touching the base, newest first.

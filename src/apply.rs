@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
@@ -53,6 +54,8 @@ fn held_open(path: &Path) -> bool {
 
 /// Runs the journal's remaining steps, saving progress after each; `reinstall` redoes installs after a crash.
 pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<String>> {
+    // A closed terminal or ssh session, or a Ctrl-C, would otherwise kill pacman halfway through a transaction.
+    let _held = HoldInterrupts::new();
     let path = paths.journal();
     // Downloads, copies and builds the switch prepared must be on disk before anything changes, or a power cut leaves recovery with empty package files.
     unsafe { libc::sync() };
@@ -334,9 +337,37 @@ pub fn mismatches(paths: &Paths, tx: &Transaction) -> Result<Vec<String>> {
     Ok(problems)
 }
 
+/// Ignores SIGHUP and SIGINT (inherited by pacman) while the journal runs, restoring the previous handlers afterwards.
+struct HoldInterrupts {
+    previous: [libc::sighandler_t; 2],
+}
+
+impl HoldInterrupts {
+    fn new() -> Self {
+        let previous = unsafe {
+            [
+                libc::signal(libc::SIGHUP, libc::SIG_IGN),
+                libc::signal(libc::SIGINT, libc::SIG_IGN),
+            ]
+        };
+        eprintln!(":: interrupts wait until the switch is done; if it is cut off anyway, `archix recover` finishes it");
+        HoldInterrupts { previous }
+    }
+}
+
+impl Drop for HoldInterrupts {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGHUP, self.previous[0]);
+            libc::signal(libc::SIGINT, self.previous[1]);
+        }
+    }
+}
+
 fn pacman<S: AsRef<OsStr>>(args: &[S]) -> Result<()> {
     let status = Command::new("pacman")
         .args(args)
+        .process_group(0)
         .env(TRANSACTION_ENV, "1")
         .status()
         .context("running pacman")?;

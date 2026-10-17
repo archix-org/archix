@@ -14,7 +14,7 @@ pub fn commits(lock: Option<&HostLock>) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Shows every AUR build recipe entering the lock (a diff for changed bases, the PKGBUILD for new ones) and asks to trust it.
+/// Shows every AUR build recipe entering the lock (a diff for changed bases, every file for new ones) and asks to trust it.
 pub fn review(
     git: &AurGit,
     old: Option<&HostLock>,
@@ -36,7 +36,7 @@ pub fn review(
             }
             None => {
                 println!("==> {base}: new AUR package at {short}");
-                git.show(&base, &commit, "PKGBUILD")?
+                git.show_all(&base, &commit)?
             }
         };
         if !ask {

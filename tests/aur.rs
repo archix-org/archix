@@ -102,6 +102,10 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
         out.contains("echo 1.1") || out.contains("pkgver=1.1"),
         "the review shows the diff:\n{out}"
     );
+    assert!(
+        out.contains("pkgver = 1.1"),
+        "the review includes .SRCINFO, which archix takes dependencies and sources from:\n{out}"
+    );
     assert_eq!(setup.lock().packages["archix-test-lib"].version, "1.1-1");
 
     aur.publish(TestPkg {
