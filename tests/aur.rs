@@ -176,3 +176,27 @@ fn real_aur_packages_resolve() {
     assert_eq!(yay.repo, AUR_REPO);
     assert_eq!(yay.base.as_deref(), Some("yay-bin"));
 }
+
+#[test]
+#[ignore]
+fn skip_check_builds_a_recipe_whose_tests_fail() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        build: "true\n}\ncheck() {\n  false",
+        ..TestPkg::new("archix-test-failing-check", "1.0")
+    });
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&["archix-test-failing-check"], &body);
+    let out = setup.fails(&["switch", "--noconfirm"]);
+    assert!(out.contains("can't be built"), "{out}");
+    let skipping = format!(
+        "aur = {{ url = {:?}, skip_check = {{ \"archix-test-failing-check\" }} }}",
+        aur.url()
+    );
+    setup.set_body(&["archix-test-failing-check"], &skipping);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("archix-test-failing-check").as_deref(), Some("1.0-1"));
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

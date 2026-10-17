@@ -98,6 +98,7 @@ struct Declared {
     aur_review: bool,
     archive_url: String,
     build_on_host: BTreeSet<String>,
+    skip_check: BTreeSet<String>,
     missing_versions: Option<Nearest>,
     boot: Option<BootSettings>,
     snapshots: bool,
@@ -240,6 +241,19 @@ fn declared(config: &Value) -> Result<Declared> {
         aur_review: !matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("review") == Some(&Value::Bool(false))),
         build_on_host: match map.get("aur") {
             Some(Value::Map(aur)) => match aur.get("build_on_host") {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => BTreeSet::new(),
+            },
+            _ => BTreeSet::new(),
+        },
+        skip_check: match map.get("aur") {
+            Some(Value::Map(aur)) => match aur.get("skip_check") {
                 Some(Value::List(items)) => items
                     .iter()
                     .filter_map(|item| match item {

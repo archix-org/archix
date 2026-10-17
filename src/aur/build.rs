@@ -26,6 +26,8 @@ pub struct Builder<'a> {
     pub archive: &'a Archive,
     pub git: &'a AurGit,
     pub snapshot_cache: &'a Path,
+    /// Bases built with makepkg --nocheck.
+    pub skip_check: &'a BTreeSet<String>,
 }
 
 /// One AUR base to build at a commit, against a snapshot, with these already-built AUR packages installed first.
@@ -129,9 +131,9 @@ impl Builder<'_> {
             .map_err(|e| anyhow::Error::new(SetupFailed(format!("{e:#}"))));
         let built = setup.and_then(|()| {
             if on_host {
-                self.build_on_host(&dir, info, date, repos, inputs)
+                self.build_on_host(&dir, info, date, repos, inputs, self.skip_check.contains(base))
             } else {
-                self.build_in_chroot(&dir, inputs)
+                self.build_in_chroot(&dir, inputs, self.skip_check.contains(base))
             }
         });
         let result = built.and_then(|()| {
@@ -296,7 +298,7 @@ impl Builder<'_> {
         Err(last.expect("tried at least one keyserver"))
     }
 
-    fn build_in_chroot(&self, dir: &Path, inputs: &[PathBuf]) -> Result<()> {
+    fn build_in_chroot(&self, dir: &Path, inputs: &[PathBuf], nocheck: bool) -> Result<()> {
         let mut cmd = devtools("makechrootpkg");
         cmd.current_dir(dir)
             .env("GNUPGHOME", self.keyring())
@@ -306,6 +308,9 @@ impl Builder<'_> {
             .args(["-U", BUILD_USER]);
         for input in inputs {
             cmd.arg("-I").arg(input);
+        }
+        if nocheck {
+            cmd.args(["--", "--nocheck"]);
         }
         run(&mut cmd, "makechrootpkg")
     }
@@ -318,6 +323,7 @@ impl Builder<'_> {
         date: Date,
         repos: &[String],
         inputs: &[PathBuf],
+        nocheck: bool,
     ) -> Result<()> {
         let mut deps: BTreeSet<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
         deps.extend(info.packages.iter().flat_map(|pkg| pkg.depends.iter().cloned()));
@@ -370,6 +376,7 @@ impl Builder<'_> {
                 .arg(format!("HOME={}", dir.display()))
                 .arg(format!("GNUPGHOME={}", self.keyring().display()))
                 .args(["makepkg", "--noconfirm", "--clean"])
+                .args(nocheck.then_some("--nocheck"))
                 .current_dir(dir),
             "makepkg",
         );

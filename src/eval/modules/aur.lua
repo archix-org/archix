@@ -18,6 +18,11 @@ return {
         default = {},
         description = "AUR packages built directly on the host with makepkg instead of in a clean chroot.",
       },
+      skip_check = archix.option {
+        type = t.list_of(t.str),
+        default = {},
+        description = "AUR packages (by pkgbase) built without running their test suite (makepkg --nocheck), for recipes whose check() fails against the locked snapshot.",
+      },
     },
     missing_versions = archix.option {
       type = t.enum { "ask", "newer", "older" },

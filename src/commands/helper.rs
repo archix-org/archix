@@ -143,6 +143,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             archive: &archive,
             git: &git,
             snapshot_cache: &cache,
+            skip_check: &declared.skip_check,
         };
         Installer::new(&builder, &temp, &declared.build_on_host, Some(&recipes))?.build(&aur_names)?
     };

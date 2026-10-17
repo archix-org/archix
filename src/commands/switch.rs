@@ -633,6 +633,7 @@ fn build_aur(
         archive,
         git: &git,
         snapshot_cache: &cache,
+        skip_check: &declared.skip_check,
     };
     let recipes = recipes(target, declared)?;
     let mut moved = BTreeSet::new();
