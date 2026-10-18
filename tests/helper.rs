@@ -160,6 +160,13 @@ fn a_switch_under_sudo_leaves_the_config_owned_by_its_owner() {
             (1000, 1000),
             "{file} should stay owned by the config's owner"
         );
+        if meta.is_dir() {
+            assert_eq!(
+                meta.mode() & 0o7777,
+                0o755,
+                "{file} should be created 0755 whatever the umask"
+            );
+        }
     }
     setup.ok(&["remove", "tree", "--noconfirm"]);
 }

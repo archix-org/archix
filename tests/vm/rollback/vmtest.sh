@@ -73,10 +73,11 @@ say "stage $stage: booted generation $booted, current generation $(current), ker
 case $stage in
   1)
     [ "$(glibc)" = 2.43 ] || fail "generation 1 should have glibc 2.43 (the 2026-06-01 snapshot)"
-    sed -i 's|"devtools" }, -- packages|"devtools", "archix-test-hello", "linux-headers", "v4l2loopback-dkms" }, -- packages|' "$config"
+    sed -i 's|"devtools" }, -- packages|"devtools", "archix-test-hello", "v4l2loopback-dkms" }, -- packages|' "$config"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding the local recipe and a DKMS module"
     [ "$(cat /usr/share/archix-test-hello/built-with)" = 2.43 ] || fail "the local recipe should be built against glibc 2.43"
     dkms_module 0.15.3
+    pacman -Qq linux-headers > /dev/null 2>&1 || fail "archix should declare linux-headers for the DKMS module by itself"
     remember old "$(current)"
     say "PASS: generation $(recall old) builds a local recipe and a DKMS module at the 2026-06-01 snapshot"
 

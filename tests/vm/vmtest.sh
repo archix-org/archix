@@ -15,6 +15,10 @@ config=/etc/archix/init.lua
 case $stage in
   1)
     [ "$(current)" = 1 ] || fail "generation 1 should be current"
+    # The first 4 bytes are the EFI attributes; bit 0 is NON_VOLATILE, which would let a later direct firmware boot read a stale entry.
+    attrs=$(od -An -tu4 -N4 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>/dev/null | tr -d ' ')
+    [ -n "$attrs" ] && [ $((attrs & 1)) = 0 ] || fail "LoaderEntrySelected should be volatile, but its attributes are ${attrs:-missing}"
+    say "PASS: systemd-boot's LoaderEntrySelected is volatile (attributes $attrs), so no later boot sees a stale entry"
     systemctl is-active -q archix-marker.service || fail "generation 1 should start the marker"
     sed -i '/-- marker/d' "$config"
     archix --host archix-vm install tree --noconfirm > /dev/console 2>&1 || fail "archix install tree"

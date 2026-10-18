@@ -697,3 +697,47 @@ fn ensure_flatpak_remotes(declared: &Declared) -> Result<()> {
         .collect();
     flatpak::ensure_remotes(&used)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use archix::eval;
+    use std::fs;
+
+    fn declared_from(lua: &str) -> Declared {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("init.lua"), lua).unwrap();
+        let evaluation = eval::evaluate(&eval::Input {
+            config_dir: dir.path().to_path_buf(),
+            hostname: "box".to_string(),
+        })
+        .unwrap_or_else(|errors| panic!("{errors}"));
+        declared(&evaluation.config).unwrap()
+    }
+
+    #[test]
+    fn a_dkms_package_brings_the_boot_kernels_headers() {
+        let boot =
+            r#"boot = { loader = "systemd-boot", kernel = "linux-cachyos" }, kernel_params = { "root=/dev/vda2" }"#;
+        let with_dkms = declared_from(&format!(
+            r#"return {{ packages = {{ "base", "nvidia-dkms" }}, {boot} }}"#
+        ));
+        assert!(
+            with_dkms.prefer.contains(&"linux-cachyos-headers".to_string()),
+            "{:?}",
+            with_dkms.prefer
+        );
+        let without = declared_from(&format!(r#"return {{ packages = {{ "base" }}, {boot} }}"#));
+        assert!(
+            !without.prefer.iter().any(|name| name.ends_with("-headers")),
+            "{:?}",
+            without.prefer
+        );
+        let unmanaged = declared_from(r#"return { packages = { "base", "nvidia-dkms" } }"#);
+        assert!(
+            !unmanaged.prefer.iter().any(|name| name.ends_with("-headers")),
+            "{:?}",
+            unmanaged.prefer
+        );
+    }
+}
