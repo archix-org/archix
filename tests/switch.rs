@@ -3,6 +3,8 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 use archix::journal::{Journal, Kind, Transaction};
 use archix::pacman::read_local_db;
@@ -299,6 +301,103 @@ fn interrupted_switch_blocks_until_recovered() {
             pacman(&["-R", "tree"]);
         }
     }
+}
+
+const STALL_HOOK: &str = "/etc/pacman.d/hooks/zz-archix-test-stall.hook";
+const STALLED: &str = "/run/archix-test-stalled";
+
+/// Holds the next transaction that installs tree in a pacman hook for a few seconds, and marks when it starts.
+fn stall_on_tree() {
+    let _ = fs::remove_file(STALLED);
+    fs::write(
+        STALL_HOOK,
+        format!("[Trigger]\nOperation = Install\nType = Package\nTarget = tree\n\n[Action]\nWhen = PostTransaction\nExec = /bin/sh -c 'touch {STALLED}; sleep 5'\n"),
+    )
+    .unwrap();
+}
+
+fn wait_for(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..600 {
+        if done() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn archix_running() -> bool {
+    Command::new("pgrep").args(["-x", "archix"]).status().unwrap().success()
+}
+
+#[test]
+#[ignore]
+fn a_terminal_hanging_up_mid_switch_doesnt_stop_it() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    stall_on_tree();
+    let command = format!(
+        "{} --config {} --host box switch --noconfirm",
+        env!("CARGO_BIN_EXE_archix"),
+        setup.dir.path().display()
+    );
+    // The terminal of an ssh session: closing script's pty hangs it up, as a dropped connection does.
+    let mut terminal = Command::new("script")
+        .args(["-qfec", &command, "/dev/null"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("pacman to install tree", || Path::new(STALLED).exists());
+    terminal.kill().unwrap();
+    terminal.wait().unwrap();
+    wait_for("archix to finish", || !archix_running());
+    fs::remove_file(STALL_HOOK).unwrap();
+    let journal_left = setup.paths.journal().exists();
+    let log = fs::read_to_string("/var/lib/archix/after-hangup.log").unwrap_or_default();
+    if journal_left {
+        setup.ok(&["recover", "--rollback"]);
+    }
+    assert!(!journal_left, "the switch should finish after its terminal hung up");
+    assert!(installed("tree").is_some());
+    assert!(
+        log.contains("switched to generation"),
+        "output after the hang-up goes to the log:\n{log}"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn a_switch_started_in_a_login_session_runs_outside_it() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    stall_on_tree();
+    // Named like logind's session scopes, which logind may kill when the session ends.
+    let mut session = Command::new("systemd-run")
+        .args(["--scope", "--quiet", "--unit=session-archixtest.scope", "--"])
+        .arg(env!("CARGO_BIN_EXE_archix"))
+        .arg("--config")
+        .arg(setup.dir.path())
+        .args(["--host", "box", "switch", "--noconfirm"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for("pacman to install tree", || Path::new(STALLED).exists());
+    let pid = String::from_utf8_lossy(&Command::new("pgrep").args(["-xo", "archix"]).output().unwrap().stdout)
+        .trim()
+        .to_string();
+    let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
+    assert!(session.wait().unwrap().success());
+    fs::remove_file(STALL_HOOK).unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        cgroup.contains("/archix-") && !cgroup.contains("session-archixtest"),
+        "the switch should run in a scope of its own: {cgroup}"
+    );
 }
 
 #[test]
