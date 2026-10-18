@@ -64,8 +64,15 @@ pub fn edit_installed(
     let file = dir.join(FILE);
     let previous = fs::read_to_string(&file).ok();
     let mut packages = installed::read(&file)?;
+    let elsewhere = declared_elsewhere(config_dir, host, &packages, add);
+    for name in &elsewhere {
+        println!(
+            "{name} is already declared in the config; not adding it to {}",
+            file.display()
+        );
+    }
     for name in add {
-        if !packages.contains(name) {
+        if !packages.contains(name) && !elsewhere.contains(name) {
             packages.push(name.clone());
         }
     }
@@ -82,6 +89,26 @@ pub fn edit_installed(
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     fs::write(&file, installed::render(&packages)).with_context(|| format!("writing {}", file.display()))?;
     Ok(InstalledEdit { path: file, previous })
+}
+
+/// Of `add`, those the config declares outside installed.lua (whose own list is `listed`).
+fn declared_elsewhere(config_dir: &Path, host: &str, listed: &[String], add: &[String]) -> Vec<String> {
+    if add.is_empty() {
+        return Vec::new();
+    }
+    let Ok(evaluation) = crate::eval::evaluate(&crate::eval::Input {
+        config_dir: config_dir.to_path_buf(),
+        hostname: host.to_string(),
+    }) else {
+        return Vec::new();
+    };
+    let Ok(declared) = declared(&evaluation.config) else {
+        return Vec::new();
+    };
+    add.iter()
+        .filter(|name| declared.packages.contains(name) && !listed.contains(name))
+        .cloned()
+        .collect()
 }
 
 /// Installs packages without declaring them; the next switch removes them unless they get declared.
