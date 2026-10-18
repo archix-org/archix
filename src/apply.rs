@@ -347,10 +347,11 @@ pub fn check_packages(tx: &Transaction) -> Result<()> {
         return Ok(());
     }
     let keyrings = incoming_keyrings(&tx.install);
-    let trial = if keyrings.is_empty() {
-        None
-    } else {
-        Some(TrialKeyring::new(&keyrings)?)
+    let trial = match keyrings.is_empty() {
+        true => None,
+        false => TrialKeyring::new(&keyrings)
+            .inspect_err(|e| eprintln!("warning: {e:#}; checking signatures against the installed keyring instead"))
+            .ok(),
     };
     let mut pacman = Command::new("pacman");
     pacman.args([
