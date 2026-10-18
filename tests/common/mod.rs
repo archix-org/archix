@@ -93,6 +93,10 @@ impl Setup {
         fs::read_to_string(self.dir.path().join(path)).ok()
     }
 
+    pub fn write(&self, path: &str, content: &str) {
+        fs::write(self.dir.path().join(path), content).unwrap();
+    }
+
     pub fn answering_raw(&self, input: &str, args: &[&str]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
             .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
