@@ -183,6 +183,29 @@ fn a_package_signed_by_a_key_an_incoming_keyring_adds_installs_in_the_same_switc
 
 #[test]
 #[ignore]
+fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
+    let _system = lock_system();
+    let repo = LocalRepo::new("archix-third");
+    repo.publish("archix-test-third", "1.0");
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
+        repo.server()
+    );
+    let _ = fs::remove_file("/var/lib/pacman/sync/archix-third.db");
+    let setup = Setup::new(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let query = Command::new("pacman").args(["-Q", "pacman"]).output().unwrap();
+    let warnings = String::from_utf8_lossy(&query.stderr).into_owned();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        !warnings.contains("database file for 'archix-third' does not exist"),
+        "{warnings}"
+    );
+}
+
+#[test]
+#[ignore]
 fn a_rollback_never_takes_a_keyring_back() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
