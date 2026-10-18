@@ -907,6 +907,16 @@ fn finish(paths: &Paths, boot: bool, repos: &[Repo]) -> Result<()> {
     let _ = fs::remove_file(paths.notes());
     integration::ensure(paths, boot)?;
     integration::sync_pacman_conf(paths, repos)?;
+    // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
+    let archive = archix::archive::for_system(&paths.state);
+    for repo in repos.iter().filter(|repo| repo.custom.is_some()) {
+        let db = paths.pacman_db.join("sync").join(format!("{}.db", repo.name));
+        if !db.exists()
+            && let Err(e) = archix::repos::fetch_db(&archive, repo, &db)
+        {
+            eprintln!("warning: couldn't download {}.db for pacman: {e:#}", repo.name);
+        }
+    }
     match gc::collect(paths, &user_cache()?) {
         Ok(report) => print_gc(&report, false),
         Err(e) => eprintln!("warning: garbage collection failed: {e:#}"),
