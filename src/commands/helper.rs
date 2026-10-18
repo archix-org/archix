@@ -253,7 +253,7 @@ pub fn pick(target: &Target, terms: &[String]) -> Result<Vec<String>> {
     for (number, hit) in hits.iter().enumerate().rev() {
         println!("{} {}", number + 1, hit.line);
     }
-    eprint!("==> Packages to install (eg: 1 2 3, 1-3 or ^4): ");
+    eprint!("==> Install which? Numbers (1 3), ranges (2-5), ^ to leave one out: ");
     io::stderr().flush()?;
     let mut answer = String::new();
     io::stdin().read_line(&mut answer)?;
