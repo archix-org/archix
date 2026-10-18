@@ -27,4 +27,5 @@ pub mod repos;
 pub mod resolve;
 pub mod soname;
 pub mod system;
+pub mod testhooks;
 pub mod value;

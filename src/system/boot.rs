@@ -454,9 +454,7 @@ pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
 pub fn protected_generations(paths: &Paths) -> BTreeSet<u32> {
     [
         crate::generations::Store::new(paths).current().ok().flatten(),
-        fs::read_to_string("/proc/cmdline")
-            .ok()
-            .and_then(|cmdline| booted_generation(&cmdline)),
+        booted_generation(&crate::testhooks::kernel_cmdline()),
     ]
     .into_iter()
     .flatten()

@@ -31,9 +31,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     };
     let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
     // The running system came from the booted generation; its entry, kernel and files are what a broken switch falls back to.
-    let booted = fs::read_to_string("/proc/cmdline")
-        .ok()
-        .and_then(|cmdline| crate::system::boot::booted_generation(&cmdline));
+    let booted = crate::system::boot::booted_generation(&crate::testhooks::kernel_cmdline());
     keep.extend(booted.filter(|number| generations.iter().any(|g| g.number == *number)));
     let mut report = Report::default();
     for generation in &generations {

@@ -3,7 +3,9 @@
 mod common;
 
 use std::fs;
+use std::os::unix::process::ExitStatusExt;
 
+use archix::generations::Store;
 use common::*;
 
 fn installed_lua(setup: &Setup) -> Option<String> {
@@ -34,6 +36,114 @@ fn install_and_remove_edit_installed_lua_and_switch() {
     setup.ok(&["-R", "tree", "--noconfirm"]);
     assert!(!installed_lua(&setup).unwrap().contains("\"tree\""));
     assert!(installed("tree").is_none());
+}
+
+fn current(setup: &Setup) -> Option<u32> {
+    Store::new(&setup.paths).current().unwrap()
+}
+
+#[test]
+#[ignore]
+fn declining_a_switch_leaves_the_lock_byte_for_byte() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let before = setup.read("archix.lock").unwrap();
+
+    let declined = setup.answering_raw("n\n", &["install", "tree"]);
+    assert!(!declined.status.success());
+    let after = setup.read("archix.lock").unwrap();
+    println!(
+        "archix.lock after declining `archix install tree`:\n{}",
+        line_diff(&before, &after)
+    );
+    assert!(
+        after == before,
+        "declining changed archix.lock:\n{}",
+        line_diff(&before, &after)
+    );
+    assert!(installed_lua(&setup).is_none());
+    assert!(installed("tree").is_none());
+
+    let init = setup.read("init.lua").unwrap();
+    let edited = init.replacen("packages = { ", "packages = { \"tree\", ", 1);
+    fs::write(setup.dir.path().join("init.lua"), &edited).unwrap();
+    let declined = setup.answering_raw("n\n", &["switch"]);
+    assert!(!declined.status.success());
+    let after = setup.read("archix.lock").unwrap();
+    println!(
+        "archix.lock after declining `archix switch` with tree added by hand:\n{}",
+        line_diff(&before, &after)
+    );
+    assert!(
+        after == before,
+        "declining changed archix.lock:\n{}",
+        line_diff(&before, &after)
+    );
+    assert_eq!(
+        setup.read("init.lua").unwrap(),
+        edited,
+        "the hand edit to the config is the user's and stays"
+    );
+    fs::write(setup.dir.path().join("init.lua"), init).unwrap();
+}
+
+#[test]
+#[ignore]
+fn a_crash_after_the_lock_is_written_puts_the_config_and_lock_back() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let before = setup.read("archix.lock").unwrap();
+    let generation = current(&setup);
+
+    let crashed = setup.run_env(
+        &[("ARCHIX_TEST_CRASH", "lock-written")],
+        &["install", "tree", "--noconfirm"],
+    );
+    assert_eq!(
+        crashed.status.signal(),
+        Some(9),
+        "archix should die right after writing the lock"
+    );
+    let torn = setup.read("archix.lock").unwrap();
+    println!("archix.lock right after the kill:\n{}", line_diff(&before, &torn));
+    println!("installed.lua right after the kill: {:?}", installed_lua(&setup));
+
+    let next = setup.ok(&["generations"]);
+    println!("the next archix run:\n{next}");
+    let after = setup.read("archix.lock").unwrap();
+    println!("archix.lock after the next run:\n{}", line_diff(&before, &after));
+    assert!(
+        after == before,
+        "the lock still differs:\n{}",
+        line_diff(&before, &after)
+    );
+    assert!(
+        installed_lua(&setup).is_none(),
+        "installed.lua should be gone again: {:?}",
+        installed_lua(&setup)
+    );
+    assert!(installed("tree").is_none());
+    assert_eq!(current(&setup), generation);
+}
+
+#[test]
+#[ignore]
+fn installing_a_package_the_config_already_declares_adds_no_duplicate() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    let out = setup.ok(&["install", "tree", "--noconfirm"]);
+    println!("{out}");
+    println!("installed.lua: {:?}", installed_lua(&setup));
+    assert!(
+        installed_lua(&setup).is_none_or(|text| !text.contains("\"tree\"")),
+        "tree is declared in init.lua, so installed.lua mustn't list it again: {:?}",
+        installed_lua(&setup)
+    );
+    assert!(installed("tree").is_some());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]

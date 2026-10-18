@@ -483,6 +483,45 @@ fn gc_keeps_only_what_the_limits_allow() {
 
 #[test]
 #[ignore]
+fn gc_keeps_the_generation_that_booted_through_15_switches() {
+    let _system = lock_system();
+    let body = |n: u32| {
+        format!(
+            r#"generations = {{ keep = 3, keep_days = 0 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#
+        )
+    };
+    let setup = Setup::new(&[], &body(0));
+    setup.ok(&["switch", "--noconfirm"]);
+    let booted = current_generation().unwrap();
+    let cmdline = format!("root=/dev/vda2 rw archix.generation={booted}");
+    let env = [("ARCHIX_TEST_CMDLINE", cmdline.as_str())];
+    for n in 1..=15 {
+        let init = setup.read("init.lua").unwrap();
+        fs::write(setup.dir.path().join("init.lua"), init.replace(&body(n - 1), &body(n))).unwrap();
+        setup.ok_env(&env, &["switch", "--noconfirm"]);
+    }
+    println!(
+        "archix gc, booted into generation {booted}:\n{}",
+        setup.ok_env(&env, &["gc"])
+    );
+    println!("archix generations:\n{}", setup.ok_env(&env, &["generations"]));
+    let numbers: Vec<u32> = archix::generations::Store::new(&setup.paths)
+        .list()
+        .unwrap()
+        .iter()
+        .map(|g| g.number)
+        .collect();
+    assert!(
+        numbers.contains(&booted),
+        "the booted generation {booted} was collected: {numbers:?}"
+    );
+    assert_eq!(numbers.len(), 4, "the newest 3 plus the booted one: {numbers:?}");
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     let _system = lock_system();
     let body = r#"unsafe_downgrades = { lemon = { "3.54" } }"#;

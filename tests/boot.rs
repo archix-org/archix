@@ -110,6 +110,80 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     assert!(!Path::new("/etc/systemd/system/sysinit.target.wants/archix-boot.service").exists());
 }
 
+/// Every file on the test ESP except systemd-boot's own, relative to it.
+fn esp_files() -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path.strip_prefix(ESP).unwrap().display().to_string());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(Path::new(ESP), &mut files);
+    files.retain(|f| !f.starts_with("EFI/systemd/") && !f.starts_with("EFI/BOOT/"));
+    files.sort();
+    files
+}
+
+#[test]
+#[ignore]
+fn adding_packages_one_at_a_time_reuses_one_uki() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    let body = format!(
+        r#"boot = {{ loader = "systemd-boot", esp = "{ESP}", entries = 20 }}, kernel_params = {{ "root=/dev/vda2", "rw" }}"#
+    );
+    let setup = Setup::new(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let first = current();
+    for count in 1..=UKI_TEST_PACKAGES.len() {
+        setup.set_body(&UKI_TEST_PACKAGES[..count], &body);
+        setup.ok(&["switch", "--noconfirm"]);
+    }
+    let files = esp_files();
+    let listing = files
+        .iter()
+        .map(|f| {
+            let size = fs::metadata(format!("{ESP}/{f}")).map_or(0, |m| m.len());
+            format!("{size:>11}  {f}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    println!(
+        "ESP after {} package adds (generations {first}..={}):\n{listing}",
+        UKI_TEST_PACKAGES.len(),
+        current()
+    );
+    let ukis: Vec<&String> = files
+        .iter()
+        .filter(|f| f.ends_with(".efi") && !f.contains("rescue"))
+        .collect();
+    assert_eq!(
+        ukis.len(),
+        1,
+        "one UKI for an unchanged kernel and initramfs:\n{listing}"
+    );
+    let menu = Command::new("bootctl")
+        .args(["--esp-path", ESP, "--no-variables", "list"])
+        .output()
+        .unwrap();
+    let menu = String::from_utf8_lossy(&menu.stdout).into_owned();
+    println!("bootctl list:\n{menu}");
+    for generation in first..=current() {
+        assert!(
+            menu.contains(&format!("generation {generation})")),
+            "generation {generation} lost its own boot menu entry:\n{menu}"
+        );
+    }
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
 #[test]
 #[ignore]
 fn rescue_restores_packages_without_pacman() {

@@ -178,6 +178,59 @@ fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
     let _ = fs::remove_dir_all(format!("/var/lib/archix/kernels/{running}"));
 }
 
+#[test]
+#[ignore]
+fn a_recipe_needing_newer_libraries_than_the_snapshot_is_refused_before_building() {
+    let dir = tempfile::TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("init.lua"),
+        r#"return { packages = { "base", "archix-test-newdep" } }"#,
+    )
+    .unwrap();
+    let recipe_dir = dir.path().join("pkgbuilds/archix-test-newdep");
+    fs::create_dir_all(&recipe_dir).unwrap();
+    // The 2026-06-01 snapshot has glibc 2.43; 2.44 arrived later.
+    fs::write(
+        recipe_dir.join("PKGBUILD"),
+        recipe("archix-test-newdep", "1", "'glibc>=2.44'", "  true"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args([
+            "--config",
+            dir.path().to_str().unwrap(),
+            "--host",
+            "box",
+            "update",
+            "--to",
+            "2026-06-01",
+            "--noconfirm",
+        ])
+        .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("archix update --to 2026-06-01 with a recipe needing glibc>=2.44:\n{text}");
+    assert!(
+        !output.status.success(),
+        "the snapshot can't satisfy glibc>=2.44, so locking must fail:\n{text}"
+    );
+    assert!(
+        text.contains("`glibc>=2.44`") && text.contains("isn't in the 2026-06-01 snapshot"),
+        "the refusal should name the dependency and the snapshot:\n{text}"
+    );
+    assert!(
+        !text.contains("glibc-git"),
+        "no AUR stand-in for glibc may be pulled in:\n{text}"
+    );
+    assert!(!text.contains("Making package"), "nothing may be built:\n{text}");
+    assert!(!dir.path().join("archix.lock").exists());
+}
+
 fn recipe(name: &str, version: &str, depends: &str, package: &str) -> String {
     format!(
         "pkgname={name}\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\ndepends=({depends})\n\

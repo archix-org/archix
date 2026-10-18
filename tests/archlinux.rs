@@ -92,6 +92,40 @@ fn lock_keeps_the_date_until_update() {
 
 #[test]
 #[ignore]
+fn a_package_newer_than_the_locked_snapshot_is_refused_and_the_date_stays() {
+    let dir = config(&["base"]);
+    stdout(&archix(dir.path(), &["update", "--to", "2026-08-19", "--noconfirm"]));
+    let path = dir.path().join(LOCK_FILE);
+    let before = fs::read_to_string(&path).unwrap();
+    // cadical reached [extra] after 2026-08-19 and is also on the AUR under the same name.
+    fs::write(dir.path().join("init.lua"), host_file(&["base", "cadical"])).unwrap();
+    let output = archix(dir.path(), &["lock"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    println!(
+        "archix lock, with cadical added to a 2026-08-19 lock:\n{}{stderr}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !output.status.success(),
+        "cadical isn't in the 2026-08-19 snapshot, so locking it there must fail"
+    );
+    assert!(
+        stderr.contains("`cadical` isn't in the 2026-08-19 snapshot") && stderr.contains("archix update"),
+        "{stderr}"
+    );
+    assert_eq!(
+        fs::read_to_string(&path).unwrap(),
+        before,
+        "a refused lock leaves archix.lock as it was"
+    );
+    assert_eq!(
+        Lockfile::load(&path).unwrap().hosts["box"].date.to_string(),
+        "2026-08-19"
+    );
+}
+
+#[test]
+#[ignore]
 fn unknown_packages_fail_to_lock() {
     let dir = config(&["base", "definitely-not-a-package"]);
     let output = archix(dir.path(), &["lock"]);

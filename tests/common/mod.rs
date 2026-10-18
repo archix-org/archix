@@ -15,10 +15,14 @@ use tempfile::TempDir;
 /// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
 pub const IMAGE_SNAPSHOT: &str = "2026-10-10";
 static SYSTEM: Mutex<()> = Mutex::new(());
+/// Small packages the boot tests add one at a time.
+pub const UKI_TEST_PACKAGES: [&str; 10] = [
+    "tree", "bc", "pv", "dos2unix", "figlet", "rlwrap", "cowsay", "sl", "toilet", "ncdu",
+];
 
 /// Packages tests install and remove; they never count as part of the image's own declared set.
 fn test_package(name: &str) -> bool {
-    matches!(name, "tree" | "lemon" | "jq") || name.starts_with("archix-test-")
+    UKI_TEST_PACKAGES.contains(&name) || matches!(name, "tree" | "lemon" | "jq") || name.starts_with("archix-test-")
 }
 
 pub fn lock_system() -> MutexGuard<'static, ()> {
@@ -62,11 +66,31 @@ impl Setup {
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
+        self.run_env(&[], args)
+    }
+
+    pub fn run_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_archix"))
             .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
             .args(args)
+            .envs(env.iter().copied())
             .output()
             .unwrap()
+    }
+
+    pub fn ok_env(&self, env: &[(&str, &str)], args: &[&str]) -> String {
+        let output = self.run_env(env, args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "archix {args:?} failed:\n{text}");
+        text
+    }
+
+    pub fn read(&self, path: &str) -> Option<String> {
+        fs::read_to_string(self.dir.path().join(path)).ok()
     }
 
     pub fn answering_raw(&self, input: &str, args: &[&str]) -> Output {
@@ -140,6 +164,24 @@ impl Setup {
         )
         .unwrap();
     }
+}
+
+/// Lines only in `before` as "- line" and only in `after` as "+ line", or "(identical)".
+pub fn line_diff(before: &str, after: &str) -> String {
+    let (old, new): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    let mut out: Vec<String> = old
+        .iter()
+        .filter(|l| !new.contains(l))
+        .map(|l| format!("- {l}"))
+        .collect();
+    out.extend(new.iter().filter(|l| !old.contains(l)).map(|l| format!("+ {l}")));
+    if out.is_empty() && before == after {
+        return "(identical)".to_string();
+    }
+    if out.is_empty() {
+        out.push("(same lines, different bytes)".to_string());
+    }
+    out.join("\n")
 }
 
 pub fn installed(name: &str) -> Option<String> {

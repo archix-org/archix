@@ -106,6 +106,7 @@ pub(super) fn save_lock(
     lockfile.hosts.insert(target.host.to_string(), new.clone());
     lockfile.save(&path)?;
     println!("wrote {}", path.display());
+    archix::testhooks::crash_at("lock-written");
     Ok(())
 }
 
