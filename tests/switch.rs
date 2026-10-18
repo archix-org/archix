@@ -303,6 +303,32 @@ fn interrupted_switch_blocks_until_recovered() {
 
 #[test]
 #[ignore]
+fn recover_rebuilds_a_keyring_a_crash_tore() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let paths = &setup.paths;
+    fake_interrupted_switch(paths);
+    // What a power cut left in the VM test: the file's size, but zeros where the keys were.
+    let pubring = "/etc/pacman.d/gnupg/pubring.gpg";
+    let size = fs::metadata(pubring).unwrap().len();
+    fs::write(pubring, vec![0u8; size as usize]).unwrap();
+    let out = setup.ok(&["recover", "--continue"]);
+    assert!(
+        out.contains("pacman's keyring was torn by the crash; rebuilt it"),
+        "{out}"
+    );
+    assert!(
+        installed("tree").is_some(),
+        "with the keyring rebuilt, pacman takes the signed package"
+    );
+    pacman(&["-R", "tree"]);
+}
+
+#[test]
+#[ignore]
 fn ignored_packages_that_arent_installed_are_named() {
     let _system = lock_system();
     let setup = Setup::new(&[], "ignored_packages = { \"archix-test-elsewhere\" }");
