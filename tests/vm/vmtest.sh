@@ -70,6 +70,38 @@ case $stage in
     grep -q "^generation $(cat "$state/rescued")," /var/lib/archix/last-rescue || fail "rescue should restore the generation whose entry was booted, not $(cat /var/lib/archix/last-rescue)"
     [ "$(current)" = "$(cat "$state/rescued")" ] || fail "booting an older rescue entry should roll back to it"
     say "PASS: an older generation's rescue entry restored that generation without pacman"
+    archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
+    ls /boot/loader/entries > /dev/console
+    for gone in /etc/systemd/system/archix-boot.service /etc/systemd/system/sysinit.target.wants/archix-boot.service /etc/pacman.d/hooks/archix.hook \
+      /etc/profile.d/archix.sh /etc/mkinitcpio.conf.d/archix-rescue.conf /etc/initcpio/hooks/archix-rescue /boot/EFI/archix; do
+      [ -e "$gone" ] && fail "eject should remove $gone"
+    done
+    ls /boot/loader/entries/archix-* > /dev/null 2>&1 && fail "eject should remove archix's boot entries"
+    grep -qx "default arch-linux.conf" /boot/loader/loader.conf || fail "eject should make arch-linux.conf the default: $(cat /boot/loader/loader.conf)"
+    say "PASS: eject wrote a plain boot entry and took archix's entries, hooks and service off"
+    echo 5 > "$state/stage"
+    systemctl reboot
+    ;;
+  5)
+    selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
+    [ "$selected" = arch-linux.conf ] || fail "after eject the plain entry should boot, not '$selected'"
+    bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should still be enforcing after eject"
+    systemctl cat archix-boot.service > /dev/null 2>&1 && fail "archix-boot.service should be gone"
+    say "PASS: after eject, the plain entry booted with Secure Boot enforcing"
+    pacman -U --noconfirm "$(sed -n 's|^Server = \(http://[^/]*\)/.*|\1|p' /etc/pacman.d/mirrorlist | head -1)/packages/l/linux/linux-7.2.8.arch1-2-x86_64.pkg.tar.zst" > /dev/console 2>&1 \
+      || fail "plain pacman changing the kernel after eject"
+    pacman -Syu --noconfirm > /dev/console 2>&1 || fail "pacman -Syu after eject"
+    sbctl verify 2>&1 | grep -q "/boot/vmlinuz-linux is signed" || fail "sbctl's hook should re-sign the new kernel: $(sbctl verify 2>&1 | head -5)"
+    echo 6 > "$state/stage"
+    systemctl reboot
+    ;;
+  6)
+    selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
+    [ "$selected" = arch-linux.conf ] || fail "the plain entry should still boot, not '$selected'"
+    [ "$(uname -r)" = 7.2.8-arch1-2 ] || fail "the kernel plain pacman installed should boot, not $(uname -r)"
+    bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
+    modprobe dummy || fail "the new kernel's modules should load"
+    say "PASS: a kernel plain pacman installed after eject boots from the plain entry with Secure Boot"
     echo done > "$state/stage"
     say "OK"
     systemctl poweroff

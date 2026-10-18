@@ -112,6 +112,50 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     assert!(!Path::new("/etc/systemd/system/sysinit.target.wants/archix-boot.service").exists());
 }
 
+#[test]
+#[ignore]
+fn eject_hands_booting_to_a_uki_mkinitcpio_keeps_building() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    let preset = "/etc/mkinitcpio.d/linux.preset";
+    let original = fs::read_to_string(preset).unwrap();
+    let setup = Setup::new(&[], &boot_body(""));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(entries().iter().any(|e| e.starts_with("archix-")));
+
+    let out = setup.ok(&["eject", "--noconfirm"]);
+    let ejected = fs::read_to_string(preset).unwrap();
+    fs::write(preset, &original).unwrap();
+    assert!(entries().is_empty(), "archix's entries go: {:?}\n{out}", entries());
+    assert!(!Path::new(&format!("{ESP}/EFI/archix")).exists());
+    assert!(
+        ejected.contains(&format!("default_uki=\"{ESP}/EFI/Linux/arch-linux.efi\"")),
+        "{ejected}"
+    );
+    let info = Command::new("ukify")
+        .args(["inspect", &format!("{ESP}/EFI/Linux/arch-linux.efi")])
+        .output()
+        .unwrap();
+    let info = String::from_utf8_lossy(&info.stdout);
+    assert!(info.contains("root=/dev/vda2 rw"), "{info}");
+    let loader = fs::read_to_string(format!("{ESP}/loader/loader.conf")).unwrap();
+    assert!(loader.lines().any(|line| line == "default arch-linux.efi"), "{loader}");
+    for gone in [
+        "/etc/systemd/system/archix-boot.service",
+        "/etc/systemd/system/sysinit.target.wants/archix-boot.service",
+        "/etc/pacman.d/hooks/archix.hook",
+        "/etc/profile.d/archix.sh",
+        "/etc/xdg/autostart/archix-status.desktop",
+        "/etc/mkinitcpio.conf.d/archix-rescue.conf",
+    ] {
+        assert!(!Path::new(gone).exists(), "{gone} is left\n{out}");
+    }
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
 /// Every file on the test ESP except systemd-boot's own, relative to it.
 fn esp_files() -> Vec<String> {
     fn walk(dir: &Path, out: &mut Vec<String>) {
