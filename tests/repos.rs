@@ -119,7 +119,7 @@ fn a_rollback_never_takes_a_keyring_back() {
 
     let out = setup.ok(&["rollback", "--noconfirm"]);
     assert!(
-        out.contains("keeping archix-test-keyring 2.0-1, newer than this generation's 1.0-1: an older keyring trusts keys revoked since"),
+        out.contains("keeping archix-test-keyring 2.0-1 rather than going back to 1.0-1: an older keyring trusts keys revoked since"),
         "{out}"
     );
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));

@@ -1,6 +1,6 @@
 mod vercmp;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
@@ -158,6 +158,27 @@ pub fn name_from_entry(dir_name: &str) -> &str {
 }
 
 /// Reads the installed packages from a local database directory, normally `/var/lib/pacman/local`.
+/// Installed packages that ship a pacman keyring, such as archlinux-keyring and cachyos-keyring.
+pub fn keyring_packages(dir: &Path) -> BTreeSet<String> {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| {
+            name_from_entry(&entry.file_name().to_string_lossy()).ends_with("-keyring")
+                && fs::read_to_string(entry.path().join("files")).is_ok_and(|files| {
+                    files
+                        .lines()
+                        .any(|line| line.starts_with(KEYRINGS) && line.ends_with(".gpg"))
+                })
+        })
+        .map(|entry| name_from_entry(&entry.file_name().to_string_lossy()).to_string())
+        .collect()
+}
+
+/// Where keyring packages put the keys `pacman-key --populate` imports.
+pub const KEYRINGS: &str = "usr/share/pacman/keyrings/";
+
 pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
     let mut packages = BTreeMap::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {

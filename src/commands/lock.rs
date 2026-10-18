@@ -232,11 +232,15 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
     Ok(())
 }
 
-/// What switching to `lock` would change, one line each, plus what's only kept because of warn mode.
-pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> Result<(Vec<String>, Vec<String>)> {
+/// What switching to `lock` would change, one line each, plus what's only kept because of warn mode, and keyrings kept newer.
+pub(super) fn pending(
+    target: &Target,
+    declared: &Declared,
+    lock: &HostLock,
+) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let paths = Paths::system();
     let installed = read_local_db(&paths.local_db())?;
-    let (changes, warned) = select_changes(
+    let (changes, warned, kept) = select_changes(
         &lock.packages,
         &installed,
         declared.remove_undeclared,
@@ -266,7 +270,7 @@ pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> 
     if !unmanaged.is_empty() {
         println!("flatpak apps archix doesn't manage: {}", unmanaged.join(" "));
     }
-    Ok((lines, warned))
+    Ok((lines, warned, kept))
 }
 
 pub fn diff(target: &Target) -> Result<()> {
@@ -286,7 +290,7 @@ pub fn diff(target: &Target) -> Result<()> {
             count(newer, "package is", "packages are")
         );
     }
-    let (lines, warned) = pending(target, &declared, &lock)?;
+    let (lines, warned, kept) = pending(target, &declared, &lock)?;
     if lines.is_empty() {
         println!("the system matches the lock and the config");
     }
@@ -294,6 +298,9 @@ pub fn diff(target: &Target) -> Result<()> {
         println!("{line}");
     }
     print_warned(&warned);
+    for line in &kept {
+        println!("{line}");
+    }
     Ok(())
 }
 
@@ -381,7 +388,7 @@ pub fn status(target: &Target) -> Result<()> {
     }
     if paths.local_db().is_dir() {
         let installed = read_local_db(&paths.local_db())?;
-        let (changes, _) = select_changes(
+        let (changes, _, _) = select_changes(
             &lock.packages,
             &installed,
             declared.remove_undeclared,

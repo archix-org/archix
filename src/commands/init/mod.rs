@@ -403,7 +403,7 @@ fn write_and_lock(
     hand_over(&dir)?;
 
     section("Result");
-    let (lines, warned) = pending(&target, &declared, &lock)?;
+    let (lines, warned, _) = pending(&target, &declared, &lock)?;
     if lines.is_empty() {
         done("the system matches the lock and the config: the first switch changes nothing");
     } else {

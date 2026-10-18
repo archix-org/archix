@@ -221,7 +221,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
 
-    let (mut changes, warned) = select_changes(
+    let (mut changes, warned, kept) = select_changes(
         &lock.packages,
         &installed,
         declared.remove_undeclared,
@@ -244,6 +244,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         )?);
     }
     print_warned(&warned);
+    for line in &kept {
+        println!("{line}");
+    }
     print_missing_ignored(&declared.ignored, &installed);
     let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
     if changes.is_empty()
@@ -963,7 +966,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     let installed = read_local_db(&paths.local_db())?;
     let ignored = generation.settings.ignored.iter().cloned().collect();
     let current_generation = store.get(current)?;
-    let (mut changes, warned) = select_changes(
+    let (mut changes, warned, kept) = select_changes(
         &generation.packages,
         &installed,
         generation.settings.remove_undeclared,
@@ -982,6 +985,9 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     );
     changes.extend(swapped);
     print_warned(&warned);
+    for line in &kept {
+        println!("{line}");
+    }
     let name = format!("generation {number} (snapshot {})", generation.date);
     let system_change = SystemChange {
         from: current_generation.system,

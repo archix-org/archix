@@ -314,10 +314,14 @@ fn restore_running_modules(paths: &Paths) -> Result<()> {
 /// Every way the installed packages differ from the transaction's end state.
 pub fn mismatches(paths: &Paths, tx: &Transaction) -> Result<Vec<String>> {
     let installed = read_local_db(&paths.local_db())?;
+    let keyrings = crate::pacman::keyring_packages(&paths.local_db());
     let mut problems = Vec::new();
     for (name, version) in &tx.versions {
         match installed.get(name) {
             None => problems.push(format!("{name} {version} is not installed")),
+            Some(pkg)
+                if keyrings.contains(name)
+                    && crate::pacman::vercmp(&pkg.version, version) == std::cmp::Ordering::Greater => {}
             Some(pkg) if pkg.version != *version => {
                 problems.push(format!("{name} is {} instead of {version}", pkg.version))
             }

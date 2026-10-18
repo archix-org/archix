@@ -410,14 +410,16 @@ fn declared(config: &Value) -> Result<Declared> {
     Ok(declared)
 }
 
-/// Changes that turn `installed` into `packages`; removals skip ignored packages and are only warned about in warn mode.
+/// Changes that turn `installed` into `packages`; removals skip ignored packages and are only warned about in warn mode, and keyrings never go back, which the third list names.
 fn select_changes(
     packages: &BTreeMap<String, Locked>,
     installed: &BTreeMap<String, LocalPkg>,
     remove_undeclared: bool,
     ignored: &BTreeSet<String>,
-) -> (Vec<Change>, Vec<String>) {
+) -> (Vec<Change>, Vec<String>, Vec<String>) {
+    let keyrings = archix::pacman::keyring_packages(&Paths::system().local_db());
     let mut warned = Vec::new();
+    let mut kept = Vec::new();
     let changes = plan(packages, installed)
         .into_iter()
         .filter(|change| match change {
@@ -426,10 +428,16 @@ fn select_changes(
                 warned.push(name.clone());
                 false
             }
+            Change::Downgrade { name, from, to } if keyrings.contains(name) => {
+                kept.push(format!(
+                    "keeping {name} {from} rather than going back to {to}: an older keyring trusts keys revoked since"
+                ));
+                false
+            }
             _ => true,
         })
         .collect();
-    (changes, warned)
+    (changes, warned, kept)
 }
 
 fn print_warned(warned: &[String]) {
