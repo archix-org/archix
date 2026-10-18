@@ -1,6 +1,7 @@
 pub mod apply;
 pub mod blobs;
 pub mod boot;
+pub mod btrfs;
 pub mod firewall;
 pub mod hooks;
 pub mod merge;

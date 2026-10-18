@@ -404,3 +404,52 @@ fn a_symlink_over_a_mounted_file_is_left_for_later() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (image, mount) = (dir.path().join("btrfs.img"), dir.path().join("mnt"));
+    fs::create_dir_all(&mount).unwrap();
+    let sh = |command: &str| {
+        let ok = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "{command}");
+    };
+    sh(&format!("truncate -s 1G {0} && mkfs.btrfs -q {0}", image.display()));
+    // commit=300 keeps the kernel from reclaiming the emptied chunks by itself before the check.
+    sh(&format!(
+        "mount -o loop,commit=300 {} {}",
+        image.display(),
+        mount.display()
+    ));
+    let free = archix::conflicts::free_space(&mount).unwrap();
+    sh(&format!(
+        "fallocate -l {} {}/fill && rm {1}/fill",
+        free - (16 << 20),
+        mount.display()
+    ));
+    let stuck = archix::system::btrfs::unallocated(&mount).unwrap();
+    println!(
+        "unallocated after filling and emptying the data chunks: {} MiB",
+        stuck >> 20
+    );
+    assert!(
+        stuck < 64 << 20,
+        "the data chunks should still hold the device: {} MiB unallocated",
+        stuck >> 20
+    );
+    archix::system::btrfs::ensure_metadata_room(&mount).unwrap();
+    let after = archix::system::btrfs::unallocated(&mount).unwrap();
+    println!("unallocated after ensure_metadata_room: {} MiB", after >> 20);
+    sh(&format!("umount {}", mount.display()));
+    assert!(
+        after > 512 << 20,
+        "the empty data chunks should be back in the pool: {} MiB unallocated",
+        after >> 20
+    );
+}

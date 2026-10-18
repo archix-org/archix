@@ -59,6 +59,9 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
         set_aside_leftovers(&paths, &journal.transaction.install, &journal)?;
     }
     let kind = kind_name(journal.kind);
+    if !matches!(mode, RecoverMode::Abandon) {
+        archix::system::btrfs::ensure_metadata_room(std::path::Path::new("/"))?;
+    }
     match mode {
         RecoverMode::Continue => {
             let install_interrupted = !journal.done.contains(&Step::Install);

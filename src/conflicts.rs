@@ -243,6 +243,7 @@ fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTr
         }
     }
     for (mount, add) in adds {
+        crate::system::btrfs::ensure_metadata_room(&mount)?;
         let frees = if crate::capture::is_btrfs(&mount) {
             0
         } else {
