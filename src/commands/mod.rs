@@ -20,7 +20,7 @@ use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
 use archix::flatpak;
 use archix::journal::{Journal, Kind, Transaction};
-use archix::lock::{ARCHIVE_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
+use archix::lock::{ARCHIVE_REPO, HostLock, Locked};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
@@ -685,10 +685,9 @@ fn settle_flatpak(
         );
     }
     if save && lock.flatpak != before {
-        let path = target.config_dir.join(LOCK_FILE);
-        let mut lockfile = Lockfile::load(&path)?;
+        let mut lockfile = lock::load_lockfile(target)?;
         lockfile.hosts.insert(target.host.to_string(), lock.clone());
-        lockfile.save(&path)?;
+        lock::store_lockfile(target, &lockfile)?;
     }
     Ok(unresolved)
 }

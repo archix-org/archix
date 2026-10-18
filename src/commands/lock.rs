@@ -31,7 +31,7 @@ pub(super) fn current_lock(
     noconfirm: bool,
     for_this_cpu: bool,
 ) -> Result<(HostLock, bool)> {
-    let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+    let mut lockfile = load_lockfile(target)?;
     let old = lockfile.hosts.get(target.host).cloned();
     let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
     let updating = !matches!(snapshot, Snapshot::Locked);
@@ -151,6 +151,24 @@ pub(super) fn defer_write(path: &Path, text: &str) -> bool {
     })
 }
 
+/// archix.lock as this switch sees it: what it deferred, else what's on disk.
+pub(super) fn load_lockfile(target: &Target) -> Result<Lockfile> {
+    let path = target.config_dir.join(LOCK_FILE);
+    match deferred_text(&path) {
+        Some(text) => Lockfile::parse(&text, &path),
+        None => Lockfile::load(&path),
+    }
+}
+
+/// Writes archix.lock, or inside a switch defers it to the switch's commit.
+pub(super) fn store_lockfile(target: &Target, lockfile: &Lockfile) -> Result<()> {
+    let path = target.config_dir.join(LOCK_FILE);
+    if !defer_write(&path, &lockfile.render()) {
+        lockfile.save(&path)?;
+    }
+    Ok(())
+}
+
 /// The deferred text for `path`, which is what the config holds as far as this switch is concerned.
 pub(super) fn deferred_text(path: &Path) -> Option<String> {
     DEFERRED.with(|deferred| {
@@ -194,7 +212,7 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
     refuse_if_unfinished(&Paths::system())?;
     let declared = declared(target.config)?;
     let refresh = !matches!(snapshot, Snapshot::Locked);
-    let before = Lockfile::load(&target.config_dir.join(LOCK_FILE))?
+    let before = load_lockfile(target)?
         .hosts
         .get(target.host)
         .map(|lock| lock.flatpak.clone())
@@ -315,7 +333,7 @@ pub fn status(target: &Target) -> Result<()> {
             count(outside.len(), "transaction", "transactions")
         );
     }
-    let lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+    let lockfile = load_lockfile(target)?;
     let Some(lock) = lockfile.hosts.get(target.host) else {
         println!("{LOCK_FILE} has no entry for {}; run `archix lock`", target.host);
         return Ok(());

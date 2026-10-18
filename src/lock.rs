@@ -132,7 +132,12 @@ impl Lockfile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lockfile::default()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        let on_disk: OnDisk = toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        Lockfile::parse(&text, path)
+    }
+
+    /// A lock from its text; `path` names it in errors.
+    pub fn parse(text: &str, path: &Path) -> Result<Lockfile> {
+        let on_disk: OnDisk = toml::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
         if on_disk.version != LOCK_VERSION {
             bail!(
                 "{} has lock format version {}, but this archix reads version {LOCK_VERSION}",

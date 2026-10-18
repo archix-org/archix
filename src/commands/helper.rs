@@ -15,13 +15,13 @@ use archix::aur::install::Installer;
 use archix::aur::review::review;
 use archix::installed::{self, FILE};
 use archix::journal::{Journal, Kind, Transaction};
-use archix::lock::{AUR_REPO, LOCK_FILE, Lockfile};
+use archix::lock::AUR_REPO;
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
 use archix::resolve::{resolve, snapshot_conf};
 
-use super::lock::{current_lock, save_lock};
+use super::lock::{current_lock, load_lockfile, save_lock};
 use super::{
     Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, recipes, refuse_if_unfinished,
     require_root, transaction_for, user_cache,
@@ -297,10 +297,7 @@ fn selection(answer: &str, count: usize) -> Result<Vec<usize>> {
 fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
     let declared = declared(target.config)?;
     let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
-    let date = match Lockfile::load(&target.config_dir.join(LOCK_FILE))?
-        .hosts
-        .get(target.host)
-    {
+    let date = match load_lockfile(target)?.hosts.get(target.host) {
         Some(lock) => lock.date,
         None => archive.latest()?,
     };
@@ -399,7 +396,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
             &declared.repos,
             Some(&aur),
         )?;
-        let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+        let mut lockfile = load_lockfile(target)?;
         save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
         drop(aur);
         lock = adopted;
@@ -419,7 +416,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
         fresh.keep_pins(&lock);
         if fresh != lock {
             review(&git, Some(&lock), &fresh, declared.aur_review && !noconfirm, &confirm)?;
-            let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+            let mut lockfile = load_lockfile(target)?;
             save_lock(target, &mut lockfile, Some(&lock), &fresh)?;
         }
     }

@@ -23,7 +23,7 @@ use archix::gc;
 use archix::generations::{Generation, Settings, Store, config_commit, now};
 use archix::integration;
 use archix::journal::{Journal, Kind, Step};
-use archix::lock::{AUR_REPO, HostLock, LOCK_FILE, Locked, Lockfile};
+use archix::lock::{AUR_REPO, HostLock, Locked};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
 use archix::plan::{Change, rebuilds, swapped_builds};
@@ -33,7 +33,7 @@ use archix::system::boot::BootPlan;
 use archix::system::running::Running;
 use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 
-use super::lock::{current_lock, save_lock};
+use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
     confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, print_warned, recipes, refuse_if_unfinished,
@@ -124,7 +124,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
                 &declared.repos,
                 Some(&aur),
             )?;
-            let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+            let mut lockfile = load_lockfile(target)?;
             save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
             drop(aur);
             lock = adopted;
@@ -376,10 +376,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "recorded the versions these packages gave themselves while building: {}",
             versioned.join(", ")
         );
-        let path = target.config_dir.join(LOCK_FILE);
-        let mut lockfile = Lockfile::load(&path)?;
+        let mut lockfile = load_lockfile(target)?;
         lockfile.hosts.insert(target.host.to_string(), lock.clone());
-        lockfile.save(&path)?;
+        store_lockfile(target, &lockfile)?;
     }
     for (name, pkg) in &lock.packages {
         if pkg.is_built() && !built.contains_key(name) {
@@ -665,7 +664,7 @@ fn build_aur(
             Ok(built) => {
                 // A fallback version only reaches archix.lock once it has actually built.
                 if !moved.is_empty() {
-                    let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+                    let mut lockfile = load_lockfile(target)?;
                     save_lock(target, &mut lockfile, Some(&before_fallbacks), lock)?;
                 }
                 return Ok(built);
@@ -833,7 +832,7 @@ fn third_party_fallback(
     if replaced {
         let git = aur_git(declared)?;
         review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
-        let mut lockfile = Lockfile::load(&target.config_dir.join(LOCK_FILE))?;
+        let mut lockfile = load_lockfile(target)?;
         save_lock(target, &mut lockfile, Some(&old), lock)?;
     }
     Ok(replaced)
