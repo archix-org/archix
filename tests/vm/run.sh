@@ -3,17 +3,19 @@
 set -euo pipefail
 suite=${1:-boot}
 root=$(cd "$(dirname "$0")/../.." && pwd)
+# One build volume per checkout, as in tests/arch/run.sh.
+target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-vm.XXXXXX)}
 echo "work dir: $work"
 docker build -t archix-arch-test "$root/tests/arch" >/tmp/archix-docker-build.log 2>&1 || { cat /tmp/archix-docker-build.log; exit 1; }
-mounts=(-v "$root":/src:ro -v archix-target:/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}")
+mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}")
 docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
   cargo build --locked --release && cp /target/release/archix /work/archix
   cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
 if [ "$suite" = upgrade ]; then
   rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old"
   git -C "$root" archive "${ARCHIX_OLD:-0.1.0-dogfood}" | tar -x -C "$work/old-src"
-  docker run --rm -v "$work":/work -v archix-target:/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR=/target/old archix-arch-test bash -c 'set -e
+  docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR=/target/old archix-arch-test bash -c 'set -e
     cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/old/x86_64-unknown-linux-musl/release/archix /work/old/archix-static'
 fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
