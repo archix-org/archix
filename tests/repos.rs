@@ -120,6 +120,8 @@ fn forget(name: &str) {
 #[ignore]
 fn a_package_signed_by_a_key_an_incoming_keyring_adds_installs_in_the_same_switch() {
     let _system = lock_system();
+    // Arch's container image ships pacman's keyring without the master key populating signs with; installed systems have one.
+    run(Command::new("pacman-key").arg("--init"));
     let signer = TempDir::new().unwrap();
     let gpg = |args: &[&str]| {
         Command::new("gpg")
