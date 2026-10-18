@@ -648,7 +648,10 @@ fn bare_terms_search_and_install_the_picks_like_yay() {
     let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
 
     let out = setup.answering("\n", &["tree"]);
-    assert!(out.contains("==> Install which? Numbers (1 3), ranges (2-5), ^ to leave one out:"), "{out}");
+    assert!(
+        out.contains("==> Install which? Numbers (1 3), ranges (2-5), ^ to leave one out:"),
+        "{out}"
+    );
     assert!(installed("tree").is_none(), "an empty answer installs nothing");
 
     let out = setup.answering("1\n", &["tree", "--noconfirm"]);
