@@ -207,6 +207,34 @@ fn the_lock_and_status_say_which_aur_packages_float() {
 
 #[test]
 #[ignore]
+fn a_new_aur_maintainer_is_named_when_the_lock_moves() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    let release = |version, maintainer| TestPkg {
+        maintainer,
+        ..TestPkg::new("archix-test-handover", version)
+    };
+    aur.publish(release("1.0", Some("alice")));
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&["archix-test-handover"], &body);
+    aur.publish(release("1.1", Some("mallory")));
+    let out = setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        out.contains(
+            "archix-test-handover has a new AUR maintainer, alice -> mallory: read its recipe before you switch"
+        ),
+        "{out}"
+    );
+    aur.publish(release("1.2", None));
+    let out = setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        out.contains("archix-test-handover has a new AUR maintainer, mallory -> nobody (orphaned): read its recipe before you switch"),
+        "{out}"
+    );
+}
+
+#[test]
+#[ignore]
 fn skip_check_builds_a_recipe_whose_tests_fail() {
     let _system = lock_system();
     let mut aur = LocalAur::new();

@@ -221,6 +221,8 @@ pub struct TestPkg<'a> {
     pub provides: &'a [&'a str],
     pub build: &'a str,
     pub package: &'a str,
+    /// None for an orphaned package.
+    pub maintainer: Option<&'a str>,
 }
 
 impl<'a> TestPkg<'a> {
@@ -233,6 +235,7 @@ impl<'a> TestPkg<'a> {
             provides: &[],
             build: "true",
             package: "",
+            maintainer: Some("archix-tests"),
         }
     }
 }
@@ -240,7 +243,7 @@ impl<'a> TestPkg<'a> {
 /// An AUR served from local bare git repos plus a metadata dump, so AUR tests don't depend on aur.archlinux.org.
 pub struct LocalAur {
     dir: TempDir,
-    published: Vec<(String, String, Vec<String>)>,
+    published: Vec<(String, String, Vec<String>, Option<String>)>,
 }
 
 impl LocalAur {
@@ -313,17 +316,18 @@ impl LocalAur {
         );
         LocalAur::git(&work, &["push", "--quiet", "origin", "master"]);
 
-        self.published.retain(|(name, _, _)| name != pkg.name);
+        self.published.retain(|(name, _, _, _)| name != pkg.name);
         self.published.push((
             pkg.name.to_string(),
             format!("{}-1", pkg.version),
             pkg.provides.iter().map(|p| p.to_string()).collect(),
+            pkg.maintainer.map(str::to_string),
         ));
         let entries: Vec<serde_json::Value> = self
             .published
             .iter()
-            .map(|(name, version, provides)| {
-                serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Provides": provides, "Popularity": 0.0 })
+            .map(|(name, version, provides, maintainer)| {
+                serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Provides": provides, "Popularity": 0.0, "Maintainer": maintainer })
             })
             .collect();
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
