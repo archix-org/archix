@@ -372,6 +372,11 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             if !name.ends_with(".conf") {
                 bail!("boot.extra_entries: {name:?} must end in .conf, as systemd-boot reads only those");
             }
+            if name.starts_with("archix-") {
+                bail!(
+                    "boot.extra_entries: {name:?} starts with archix-, which archix's own generation entries use; pick another name"
+                );
+            }
             b.text(&format!("{esp}/loader/entries/{}", unit_name(name)?), &lines(text));
         }
     }
@@ -714,5 +719,17 @@ mod tests {
         let live_text =
             serde_json::json!({ "home": { "user": "u", "files": { ".x": { "text": "x", "live": true } } } });
         assert!(render(&config(live_text), dir.path()).is_err());
+        for (name, why) in [
+            ("archix-5.conf", "starts with archix-"),
+            ("memtest", "must end in .conf"),
+        ] {
+            let boot =
+                serde_json::json!({ "boot": { "loader": "systemd-boot", "extra_entries": { name: "title x" } } });
+            let error = render(&config(boot), dir.path())
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(error.contains(why), "{name}: {error}");
+        }
     }
 }

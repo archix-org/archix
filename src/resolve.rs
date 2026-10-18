@@ -400,7 +400,7 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>, ne
                         None => format!("`{dep}`"),
                     };
                     bail!(
-                        "{what} isn't in the {} snapshot; the official repos have it from the {since} snapshot on, so it isn't taken from the AUR. Run `archix update` to lock a newer snapshot; nothing was changed",
+                        "{what} isn't in the {} snapshot, but the newest one ({since}) has it in the official repos, so it isn't taken from the AUR. Run `archix update` to lock a newer snapshot; nothing was changed",
                         newer.date
                     );
                 }
