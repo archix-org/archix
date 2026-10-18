@@ -82,9 +82,16 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     report.bytes += blob_bytes;
 
     let dates: BTreeSet<String> = kept_generations.iter().map(|g| g.date.to_string()).collect();
+    // `archix lock` doesn't take archix's lock, so one resolving right now may be reading a snapshot no generation uses yet.
+    let fresh = |entry: &fs::DirEntry| {
+        entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(86_400))
+    };
     if let Ok(entries) = fs::read_dir(snapshot_cache.join("snapshots")) {
         for entry in entries.flatten() {
-            if !dates.contains(entry.file_name().to_string_lossy().as_ref()) {
+            if !dates.contains(entry.file_name().to_string_lossy().as_ref()) && !fresh(&entry) {
                 fs::remove_dir_all(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
                 report.snapshots += 1;
             }
