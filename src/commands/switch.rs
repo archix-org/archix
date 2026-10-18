@@ -1222,6 +1222,12 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         return Ok(());
     }
     let store = Store::new(&paths);
+    if store.get(booted).is_err() {
+        println!(
+            "archix: the boot entry names generation {booted}, which archix doesn't have; not rolling anything back"
+        );
+        return Ok(());
+    }
     match store.current()? {
         Some(current) if current == booted => Ok(()),
         Some(current) => {
