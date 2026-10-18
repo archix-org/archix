@@ -14,6 +14,14 @@ pub fn commits(lock: Option<&HostLock>) -> BTreeMap<String, String> {
         .collect()
 }
 
+fn orphan_or(maintainer: &str) -> &str {
+    if maintainer.is_empty() {
+        "nobody (orphaned)"
+    } else {
+        maintainer
+    }
+}
+
 /// Shows every AUR build recipe entering the lock (a diff for changed bases, every file for new ones) and asks to trust it.
 pub fn review(
     git: &AurGit,
@@ -23,6 +31,17 @@ pub fn review(
     confirm: &dyn Fn(&str) -> Result<bool>,
 ) -> Result<()> {
     let before = commits(old);
+    for (name, pkg) in &new.packages {
+        let previous = old
+            .and_then(|old| old.packages.get(name))
+            .and_then(|pkg| pkg.maintainer.as_deref());
+        if let (Some(was), Some(now)) = (previous, pkg.maintainer.as_deref())
+            && was != now
+        {
+            let (was, now) = (orphan_or(was), orphan_or(now));
+            println!("==> {name} has a new AUR maintainer, {was} -> {now}: read its recipe before you switch");
+        }
+    }
     for (base, commit) in commits(Some(new)) {
         let short = &commit[..commit.len().min(12)];
         let shown = match before.get(&base) {

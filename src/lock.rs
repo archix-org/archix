@@ -61,6 +61,9 @@ pub struct Locked {
     /// Needed only to build other AUR packages, so it's built but never installed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_only: bool,
+    /// The AUR maintainer when locked, empty for an orphaned package; None in locks from before archix recorded it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintainer: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -181,6 +184,9 @@ impl Lockfile {
                 if let (Some(base), Some(commit)) = (&pkg.base, &pkg.commit) {
                     fields.push(format!("base = {}", string(base)));
                     fields.push(format!("commit = {}", string(commit)));
+                }
+                if let Some(maintainer) = &pkg.maintainer {
+                    fields.push(format!("maintainer = {}", string(maintainer)));
                 }
                 fields.push(format!("explicit = {}", pkg.explicit));
                 if pkg.build_only {

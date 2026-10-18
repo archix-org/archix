@@ -31,6 +31,9 @@ pub struct Entry {
     pub popularity: f64,
     #[serde(default)]
     pub out_of_date: Option<u64>,
+    /// None for an orphaned package.
+    #[serde(default)]
+    pub maintainer: Option<String>,
 }
 
 /// Every AUR package from the AUR's metadata dump, so names resolve without asking the AUR each time.
@@ -201,6 +204,7 @@ mod tests {
             num_votes: 0,
             popularity,
             out_of_date: None,
+            maintainer: None,
         }
     }
 

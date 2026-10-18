@@ -523,11 +523,19 @@ fn aur_closure(
     {
         let (commit, info) = &bases[&base];
         let pkg = info.package(&name).expect("checked while walking");
+        let local = aur.recipes.is_some_and(|r| r.is_local(&base));
+        let maintainer = match local {
+            true => None,
+            false => aur
+                .index()?
+                .get(&name)
+                .map(|entry| entry.maintainer.clone().unwrap_or_default()),
+        };
         closure.packages.insert(
             name,
             Locked {
                 version: info.version.clone(),
-                repo: if aur.recipes.is_some_and(|r| r.is_local(&base)) {
+                repo: if local {
                     LOCAL_REPO.to_string()
                 } else {
                     AUR_REPO.to_string()
@@ -536,6 +544,7 @@ fn aur_closure(
                 base: Some(base.clone()),
                 commit: Some(commit.clone()),
                 build_only,
+                maintainer,
                 ..Default::default()
             },
         );
