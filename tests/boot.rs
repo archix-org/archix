@@ -170,15 +170,13 @@ fn adding_packages_one_at_a_time_reuses_one_uki() {
         1,
         "one UKI for an unchanged kernel and initramfs:\n{listing}"
     );
-    let menu = Command::new("bootctl")
-        .args(["--esp-path", ESP, "--no-variables", "list"])
-        .output()
-        .unwrap();
-    let menu = String::from_utf8_lossy(&menu.stdout).into_owned();
-    println!("bootctl list:\n{menu}");
+    // bootctl refuses an ESP that isn't a FAT partition, as this one isn't; the VM boot suite has systemd-boot read real entries.
     for generation in first..=current() {
+        let entry = format!("archix-{generation}.conf");
+        let menu = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap_or_default();
+        println!("{entry}:\n{menu}");
         assert!(
-            menu.contains(&format!("generation {generation})")),
+            menu.contains(&format!("generation {generation})")) && Path::new(&uki(&entry)).is_file(),
             "generation {generation} lost its own boot menu entry:\n{menu}"
         );
     }
