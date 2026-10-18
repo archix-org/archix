@@ -496,6 +496,51 @@ mod tests {
     }
 
     #[test]
+    fn rescuing_a_kernel_writes_its_module_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("usr/lib")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", root.join("lib")).unwrap();
+        let paths = Paths::under(&root);
+        fs::create_dir_all(paths.packages()).unwrap();
+        let file = paths.packages().join("linux-test-6.0.0-1-x86_64.pkg.tar.zst");
+        let mut builder = tar::Builder::new(
+            zstd::Encoder::new(File::create(&file).unwrap(), 3)
+                .unwrap()
+                .auto_finish(),
+        );
+        for (name, data) in [
+            (
+                ".PKGINFO",
+                &b"pkgname = linux-test\npkgver = 6.0.0-1\narch = x86_64\n"[..],
+            ),
+            (".MTREE", b"mtree bytes"),
+            ("usr/lib/modules/6.0.0-test/vmlinuz", b"kernel"),
+            ("usr/lib/modules/6.0.0-test/kernel/foo.ko", b"module"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, data).unwrap();
+        }
+        builder.into_inner().unwrap();
+        let generation: Generation = serde_json::from_value(serde_json::json!({
+            "number": 1, "created": 0, "host": "box", "date": "2026-10-10",
+            "packages": { "linux-test": { "version": "6.0.0-1", "repo": "core", "file": "linux-test-6.0.0-1-x86_64.pkg.tar.zst" } },
+            "settings": { "remove_undeclared": true, "ignored": [], "keep": 10, "keep_days": 30 },
+            "config_commit": null, "config_dirty": false, "rescue": ["linux-test"],
+        }))
+        .unwrap();
+        let rescued = rescue(&root, &generation, &[]).unwrap();
+        assert_eq!(rescued.restored, ["linux-test 6.0.0-1"]);
+        assert!(
+            root.join("usr/lib/modules/6.0.0-test/modules.dep").is_file(),
+            "pacman's depmod hook doesn't run without pacman, so rescue has to"
+        );
+    }
+
+    #[test]
     fn rescue_covers_what_systemd_and_the_kernels_need() {
         let db = tempfile::tempdir().unwrap();
         let entry = |name: &str, desc: &str, files: &str| {
