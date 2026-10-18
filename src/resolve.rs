@@ -148,7 +148,8 @@ pub fn resolve(
             let names: Vec<&String> = not_in_repos.iter().collect();
             bail!("not in the configured repos for this snapshot: {names:?}");
         };
-        from_aur = aur_closure(aur, &conf, &db, &not_in_repos)?;
+        let newer = Newer::new(archive, cache, date, repos);
+        from_aur = aur_closure(aur, &conf, &db, &not_in_repos, &newer)?;
     }
 
     let mut sync = BTreeMap::new();
@@ -340,8 +341,44 @@ struct AurClosure {
 }
 
 /// Walks AUR packages and their dependencies; runtime ones get installed, make/check-only ones are just built.
-fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) -> Result<AurClosure> {
+/// A newer snapshot's official repos, which tell a name this snapshot lacks because it's too new from one only the AUR has.
+struct Newer<'a> {
+    archive: &'a Archive,
+    cache: &'a Path,
+    date: Date,
+    repos: Vec<Repo>,
+    snapshot: OnceCell<Option<(Date, PathBuf, PathBuf)>>,
+}
+
+impl<'a> Newer<'a> {
+    fn new(archive: &'a Archive, cache: &'a Path, date: Date, repos: &[Repo]) -> Self {
+        Newer {
+            archive,
+            cache,
+            date,
+            repos: repos.iter().filter(|r| r.custom.is_none()).cloned().collect(),
+            snapshot: OnceCell::new(),
+        }
+    }
+
+    /// The newest snapshot, if it's newer than the lock's and its official repos satisfy `dep`.
+    fn has(&self, dep: &str) -> Option<Date> {
+        let (date, conf, db) = self
+            .snapshot
+            .get_or_init(|| {
+                let latest = self.archive.latest().ok().filter(|latest| *latest > self.date)?;
+                let (conf, db) = snapshot_conf(self.archive, self.cache, latest, &self.repos).ok()?;
+                Some((latest, conf, db))
+            })
+            .as_ref()?;
+        let missing = unsatisfied(conf, db, &[dep.to_string()]).ok()?;
+        missing.is_empty().then_some(*date)
+    }
+}
+
+fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>, newer: &Newer) -> Result<AurClosure> {
     let mut queue: VecDeque<(String, bool)> = targets.iter().map(|t| (t.clone(), true)).collect();
+    let mut needed_by: HashMap<String, String> = HashMap::new();
     let mut bases: HashMap<String, (String, SrcInfo)> = HashMap::new();
     let mut runtime: BTreeMap<String, String> = BTreeMap::new();
     let mut build: BTreeMap<String, String> = BTreeMap::new();
@@ -357,6 +394,16 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
                 (pkg.name.clone(), recipe.id.clone())
             }
             None => {
+                if let Some(since) = newer.has(&dep) {
+                    let what = match needed_by.get(&dep) {
+                        Some(by) => format!("{by} needs `{dep}`, which"),
+                        None => format!("`{dep}`"),
+                    };
+                    bail!(
+                        "{what} isn't in the {} snapshot; the official repos have it from the {since} snapshot on, so it isn't taken from the AUR. Run `archix update` to lock a newer snapshot; nothing was changed",
+                        newer.date
+                    );
+                }
                 let Some(entry) = aur.index()?.satisfier(&dep) else {
                     bail!("`{dep}` is in none of the configured repos, pkgbuilds/ or the AUR");
                 };
@@ -392,11 +439,13 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>) ->
                     closure.repo_deps.insert(dep);
                 }
             } else {
+                needed_by.entry(dep.clone()).or_insert_with(|| name.clone());
                 queue.push_back((dep, needed_at_runtime));
             }
         }
         for dep in build_deps {
             if missing_from_repos.contains(&dep) {
+                needed_by.entry(dep.clone()).or_insert_with(|| name.clone());
                 queue.push_back((dep, false));
             }
         }
