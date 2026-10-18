@@ -185,7 +185,8 @@ fn the_lock_and_status_say_which_aur_packages_float() {
     aur.publish(TestPkg::new("archix-test-thing-git", "1.0.r3.gabc1234"));
     aur.publish(TestPkg::new("archix-test-steady", "1.0"));
     let body = format!("aur = {{ url = {:?} }}", aur.url());
-    let setup = Setup::new(&["archix-test-thing-git", "archix-test-steady"], &body);
+    let setup = Setup::new(&[], &body);
+    setup.set_body(&["archix-test-thing-git", "archix-test-steady"], &body);
     let locked = setup.ok(&["lock", "--noconfirm"]);
     assert!(
         locked.contains("+ archix-test-thing-git 1.0.r3.gabc1234-1 (builds from a VCS source, so it floats)"),
