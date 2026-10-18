@@ -314,11 +314,21 @@ const SPARE: u64 = 128 << 20;
 
 /// Refuses a transaction that adds `adds` bytes and frees `frees` when `root`'s filesystem can't hold the difference plus some spare.
 pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
-    let Some((free, total)) = space(root) else {
+    let Some((mut free, total)) = space(root) else {
         return Ok(());
     };
     // pacman keeps 5% of the filesystem as a cushion; a small ESP still takes a ucode update.
     let needed = adds.saturating_sub(frees) + SPARE.min(total / 20);
+    // btrfs hands back a deleted file's space only at its next commit, which can take two.
+    for _ in 0..2 {
+        if free >= needed {
+            break;
+        }
+        if let Ok(dir) = File::open(root) {
+            unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+        }
+        free = space(root).map_or(free, |(free, _)| free);
+    }
     if free < needed {
         let mib = |bytes: u64| bytes.div_ceil(1 << 20);
         bail!(

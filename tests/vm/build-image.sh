@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds /work/disk.img: GPT with an ESP and an ext4 root, Arch pacstrapped at the test snapshot, archix generation 1.
+# Builds /work/disk.img: GPT with an ESP and an ext4 root (FS=btrfs: btrfs with an @ subvolume, as CachyOS installs it), Arch pacstrapped at the test snapshot, archix generation 1.
 set -euo pipefail
 suite=${SUITE:-boot}
 archive=${ARCHIVE:-https://archive.archlinux.org}
@@ -8,6 +8,8 @@ dir=/vm date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sb
 if [ "$suite" = rollback ]; then
   dir=/vm/rollback date=2026-06-01 size=16G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 fi
+fs=${FS:-ext4}
+[ "$fs" = btrfs ] && packages+=(btrfs-progs)
 img=/work/disk.img
 rm -f "$img" /work/vars.fd
 truncate -s "$size" "$img"
@@ -24,8 +26,14 @@ esp=$(losetup --show -f -o "$esp_start" --sizelimit "$esp_size" "$img")
 root=$(losetup --show -f -o "$root_start" --sizelimit "$root_size" "$img")
 trap 'umount -R /mnt 2>/dev/null || true; losetup -d "$esp" "$root" 2>/dev/null || true' EXIT
 mkfs.fat -F 32 -n ESP "$esp" >/dev/null
-mkfs.ext4 -q -L archixroot "$root"
-mount "$root" /mnt
+if [ "$fs" = btrfs ]; then
+  mkfs.btrfs -q -L archixroot "$root"
+  mount "$root" /mnt && btrfs -q subvolume create /mnt/@ && umount /mnt
+  mount -o subvol=@ "$root" /mnt
+else
+  mkfs.ext4 -q -L archixroot "$root"
+  mount "$root" /mnt
+fi
 mkdir -p /mnt/boot
 mount "$esp" /mnt/boot
 
@@ -44,7 +52,8 @@ echo "UUID=$(blkid -s UUID -o value "$esp") /boot vfat defaults 0 2" >> /mnt/etc
 printf 'timeout 2\nconsole-mode keep\n' > /mnt/boot/loader/loader.conf
 
 mkdir -p /mnt/etc/archix
-sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|@ARCHIVE_URL@|$archive|" "$dir/config.lua" > /mnt/etc/archix/init.lua
+rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs='"btrfs-progs", '
+sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
