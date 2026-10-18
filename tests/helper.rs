@@ -137,6 +137,11 @@ fn installing_a_package_the_config_already_declares_adds_no_duplicate() {
     println!("{out}");
     println!("installed.lua: {:?}", installed_lua(&setup));
     assert!(
+        installed_lua(&setup).is_none(),
+        "nothing to add, so no installed.lua: {:?}",
+        installed_lua(&setup)
+    );
+    assert!(
         installed_lua(&setup).is_none_or(|text| !text.contains("\"tree\"")),
         "tree is declared in init.lua, so installed.lua mustn't list it again: {:?}",
         installed_lua(&setup)

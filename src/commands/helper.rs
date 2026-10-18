@@ -86,6 +86,9 @@ pub fn edit_installed(
         packages.retain(|p| p != name);
     }
     packages.sort();
+    if previous.is_none() && packages.is_empty() {
+        return Ok(InstalledEdit { path: file, previous });
+    }
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     fs::write(&file, installed::render(&packages)).with_context(|| format!("writing {}", file.display()))?;
     Ok(InstalledEdit { path: file, previous })
