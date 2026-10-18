@@ -114,6 +114,18 @@ impl Index {
             })
     }
 
+    /// Whether `entry` itself, or something it provides, satisfies `dep`, version constraint included.
+    pub fn satisfies(entry: &Entry, dep: &str) -> bool {
+        let name = dep_name(dep);
+        let wanted = constraint(dep);
+        (entry.name == name && meets(Some(&entry.version), wanted))
+            || entry
+                .provides
+                .iter()
+                .filter(|provided| dep_name(provided) == name)
+                .any(|provided| meets(provided.split_once('=').map(|(_, v)| v), wanted))
+    }
+
     /// Packages whose name or description contains every term, most popular first.
     pub fn search(&self, terms: &[String]) -> Vec<&Entry> {
         let terms: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();

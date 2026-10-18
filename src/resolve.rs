@@ -143,19 +143,23 @@ pub fn resolve(
         .cloned()
         .collect();
     let mut from_aur = AurClosure::default();
-    if !not_in_repos.is_empty() {
-        let Some(aur) = aur else {
-            let names: Vec<&String> = not_in_repos.iter().collect();
-            bail!("not in the configured repos for this snapshot: {names:?}");
-        };
-        let newer = Newer::new(archive, cache, date, repos);
-        from_aur = aur_closure(aur, &conf, &db, &not_in_repos, &newer)?;
+    if !not_in_repos.is_empty() && aur.is_none() {
+        let names: Vec<&String> = not_in_repos.iter().collect();
+        bail!("not in the configured repos for this snapshot: {names:?}");
     }
-
     let mut sync = BTreeMap::new();
     for repo in repos {
         let path = db.join("sync").join(format!("{}.db", repo.name));
         sync.insert(repo.name.clone(), read_sync_db(&path)?);
+    }
+    if let Some(aur) = aur.filter(|_| !not_in_repos.is_empty()) {
+        let newer = Newer::new(archive, cache, date, repos);
+        let in_repos: BTreeSet<&str> = sync
+            .values()
+            .flat_map(|packages| packages.keys())
+            .map(String::as_str)
+            .collect();
+        from_aur = aur_closure(aur, &conf, &db, &not_in_repos, &newer, &in_repos)?;
     }
     let mut targets: Vec<String> = official.clone();
     targets.extend(from_aur.repo_deps.iter().map(|dep| provider(&sync, dep, prefer)));
@@ -341,13 +345,16 @@ struct AurClosure {
 }
 
 /// Walks AUR packages and their dependencies; runtime ones get installed, make/check-only ones are just built.
+/// A snapshot's date with its pacman config and db directory.
+type Snapshot = (Date, PathBuf, PathBuf);
+
 /// A newer snapshot's official repos, which tell a name this snapshot lacks because it's too new from one only the AUR has.
 struct Newer<'a> {
     archive: &'a Archive,
     cache: &'a Path,
     date: Date,
     repos: Vec<Repo>,
-    snapshot: OnceCell<Option<(Date, PathBuf, PathBuf)>>,
+    snapshot: OnceCell<std::result::Result<Option<Snapshot>, String>>,
 }
 
 impl<'a> Newer<'a> {
@@ -361,22 +368,42 @@ impl<'a> Newer<'a> {
         }
     }
 
-    /// The newest snapshot, if it's newer than the lock's and its official repos satisfy `dep`.
-    fn has(&self, dep: &str) -> Option<Date> {
-        let (date, conf, db) = self
-            .snapshot
-            .get_or_init(|| {
-                let latest = self.archive.latest().ok().filter(|latest| *latest > self.date)?;
-                let (conf, db) = snapshot_conf(self.archive, self.cache, latest, &self.repos).ok()?;
-                Some((latest, conf, db))
-            })
-            .as_ref()?;
-        let missing = unsatisfied(conf, db, &[dep.to_string()]).ok()?;
-        missing.is_empty().then_some(*date)
+    /// The newest snapshot, if it's newer than the lock's and its official repos satisfy `dep`; an error when that can't be checked, so nothing comes from the AUR unchecked.
+    fn has(&self, dep: &str) -> Result<Option<Date>> {
+        let snapshot = self.snapshot.get_or_init(|| {
+            let latest = self.archive.latest().map_err(|e| format!("{e:#}"))?;
+            if latest <= self.date {
+                return Ok(None);
+            }
+            let (conf, db) =
+                snapshot_conf(self.archive, self.cache, latest, &self.repos).map_err(|e| format!("{e:#}"))?;
+            Ok(Some((latest, conf, db)))
+        });
+        let unverified = |why: &str| {
+            anyhow::anyhow!(
+                "couldn't verify against the archive that `{dep}` isn't simply too new for the {} snapshot ({why}), so it isn't taken from the AUR; nothing was changed",
+                self.date
+            )
+        };
+        let (date, conf, db) = match snapshot {
+            Ok(Some(found)) => found,
+            Ok(None) => return Ok(None),
+            Err(why) => return Err(unverified(why)),
+        };
+        let missing = unsatisfied(conf, db, &[dep.to_string()]).map_err(|e| unverified(&format!("{e:#}")))?;
+        Ok(missing.is_empty().then_some(*date))
     }
 }
 
-fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>, newer: &Newer) -> Result<AurClosure> {
+/// `in_repos` is every package name the snapshot's configured repos ship, which an AUR package may only stand in for when declared.
+fn aur_closure(
+    aur: &Aur,
+    conf: &Path,
+    db: &Path,
+    targets: &BTreeSet<String>,
+    newer: &Newer,
+    in_repos: &BTreeSet<&str>,
+) -> Result<AurClosure> {
     let mut queue: VecDeque<(String, bool)> = targets.iter().map(|t| (t.clone(), true)).collect();
     let mut needed_by: HashMap<String, String> = HashMap::new();
     let mut bases: HashMap<String, (String, SrcInfo)> = HashMap::new();
@@ -394,7 +421,7 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>, ne
                 (pkg.name.clone(), recipe.id.clone())
             }
             None => {
-                if let Some(since) = newer.has(&dep) {
+                if let Some(since) = newer.has(&dep)? {
                     let what = match needed_by.get(&dep) {
                         Some(by) => format!("{by} needs `{dep}`, which"),
                         None => format!("`{dep}`"),
@@ -404,9 +431,26 @@ fn aur_closure(aur: &Aur, conf: &Path, db: &Path, targets: &BTreeSet<String>, ne
                         newer.date
                     );
                 }
-                let Some(entry) = aur.index()?.satisfier(&dep) else {
+                let index = aur.index()?;
+                let declared = targets
+                    .iter()
+                    .filter_map(|target| index.get(target))
+                    .find(|entry| Index::satisfies(entry, &dep));
+                let Some(entry) = declared.or_else(|| index.satisfier(&dep)) else {
                     bail!("`{dep}` is in none of the configured repos, pkgbuilds/ or the AUR");
                 };
+                let wanted = srcinfo::dep_name(&dep);
+                if entry.name != wanted && in_repos.contains(wanted) && !targets.contains(&entry.name) {
+                    let what = match needed_by.get(&dep) {
+                        Some(by) => format!("{by} needs `{dep}`, which the configured repos' {wanted} can't satisfy;"),
+                        None => format!("`{dep}`:"),
+                    };
+                    bail!(
+                        "{what} only {}, an AUR package standing in for {wanted}, would, and archix doesn't swap a repo package for an AUR one unasked; nothing was changed. Declare {} in packages if that's what you want",
+                        entry.name,
+                        entry.name
+                    );
+                }
                 (entry.name.clone(), entry.package_base.clone())
             }
         };
