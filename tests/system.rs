@@ -420,13 +420,18 @@ fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
             .success();
         assert!(ok, "{command}");
     };
-    sh(&format!("truncate -s 1G {0} && mkfs.btrfs -q {0}", image.display()));
+    // Several data chunks, as on a real disk: btrfs never gives up the only chunk of a type.
+    sh(&format!("truncate -s 6G {0} && mkfs.btrfs -q {0}", image.display()));
     // commit=300 keeps the kernel from reclaiming the emptied chunks by itself before the check.
     sh(&format!(
         "mount -o loop,commit=300 {} {}",
         image.display(),
         mount.display()
     ));
+    // Some data to keep, as any root has; with nothing at all, btrfs refuses to balance away its last data chunk.
+    for i in 0..300 {
+        fs::write(mount.join(format!("file{i}")), vec![7u8; 4096]).unwrap();
+    }
     let free = archix::conflicts::free_space(&mount).unwrap();
     sh(&format!(
         "fallocate -l {} {}/fill && rm {1}/fill",
@@ -448,7 +453,7 @@ fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
     println!("unallocated after ensure_metadata_room: {} MiB", after >> 20);
     sh(&format!("umount {}", mount.display()));
     assert!(
-        after > 512 << 20,
+        after > 2 << 30,
         "the empty data chunks should be back in the pool: {} MiB unallocated",
         after >> 20
     );
