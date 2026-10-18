@@ -417,11 +417,15 @@ fn write_and_lock(
     Ok(())
 }
 
-/// The kernel package boot entries are built for.
-fn boot_kernel(local: &BTreeMap<String, LocalPkg>, _running: Option<&str>, _installed: &[String]) -> String {
-    ["linux", "linux-lts", "linux-zen", "linux-hardened"]
+/// The kernel package boot entries are built for: the running kernel's when a package owns it, as linux-cachyos does on CachyOS, else an installed kernel package.
+fn boot_kernel(local: &BTreeMap<String, LocalPkg>, running: Option<&str>, installed: &[String]) -> String {
+    let running = running.map(str::trim).filter(|base| local.contains_key(*base));
+    let preferred = ["linux", "linux-lts", "linux-zen", "linux-hardened"]
         .into_iter()
-        .find(|kernel| local.contains_key(*kernel))
+        .find(|kernel| installed.iter().any(|base| base == kernel));
+    running
+        .or(preferred)
+        .or(installed.first().map(String::as_str))
         .unwrap_or("linux")
         .to_string()
 }
