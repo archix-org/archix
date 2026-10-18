@@ -40,6 +40,7 @@ needs_newer_glibc() {
 }
 # Files pacman owns that are missing from disk.
 missing_files() { pacman -Qk 2>&1 | grep -c 'No such file or directory'; }
+# Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
 cut_power() { echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger; for _ in 1 2 3 4 5 6 7 8 9 10; do nap; done; }
 # Bash builtins only from here: mid-update, glibc itself may be half-replaced and every external command fail.
@@ -84,9 +85,9 @@ case $stage in
 
     ax update --to 2026-10-10 --noconfirm > /dev/console 2>&1 || fail "archix update --to 2026-10-10"
     fill_disk $((20 * 1024 * 1024))
-    ax switch --noconfirm > "$state/full.log" 2>&1 && fail "a switch with 20 MB free should fail"
-    tail -5 "$state/full.log" > /dev/console
-    grep -q "nothing was changed" "$state/full.log" || fail "the full-disk refusal should say nothing was changed"
+    ax switch --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "a switch with 20 MB free should fail"
+    tail -5 /run/archix-vmtest-full.log > /dev/console
+    grep -q "nothing was changed" /run/archix-vmtest-full.log || fail "the full-disk refusal should say nothing was changed"
     rm -f /var/tmp/archix-fill
     [ "$(current)" = "$(recall old)" ] || fail "the failed switch on a full disk changed the current generation"
     journal_open && fail "a switch that can't fit on the disk should fail before changing anything, but it left a journal"
@@ -182,8 +183,8 @@ case $stage in
     say "PASS: a rollback killed halfway, leaving pacman unable to start, is undone cleanly by recover --rollback"
 
     fill_disk $((30 * 1024 * 1024))
-    ax rollback "$(recall new)" --noconfirm > "$state/full.log" 2>&1 && fail "a rollback with 30 MB free should fail"
-    tail -5 "$state/full.log" > /dev/console
+    ax rollback "$(recall new)" --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "a rollback with 30 MB free should fail"
+    tail -5 /run/archix-vmtest-full.log > /dev/console
     rm -f /var/tmp/archix-fill
     if journal_open; then
       ax recover --rollback > /dev/console 2>&1
