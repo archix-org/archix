@@ -20,6 +20,14 @@ recall() { cat "$state/$1"; }
 booted=$(sed -n 's/.*archix\.generation=\([0-9]*\).*/\1/p' /proc/cmdline)
 glibc() { pacman -Q glibc | awk '{print $2}' | cut -d+ -f1; }
 kernel_pkg() { pacman -Q linux | awk '{print $2}'; }
+# The DKMS module, which must be built for and loadable by the running kernel, at the version the generation locks.
+dkms_module() {
+  local want=$1 have
+  have=$(modinfo -F version v4l2loopback 2>/dev/null)
+  [ "$have" = "$want" ] || fail "v4l2loopback $want should be built by DKMS for $(uname -r), found '${have:-nothing}': $(dkms status 2>&1 | head -5)"
+  case $(modinfo -n v4l2loopback) in */updates/dkms/*) ;; *) fail "v4l2loopback should come from DKMS, not $(modinfo -n v4l2loopback)" ;; esac
+  modprobe v4l2loopback || fail "v4l2loopback $want should load on $(uname -r)"
+}
 journal_open() { [ -e /var/lib/archix/journal.json ]; }
 # Files that reference a GLIBC symbol version the installed glibc lacks; empty when the system is consistent.
 needs_newer_glibc() {
@@ -64,11 +72,12 @@ say "stage $stage: booted generation $booted, current generation $(current), ker
 case $stage in
   1)
     [ "$(glibc)" = 2.43 ] || fail "generation 1 should have glibc 2.43 (the 2026-06-01 snapshot)"
-    sed -i 's|"devtools" }, -- packages|"devtools", "archix-test-hello" }, -- packages|' "$config"
-    ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding the local recipe"
+    sed -i 's|"devtools" }, -- packages|"devtools", "archix-test-hello", "linux-headers", "v4l2loopback-dkms" }, -- packages|' "$config"
+    ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding the local recipe and a DKMS module"
     [ "$(cat /usr/share/archix-test-hello/built-with)" = 2.43 ] || fail "the local recipe should be built against glibc 2.43"
+    dkms_module 0.15.3
     remember old "$(current)"
-    say "PASS: generation $(recall old) builds a local recipe at the 2026-06-01 snapshot"
+    say "PASS: generation $(recall old) builds a local recipe and a DKMS module at the 2026-06-01 snapshot"
 
     ax update --to 2026-10-10 --noconfirm > /dev/console 2>&1 || fail "archix update --to 2026-10-10"
     fill_disk $((20 * 1024 * 1024))
@@ -110,6 +119,7 @@ case $stage in
     archix-test-hello || fail "the local recipe's build should run after the update"
     [ "$(cat /usr/share/archix-test-hello/built-with)" = 2.44 ] || fail "the local recipe should have been rebuilt, since the soname it links went away"
     /usr/lib/ld-linux-x86-64.so.2 --list /usr/bin/archix-test-hello | grep -q libfaac.so.1 || fail "the rebuild should link libfaac.so.1"
+    dkms_module 0.15.4
     say "PASS: booted the updated generation: kernel $(uname -r), glibc $(glibc)"
     bootctl set-oneshot "archix-$(recall old).efi" || fail "bootctl set-oneshot"
     echo 4 > "$state/stage"
@@ -127,7 +137,8 @@ case $stage in
     [ "$(cat /usr/share/archix-test-hello/built-with)" = 2.43 ] || fail "the rollback kept the local recipe's glibc 2.44 build instead of generation $(recall old)'s own"
     archix-test-hello || fail "generation $(recall old)'s own build should run against libfaac.so.0 again"
     [ "$(missing_files)" = 0 ] || fail "files are missing after the boot-time rollback"
-    say "PASS: booting the old entry rolled back kernel, glibc and the local build, and every binary still finds its glibc"
+    dkms_module 0.15.3
+    say "PASS: booting the old entry rolled back kernel, glibc, the local build and the DKMS module, and every binary still finds its glibc"
 
     ax rollback "$(recall new)" --noconfirm > /dev/console 2>&1 || fail "archix rollback to the newer generation at runtime"
     [ "$(glibc)" = 2.44 ] || fail "rolling forward at runtime should bring glibc 2.44 back"
@@ -142,12 +153,22 @@ case $stage in
     say "killing a rollback halfway"
     interrupt_after kill 40 rollback "$(recall new)" --noconfirm
     journal_open || fail "the killed rollback should leave a journal"
-    ax recover --rollback > /dev/console 2>&1 || fail "archix recover --rollback after a killed rollback"
+    if pacman -Qq pacman > /dev/null 2>&1; then
+      lib=$(readlink -f /usr/lib/libcurl.so.4)
+      head -c 4096 /dev/urandom > "$lib.torn" && mv "$lib.torn" "$lib"
+      pacman -Qq pacman > /dev/null 2>&1 && fail "pacman should not start with libcurl torn"
+      say "tore libcurl, as if the kill had come while pacman was writing it"
+    else
+      say "pacman can't start after the kill"
+    fi
+    ax recover --rollback > "$state/recover.log" 2>&1 || { cat "$state/recover.log" > /dev/console; fail "archix recover --rollback after a killed rollback"; }
+    cat "$state/recover.log" > /dev/console
+    grep -q "pacman couldn't start" "$state/recover.log" || fail "recover --rollback should have restored pacman's libraries without pacman"
     journal_open && fail "recover --rollback left the journal"
     [ "$(current)" = "$(recall old)" ] || fail "recover --rollback should leave generation $(recall old) current"
     [ "$(glibc)" = 2.43 ] || fail "recover --rollback should put glibc 2.43 back"
     [ "$(missing_files)" = 0 ] || fail "files are missing after recovering the killed rollback"
-    say "PASS: a rollback killed halfway is undone cleanly by recover --rollback"
+    say "PASS: a rollback killed halfway, leaving pacman unable to start, is undone cleanly by recover --rollback"
 
     fill_disk $((30 * 1024 * 1024))
     ax rollback "$(recall new)" --noconfirm > "$state/full.log" 2>&1 && fail "a rollback with 30 MB free should fail"
@@ -187,7 +208,7 @@ case $stage in
     [ "$(current)" = "$(recall old)" ] || fail "the rollback should still be current after a reboot"
     say "PASS: the rolled-back generation stays the default entry across a reboot"
 
-    sed -i 's|"devtools", "archix-test-hello" }, -- packages|"devtools", "jq" }, -- packages|' "$config"
+    sed -i 's|"archix-test-hello", |"jq", |' "$config"
     ax lock --noconfirm > /dev/console 2>&1 || fail "archix lock with jq"
     date=$(sed -n 's/^date = "\(.*\)"/\1/p' "$lock" | head -1)
     file=$(sed -n 's/^jq = .*file = "\([^"]*\)".*/\1/p' "$lock")

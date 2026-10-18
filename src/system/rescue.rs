@@ -28,6 +28,16 @@ const ROOTS: &[&str] = &[
 
 /// The installed dependency closure of `ROOTS` plus every kernel package (the owners of usr/lib/modules/*/vmlinuz), from pacman's local database.
 pub fn closure(local_db: &Path) -> Vec<String> {
+    closure_of(local_db, ROOTS, true, BTreeMap::new())
+}
+
+/// `incoming` maps package names to the (depends, provides) of the versions about to be unpacked, which override the installed ones.
+fn closure_of(
+    local_db: &Path,
+    roots: &[&str],
+    with_kernels: bool,
+    incoming: BTreeMap<String, (Vec<String>, Vec<String>)>,
+) -> Vec<String> {
     let mut depends: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut provider: BTreeMap<String, String> = BTreeMap::new();
     let mut kernels = Vec::new();
@@ -47,15 +57,27 @@ pub fn closure(local_db: &Path) -> Vec<String> {
             deps.map(|dep| crate::aur::srcinfo::dep_name(dep).to_string()).collect(),
         );
         let files = fs::read_to_string(entry.path().join("files")).unwrap_or_default();
-        if files
-            .lines()
-            .any(|line| line.starts_with("usr/lib/modules/") && line.ends_with("/vmlinuz"))
+        if with_kernels
+            && files
+                .lines()
+                .any(|line| line.starts_with("usr/lib/modules/") && line.ends_with("/vmlinuz"))
         {
             kernels.push(name);
         }
     }
+    for (name, (deps, provides)) in incoming {
+        for provided in provides {
+            provider.insert(crate::aur::srcinfo::dep_name(&provided).to_string(), name.clone());
+        }
+        depends.insert(
+            name,
+            deps.iter()
+                .map(|dep| crate::aur::srcinfo::dep_name(dep).to_string())
+                .collect(),
+        );
+    }
     let mut seen = std::collections::BTreeSet::new();
-    let mut queue: Vec<String> = ROOTS.iter().map(|root| root.to_string()).chain(kernels).collect();
+    let mut queue: Vec<String> = roots.iter().map(|root| root.to_string()).chain(kernels).collect();
     while let Some(want) = queue.pop() {
         let name = if depends.contains_key(&want) {
             want
@@ -159,7 +181,42 @@ pub fn rescue(root: &Path, generation: &Generation, extra: &[String]) -> Result<
         dropped.extend(install(root, &paths, &file, pkg.explicit).with_context(|| format!("restoring {name}"))?);
         rescued.restored.push(format!("{name} {}", pkg.version));
     }
-    // Only once every entry is written: a file can move between packages, and the package that ships it now must keep it.
+    remove_dropped(root, &paths, &dropped)?;
+    Ok(rescued)
+}
+
+/// Unpacks the files among `files` that belong to pacman's own dependency closure, without pacman, for when a cut-off transaction left it unable to start; returns them as "name version".
+pub fn restore_pacman(root: &Path, files: &[PathBuf], explicit: &BTreeMap<String, bool>) -> Result<Vec<String>> {
+    let paths = Paths::under(root);
+    let mut packages = BTreeMap::new();
+    for file in files {
+        let package = read_package(root, file, false).with_context(|| format!("reading {}", file.display()))?;
+        let field = |key: &str| package.info.get(key).cloned().unwrap_or_default();
+        if let Some(name) = field("pkgname").first() {
+            packages.insert(
+                name.clone(),
+                (file, field("pkgver").concat(), field("depend"), field("provides")),
+            );
+        }
+    }
+    let incoming = packages
+        .iter()
+        .map(|(name, (_, _, deps, provides))| (name.clone(), (deps.clone(), provides.clone())))
+        .collect();
+    let needed = closure_of(&paths.local_db(), &["pacman"], false, incoming);
+    let mut restored = Vec::new();
+    let mut dropped = Vec::new();
+    for (name, (file, version, _, _)) in packages.iter().filter(|(name, _)| needed.contains(*name)) {
+        let explicit = explicit.get(name).copied().unwrap_or(false);
+        dropped.extend(install(root, &paths, file, explicit).with_context(|| format!("restoring {name}"))?);
+        restored.push(format!("{name} {version}"));
+    }
+    remove_dropped(root, &paths, &dropped)?;
+    Ok(restored)
+}
+
+/// Only once every entry is written: a file can move between packages, and the package that ships it now must keep it.
+fn remove_dropped(root: &Path, paths: &Paths, dropped: &[String]) -> Result<()> {
     let owned = crate::conflicts::owned_files(&paths.local_db());
     for path in dropped.iter().filter(|path| !owned.contains(*path)) {
         let target = root.join(path);
@@ -168,7 +225,7 @@ pub fn rescue(root: &Path, generation: &Generation, extra: &[String]) -> Result<
         }
     }
     unsafe { libc::sync() };
-    Ok(rescued)
+    Ok(())
 }
 
 fn decoder(path: &Path) -> Result<Box<dyn Read>> {
@@ -461,6 +518,38 @@ mod tests {
         entry("kmod", "", "usr/bin/kmod");
         entry("firefox", "", "usr/bin/firefox");
         assert_eq!(closure(db.path()), ["kmod", "libseccomp", "linux-cachyos", "systemd"]);
+    }
+
+    #[test]
+    fn restoring_pacman_unpacks_only_what_pacman_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let paths = Paths::under(&root);
+        let pacman = paths.local_db().join("pacman-7.1.0-1");
+        fs::create_dir_all(&pacman).unwrap();
+        fs::write(pacman.join("desc"), "%NAME%\npacman\n\n%VERSION%\n7.1.0-1\n\n").unwrap();
+        let file = package(dir.path());
+        assert!(
+            restore_pacman(&root, std::slice::from_ref(&file), &BTreeMap::new())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!root.join("usr/bin/demo").exists());
+        fs::write(
+            pacman.join("desc"),
+            "%NAME%\npacman\n\n%VERSION%\n7.1.0-1\n\n%DEPENDS%\ndemo>=1\n\n",
+        )
+        .unwrap();
+        assert_eq!(
+            restore_pacman(&root, &[file], &BTreeMap::new()).unwrap(),
+            ["demo 1.0-1"]
+        );
+        assert!(root.join("usr/bin/demo").exists());
+        assert!(
+            fs::read_to_string(paths.local_db().join("demo-1.0-1/desc"))
+                .unwrap()
+                .contains("%REASON%\n1\n")
+        );
     }
 
     #[test]

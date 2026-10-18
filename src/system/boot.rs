@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::ffi::CString;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,13 +78,15 @@ pub fn preserve_modules(paths: &Paths, version: &str) -> Result<()> {
     preserve_from(Path::new(MODULES), paths, version)
 }
 
+/// Refreshes the copy each time, so it carries the DKMS modules built since the kernel was first kept.
 pub(crate) fn preserve_from(modules: &Path, paths: &Paths, version: &str) -> Result<()> {
     let dest = kernels(paths).join(version);
-    if dest.exists() {
+    if !modules.join(version).is_dir() && dest.exists() {
         return Ok(());
     }
     fs::create_dir_all(kernels(paths))?;
     let tmp = kernels(paths).join(format!(".{version}.{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
     let status = Command::new("cp")
         .arg("-al")
         .arg(modules.join(version))
@@ -93,7 +96,25 @@ pub(crate) fn preserve_from(modules: &Path, paths: &Paths, version: &str) -> Res
         let _ = fs::remove_dir_all(&tmp);
         bail!("could not keep a copy of {version}'s modules");
     }
-    fs::rename(&tmp, &dest)?;
+    if dest.exists() {
+        exchange(&tmp, &dest).with_context(|| format!("refreshing the copy of {version}'s modules"))?;
+        fs::remove_dir_all(&tmp)?;
+    } else {
+        fs::rename(&tmp, &dest)?;
+    }
+    Ok(())
+}
+
+/// Swaps two paths atomically, so a crash never leaves a kernel without its kept modules.
+fn exchange(a: &Path, b: &Path) -> Result<()> {
+    let (a, b) = (
+        CString::new(a.as_os_str().as_encoded_bytes())?,
+        CString::new(b.as_os_str().as_encoded_bytes())?,
+    );
+    let flags = libc::RENAME_EXCHANGE;
+    if unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), flags) } != 0 {
+        return Err(io::Error::last_os_error().into());
+    }
     Ok(())
 }
 
@@ -102,10 +123,11 @@ pub fn restore_modules(paths: &Paths, version: &str) -> Result<bool> {
     restore_into(Path::new(MODULES), paths, version)
 }
 
+/// A modules directory without `modules.dep` is what pacman leaves when unowned files, such as DKMS's directories, keep it from deleting it; nothing loads from it.
 pub fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool> {
     let target = modules.join(version);
     let source = kernels(paths).join(version);
-    if target.exists() || !source.exists() {
+    if target.join("modules.dep").exists() || !source.exists() {
         return Ok(false);
     }
     let tmp = modules.join(format!(".{version}.restoring"));
@@ -113,8 +135,28 @@ pub fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool
         fs::remove_dir_all(&tmp)?;
     }
     link_tree(&source, &tmp).with_context(|| format!("restoring {version}'s modules"))?;
-    fs::rename(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
+    if fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+        move_missing(&target, &tmp)?;
+        exchange(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
+        fs::remove_dir_all(&tmp)?;
+    } else {
+        fs::rename(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
+    }
     Ok(true)
+}
+
+/// Moves what `from` has and `to` lacks into `to`, so files left in an incomplete modules directory survive its restore.
+fn move_missing(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (source, target) = (entry.path(), to.join(entry.file_name()));
+        match fs::symlink_metadata(&target) {
+            Err(_) => fs::rename(&source, &target)?,
+            Ok(meta) if meta.is_dir() && entry.file_type()?.is_dir() => move_missing(&source, &target)?,
+            Ok(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// Recreates `from` at `to` with hard links (the preserved modules share the root filesystem), copying where linking fails; the initramfs has no cp.
@@ -549,6 +591,55 @@ mod tests {
                 .unwrap()
                 .contains("archix-2.efi"),
             "a generation without an entry leaves the default alone"
+        );
+    }
+
+    #[test]
+    fn the_kept_modules_follow_dkms_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let modules = dir.path().join("modules");
+        let paths = Paths::under(&dir.path().join("root"));
+        fs::create_dir_all(modules.join("7.0.10-arch1-1/kernel")).unwrap();
+        fs::write(modules.join("7.0.10-arch1-1/kernel/dummy.ko"), "in-tree").unwrap();
+        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
+        fs::create_dir_all(modules.join("7.0.10-arch1-1/updates/dkms")).unwrap();
+        fs::write(modules.join("7.0.10-arch1-1/updates/dkms/v4l2loopback.ko"), "dkms").unwrap();
+        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
+        fs::remove_dir_all(modules.join("7.0.10-arch1-1")).unwrap();
+        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
+        assert!(restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap());
+        assert!(modules.join("7.0.10-arch1-1/kernel/dummy.ko").exists());
+        assert!(modules.join("7.0.10-arch1-1/updates/dkms/v4l2loopback.ko").exists());
+        assert_eq!(fs::read_dir(paths.state.join("kernels")).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_modules_directory_dkms_kept_from_deletion_is_restored_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let modules = dir.path().join("modules");
+        let paths = Paths::under(&dir.path().join("root"));
+        let release = modules.join("7.0.10-arch1-1");
+        fs::create_dir_all(release.join("kernel/fs")).unwrap();
+        fs::write(release.join("kernel/fs/vfat.ko"), "in-tree").unwrap();
+        fs::write(release.join("modules.dep"), "kernel/fs/vfat.ko:\n").unwrap();
+        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
+        assert!(
+            !restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap(),
+            "a complete directory stays"
+        );
+        fs::remove_dir_all(&release).unwrap();
+        fs::create_dir_all(release.join("updates/dkms")).unwrap();
+        fs::write(release.join("updates/dkms/extra.ko"), "left behind").unwrap();
+        assert!(restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap());
+        assert!(release.join("modules.dep").exists() && release.join("kernel/fs/vfat.ko").exists());
+        assert_eq!(
+            fs::read_to_string(release.join("updates/dkms/extra.ko")).unwrap(),
+            "left behind"
+        );
+        assert_eq!(
+            fs::read_dir(&modules).unwrap().count(),
+            1,
+            "no temporary directory is left"
         );
     }
 

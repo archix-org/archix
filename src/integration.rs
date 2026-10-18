@@ -79,14 +79,14 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
         ));
         files.push((
             root.join("etc/initcpio/hooks/archix-rescue"),
-            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline || [ -e /new_root/var/lib/archix/journal.json ] || [ ! -d /new_root/usr/lib/modules/$(uname -r) ]; then\n        \
+            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline || [ -e /new_root/var/lib/archix/journal.json ] || [ ! -e /new_root/usr/lib/modules/$(uname -r)/modules.dep ]; then\n        \
              mount -o remount,rw /new_root\n        /usr/bin/archix rescue --root /new_root --initrd\n    fi\n}\n"
                 .to_string(),
         ));
         files.push((
             root.join("usr/lib/archix/archix-rescue.service"),
             "[Unit]\nDescription=archix rescue: restore core packages\nDefaultDependencies=no\n\
-             ConditionKernelCommandLine=|archix.rescue\nConditionPathExists=|/sysroot/var/lib/archix/journal.json\nConditionPathExists=|!/sysroot/usr/lib/modules/%v\n\
+             ConditionKernelCommandLine=|archix.rescue\nConditionPathExists=|/sysroot/var/lib/archix/journal.json\nConditionPathExists=|!/sysroot/usr/lib/modules/%v/modules.dep\n\
              After=initrd-root-fs.target\nBefore=initrd-parse-etc.service initrd-switch-root.target\n\n\
              [Service]\nType=oneshot\nExecStartPre=/usr/bin/mount -o remount,rw /sysroot\nExecStart=/usr/bin/archix rescue --root /sysroot --initrd\n\
              StandardOutput=journal+console\n"

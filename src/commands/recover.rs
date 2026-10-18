@@ -62,6 +62,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
     match mode {
         RecoverMode::Continue => {
             let install_interrupted = !journal.done.contains(&Step::Install);
+            make_pacman_run(&journal.transaction)?;
             let failures = apply::run(&paths, &mut journal, install_interrupted)?;
             println!("finished the interrupted {kind} to {}", journal.target);
             return finish_with_hooks(&paths, &journal, failures, &format!("{} is current", journal.target));
@@ -89,6 +90,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
                 .unwrap_or_default();
             guard_downgrades(&unsafe_downgrades(&changes, &configured), false, allow_unsafe)?;
             let transaction = rollback_transaction(&archive, &paths, &journal, &installed)?;
+            make_pacman_run(&transaction)?;
             set_aside_leftovers(&paths, &transaction.install, &journal)?;
             archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
             apply::check_packages(&transaction)?;
@@ -115,6 +117,31 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
             forget_unactivated(&paths, &journal);
             println!("closed the journal without changes; `archix diff` shows how the system differs from the lock");
         }
+    }
+    Ok(())
+}
+
+/// pacman loads its libraries from the packages it installs, so a transaction cut off halfway can leave them at mixed versions and pacman unable to start.
+fn make_pacman_run(transaction: &Transaction) -> Result<()> {
+    let runs = || {
+        Command::new("pacman")
+            .args(["-Qq", "pacman"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if runs() {
+        return Ok(());
+    }
+    let restored =
+        archix::system::rescue::restore_pacman(std::path::Path::new("/"), &transaction.install, &transaction.reasons)?;
+    println!(
+        "pacman couldn't start, its libraries left at mixed versions by the interruption; unpacked the {} packages it runs on without it",
+        restored.len()
+    );
+    if !runs() {
+        bail!(
+            "pacman still can't start; boot the current generation's rescue entry, which restores it without pacman, then run `archix recover` again"
+        );
     }
     Ok(())
 }
