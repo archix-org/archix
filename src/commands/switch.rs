@@ -441,6 +441,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         created.number,
         &previous_flatpak,
     )?);
+    // The generation is current by now, so what was recorded after the journal took its writes (Flatpak commits) is written directly.
+    super::lock::write_deferred()?;
     soft_failures.extend(run_hooks(&paths, &system_change, &rewritten));
     println!("switched to {name}");
     reboot_notice();

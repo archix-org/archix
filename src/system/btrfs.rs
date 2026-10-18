@@ -70,6 +70,10 @@ pub fn ensure_metadata_room(mount: &Path) -> Result<()> {
     if before.unallocated >= LOW_UNALLOCATED {
         return Ok(());
     }
+    // Freed space counts only once committed, so a file deleted just now would still hold its chunk.
+    if let Ok(dir) = std::fs::File::open(mount) {
+        unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+    }
     // Only completely empty data chunks move, so this is quick and touches no data.
     let _ = Command::new("btrfs")
         .args(["balance", "start", "-dusage=0"])
