@@ -26,6 +26,24 @@ fn render(expr: &str) -> String {
 }
 
 #[test]
+fn a_table_key_is_refused_instead_of_written_as_an_address() {
+    let dir = tempfile::tempdir().unwrap();
+    let init = "return { options = { out = archix.option { type = archix.types.str } }, config = { out = archix.formats.json { [{}] = 1 } } }";
+    fs::write(dir.path().join("init.lua"), init).unwrap();
+    let err = evaluate(&Input {
+        config_dir: dir.path().to_path_buf(),
+        hostname: "x".into(),
+        ..Default::default()
+    })
+    .err()
+    .expect("a table key can't be written");
+    assert!(
+        format!("{err}").contains("keys must be strings, numbers or booleans"),
+        "{err}"
+    );
+}
+
+#[test]
 fn yaml_quotes_strings_and_nests() {
     assert_eq!(
         render(r#"archix.formats.yaml { name = "a: b", list = { 1, "two" }, nested = { on = true }, empty = {} }"#),

@@ -263,6 +263,18 @@ fn pairs_iterates_in_sorted_order() {
 }
 
 #[test]
+fn pairs_refuses_keys_with_no_reproducible_order() {
+    let err = eval_err(&[(
+        "init.lua",
+        r#"
+        local seen = { [{}] = 1, [{}] = 2 }
+        for _ in pairs(seen) do end
+        return {}"#,
+    )]);
+    assert!(err.contains("no reproducible order"), "{err}");
+}
+
+#[test]
 fn self_feeding_config_fails_to_settle() {
     let err = eval_err(&[(
         "init.lua",
