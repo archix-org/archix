@@ -383,7 +383,7 @@ fn changed_user_units_reload_the_running_user_managers() {
     let _system = lock_system();
     let unit = |text: &str| {
         format!(
-            r#"files = {{ ["/etc/systemd/user/archix-test-user.service"] = {{ text = "[Service]\nType=oneshot\nExecStart=/usr/bin/echo {text}\n" }} }}"#
+            r#"files = {{ ["/etc/systemd/user/archix-test-user.service"] = {{ text = "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/echo {text}\n" }} }}"#
         )
     };
     assert!(
@@ -403,11 +403,15 @@ fn changed_user_units_reload_the_running_user_managers() {
     };
     let setup = Setup::new(&[], &unit("one"));
     setup.ok(&["switch", "--noconfirm"]);
+    // Started, so the manager keeps it loaded and only a daemon-reload reads the changed file.
+    user(&["start", "archix-test-user.service"]);
+    assert_eq!(user(&["is-active", "archix-test-user.service"]), "active");
     assert!(user(&["show", "-P", "ExecStart", "archix-test-user.service"]).contains("echo one"));
     setup.set_body(&[], &unit("two"));
     setup.ok(&["switch", "--noconfirm"]);
     let stale = user(&["show", "-P", "NeedDaemonReload", "archix-test-user.service"]);
     let exec = user(&["show", "-P", "ExecStart", "archix-test-user.service"]);
+    user(&["stop", "archix-test-user.service"]);
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(stale, "no", "root's user manager should have reloaded the changed unit");
