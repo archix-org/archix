@@ -53,11 +53,20 @@ impl LocalRepo {
 
     /// Like `publish`, with more shell for its package().
     fn publish_with(&self, name: &str, version: &str, package: &str) {
+        self.publish_full(name, version, package, "", None);
+    }
+
+    /// Like `publish_with`, plus an install script, and signed with the key in `signer` when given.
+    fn publish_full(&self, name: &str, version: &str, package: &str, install: &str, signer: Option<&Path>) {
         let work = TempDir::new().unwrap();
-        let pkgbuild = format!(
+        let mut pkgbuild = format!(
             "pkgname={name}\npkgver={version}\npkgrel=1\narch=('any')\nlicense=('MIT')\n\
              package() {{\n  install -d \"$pkgdir/usr/share/archix-third/{name}\"\n  echo {version} > \"$pkgdir/usr/share/archix-third/{name}/version\"\n  {package}\n}}\n"
         );
+        if !install.is_empty() {
+            pkgbuild.push_str(&format!("install={name}.install\n"));
+            fs::write(work.path().join(format!("{name}.install")), install).unwrap();
+        }
         fs::write(work.path().join("PKGBUILD"), pkgbuild).unwrap();
         run(Command::new("chown").arg("-R").arg("archix-build:").arg(work.path()));
         run(Command::new("runuser")
@@ -67,6 +76,14 @@ impl LocalRepo {
             .current_dir(work.path()));
         let file = format!("{name}-{version}-1-any.pkg.tar.zst");
         fs::copy(work.path().join(&file), self.dir.path().join(&file)).unwrap();
+        if let Some(signer) = signer {
+            run(Command::new("gpg")
+                .arg("--homedir")
+                .arg(signer)
+                .args(["--batch", "--detach-sign", "--no-armor", "--output"])
+                .arg(self.dir.path().join(format!("{file}.sig")))
+                .arg(self.dir.path().join(&file)));
+        }
         run(Command::new("repo-add")
             .arg("--quiet")
             .arg(self.database())
@@ -97,6 +114,69 @@ fn forget(name: &str) {
             }
         }
     }
+}
+
+#[test]
+#[ignore]
+fn a_package_signed_by_a_key_an_incoming_keyring_adds_installs_in_the_same_switch() {
+    let _system = lock_system();
+    let signer = TempDir::new().unwrap();
+    let gpg = |args: &[&str]| {
+        Command::new("gpg")
+            .arg("--homedir")
+            .arg(signer.path())
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let made = gpg(&[
+        "--quick-gen-key",
+        "archix test packager <packager@archix.test>",
+        "ed25519",
+        "sign",
+        "never",
+    ]);
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let listing = String::from_utf8_lossy(&gpg(&["--with-colons", "--list-keys"]).stdout).into_owned();
+    let fingerprint = listing
+        .lines()
+        .find(|line| line.starts_with("fpr:"))
+        .and_then(|line| line.split(':').nth(9))
+        .unwrap()
+        .to_string();
+    // Files the unprivileged makepkg user packages, as archlinux-keyring ships its packagers' keys.
+    let keys = TempDir::new().unwrap();
+    fs::set_permissions(keys.path(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    fs::write(keys.path().join("archix-test.gpg"), gpg(&["--export"]).stdout).unwrap();
+    fs::write(keys.path().join("archix-test-trusted"), format!("{fingerprint}:4:\n")).unwrap();
+    let keyrings = LocalRepo::new("archix-keyrings");
+    keyrings.publish_full(
+        "archix-test-keyring",
+        "1.0",
+        &format!(
+            "install -Dm644 -t \"$pkgdir/usr/share/pacman/keyrings\" {0}/archix-test.gpg {0}/archix-test-trusted",
+            keys.path().display()
+        ),
+        "post_install() {\n  pacman-key --populate archix-test\n}\n",
+        None,
+    );
+    let signed = LocalRepo::new("archix-signed");
+    signed.publish_full("archix-test-signed", "1.0", "", "", Some(signer.path()));
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-keyrings\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }}, {{ name = \"archix-signed\", servers = {{ {:?} }} }} }}",
+        keyrings.server(),
+        signed.server()
+    );
+
+    let setup = Setup::new(&["archix-test-keyring", "archix-test-signed"], &body);
+    let out = setup.run(&["switch", "--noconfirm"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let _ = Command::new("pacman-key").args(["--delete", &fingerprint]).output();
+    assert!(out.status.success(), "{text}");
+    assert_eq!(installed("archix-test-signed").as_deref(), Some("1.0-1"));
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
