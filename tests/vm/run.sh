@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix-managed generations in QEMU with OVMF; `run.sh` tests boot entries, Secure Boot and rescue, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across rollbacks (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh upgrade` archix upgrading from the previous release (ARCHIX_OLD, a tag).
+# Boots archix-managed generations in QEMU with OVMF; `run.sh` tests boot entries, Secure Boot and rescue, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across rollbacks (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh upgrade` archix upgrading from the previous release (ARCHIX_OLD, a tag), `run.sh cachyos` the rollback torture test on CachyOS's real repos.
 set -euo pipefail
 suite=${1:-boot}
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -21,6 +21,6 @@ fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" archix-arch-test /vm/build-image.sh
-if [ "$suite" = rollback ] || [ "$suite" = nvidia ]; then mounts+=(-e VM_TIMEOUT=14400 -e VM_MEM=8192 -e VM_CPUS=6); fi
+if [ "$suite" = rollback ] || [ "$suite" = nvidia ] || [ "$suite" = cachyos ]; then mounts+=(-e VM_TIMEOUT=14400 -e VM_MEM=8192 -e VM_CPUS=6); fi
 if [ "$suite" = upgrade ]; then mounts+=(-e VM_TIMEOUT=7200); fi
 docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh

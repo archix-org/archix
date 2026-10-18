@@ -11,6 +11,8 @@ elif [ "$suite" = nvidia ]; then
   dir=/vm/nvidia date=2026-06-01 size=24G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 elif [ "$suite" = upgrade ]; then
   dir=/vm/upgrade packages=(base linux mkinitcpio systemd-ukify)
+elif [ "$suite" = cachyos ]; then
+  dir=/vm/cachyos date=2026-10-16 size=12G packages=(base linux-cachyos mkinitcpio systemd-ukify cachyos-keyring htop jq) archix=/work/archix-static
 fi
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
@@ -42,11 +44,30 @@ mkdir -p /mnt/boot
 mount "$esp" /mnt/boot
 
 grep -v '^NoExtract' /etc/pacman.conf > /tmp/pacman.conf
+if [ "$suite" = cachyos ]; then
+  # As on a CachyOS install: its live repos ahead of Arch's, x86-64-v3 builds allowed, and its signing key trusted.
+  python - /tmp/pacman.conf <<'PY'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+repos = "".join(f"[{r}]\nServer = https://mirror.cachyos.org/repo/x86_64_v3/$repo\n\n" for r in ("cachyos-v3", "cachyos-core-v3", "cachyos-extra-v3"))
+repos += "[cachyos]\nServer = https://mirror.cachyos.org/repo/x86_64/$repo\n\n"
+text = text.replace("[core]", repos + "[core]", 1)
+text = re.sub(r"^#?Architecture = .*$", "Architecture = x86_64 x86_64_v3", text, count=1, flags=re.M)
+open(path, "w").write(text)
+PY
+  keyring=$(mktemp -d)
+  curl -sfo "$keyring/keyring.pkg.tar.zst" https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos-keyring-20240331-1-any.pkg.tar.zst
+  bsdtar -xf "$keyring/keyring.pkg.tar.zst" -C "$keyring" usr/share/pacman/keyrings
+  pacman-key --init >/dev/null 2>&1
+  pacman-key --populate-from "$keyring/usr/share/pacman/keyrings" --populate cachyos >/dev/null
+fi
 # pacstrap at the test's snapshot, so generation 1 isn't newer than its own lock.
 echo "Server = $archive/repos/${date//-//}/\$repo/os/\$arch" > /tmp/mirrorlist
 sed 's|/etc/pacman.d/mirrorlist|/tmp/mirrorlist|' /tmp/pacman.conf > /tmp/pacstrap.conf
 for attempt in 1 2 3; do pacstrap -C /tmp/pacstrap.conf -K /mnt "${packages[@]}" >/dev/null && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done
 cp /tmp/pacman.conf /mnt/etc/pacman.conf
+[ "$suite" = cachyos ] && arch-chroot /mnt pacman-key --populate archlinux cachyos >/dev/null
 cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
 # The filesystem package's resolv.conf is empty; the suites enable systemd-resolved, so point at its stub as an Arch install would.
 ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
