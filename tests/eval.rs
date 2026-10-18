@@ -36,6 +36,7 @@ fn eval_at(dir: &Path, host: &str) -> Result<Evaluation, EvalError> {
     evaluate(&Input {
         config_dir: dir.to_path_buf(),
         hostname: host.to_string(),
+        ..Default::default()
     })
 }
 

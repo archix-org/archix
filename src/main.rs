@@ -491,6 +491,7 @@ fn run() -> Result<ExitCode> {
         let evaluation = eval::evaluate(&Input {
             config_dir: empty.clone(),
             hostname: hostname.clone(),
+            ..Default::default()
         });
         let _ = fs::remove_dir_all(&empty);
         let evaluation = evaluation.map_err(|errors| anyhow::anyhow!("{errors}"))?;
@@ -505,52 +506,38 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
-    let guards_config = match &command {
-        Command::Install { temp: false, path, .. } | Command::Remove { path, .. } => Some(path.as_deref()),
-        Command::Switch { .. } | Command::Upgrade { .. } | Command::Pick(_) => Some(None),
-        _ => None,
-    };
-    let _config_guard = match guards_config {
-        Some(path) if is_root() => Some(archix::pending::begin(
-            &archix::paths::Paths::system(),
-            &archix::pending::config_files(&cli.config, &hostname, path),
-        )?),
-        _ => None,
-    };
-    let edit = match &command {
+    // Nothing these commands change in the config is written until the switch commits; its journal writes it then.
+    if matches!(
+        command,
+        Command::Install { temp: false, .. }
+            | Command::Remove { .. }
+            | Command::Switch { .. }
+            | Command::Upgrade { .. }
+            | Command::Pick(_)
+    ) {
+        commands::defer_config_writes();
+    }
+    match &command {
         Command::Install {
             packages,
             path,
             temp: false,
             ..
-        } => Some(commands::edit_installed(
-            &cli.config,
-            &hostname,
-            path.as_deref(),
-            packages,
-            &[],
-        )?),
-        Command::Remove { packages, path, .. } => Some(commands::edit_installed(
-            &cli.config,
-            &hostname,
-            path.as_deref(),
-            &[],
-            packages,
-        )?),
-        _ => None,
-    };
-    let undo = || {
-        if let Some(edit) = &edit {
-            edit.restore();
+        } => {
+            commands::edit_installed(&cli.config, &hostname, path.as_deref(), packages, &[])?;
         }
-    };
+        Command::Remove { packages, path, .. } => {
+            commands::edit_installed(&cli.config, &hostname, path.as_deref(), &[], packages)?;
+        }
+        _ => {}
+    }
     let evaluation = match eval::evaluate(&Input {
         config_dir: cli.config.clone(),
         hostname: hostname.clone(),
+        overlay: commands::deferred_overlay(&cli.config),
     }) {
         Ok(evaluation) => evaluation,
         Err(errors) => {
-            undo();
             eprintln!("{errors}");
             return Ok(ExitCode::FAILURE);
         }
@@ -577,16 +564,11 @@ fn run() -> Result<ExitCode> {
             } else {
                 commands::switch(&target, noconfirm, None, false)
             };
-            if let Err(e) = result {
-                undo();
-                return Err(e.context("installed.lua was restored"));
-            }
+            result.map_err(|e| e.context("installed.lua was left as it was"))?;
         }
         Command::Remove { noconfirm, .. } => {
-            if let Err(e) = commands::switch(&target, noconfirm, None, false) {
-                undo();
-                return Err(e.context("installed.lua was restored"));
-            }
+            commands::switch(&target, noconfirm, None, false)
+                .map_err(|e| e.context("installed.lua was left as it was"))?;
         }
         Command::Search { terms } => commands::search(&target, &terms)?,
         Command::Pick(args) => {

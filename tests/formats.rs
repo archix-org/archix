@@ -13,6 +13,7 @@ fn render(expr: &str) -> String {
     let evaluation = evaluate(&Input {
         config_dir: dir.path().to_path_buf(),
         hostname: "x".into(),
+        ..Default::default()
     })
     .unwrap();
     match &evaluation.config {
@@ -76,6 +77,7 @@ fn program_builds_a_thin_module() {
     let evaluation = evaluate(&Input {
         config_dir: dir.path().to_path_buf(),
         hostname: "x".into(),
+        ..Default::default()
     })
     .unwrap();
     let json = serde_json::to_value(&evaluation.config).unwrap();

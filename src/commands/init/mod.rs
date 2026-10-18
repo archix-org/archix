@@ -1099,6 +1099,7 @@ fn evaluate(dir: &Path, host: &str) -> Result<Evaluation> {
     eval::evaluate(&eval::Input {
         config_dir: dir.to_path_buf(),
         hostname: host.to_string(),
+        ..Default::default()
     })
     .map_err(|errors| anyhow::anyhow!("the generated config doesn't evaluate; please report this:\n{errors}"))
 }

@@ -15,9 +15,12 @@ use sandbox::{BUILTIN_MODULES, Sandbox, UnsetReads, lua_message};
 const MAX_ROUNDS: usize = 32;
 const MODULE_KEYS: [&str; 3] = ["imports", "options", "config"];
 
+#[derive(Default)]
 pub struct Input {
     pub config_dir: PathBuf,
     pub hostname: String,
+    /// Files (relative to the config directory) evaluated with this text instead of what's on disk, such as an installed.lua a switch hasn't written yet.
+    pub overlay: std::collections::BTreeMap<PathBuf, String>,
 }
 
 pub struct Evaluation {
@@ -51,7 +54,12 @@ pub fn evaluate(input: &Input) -> Result<Evaluation, EvalError> {
     if !root.join("init.lua").is_file() {
         return Err(EvalError::one(format!("no init.lua in {}", root.display())));
     }
-    let sandbox = Sandbox::new(&root, &input.hostname).map_err(|e| EvalError::one(lua_message(&e)))?;
+    let overlay = input
+        .overlay
+        .iter()
+        .map(|(path, text)| (path.to_string_lossy().into_owned(), text.clone()))
+        .collect();
+    let sandbox = Sandbox::new(&root, &input.hostname, overlay).map_err(|e| EvalError::one(lua_message(&e)))?;
 
     let mut loader = Loader::new(&sandbox);
     for (name, _) in BUILTIN_MODULES {
@@ -61,10 +69,11 @@ pub fn evaluate(input: &Input) -> Result<Evaluation, EvalError> {
         Ok((value, source)) => loader.add(value, source),
         Err(e) => loader.fail(lua_message(&e)),
     }
-    if crate::installed::default_dir(&root, &input.hostname)
-        .join(crate::installed::FILE)
-        .is_file()
-    {
+    let installed = crate::installed::default_dir(&root, &input.hostname).join(crate::installed::FILE);
+    let overlaid = installed
+        .strip_prefix(&root)
+        .is_ok_and(|relative| input.overlay.contains_key(relative));
+    if overlaid || installed.is_file() {
         loader.import(&format!("hosts.{}.installed", input.hostname), "<archix>");
     }
     if !loader.diags.is_empty() {

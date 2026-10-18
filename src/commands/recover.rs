@@ -230,6 +230,7 @@ fn rollback_transaction(
     let mut install = apply::without_signatures(paths, &pinned)?;
     install.extend(unpinned);
     Ok(Transaction {
+        config: Vec::new(),
         reinstall: false,
         at_boot: false,
         system: journal.transaction.system.as_ref().map(SystemChange::reversed),

@@ -48,6 +48,8 @@ struct Modules {
     root: PathBuf,
     cache: HashMap<String, (LuaValue, Rc<str>)>,
     loading: Vec<String>,
+    /// Module files by path relative to `root`, evaluated instead of the copy on disk.
+    overlay: HashMap<String, String>,
 }
 
 /// Options a module read that had no value, recorded by the strict cfg tables.
@@ -58,7 +60,7 @@ pub struct UnsetReads {
 }
 
 impl Sandbox {
-    pub fn new(root: &Path, hostname: &str) -> mlua::Result<Self> {
+    pub fn new(root: &Path, hostname: &str, overlay: HashMap<String, String>) -> mlua::Result<Self> {
         let libs = StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH | StdLib::COROUTINE;
         let lua = Lua::new_with(libs, LuaOptions::default())?;
         let globals = lua.globals();
@@ -96,6 +98,7 @@ impl Sandbox {
             root: root.to_path_buf(),
             cache: HashMap::new(),
             loading: Vec::new(),
+            overlay,
         });
         lua.set_app_data(UnsetReads::default());
         Ok(Sandbox { lua, markers })
@@ -133,7 +136,7 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
             "invalid module name {name:?}; use dotted names like \"hosts.desktop\""
         )));
     }
-    let root = {
+    let (root, overlay) = {
         let modules = lua.app_data_ref::<Modules>().expect("modules state");
         if let Some(hit) = modules.cache.get(name) {
             return Ok(hit.clone());
@@ -142,7 +145,7 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
             let chain = modules.loading.join(" -> ");
             return Err(mlua::Error::runtime(format!("require cycle: {chain} -> {name}")));
         }
-        modules.root.clone()
+        (modules.root.clone(), modules.overlay.clone())
     };
     let (source, code) = match name.strip_prefix("archix.") {
         Some(builtin) => match BUILTIN_MODULES.iter().find(|(n, _)| *n == builtin) {
@@ -152,14 +155,20 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
         None => {
             let rel = name.replace('.', "/");
             let candidates = [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")];
-            let Some(source) = candidates.iter().find(|c| root.join(c).is_file()) else {
+            let Some(source) = candidates
+                .iter()
+                .find(|c| overlay.contains_key(c.as_str()) || root.join(c).is_file())
+            else {
                 return Err(mlua::Error::runtime(format!(
                     "module {name:?} not found (looked for {} and {})",
                     candidates[0], candidates[1]
                 )));
             };
-            let code = fs::read_to_string(root.join(source))
-                .map_err(|e| mlua::Error::runtime(format!("reading {source}: {e}")))?;
+            let code = match overlay.get(source.as_str()) {
+                Some(text) => text.clone(),
+                None => fs::read_to_string(root.join(source))
+                    .map_err(|e| mlua::Error::runtime(format!("reading {source}: {e}")))?,
+            };
             (source.clone(), code)
         }
     };

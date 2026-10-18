@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use anyhow::Result;
 
@@ -8,7 +9,7 @@ use archix::aur::review::review;
 use archix::flatpak;
 use archix::generations::Store;
 use archix::integration;
-use archix::journal::Journal;
+use archix::journal::{ConfigWrite, Journal};
 use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
@@ -68,15 +69,18 @@ pub(super) fn current_lock(
     let git = aur_git(declared)?;
     let keep_commits = if updating { None } else { old.as_ref() };
     let aur = aur_source(&git, declared, &archive, keep_commits, updating, &recipes);
-    let mut new = resolve(
-        &archive,
-        &user_cache()?,
-        date,
-        &declared.repos,
-        &declared.packages,
-        &declared.prefer,
-        Some(&aur),
-    )?;
+    let resolve_with = |prefer: &[String]| {
+        resolve(
+            &archive,
+            &user_cache()?,
+            date,
+            &declared.repos,
+            &declared.packages,
+            prefer,
+            Some(&aur),
+        )
+    };
+    let mut new = resolve_with(&declared.prefer)?;
     if let Some(old) = &old {
         new.keep_pins(old);
         new.flatpak = old.flatpak.clone();
@@ -104,10 +108,76 @@ pub(super) fn save_lock(
     }
     let path = target.config_dir.join(LOCK_FILE);
     lockfile.hosts.insert(target.host.to_string(), new.clone());
-    lockfile.save(&path)?;
-    println!("wrote {}", path.display());
+    if !defer_write(&path, &lockfile.render()) {
+        lockfile.save(&path)?;
+        println!("wrote {}", path.display());
+    }
     archix::testhooks::crash_at("lock-resolved");
     Ok(())
+}
+
+thread_local! {
+    /// While a switch runs, the config files it would write, which wait for it to commit.
+    static DEFERRED: std::cell::RefCell<Option<Vec<ConfigWrite>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// From here on, config writes wait in memory for the switch's journal, which writes them when the generation becomes current.
+pub fn defer_config_writes() {
+    DEFERRED.with(|deferred| *deferred.borrow_mut() = Some(Vec::new()));
+}
+
+/// Holds `text` for `path` if writes are deferred, replacing an earlier one for it; false if they aren't.
+pub(super) fn defer_write(path: &Path, text: &str) -> bool {
+    DEFERRED.with(|deferred| match deferred.borrow_mut().as_mut() {
+        Some(writes) => {
+            writes.retain(|write| write.path != path);
+            writes.push(ConfigWrite {
+                path: path.to_path_buf(),
+                text: text.to_string(),
+            });
+            true
+        }
+        None => false,
+    })
+}
+
+/// The deferred text for `path`, which is what the config holds as far as this switch is concerned.
+pub(super) fn deferred_text(path: &Path) -> Option<String> {
+    DEFERRED.with(|deferred| {
+        deferred
+            .borrow()
+            .as_ref()?
+            .iter()
+            .find(|write| write.path == path)
+            .map(|write| write.text.clone())
+    })
+}
+
+/// Deferred .lua files under `config_dir`, as an evaluation overlay, so the config is evaluated as the switch will write it.
+pub fn deferred_overlay(config_dir: &Path) -> std::collections::BTreeMap<std::path::PathBuf, String> {
+    let root = std::path::absolute(config_dir).unwrap_or_else(|_| config_dir.to_path_buf());
+    DEFERRED.with(|deferred| {
+        deferred
+            .borrow()
+            .iter()
+            .flatten()
+            .filter(|write| write.path.extension().is_some_and(|ext| ext == "lua"))
+            .filter_map(|write| {
+                let path = std::path::absolute(&write.path).ok()?;
+                Some((path.strip_prefix(&root).ok()?.to_path_buf(), write.text.clone()))
+            })
+            .collect()
+    })
+}
+
+/// The deferred writes, for the switch's journal; writes are still deferred afterwards.
+pub(super) fn take_deferred() -> Vec<ConfigWrite> {
+    DEFERRED.with(|deferred| deferred.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default())
+}
+
+/// Writes what was deferred, for a switch that commits without a journal, as when no package changes.
+pub(super) fn write_deferred() -> Result<()> {
+    archix::journal::write_config(&take_deferred())
 }
 
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {

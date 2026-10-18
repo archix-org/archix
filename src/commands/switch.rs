@@ -40,12 +40,12 @@ use super::{
     require_root, select_changes, settle_flatpak, transaction_for, user_cache,
 };
 
-/// Declares packages in the host's installed.lua and switches, undoing the edit if that fails.
+/// Declares packages in the host's installed.lua and switches; installed.lua is written only if the switch commits.
 pub fn declare_and_switch(target: &Target, names: &[String], noconfirm: bool) -> Result<()> {
     switch_after_declaring(target, names, noconfirm, None, false)
 }
 
-/// Adds out-of-band packages to installed.lua and switches to the result, undoing the edit if that fails.
+/// Adds out-of-band packages to installed.lua and switches to the result; installed.lua is written only if the switch commits.
 fn switch_after_declaring(
     target: &Target,
     added: &[String],
@@ -53,23 +53,18 @@ fn switch_after_declaring(
     accept_nearest: Option<Nearest>,
     allow_unsafe: bool,
 ) -> Result<()> {
-    let edit = edit_installed(target.config_dir, target.host, None, added, &[])?;
-    let result = eval::evaluate(&eval::Input {
+    edit_installed(target.config_dir, target.host, None, added, &[])?;
+    let evaluation = eval::evaluate(&eval::Input {
         config_dir: target.config_dir.to_path_buf(),
         hostname: target.host.to_string(),
+        overlay: super::lock::deferred_overlay(target.config_dir),
     })
-    .map_err(|errors| anyhow::anyhow!("{errors}"))
-    .and_then(|evaluation| {
-        let target = Target {
-            config: &evaluation.config,
-            ..*target
-        };
-        switch(&target, noconfirm, accept_nearest, allow_unsafe)
-    });
-    if result.is_err() {
-        edit.restore();
-    }
-    result.context("installed.lua was restored")
+    .map_err(|errors| anyhow::anyhow!("{errors}"))?;
+    let target = Target {
+        config: &evaluation.config,
+        ..*target
+    };
+    switch(&target, noconfirm, accept_nearest, allow_unsafe).context("installed.lua was left as it was")
 }
 
 pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>, allow_unsafe: bool) -> Result<()> {
@@ -256,6 +251,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     {
         if let Some(current) = current.filter(|current| current.same_system(&generation)) {
             finish(&paths, declared.boot.is_some(), &declared.repos)?;
+            super::lock::write_deferred()?;
             println!(
                 "nothing to do: the system matches generation {} (snapshot {})",
                 current.number, lock.date
@@ -268,6 +264,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         system::apply::keep_originals(&paths, &system_change)?;
         let created = store.create(generation)?;
         store.activate(created.number)?;
+        super::lock::write_deferred()?;
         finish(&paths, false, &declared.repos)?;
         println!(
             "switched to generation {} (snapshot {}); no package changes were needed",
@@ -431,6 +428,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         store.update(&created)?;
     }
     let name = format!("generation {} (snapshot {})", created.number, lock.date);
+    transaction.config = super::lock::take_deferred();
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
     journal.save(&paths.journal())?;

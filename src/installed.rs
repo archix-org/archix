@@ -17,6 +17,11 @@ pub fn read(path: &Path) -> Result<Vec<String>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
+    parse(&text, path)
+}
+
+/// The package names in an installed.lua's text; `path` names it in errors.
+pub fn parse(text: &str, path: &Path) -> Result<Vec<String>> {
     let Some(start) = text.find("packages = {") else {
         bail!("{} has no `packages = {{ ... }}` list", path.display());
     };

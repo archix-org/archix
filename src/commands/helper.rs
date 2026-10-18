@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -28,28 +28,14 @@ use super::{
 };
 
 /// An edit to an installed.lua that can be undone if the switch after it doesn't go through.
-pub struct InstalledEdit {
-    path: PathBuf,
-    previous: Option<String>,
-}
-
-impl InstalledEdit {
-    pub fn restore(&self) {
-        let _ = match &self.previous {
-            Some(text) => fs::write(&self.path, text),
-            None => fs::remove_file(&self.path),
-        };
-    }
-}
-
-/// Adds (or removes) packages in the host's installed.lua, or the one in `path`, before the config is evaluated.
+/// Adds (or removes) packages in the host's installed.lua, or the one in `path`; the new text waits for the switch to commit and is evaluated from memory until then.
 pub fn edit_installed(
     config_dir: &Path,
     host: &str,
     path: Option<&Path>,
     add: &[String],
     remove: &[String],
-) -> Result<InstalledEdit> {
+) -> Result<()> {
     let dir = match path {
         Some(dir) => {
             let module = installed::module_name(config_dir, dir)?;
@@ -57,13 +43,16 @@ pub fn edit_installed(
             if dir.canonicalize().ok() != default.canonicalize().ok() {
                 eprintln!("note: import {module:?} from a module this host loads, or archix won't see it");
             }
-            dir.to_path_buf()
+            std::path::absolute(dir)?
         }
         None => installed::default_dir(config_dir, host),
     };
     let file = dir.join(FILE);
-    let previous = fs::read_to_string(&file).ok();
-    let mut packages = installed::read(&file)?;
+    let current = super::lock::deferred_text(&file).or_else(|| fs::read_to_string(&file).ok());
+    let mut packages = match &current {
+        Some(text) => installed::parse(text, &file)?,
+        None => Vec::new(),
+    };
     let elsewhere = declared_elsewhere(config_dir, host, &packages, add);
     for name in &elsewhere {
         println!(
@@ -86,11 +75,14 @@ pub fn edit_installed(
         packages.retain(|p| p != name);
     }
     packages.sort();
-    if previous.is_none() && packages.is_empty() {
-        return Ok(InstalledEdit { path: file, previous });
+    let text = installed::render(&packages);
+    if (current.is_none() && packages.is_empty()) || current.as_deref() == Some(text.as_str()) {
+        return Ok(());
     }
-    archix::durable::write_config(&file, installed::render(&packages).as_bytes())?;
-    Ok(InstalledEdit { path: file, previous })
+    if !super::lock::defer_write(&file, &text) {
+        archix::durable::write_config(&file, text.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Of `add`, those the config declares outside installed.lua (whose own list is `listed`).
@@ -101,6 +93,7 @@ fn declared_elsewhere(config_dir: &Path, host: &str, listed: &[String], add: &[S
     let Ok(evaluation) = crate::eval::evaluate(&crate::eval::Input {
         config_dir: config_dir.to_path_buf(),
         hostname: host.to_string(),
+        ..Default::default()
     }) else {
         return Vec::new();
     };
@@ -193,6 +186,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         })
         .collect();
     let transaction = Transaction {
+        config: Vec::new(),
         reinstall: false,
         at_boot: false,
         system: None,

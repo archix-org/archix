@@ -142,7 +142,8 @@ fn run_package_step(
                 activated.rescue = crate::system::rescue::closure(&paths.local_db());
                 store.update(&activated)?;
                 store.activate(number)?;
-                crate::system::boot::set_default_entry(paths, number)
+                crate::system::boot::set_default_entry(paths, number)?;
+                crate::journal::write_config(&tx.config)
             }
             None => Ok(()),
         },

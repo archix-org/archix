@@ -50,6 +50,7 @@ fn ports_render_what_home_manager_renders() {
         let evaluation = match evaluate(&Input {
             config_dir: dir.path().to_path_buf(),
             hostname: "hm".into(),
+            ..Default::default()
         }) {
             Ok(evaluation) => evaluation,
             Err(e) => {

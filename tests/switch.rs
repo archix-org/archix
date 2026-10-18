@@ -29,6 +29,7 @@ fn fake_interrupted_switch(paths: &Paths) {
         before.iter().map(|(name, pkg)| (name.clone(), pkg.explicit)).collect();
     reasons.insert("tree".into(), true);
     let transaction = Transaction {
+        config: Vec::new(),
         system: None,
         boot: None,
         reinstall: false,
@@ -154,6 +155,7 @@ fn the_initramfs_repair_restores_what_a_cut_off_switch_was_changing() {
         .collect();
     versions.remove("tree");
     let transaction = Transaction {
+        config: Vec::new(),
         remove: vec!["tree".into()],
         versions,
         ..Transaction::default()

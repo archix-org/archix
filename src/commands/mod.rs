@@ -31,7 +31,7 @@ use archix::value::Value;
 
 pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, upgrade};
 pub use init::init;
-pub use lock::{diff, lock, status};
+pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
 pub use recover::recover;
 
 /// `archix secure-boot setup`.
@@ -503,6 +503,7 @@ fn transaction_for(
         &wanted,
     )?);
     Ok(Transaction {
+        config: Vec::new(),
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
         at_boot: false,
         install,
@@ -718,6 +719,7 @@ mod tests {
         let evaluation = eval::evaluate(&eval::Input {
             config_dir: dir.path().to_path_buf(),
             hostname: "box".to_string(),
+            ..Default::default()
         })
         .unwrap_or_else(|errors| panic!("{errors}"));
         declared(&evaluation.config).unwrap()

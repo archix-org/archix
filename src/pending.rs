@@ -1,6 +1,6 @@
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::generations::Store;
 use crate::paths::Paths;
 
-/// Config files a switch may rewrite (archix.lock, installed.lua), as they were before it, and the generation that was current then.
+/// What archix 0.1.0-dogfood recorded before a switch rewrote archix.lock or installed.lua; later versions write the config only when a switch commits, and only put back what an old record names.
 #[derive(Serialize, Deserialize)]
 struct Record {
     files: Vec<Saved>,
@@ -29,27 +29,6 @@ fn record_path(paths: &Paths) -> PathBuf {
 
 pub fn exists(paths: &Paths) -> bool {
     record_path(paths).exists()
-}
-
-/// Remembers `files` before a switch may rewrite them; dropping the guard puts them back unless a new generation became current.
-pub fn begin(paths: &Paths, files: &[PathBuf]) -> Result<Guard> {
-    settle(paths)?;
-    let record = Record {
-        files: files
-            .iter()
-            .map(|file| Saved {
-                path: file.clone(),
-                text: fs::read_to_string(file).ok(),
-                owner: fs::metadata(file)
-                    .ok()
-                    .map(|meta| (meta.uid(), meta.gid(), meta.mode() & 0o7777)),
-            })
-            .collect(),
-        generation: Store::new(paths).current()?,
-    };
-    fs::create_dir_all(&paths.state)?;
-    crate::durable::write(&record_path(paths), &serde_json::to_vec(&record)?)?;
-    Ok(Guard { paths: paths.clone() })
 }
 
 /// Puts the remembered files back unless a new generation became current since, and forgets them; returns what it put back. An open journal leaves them to `archix recover`.
@@ -93,33 +72,4 @@ pub fn settle(paths: &Paths) -> Result<Vec<PathBuf>> {
 pub fn describe(restored: &[PathBuf], what: &str) -> Option<String> {
     let names: Vec<String> = restored.iter().map(|p| p.display().to_string()).collect();
     (!names.is_empty()).then(|| format!("put back {} as they were before {what}", names.join(" and ")))
-}
-
-pub struct Guard {
-    paths: Paths,
-}
-
-impl Drop for Guard {
-    fn drop(&mut self) {
-        match settle(&self.paths) {
-            Ok(restored) => {
-                if let Some(note) = describe(&restored, "this command") {
-                    eprintln!("{note}");
-                }
-            }
-            Err(e) => eprintln!("warning: couldn't put the config back: {e:#}"),
-        }
-    }
-}
-
-/// The files `archix switch`, `install` and `remove` may rewrite under `config_dir`.
-pub fn config_files(config_dir: &Path, host: &str, installed_dir: Option<&Path>) -> Vec<PathBuf> {
-    let mut files = vec![
-        config_dir.join(crate::lock::LOCK_FILE),
-        crate::installed::default_dir(config_dir, host).join(crate::installed::FILE),
-    ];
-    if let Some(dir) = installed_dir {
-        files.push(dir.join(crate::installed::FILE));
-    }
-    files
 }

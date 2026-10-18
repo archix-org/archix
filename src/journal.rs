@@ -93,6 +93,24 @@ pub struct Transaction {
     /// A boot-time rollback, which runs before sysinit.target: units are queued with --no-block instead of waited for, and nothing is restarted.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub at_boot: bool,
+    /// Config files (archix.lock, installed.lua) the switch writes when it makes its generation current, and not before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub config: Vec<ConfigWrite>,
+}
+
+/// One config file's new text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigWrite {
+    pub path: PathBuf,
+    pub text: String,
+}
+
+/// Writes config files keeping their owner, as the last thing a committed switch does.
+pub fn write_config(writes: &[ConfigWrite]) -> anyhow::Result<()> {
+    for write in writes {
+        crate::durable::write_config(&write.path, write.text.as_bytes())?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
