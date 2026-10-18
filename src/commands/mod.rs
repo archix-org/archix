@@ -391,6 +391,14 @@ fn declared(config: &Value) -> Result<Declared> {
         if boot.secure_boot == Some(true) {
             needed.push("sbctl".to_string());
         }
+        // A boot-time rollback reinstalls the kernel, and DKMS can only rebuild its modules for it with that kernel's headers.
+        if declared
+            .packages
+            .iter()
+            .any(|name| name == "dkms" || name.ends_with("-dkms"))
+        {
+            needed.push(format!("{}-headers", boot.kernel));
+        }
         declared
             .prefer
             .extend(needed.into_iter().filter(|name| !declared.packages.contains(name)));
