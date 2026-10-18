@@ -417,6 +417,15 @@ fn write_and_lock(
     Ok(())
 }
 
+/// The kernel package boot entries are built for.
+fn boot_kernel(local: &BTreeMap<String, LocalPkg>, _running: Option<&str>, _installed: &[String]) -> String {
+    ["linux", "linux-lts", "linux-zen", "linux-hardened"]
+        .into_iter()
+        .find(|kernel| local.contains_key(*kernel))
+        .unwrap_or("linux")
+        .to_string()
+}
+
 /// Reads everything init needs from the machine.
 fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     let machine = Machine {
@@ -488,11 +497,18 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         Some(esp) => {
             let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
             if params.iter().any(|p| p.starts_with("root=")) {
-                let kernel = ["linux", "linux-lts", "linux-zen", "linux-hardened"]
+                let running = fs::read_to_string(format!(
+                    "/usr/lib/modules/{}/pkgbase",
+                    fs::read_to_string("/proc/sys/kernel/osrelease")
+                        .unwrap_or_default()
+                        .trim()
+                ))
+                .ok();
+                let installed: Vec<String> = archix::system::boot::installed_kernels()
                     .into_iter()
-                    .find(|kernel| machine.local.contains_key(*kernel))
-                    .unwrap_or("linux")
-                    .to_string();
+                    .map(|(base, _)| base)
+                    .collect();
+                let kernel = boot_kernel(&machine.local, running.as_deref(), &installed);
                 let microcode = ["amd-ucode.img", "intel-ucode.img"]
                     .into_iter()
                     .filter(|image| Path::new(&esp).join(image).is_file())
@@ -1154,4 +1170,43 @@ fn swapped_providers(lock: &HostLock, facts: &Facts, declared: &Declared) -> Vec
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn machine(names: &[&str]) -> BTreeMap<String, LocalPkg> {
+        names
+            .iter()
+            .map(|name| {
+                let pkg = LocalPkg {
+                    name: name.to_string(),
+                    version: "1-1".into(),
+                    arch: "x86_64".into(),
+                    explicit: true,
+                    installed_at: None,
+                };
+                (name.to_string(), pkg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn boot_entries_are_for_the_kernel_the_machine_runs() {
+        let cachyos = machine(&["linux-cachyos", "linux-cachyos-lts"]);
+        let installed = ["linux-cachyos".to_string(), "linux-cachyos-lts".to_string()];
+        assert_eq!(
+            boot_kernel(&cachyos, Some("linux-cachyos-lts\n"), &installed),
+            "linux-cachyos-lts"
+        );
+        assert_eq!(
+            boot_kernel(&cachyos, None, &installed),
+            "linux-cachyos",
+            "without the running one, an installed kernel"
+        );
+        let arch = machine(&["linux", "linux-lts"]);
+        let installed = ["linux".to_string(), "linux-lts".to_string()];
+        assert_eq!(boot_kernel(&arch, Some("linux"), &installed), "linux");
+    }
 }
