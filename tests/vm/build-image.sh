@@ -48,6 +48,8 @@ sed 's|/etc/pacman.d/mirrorlist|/tmp/mirrorlist|' /tmp/pacman.conf > /tmp/pacstr
 for attempt in 1 2 3; do pacstrap -C /tmp/pacstrap.conf -K /mnt "${packages[@]}" >/dev/null && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done
 cp /tmp/pacman.conf /mnt/etc/pacman.conf
 cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
+# The filesystem package's resolv.conf is empty; the suites enable systemd-resolved, so point at its stub as an Arch install would.
+ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 if [ "$suite" = upgrade ]; then
   # archix is a package from a local repo, so switches upgrade it and rollbacks downgrade it: 1 is the previous release, 2 and 3 this tree.
   useradd -r builder 2>/dev/null || true
