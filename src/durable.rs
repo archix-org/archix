@@ -48,7 +48,7 @@ pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).with_context(|| format!("chmod {}", path.display()))
 }
 
-/// Creates `dir` and its missing parents owned like the nearest one that exists.
+/// Creates `dir` and its missing parents owned like the nearest one that exists, 0755 whatever the umask.
 pub fn create_config_dirs(dir: &Path) -> Result<()> {
     let Some(existing) = dir.ancestors().find(|a| a.exists()) else {
         return Ok(());
@@ -59,6 +59,8 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
     for created in missing {
         std::os::unix::fs::chown(created, Some(owner.uid()), Some(owner.gid()))
             .with_context(|| format!("chown {}", created.display()))?;
+        fs::set_permissions(created, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", created.display()))?;
     }
     Ok(())
 }
