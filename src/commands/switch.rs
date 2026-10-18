@@ -36,9 +36,9 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
-    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies, print_warned,
-    recipes, refuse_if_unfinished, require_root, select_changes, settle_flatpak, third_party_repos, transaction_for,
-    user_cache,
+    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies,
+    print_missing_ignored, print_warned, recipes, refuse_if_unfinished, require_root, select_changes, settle_flatpak,
+    third_party_repos, transaction_for, user_cache,
 };
 
 /// Declares packages in the host's installed.lua and switches; installed.lua is written only if the switch commits.
@@ -244,6 +244,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         )?);
     }
     print_warned(&warned);
+    print_missing_ignored(&declared.ignored, &installed);
     let unchanged = current.as_ref().is_some_and(|current| current.same_system(&generation));
     if changes.is_empty()
         && system_lines.is_empty()

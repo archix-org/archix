@@ -441,6 +441,30 @@ fn print_warned(warned: &[String]) {
     }
 }
 
+/// Ignored packages missing here, as on a second machine sharing the config, which archix won't install.
+fn print_missing_ignored(ignored: &BTreeSet<String>, installed: &BTreeMap<String, LocalPkg>) {
+    let missing: Vec<&str> = ignored
+        .iter()
+        .filter(|name| !installed.contains_key(*name))
+        .map(String::as_str)
+        .collect();
+    if !missing.is_empty() {
+        println!(
+            "ignored_packages lists {} installed here, and archix never installs ignored ones: {}",
+            count(missing.len(), "package that isn't", "packages that aren't"),
+            missing.join(", ")
+        );
+    }
+}
+
+/// A package archix builds from a VCS checkout, which its locked recipe doesn't pin, going by the suffixes AUR helpers' devel modes use.
+fn floats(name: &str, pkg: &Locked) -> bool {
+    pkg.is_built()
+        && ["-git", "-hg", "-svn", "-bzr", "-fossil", "-darcs"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
 /// Where to get a locked package's file: archix's own build cache for built packages, else its repo at the lock's date and the archive's permanent copy.
 fn wanted_file(archive: &Archive, date: Date, name: &str, pkg: &Locked, repos: &[Repo]) -> Wanted {
     if pkg.is_built() {

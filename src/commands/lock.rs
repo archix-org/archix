@@ -18,8 +18,8 @@ use archix::resolve::resolve;
 use archix::system::{self, apply::SystemChange};
 
 use super::{
-    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, describe_unfinished, print_warned,
-    recipes, refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, describe_unfinished, floats,
+    print_missing_ignored, print_warned, recipes, refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
 };
 
 /// The host's lock, re-resolved at the locked date (or `snapshot`) if the config changed; saved when `save`.
@@ -353,6 +353,23 @@ pub fn status(target: &Target) -> Result<()> {
     if let Some(warning) = super::lock_age_warning(lock, declared.lock_warn_after_days) {
         println!("{warning}");
     }
+    let floating: Vec<&str> = lock
+        .packages
+        .iter()
+        .filter(|(name, pkg)| floats(name, pkg))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    match floating.len() {
+        0 => {}
+        1 => println!(
+            "1 package builds from a VCS source, so a rebuild from its locked recipe can differ (`archix cache push` keeps the exact build): {}",
+            floating[0]
+        ),
+        n => println!(
+            "{n} packages build from VCS sources, so rebuilds from their locked recipes can differ (`archix cache push` keeps the exact builds): {}",
+            floating.join(", ")
+        ),
+    }
     let fingerprints = recipes(target, &declared)?.fingerprints(&lock.local_recipes())?;
     if !lock.matches(
         &declared.packages,
@@ -374,6 +391,7 @@ pub fn status(target: &Target) -> Result<()> {
             0 => println!("the system matches the lock"),
             n => println!("{} pending; see `archix diff`", count(n, "change", "changes")),
         }
+        print_missing_ignored(&declared.ignored, &installed);
     }
     Ok(())
 }
@@ -388,10 +406,15 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
     let empty = Default::default();
     let old_packages = old.map_or(&empty, |old| &old.packages);
     for (name, pkg) in &new.packages {
+        let note = if floats(name, pkg) {
+            " (builds from a VCS source, so it floats)"
+        } else {
+            ""
+        };
         match old_packages.get(name) {
-            None => lines.push(format!("+ {name} {}", pkg.version)),
+            None => lines.push(format!("+ {name} {}{note}", pkg.version)),
             Some(before) if before.version != pkg.version => {
-                lines.push(format!("~ {name} {} -> {}", before.version, pkg.version))
+                lines.push(format!("~ {name} {} -> {}{note}", before.version, pkg.version))
             }
             Some(_) => {}
         }
