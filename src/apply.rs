@@ -118,7 +118,11 @@ fn run_step(paths: &Paths, journal: &Journal, step: Step, reinstall: bool) -> Re
             crate::system::apply::start_services(change, tx.at_boot)
         })),
         Step::Boot => match &tx.boot {
-            Some(plan) => crate::system::boot::write_entry(paths, plan).map(|_| Vec::new()),
+            Some(plan) => {
+                // The rescue hook has to be in place before this generation's initramfs is built, also on the first switch.
+                crate::integration::ensure(paths, true)?;
+                crate::system::boot::write_entry(paths, plan).map(|_| Vec::new())
+            }
             None => Ok(Vec::new()),
         },
         step => run_package_step(paths, tx, generation, step, reinstall).map(|()| Vec::new()),
