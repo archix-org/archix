@@ -179,6 +179,28 @@ fn real_aur_packages_resolve() {
 
 #[test]
 #[ignore]
+fn the_lock_and_status_say_which_aur_packages_float() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new("archix-test-thing-git", "1.0.r3.gabc1234"));
+    aur.publish(TestPkg::new("archix-test-steady", "1.0"));
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&["archix-test-thing-git", "archix-test-steady"], &body);
+    let locked = setup.ok(&["lock", "--noconfirm"]);
+    assert!(
+        locked.contains("+ archix-test-thing-git 1.0.r3.gabc1234-1 (builds from a VCS source, so it floats)"),
+        "{locked}"
+    );
+    assert!(locked.contains("+ archix-test-steady 1.0-1\n"), "{locked}");
+    let status = setup.ok(&["status"]);
+    assert!(
+        status.contains("1 package builds from a VCS source, so a rebuild from its locked recipe can differ (`archix cache push` keeps the exact build): archix-test-thing-git"),
+        "{status}"
+    );
+}
+
+#[test]
+#[ignore]
 fn skip_check_builds_a_recipe_whose_tests_fail() {
     let _system = lock_system();
     let mut aur = LocalAur::new();

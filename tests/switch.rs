@@ -303,6 +303,20 @@ fn interrupted_switch_blocks_until_recovered() {
 
 #[test]
 #[ignore]
+fn ignored_packages_that_arent_installed_are_named() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "ignored_packages = { \"archix-test-elsewhere\" }");
+    let message = "ignored_packages lists 1 package that isn't installed here, and archix never installs ignored ones: archix-test-elsewhere";
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains(message), "{out}");
+    let status = setup.ok(&["status"]);
+    assert!(status.contains(message), "{status}");
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn a_journal_from_a_newer_archix_is_handed_to_the_archix_that_wrote_it() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
