@@ -96,6 +96,38 @@ fn forget(name: &str) {
 
 #[test]
 #[ignore]
+fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it() {
+    let _system = lock_system();
+    let repo = LocalRepo::new("archix-third");
+    repo.publish("archix-test-adopted", "1.0");
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
+        repo.server()
+    );
+    let setup = Setup::new(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    // Installed with plain pacman, the way `archix init` finds packages on a machine.
+    pacman(&["-Sy", "--noconfirm", "archix-test-adopted"]);
+    setup.set_body(&["archix-test-adopted"], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("archix-test-adopted").is_none());
+
+    repo.withdraw("archix-test-adopted");
+    for entry in fs::read_dir("/var/cache/pacman/pkg").unwrap().flatten() {
+        if entry.file_name().to_string_lossy().starts_with("archix-test-adopted-") {
+            fs::remove_file(entry.path()).unwrap();
+        }
+    }
+    setup.ok(&["rollback", "--noconfirm"]);
+    assert_eq!(installed("archix-test-adopted").as_deref(), Some("1.0-1"));
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn third_party_packages_install_and_fall_back_down_the_chain() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
