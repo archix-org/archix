@@ -25,15 +25,22 @@ const PROTECTED: &[&str] = &[
     "dbus-broker.service",
     "systemd-logind.service",
     "NetworkManager.service",
+    "systemd-networkd.service",
+    "systemd-resolved.service",
+    "iwd.service",
+    "wpa_supplicant.service",
     "sshd.service",
     "getty@",
     "serial-getty@",
     "user@",
 ];
 
-/// User units that are the desktop session itself.
+/// User units that are the desktop session itself, or that running apps hold streams to, such as audio and screen sharing.
 const SESSION: &[&str] = &[
     "dbus",
+    "pipewire",
+    "wireplumber",
+    "xdg-desktop-portal",
     "plasma-kwin",
     "plasma-plasmashell",
     "plasma-ksmserver",
@@ -448,7 +455,27 @@ mod tests {
         assert!(is_protected("getty@tty1.service", false, &none, ""));
         assert!(!is_protected("cups.service", false, &none, "sddm.service"));
         assert!(is_protected("plasma-kwin_wayland.service", true, &none, ""));
-        assert!(!is_protected("pipewire.service", true, &none, ""));
+        for network in [
+            "systemd-networkd.service",
+            "systemd-resolved.service",
+            "iwd.service",
+            "wpa_supplicant.service",
+        ] {
+            assert!(is_protected(network, false, &none, ""), "{network} can cut off ssh");
+        }
+        for media in [
+            "pipewire.service",
+            "pipewire-pulse.service",
+            "wireplumber.service",
+            "xdg-desktop-portal.service",
+            "xdg-desktop-portal-kde.service",
+        ] {
+            assert!(
+                is_protected(media, true, &none, ""),
+                "restarting {media} breaks audio or screen sharing"
+            );
+        }
+        assert!(!is_protected("syncthing.service", true, &none, ""));
         let overrides = BTreeMap::from([("sshd.service".to_string(), true), ("cups.service".to_string(), false)]);
         assert!(!is_protected("sshd.service", false, &overrides, ""));
         assert!(is_protected("cups.service", false, &overrides, ""));
