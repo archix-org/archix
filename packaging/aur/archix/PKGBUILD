@@ -19,8 +19,10 @@ optdepends=(
 )
 # Other AUR packages ship their own /usr/bin/ax.
 conflicts=('ax')
-source=("$pkgname-$pkgver.tar.gz::https://github.com/archix-org/archix/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+source=("https://github.com/archix-org/archix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"{,.sig})
+# packaging/aur/pin.sh fills these in from the signed release.
+sha256sums=('SKIP' 'SKIP')
+validpgpkeys=()
 # makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
 options=('!lto' '!debug')
 

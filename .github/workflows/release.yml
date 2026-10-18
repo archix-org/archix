@@ -27,6 +27,11 @@ jobs:
           cp LICENSE-MIT LICENSE-APACHE "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          git config --global --add safe.directory "$PWD"
+          git archive --format=tar.gz --prefix="archix-$version/" -o "archix-$version.tar.gz" HEAD
+          sha256sum "archix-$version.tar.gz" > "archix-$version.tar.gz.sha256"
+      # A draft until scripts/sign-release.sh has signed the tarballs and attached the signatures.
       - uses: softprops/action-gh-release@v2
         with:
-          files: archix-*-x86_64-linux.tar.gz*
+          draft: true
+          files: archix-*.tar.gz*

@@ -18,8 +18,10 @@ optdepends=(
 )
 provides=('archix')
 conflicts=('archix' 'ax')
-source=("archix-$pkgver-x86_64-linux.tar.gz::https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-x86_64-linux.tar.gz")
-sha256sums=('SKIP')
+source=("https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-x86_64-linux.tar.gz"{,.sig})
+# packaging/aur/pin.sh fills these in from the signed release.
+sha256sums=('SKIP' 'SKIP')
+validpgpkeys=()
 
 package() {
   cd "archix-$pkgver-x86_64-linux"
