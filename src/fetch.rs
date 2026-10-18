@@ -76,6 +76,16 @@ fn copy_whole(from: &Path, to: &Path) -> Result<()> {
     fs::rename(&part, to).with_context(|| format!("renaming {}", part.display()))
 }
 
+/// A hard link to a file another cache holds, since pacman never rewrites a cached package in place, or a copy when they're on different filesystems.
+fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
+    let part = to.with_extension(format!("part.{}", std::process::id()));
+    let _ = fs::remove_file(&part);
+    if fs::hard_link(from, &part).is_ok() {
+        return fs::rename(&part, to).with_context(|| format!("renaming {}", part.display()));
+    }
+    copy_whole(from, to)
+}
+
 fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wanted) -> Result<()> {
     let dest = dir.join(&item.file);
     if dest.is_file() && matches(&dest, item)? {
@@ -84,10 +94,10 @@ fn fetch_one(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], item: &Wan
     for other in also_look_in {
         let candidate = other.join(&item.file);
         if candidate.is_file() && matches(&candidate, item)? {
-            copy_whole(&candidate, &dest)?;
+            link_or_copy(&candidate, &dest)?;
             let sig = other.join(format!("{}.sig", item.file));
             if sig.is_file() {
-                copy_whole(&sig, &dir.join(format!("{}.sig", item.file)))?;
+                link_or_copy(&sig, &dir.join(format!("{}.sig", item.file)))?;
             }
             return Ok(());
         }
@@ -189,7 +199,13 @@ mod tests {
             sha256: Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()),
         };
         let archive = Archive::new("http://127.0.0.1:9");
-        let files = fetch_all(&archive, &ours, &[pacman], &[wanted]).unwrap();
+        let files = fetch_all(&archive, &ours, std::slice::from_ref(&pacman), &[wanted]).unwrap();
         assert_eq!(fs::read_to_string(&files[0]).unwrap(), "abc");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(
+            fs::metadata(&files[0]).unwrap().ino(),
+            fs::metadata(pacman.join("a-1-1-x86_64.pkg.tar.zst")).unwrap().ino(),
+            "a file pacman's cache already holds is linked, not stored twice"
+        );
     }
 }
