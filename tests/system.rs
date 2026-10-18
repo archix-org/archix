@@ -403,13 +403,18 @@ fn changed_user_units_reload_the_running_user_managers() {
     };
     let setup = Setup::new(&[], &unit("one"));
     setup.ok(&["switch", "--noconfirm"]);
-    assert!(user(&["cat", "archix-test-user.service"]).contains("echo one"));
+    assert!(user(&["show", "-P", "ExecStart", "archix-test-user.service"]).contains("echo one"));
     setup.set_body(&[], &unit("two"));
     setup.ok(&["switch", "--noconfirm"]);
     let stale = user(&["show", "-P", "NeedDaemonReload", "archix-test-user.service"]);
+    let exec = user(&["show", "-P", "ExecStart", "archix-test-user.service"]);
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(stale, "no", "root's user manager should have reloaded the changed unit");
+    assert!(
+        exec.contains("echo two"),
+        "root's user manager should run the new unit: {exec}"
+    );
 }
 
 #[test]
