@@ -81,6 +81,16 @@ pub(super) fn current_lock(
         )
     };
     let mut new = resolve_with(&declared.prefer)?;
+    // A DKMS module that came in as a dependency still needs the boot kernel's headers, which only the resolution shows.
+    if let Some(boot) = &declared.boot {
+        let headers = format!("{}-headers", boot.kernel);
+        if new.packages.contains_key("dkms") && !new.packages.contains_key(&headers) {
+            let mut prefer = declared.prefer.clone();
+            prefer.push(headers);
+            new = resolve_with(&prefer)?;
+            new.prefer = declared.prefer.clone();
+        }
+    }
     if let Some(old) = &old {
         new.keep_pins(old);
         new.flatpak = old.flatpak.clone();
