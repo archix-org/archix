@@ -362,6 +362,34 @@ fn settle_pending(holding: bool) {
     }
 }
 
+const DETACHED: &str = "ARCHIX_DETACHED";
+
+/// Run from a login session, archix moves to a scope of its own, as NixOS runs its switch with systemd-run, so logind ending the session when an ssh connection drops doesn't stop it; it stays on the same terminal.
+fn leave_login_session() {
+    use std::os::unix::process::CommandExt;
+    if std::env::var_os(DETACHED).is_some() || !std::path::Path::new("/run/systemd/system").exists() {
+        return;
+    }
+    let in_session = fs::read_to_string("/proc/self/cgroup").is_ok_and(|cgroups| {
+        cgroups
+            .lines()
+            .any(|line| line.contains("/session-") && line.ends_with(".scope"))
+    });
+    let Ok(exe) = std::env::current_exe() else { return };
+    if !in_session {
+        return;
+    }
+    let error = std::process::Command::new("systemd-run")
+        .args(["--scope", "--quiet", "--collect"])
+        .arg(format!("--unit=archix-{}", std::process::id()))
+        .arg("--")
+        .arg(exe)
+        .args(std::env::args_os().skip(1))
+        .env(DETACHED, "1")
+        .exec();
+    eprintln!("warning: couldn't move out of the login session ({error}), so ending the session could stop this run");
+}
+
 fn running_file() -> Result<fs::File> {
     let dir = archix::paths::Paths::system().state;
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -414,6 +442,9 @@ fn run() -> Result<ExitCode> {
         );
     }
     let changes_things = needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. });
+    if needs_root(&command).is_some() {
+        leave_login_session();
+    }
     if changes_things {
         hold_exclusive()?;
     }

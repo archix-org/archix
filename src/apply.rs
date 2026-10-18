@@ -56,7 +56,7 @@ fn held_open(path: &Path) -> bool {
 /// Runs the journal's remaining steps, saving progress after each; `reinstall` redoes installs after a crash.
 pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<String>> {
     // A closed terminal or ssh session, or a Ctrl-C, would otherwise kill pacman halfway through a transaction.
-    let _held = HoldInterrupts::new();
+    let _held = HoldInterrupts::new(paths);
     let path = paths.journal();
     // Downloads, copies and builds the switch prepared must be on disk before anything changes, or a power cut leaves recovery with empty package files.
     unsafe { libc::sync() };
@@ -486,16 +486,35 @@ pub fn mismatches(paths: &Paths, tx: &Transaction) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// Ignores SIGHUP and SIGINT (inherited by pacman) while the journal runs, restoring the previous handlers afterwards.
+static HANGUP_LOG: std::sync::OnceLock<std::ffi::CString> = std::sync::OnceLock::new();
+
+/// Once the terminal hangs up, as a dropped ssh connection does, writing to it fails, and Rust's print macros would stop archix halfway; output goes to a log instead.
+extern "C" fn after_hangup(_: libc::c_int) {
+    if let Some(path) = HANGUP_LOG.get() {
+        unsafe {
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND | libc::O_CLOEXEC;
+            let fd = libc::open(path.as_ptr(), flags, 0o600 as libc::c_uint);
+            if fd >= 0 {
+                libc::dup2(fd, 1);
+                libc::dup2(fd, 2);
+                libc::close(fd);
+            }
+        }
+    }
+}
+
+/// Holds off SIGINT and a hang-up while the journal runs, restoring the previous handlers afterwards.
 struct HoldInterrupts {
     previous: [libc::sighandler_t; 2],
 }
 
 impl HoldInterrupts {
-    fn new() -> Self {
+    fn new(paths: &Paths) -> Self {
+        let log = paths.state.join("after-hangup.log");
+        let _ = HANGUP_LOG.set(std::ffi::CString::new(log.as_os_str().as_encoded_bytes()).unwrap_or_default());
         let previous = unsafe {
             [
-                libc::signal(libc::SIGHUP, libc::SIG_IGN),
+                libc::signal(libc::SIGHUP, after_hangup as *const () as libc::sighandler_t),
                 libc::signal(libc::SIGINT, libc::SIG_IGN),
             ]
         };
@@ -514,12 +533,16 @@ impl Drop for HoldInterrupts {
 }
 
 fn pacman<S: AsRef<OsStr>>(args: &[S]) -> Result<()> {
-    let status = Command::new("pacman")
-        .args(args)
-        .process_group(0)
-        .env(TRANSACTION_ENV, "1")
-        .status()
-        .context("running pacman")?;
+    let mut pacman = Command::new("pacman");
+    pacman.args(args).process_group(0).env(TRANSACTION_ENV, "1");
+    // archix's own hang-up handler doesn't carry over into pacman, so it ignores the signal outright.
+    unsafe {
+        pacman.pre_exec(|| {
+            libc::signal(libc::SIGHUP, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+    let status = pacman.status().context("running pacman")?;
     if !status.success() {
         bail!("pacman exited with {status}");
     }
