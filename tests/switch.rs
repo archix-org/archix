@@ -316,6 +316,7 @@ fn a_journal_from_a_newer_archix_is_handed_to_the_archix_that_wrote_it() {
     );
     let mut newer = serde_json::to_value(&journal).unwrap();
     newer["version"] = 99.into();
+    fs::create_dir_all(&paths.state).unwrap();
     fs::write(paths.journal(), newer.to_string()).unwrap();
     let writer = paths.state.join("journal-archix");
     fs::write(&writer, "#!/bin/sh\necho \"handed over: $* ($ARCHIX_HANDED_OVER)\"\n").unwrap();
