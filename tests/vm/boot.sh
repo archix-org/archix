@@ -10,5 +10,6 @@ timeout "${VM_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_
   -drive file=/work/disk.img,format=raw,if=virtio \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0,romfile= \
   -display none -serial file:/work/serial.log -monitor none || true
-grep VMTEST /work/serial.log || true
-grep -q "VMTEST: OK" /work/serial.log
+# The console log carries escape and NUL bytes, which make grep call it binary and hide every line.
+grep -a VMTEST /work/serial.log || true
+grep -aq "VMTEST: OK" /work/serial.log
