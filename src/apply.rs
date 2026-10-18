@@ -165,10 +165,18 @@ fn run_package_step(
                     OsStr::new("--noconfirm"),
                     OsStr::new("--nodeps"),
                     OsStr::new("--nodeps"),
-                    OsStr::new("--needed"),
                 ];
+                if !reinstall {
+                    args.push(OsStr::new("--needed"));
+                }
                 args.extend(keyrings.iter().map(|path| path.as_os_str()));
                 pacman(&args)?;
+                // Their install scripts rewrote pacman's gpg keyring; torn by a power cut, it would make pacman reject every package.
+                unsafe { libc::sync() };
+            }
+            let rest: Vec<&PathBuf> = tx.install.iter().filter(|path| !keyrings.contains(path)).collect();
+            if rest.is_empty() {
+                return restore_running_modules(paths);
             }
             // -dd: the lock is a complete set, and what still depends on old versions is removed by the Remove step that follows.
             let mut args = vec![
@@ -183,7 +191,7 @@ fn run_package_step(
             if !reinstall && !tx.reinstall {
                 args.push(OsStr::new("--needed"));
             }
-            args.extend(tx.install.iter().map(|path| path.as_os_str()));
+            args.extend(rest.iter().map(|path| path.as_os_str()));
             pacman(&args)?;
             for failed in crate::system::dkms::reconcile(Path::new(crate::system::boot::MODULES)) {
                 eprintln!("warning: {failed} failed, so DKMS may not remove that module's files later");

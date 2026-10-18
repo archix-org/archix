@@ -20,6 +20,48 @@ use archix::plan::Change;
 use super::switch::{guard_downgrades, reboot_notice, report_soft_failures, run_hooks};
 use super::{RecoverMode, count, describe_unfinished, kind_name, require_root};
 
+/// A keyring package's install script rewrites pacman's gpg keyring, which a power cut can leave unreadable, and pacman then rejects every package; this sets it aside and rebuilds it from the keyrings on disk.
+fn repair_keyring(paths: &Paths, journal: &Journal) -> Result<()> {
+    let gnupg = paths.pacman_conf.with_file_name("pacman.d").join("gnupg");
+    if !gnupg.is_dir() {
+        return Ok(());
+    }
+    let readable = Command::new("gpg")
+        .arg("--homedir")
+        .arg(&gnupg)
+        .args(["--batch", "--list-keys"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if readable {
+        return Ok(());
+    }
+    let aside = paths.state.join("torn-gnupg").join(journal.started.to_string());
+    fs::create_dir_all(aside.parent().expect("under the state dir"))?;
+    let _ = Command::new("gpgconf")
+        .arg("--homedir")
+        .arg(&gnupg)
+        .args(["--kill", "all"])
+        .output();
+    fs::rename(&gnupg, &aside).with_context(|| format!("moving {} aside", gnupg.display()))?;
+    for args in [&["--init"][..], &["--populate"][..]] {
+        let status = Command::new("pacman-key")
+            .args(args)
+            .status()
+            .context("running pacman-key")?;
+        if !status.success() {
+            bail!(
+                "pacman's keyring was torn by the crash, and `pacman-key {}` failed rebuilding it",
+                args.join(" ")
+            );
+        }
+    }
+    println!(
+        "pacman's keyring was torn by the crash; rebuilt it from /usr/share/pacman/keyrings, and moved the torn one to {}",
+        aside.display()
+    );
+    Ok(())
+}
+
 pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
     require_root("recover")?;
     let paths = Paths::system();
@@ -57,6 +99,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
     }
     if !matches!(mode, RecoverMode::Abandon) {
         set_aside_leftovers(&paths, &journal.transaction.install, &journal)?;
+        repair_keyring(&paths, &journal)?;
     }
     let kind = kind_name(journal.kind);
     if !matches!(mode, RecoverMode::Abandon) {
