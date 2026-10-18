@@ -193,6 +193,7 @@ fn rollback_transaction(
     // What was installed before the switch is the current generation, which records each file and its sha256.
     let store = Store::new(paths);
     let current = store.current()?.and_then(|number| store.get(number).ok());
+    let repos = super::third_party_repos(paths);
     let mut wanted = Vec::new();
     let mut verified = Vec::new();
     for (name, pkg) in &journal.before {
@@ -211,9 +212,14 @@ fn rollback_transaction(
         if sha256.is_some() {
             verified.push(file.clone());
         }
+        let mut urls: Vec<String> = recorded
+            .and_then(|locked| repos.iter().find(|repo| repo.name == locked.repo))
+            .map(|repo| repo.urls(&file))
+            .unwrap_or_default();
+        urls.push(archive.package_url(name, &file));
         wanted.push(Wanted {
             name: name.clone(),
-            urls: vec![archive.package_url(name, &file)],
+            urls,
             file,
             sha256,
         });

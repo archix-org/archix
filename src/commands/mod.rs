@@ -466,6 +466,47 @@ fn wanted_file(archive: &Archive, date: Date, name: &str, pkg: &Locked, repos: &
     }
 }
 
+/// Third-party repos usually keep only their latest version, so a generation keeps a copy of each package it takes from one, also one archix didn't install itself, for rollbacks to install.
+fn keep_third_party_copies(
+    archive: &Archive,
+    paths: &Paths,
+    date: Date,
+    packages: &BTreeMap<String, Locked>,
+    repos: &[Repo],
+) {
+    for (name, pkg) in packages {
+        let third_party = repos.iter().any(|repo| repo.name == pkg.repo && repo.custom.is_some());
+        if !third_party || pkg.is_built() || paths.packages().join(&pkg.file).is_file() {
+            continue;
+        }
+        let wanted = wanted_file(archive, date, name, pkg, repos);
+        if let Err(e) = fetch_all(
+            archive,
+            &paths.packages(),
+            std::slice::from_ref(&paths.pacman_cache),
+            &[wanted],
+        ) {
+            eprintln!(
+                "warning: couldn't keep a copy of {name} {}, so a rollback to this generation needs {} to still have it: {e:#}",
+                pkg.version, pkg.repo
+            );
+        }
+    }
+}
+
+/// The third-party repos in pacman.conf, which archix keeps in step with the config, for rollbacks that don't evaluate it.
+fn third_party_repos(paths: &Paths) -> Vec<Repo> {
+    let text = std::fs::read_to_string(&paths.pacman_conf).unwrap_or_default();
+    let (_, custom) = archix::capture::parse_pacman_conf(&text, |path| std::fs::read_to_string(path).ok());
+    custom
+        .into_iter()
+        .map(|(name, custom)| Repo {
+            name,
+            custom: Some(custom),
+        })
+        .collect()
+}
+
 /// Downloads everything `changes` installs and builds the transaction that ends at exactly `packages`.
 fn transaction_for(
     archive: &Archive,
@@ -711,6 +752,34 @@ mod tests {
     use super::*;
     use archix::eval;
     use std::fs;
+
+    #[test]
+    fn a_rollback_takes_third_party_servers_from_pacman_conf() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        fs::create_dir_all(paths.pacman_conf.parent().unwrap()).unwrap();
+        fs::write(
+            &paths.pacman_conf,
+            "[options]\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n\n[archix-self]\nSigLevel = Optional TrustAll\nServer = file:///srv/archix-repo\n",
+        )
+        .unwrap();
+        let locked = Locked {
+            version: "1-1".into(),
+            repo: "archix-self".into(),
+            file: "archix-1-1-x86_64.pkg.tar.zst".into(),
+            sha256: "00".into(),
+            ..Default::default()
+        };
+        let archive = Archive::new("https://archive.example");
+        let wanted = wanted_file(
+            &archive,
+            "2026-10-10".parse().unwrap(),
+            "archix",
+            &locked,
+            &third_party_repos(&paths),
+        );
+        assert_eq!(wanted.urls, ["file:///srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst"]);
+    }
 
     fn declared_from(lua: &str) -> Declared {
         let dir = tempfile::tempdir().unwrap();

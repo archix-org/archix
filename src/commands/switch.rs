@@ -36,8 +36,9 @@ use archix::system::{self, SystemState, apply::SystemChange, snapshot};
 use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
-    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, print_warned, recipes, refuse_if_unfinished,
-    require_root, select_changes, settle_flatpak, transaction_for, user_cache,
+    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies, print_warned,
+    recipes, refuse_if_unfinished, require_root, select_changes, settle_flatpak, third_party_repos, transaction_for,
+    user_cache,
 };
 
 /// Declares packages in the host's installed.lua and switches; installed.lua is written only if the switch commits.
@@ -262,6 +263,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         }
         system::blobs::ensure(&paths, &archive, &rendered)?;
         system::apply::keep_originals(&paths, &system_change)?;
+        keep_third_party_copies(&archive, &paths, lock.date, &lock.packages, &declared.repos);
         let created = store.create(generation)?;
         store.activate(created.number)?;
         super::lock::write_deferred()?;
@@ -409,6 +411,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &system::hooks::due(&system_change, &rewritten),
     )?;
     transaction.system = Some(system_change.clone());
+    keep_third_party_copies(&archive, &paths, lock.date, &lock.packages, &declared.repos);
     let mut created = store.create(generation)?;
     if let Some(boot) = &declared.boot {
         transaction.boot = Some(BootPlan {
@@ -1062,7 +1065,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
         &generation.packages,
         &changes,
         &BTreeMap::new(),
-        &[],
+        &third_party_repos(&paths),
     )?;
     transaction.install = apply::without_signatures(&paths, &transaction.install)?;
     if online {
