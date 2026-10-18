@@ -1,0 +1,3 @@
+# dkms versions `tests/vm/run.sh nvidia` passed with; add one only after a passing run, with the log that shows it.
+3.4.1-1
+3.4.4-1
