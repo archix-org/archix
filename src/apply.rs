@@ -72,6 +72,7 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
         unsafe { libc::sync() };
         journal.done.push(step);
         journal.save(&path)?;
+        crate::testhooks::crash_at(&format!("after-{}", format!("{step:?}").to_lowercase()));
     }
     Journal::delete(&path)?;
     Ok(soft_failures)

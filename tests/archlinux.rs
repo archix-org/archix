@@ -161,6 +161,34 @@ fn with_the_archive_unreachable_a_name_the_snapshot_lacks_is_refused_not_taken_f
 
 #[test]
 #[ignore]
+fn a_dkms_module_pulled_in_as_a_dependency_brings_the_kernels_headers() {
+    let dir = TempDir::new().unwrap();
+    // v4l2loopback-utils needs a V4L2LOOPBACK-MODULE, which v4l2loopback-dkms provides; nothing declares the DKMS package itself.
+    fs::write(
+        dir.path().join("init.lua"),
+        r#"return { packages = { "base", "v4l2loopback-utils" }, boot = { loader = "systemd-boot" }, kernel_params = { "root=/dev/vda2" } }"#,
+    )
+    .unwrap();
+    let out = stdout(&archix(dir.path(), &["update", "--to", "2026-10-10", "--noconfirm"]));
+    let lock = Lockfile::load(&dir.path().join(LOCK_FILE)).unwrap();
+    let packages = &lock.hosts["box"].packages;
+    println!(
+        "locked: v4l2loopback-dkms {:?}, linux-headers {:?}\n{out}",
+        packages.get("v4l2loopback-dkms").map(|p| &p.version),
+        packages.get("linux-headers").map(|p| &p.version)
+    );
+    assert!(
+        packages.contains_key("v4l2loopback-dkms"),
+        "the dependency should pull in the DKMS module"
+    );
+    assert!(
+        packages.contains_key("linux-headers"),
+        "a DKMS module in the lock needs the boot kernel's headers in it too"
+    );
+}
+
+#[test]
+#[ignore]
 fn unknown_packages_fail_to_lock() {
     let dir = config(&["base", "definitely-not-a-package"]);
     let output = archix(dir.path(), &["lock"]);
