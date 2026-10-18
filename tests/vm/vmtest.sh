@@ -7,7 +7,8 @@ stage=$(cat "$state/stage" 2>/dev/null || echo 1)
 say() { echo "VMTEST: $*" > /dev/console; }
 fail() { say "FAIL: $*"; systemctl poweroff; exit 1; }
 current() { archix generations | awk '$1 == "*" { print $2 }'; }
-booted=$(sed -n 's/.*archix\.generation=\([0-9]*\).*/\1/p' /proc/cmdline)
+# systemd-boot names the entry it started in LoaderEntrySelected: 4 attribute bytes, then archix-N.conf in UTF-16.
+booted=$(tr -d '\000' < /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>/dev/null | grep -ao 'archix-[0-9]*' | head -1 | cut -d- -f2)
 say "stage $stage: booted generation $booted, current generation $(current)"
 config=/etc/archix/init.lua
 
@@ -19,7 +20,7 @@ case $stage in
     archix --host archix-vm install tree --noconfirm > /dev/console 2>&1 || fail "archix install tree"
     systemctl is-enabled -q archix-marker.service && fail "generation 2 drops the marker"
     [ "$(current)" = 2 ] || fail "installing tree should make generation 2"
-    bootctl set-oneshot archix-1.efi || fail "bootctl set-oneshot archix-1.efi"
+    bootctl set-oneshot archix-1.conf || fail "bootctl set-oneshot archix-1.conf"
     echo 2 > "$state/stage"
     say "PASS: generation 2 has a boot entry; booting generation 1's next"
     systemctl reboot
@@ -41,7 +42,7 @@ case $stage in
     say "PASS: booted a signed entry with Secure Boot enforcing"
     archix secure-boot check > /dev/console 2>&1 || fail "secure-boot check should pass"
     archix secure-boot check --anticheat > /dev/console 2>&1 && fail "the anti-cheat check can't pass with a self-signed kernel"
-    [ -f "/boot/EFI/Linux/archix-$(current)-protected.efi" ] || fail "protected_entry should write a protected entry"
+    [ -f "/boot/loader/entries/archix-$(current)-protected.conf" ] || fail "protected_entry should write a protected entry"
     sed -i 's|secure_boot = true|secure_boot = false|' "$config"
     before=$(current)
     archix --host archix-vm install jq --noconfirm > /dev/console 2>&1 && fail "an unsigned switch must be refused under Secure Boot"
@@ -55,7 +56,7 @@ case $stage in
     [ "$(current)" -gt "$rescued" ] || fail "installing jq should make a newer generation"
     rm -f /usr/lib/libalpm.so*
     pacman -V > /dev/null 2>&1 && fail "pacman should be broken now"
-    bootctl set-oneshot "archix-$rescued-rescue.efi" || fail "bootctl set-oneshot rescue"
+    bootctl set-oneshot "archix-$rescued-rescue.conf" || fail "bootctl set-oneshot rescue"
     echo "$rescued" > "$state/rescued"
     echo 4 > "$state/stage"
     systemctl reboot

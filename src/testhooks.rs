@@ -16,3 +16,13 @@ pub fn kernel_cmdline() -> String {
     }
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
+
+/// The boot entry systemd-boot started, or ARCHIX_TEST_ENTRY in a debug build.
+pub fn selected_entry() -> Option<String> {
+    if cfg!(debug_assertions)
+        && let Ok(entry) = std::env::var("ARCHIX_TEST_ENTRY")
+    {
+        return Some(entry);
+    }
+    crate::system::boot::read_selected_entry()
+}

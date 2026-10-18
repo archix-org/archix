@@ -19,7 +19,7 @@ fn boot_body(extra: &str) -> String {
 }
 
 fn entries() -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(format!("{ESP}/EFI/Linux"))
+    let mut names: Vec<String> = fs::read_dir(format!("{ESP}/loader/entries"))
         .map(|dir| {
             dir.flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -34,11 +34,15 @@ fn current() -> u32 {
     Store::new(&archix::paths::Paths::system()).current().unwrap().unwrap()
 }
 
+/// The UKI a boot menu entry starts.
+fn uki(entry: &str) -> String {
+    let text = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap();
+    let path = text.lines().find_map(|line| line.strip_prefix("efi ")).unwrap().trim();
+    format!("{ESP}{path}")
+}
+
 fn inspect(entry: &str) -> String {
-    let output = Command::new("ukify")
-        .args(["inspect", &format!("{ESP}/EFI/Linux/{entry}")])
-        .output()
-        .unwrap();
+    let output = Command::new("ukify").args(["inspect", &uki(entry)]).output().unwrap();
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
@@ -50,16 +54,14 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     let setup = Setup::new(&["tree"], &boot_body(""));
     setup.ok(&["switch", "--noconfirm"]);
     let with_tree = current();
-    let entry = format!("archix-{with_tree}.efi");
+    let entry = format!("archix-{with_tree}.conf");
     assert!(entries().contains(&entry), "{:?}", entries());
     let info = inspect(&entry);
+    assert!(info.contains("root=/dev/vda2"), "{info}");
+    let menu = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap();
     assert!(
-        info.contains(&format!("archix.generation={with_tree}")) && info.contains("root=/dev/vda2"),
-        "{info}"
-    );
-    assert!(
-        info.contains(&format!("generation {with_tree}")),
-        "the entry's title names the generation:\n{info}"
+        menu.contains(&format!("generation {with_tree}")),
+        "the entry's title names the generation:\n{menu}"
     );
     let kernel = fs::read_to_string(format!("/var/lib/archix/boot/{with_tree}.kernel")).unwrap();
     assert!(
@@ -75,7 +77,7 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     setup.ok(&["switch", "--noconfirm"]);
     let newest = current();
     let kept: BTreeSet<String> = entries().into_iter().filter(|e| !e.contains("rescue")).collect();
-    let expected = BTreeSet::from([format!("archix-{newest}.efi"), format!("archix-{without_tree}.efi")]);
+    let expected = BTreeSet::from([format!("archix-{newest}.conf"), format!("archix-{without_tree}.conf")]);
     assert_eq!(kept, expected, "only the newest 2");
 
     setup.ok(&[
@@ -96,7 +98,7 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     );
     setup.set_body(&[], &boot_body(", secure_boot = true"));
     setup.ok(&["switch", "--noconfirm"]);
-    let signed = format!("{ESP}/EFI/Linux/archix-{}.efi", current());
+    let signed = uki(&format!("archix-{}.conf", current()));
     let verify = Command::new("sbctl")
         .env("ESP_PATH", ESP)
         .args(["verify", &signed])

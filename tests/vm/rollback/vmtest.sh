@@ -17,7 +17,8 @@ current() { ax generations | awk '$1 == "*" { print $2 }'; }
 newest() { ax generations | awk '{ n = ($1 == "*") ? $2 : $1 } END { print n }'; }
 remember() { echo "$2" > "$state/$1"; }
 recall() { cat "$state/$1"; }
-booted=$(sed -n 's/.*archix\.generation=\([0-9]*\).*/\1/p' /proc/cmdline)
+# systemd-boot names the entry it started in LoaderEntrySelected: 4 attribute bytes, then archix-N.conf in UTF-16.
+booted=$(tr -d '\000' < /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>/dev/null | grep -ao 'archix-[0-9]*' | head -1 | cut -d- -f2)
 glibc() { pacman -Q glibc | awk '{print $2}' | cut -d+ -f1; }
 kernel_pkg() { pacman -Q linux | awk '{print $2}'; }
 # The DKMS module, which must be built for and loadable by the running kernel, at the version the generation locks.
@@ -122,7 +123,7 @@ case $stage in
     /usr/lib/ld-linux-x86-64.so.2 --list /usr/bin/archix-test-hello | grep -q libfaac.so.1 || fail "the rebuild should link libfaac.so.1"
     dkms_module 0.15.4
     say "PASS: booted the updated generation: kernel $(uname -r), glibc $(glibc)"
-    bootctl set-oneshot "archix-$(recall old).efi" || fail "bootctl set-oneshot"
+    bootctl set-oneshot "archix-$(recall old).conf" || fail "bootctl set-oneshot"
     echo 4 > "$state/stage"
     systemctl reboot
     ;;
@@ -183,7 +184,7 @@ case $stage in
     say "PASS: a full disk stops a rollback before it changes anything"
 
     ax rollback "$(recall new)" --noconfirm > /dev/console 2>&1 || fail "archix rollback to the newer generation"
-    bootctl set-oneshot "archix-$(recall old)-rescue.efi" || fail "bootctl set-oneshot rescue"
+    bootctl set-oneshot "archix-$(recall old)-rescue.conf" || fail "bootctl set-oneshot rescue"
     echo 5 > "$state/stage"
     sync
     say "breaking glibc on disk, then booting generation $(recall old)'s rescue entry"

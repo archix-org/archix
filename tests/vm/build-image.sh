@@ -58,6 +58,6 @@ install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
 arch-chroot /mnt archix --host archix-vm switch --noconfirm
-ls /mnt/boot/EFI/Linux
+ls /mnt/boot/loader/entries /mnt/boot/EFI/archix
 # Inside the VM the host-side mirror has another address.
 sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist /mnt/var/lib/archix/archive-url

@@ -1194,11 +1194,11 @@ pub fn hook_record() {
 
 /// Run early at boot by archix-boot.service: if an older generation's entry was booted, make that generation current.
 pub fn boot_check(cmdline: Option<String>) -> Result<()> {
-    let cmdline = match cmdline {
-        Some(cmdline) => cmdline,
-        None => fs::read_to_string("/proc/cmdline").context("reading /proc/cmdline")?,
+    let booted = match cmdline {
+        Some(cmdline) => system::boot::booted_generation(&cmdline),
+        None => system::boot::booted(),
     };
-    let Some(booted) = system::boot::booted_generation(&cmdline) else {
+    let Some(booted) = booted else {
         return Ok(());
     };
     let paths = Paths::system();
@@ -1285,7 +1285,10 @@ pub fn rescue(root: &std::path::Path, generation: Option<u32>, extra: &[String],
         extra.extend(touched(&journal));
     }
     // A rescue entry carries its own generation on the command line; restoring the current one couldn't undo a bad switch.
-    let booted = system::boot::booted_generation(&cmdline);
+    if initrd {
+        system::boot::mount_efivars();
+    }
+    let booted = system::boot::booted();
     let number = match generation.or(booted) {
         Some(number) => number,
         None => store
