@@ -1,7 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -162,6 +164,7 @@ pub fn rescue(root: &Path, generation: &Generation, extra: &[String]) -> Result<
         .map(|(name, _)| name)
         .collect();
     let mut dropped = Vec::new();
+    let mut kernels = BTreeSet::new();
     for name in names {
         let pkg = &generation.packages[name];
         let candidates = [paths.packages().join(&pkg.file), paths.pacman_cache.join(&pkg.file)];
@@ -180,9 +183,47 @@ pub fn rescue(root: &Path, generation: &Generation, extra: &[String]) -> Result<
         }
         dropped.extend(install(root, &paths, &file, pkg.explicit).with_context(|| format!("restoring {name}"))?);
         rescued.restored.push(format!("{name} {}", pkg.version));
+        let entry = paths.local_db().join(format!("{name}-{}", pkg.version)).join("files");
+        kernels.extend(
+            fs::read_to_string(entry)
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|path| {
+                    let (version, inside) = path.strip_prefix("usr/lib/modules/")?.split_once('/')?;
+                    (!inside.is_empty()).then(|| version.to_string())
+                }),
+        );
     }
     remove_dropped(root, &paths, &dropped)?;
+    index_modules(root, &kernels);
     Ok(rescued)
+}
+
+/// Writes modules.dep and the other indexes of each kernel version, as pacman's depmod hook would; without them modprobe and udev load nothing.
+fn index_modules(root: &Path, versions: &BTreeSet<String>) {
+    for version in versions {
+        let indexed = match Command::new("depmod").arg("-b").arg(root).arg(version).output() {
+            Ok(output) => output.status.success(),
+            // The initramfs may have no depmod; the restored root's own runs inside it.
+            Err(_) => {
+                let root = root.to_path_buf();
+                let mut depmod = Command::new("/usr/bin/depmod");
+                depmod.arg(version);
+                unsafe {
+                    depmod.pre_exec(move || {
+                        std::os::unix::fs::chroot(&root)?;
+                        std::env::set_current_dir("/")
+                    });
+                }
+                depmod.output().is_ok_and(|output| output.status.success())
+            }
+        };
+        if !indexed {
+            eprintln!(
+                "warning: depmod failed for {version}, so its modules may not load until `depmod {version}` runs"
+            );
+        }
+    }
 }
 
 /// Unpacks the files among `files` that belong to pacman's own dependency closure, without pacman, for when a cut-off transaction left it unable to start; returns them as "name version".
