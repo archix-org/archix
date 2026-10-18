@@ -99,7 +99,7 @@ pub fn recover(mode: Option<RecoverMode>, allow_unsafe: bool) -> Result<()> {
             apply::check_packages(&transaction)?;
             let target = format!("the packages from before the {kind} to {}", journal.target);
             let mut rollback = Journal::new(Kind::Rollback, &journal.host, target, installed, transaction);
-            rollback.save(&paths.journal())?;
+            rollback.begin(&paths.journal())?;
             let failures = apply::run(&paths, &mut rollback, true)?;
             forget_unactivated(&paths, &journal);
             println!("rolled back to the packages from before the {kind}");

@@ -7,6 +7,15 @@ use anyhow::{Context, Result};
 
 /// Writes via a temp file, fsync and rename, so a power cut leaves either the old or the new contents, never a torn file.
 pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
+    write_mode(path, contents, None)
+}
+
+/// Like `write`, for a program: it gets mode 0755 before the rename, so it never appears without it.
+pub fn write_executable(path: &Path, contents: &[u8]) -> Result<()> {
+    write_mode(path, contents, Some(0o755))
+}
+
+fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -15,6 +24,9 @@ pub fn write(path: &Path, contents: &[u8]) -> Result<()> {
     let tmp = path.with_file_name(tmp_name);
     let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
     file.write_all(contents)?;
+    if let Some(mode) = mode {
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
     file.sync_all()?;
     fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     sync_dir(path)

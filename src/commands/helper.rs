@@ -204,7 +204,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     apply::check_packages(&transaction)?;
     let what = format!("a temporary install of {}", names.join(" "));
     let mut journal = Journal::new(Kind::Switch, target.host, what, installed, transaction);
-    journal.save(&paths.journal())?;
+    journal.begin(&paths.journal())?;
     apply::run(&paths, &mut journal, false)?;
     println!(
         "installed {} without declaring it; the next `archix switch` removes it unless it's declared",

@@ -430,7 +430,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     transaction.config = super::lock::take_deferred();
     let mut journal = Journal::new(Kind::Switch, target.host, name.clone(), installed, transaction);
     journal.generation = Some(created.number);
-    journal.save(&paths.journal())?;
+    journal.begin(&paths.journal())?;
     let mut soft_failures = apply::run(&paths, &mut journal, false)?;
     finish(&paths, declared.boot.is_some(), &declared.repos)?;
     soft_failures.extend(finish_flatpak(
@@ -1078,7 +1078,7 @@ fn roll_back(to: Option<u32>, noconfirm: bool, allow_unsafe: Option<bool>) -> Re
     transaction.at_boot = !online;
     let mut journal = Journal::new(Kind::Switch, &generation.host, name.clone(), installed, transaction);
     journal.generation = Some(number);
-    journal.save(&paths.journal())?;
+    journal.begin(&paths.journal())?;
     let mut soft_failures = apply::run(&paths, &mut journal, false)?;
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
         if online {

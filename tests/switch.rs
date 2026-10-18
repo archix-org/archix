@@ -301,6 +301,39 @@ fn interrupted_switch_blocks_until_recovered() {
     }
 }
 
+#[test]
+#[ignore]
+fn a_journal_from_a_newer_archix_is_handed_to_the_archix_that_wrote_it() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let paths = &setup.paths;
+    let journal = Journal::new(
+        Kind::Switch,
+        "box",
+        "snapshot 2026-10-10".into(),
+        Default::default(),
+        Transaction::default(),
+    );
+    let mut newer = serde_json::to_value(&journal).unwrap();
+    newer["version"] = 99.into();
+    fs::write(paths.journal(), newer.to_string()).unwrap();
+    let writer = paths.state.join("journal-archix");
+    fs::write(&writer, "#!/bin/sh\necho \"handed over: $* ($ARCHIX_HANDED_OVER)\"\n").unwrap();
+    fs::set_permissions(&writer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let out = setup.ok(&["recover", "--continue"]);
+    assert!(
+        out.contains("handed over:") && out.contains("recover --continue (1)"),
+        "{out}"
+    );
+    assert!(setup.ok(&["status"]).contains("status (1)"));
+
+    fs::remove_file(&writer).unwrap();
+    let out = setup.fails(&["recover", "--continue"]);
+    assert!(out.contains("version 99"), "{out}");
+    fs::remove_file(paths.journal()).unwrap();
+}
+
 /// Installs lemon 3.54.0 from a later snapshot with plain pacman, the way `pacman -Syu` or yay would.
 fn upgrade_lemon_behind_archix() {
     let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");

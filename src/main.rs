@@ -389,7 +389,8 @@ fn hold_exclusive() -> Result<()> {
 }
 
 fn run() -> Result<ExitCode> {
-    let cli = Cli::parse();
+    // A switch by 0.1.0-dogfood that replaced archix itself left units saying `ExecStart=/usr/bin/archix (deleted) boot-check`.
+    let cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
     if let Some(name) = needs_root(&command)
         && !is_root()

@@ -100,9 +100,19 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     files
 }
 
+/// Where this archix was started from, also after a switch had pacman replace it, when Linux appends " (deleted)".
+fn own_path() -> Result<PathBuf> {
+    let exe = std::env::current_exe().context("finding the archix binary")?;
+    let text = exe.to_string_lossy();
+    Ok(match text.strip_suffix(" (deleted)") {
+        Some(path) => PathBuf::from(path),
+        None => exe,
+    })
+}
+
 /// Writes the integration files that are missing or out of date, and boot ones only while archix manages booting.
 pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
-    let archix = std::env::current_exe().context("finding the archix binary")?;
+    let archix = own_path()?;
     let root = paths
         .pacman_conf
         .parent()
