@@ -2,9 +2,14 @@
 local formats = {}
 local null = archix.null
 
+local writable = { string = true, number = true, boolean = true }
+
 local function keys(t)
   local list = {}
-  for k in next, t do list[#list + 1] = k end
+  for k in next, t do
+    if not writable[type(k)] then error("archix.formats: keys must be strings, numbers or booleans, not a " .. type(k), 3) end
+    list[#list + 1] = k
+  end
   table.sort(list, function(a, b) return tostring(a) < tostring(b) end)
   return list
 end

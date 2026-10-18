@@ -65,11 +65,15 @@ end
 local type_rank = { number = 1, string = 2, boolean = 3 }
 
 local function key_less(a, b)
-  local ta, tb = type(a), type(b)
-  if ta ~= tb then return (type_rank[ta] or 4) < (type_rank[tb] or 4) end
-  if ta == "number" or ta == "string" then return a < b end
-  if ta == "boolean" then return (not a) and b end
-  return tostring(a) < tostring(b)
+  if a == b then return false end
+  local ra, rb = type_rank[type(a)], type_rank[type(b)]
+  if not (ra and rb) then
+    if ra or rb then return ra ~= nil end
+    error("pairs: two keys are tables or functions, which have no reproducible order; key the table by strings or numbers", 3)
+  end
+  if ra ~= rb then return ra < rb end
+  if type(a) == "boolean" then return (not a) and b end
+  return a < b
 end
 
 -- Lua's hash order is seeded per run; sorted keys keep evaluation reproducible.
