@@ -83,6 +83,7 @@ case $stage in
     fill_disk $((20 * 1024 * 1024))
     ax switch --noconfirm > "$state/full.log" 2>&1 && fail "a switch with 20 MB free should fail"
     tail -5 "$state/full.log" > /dev/console
+    grep -q "nothing was changed" "$state/full.log" || fail "the full-disk refusal should say nothing was changed"
     rm -f /var/tmp/archix-fill
     [ "$(current)" = "$(recall old)" ] || fail "the failed switch on a full disk changed the current generation"
     journal_open && fail "a switch that can't fit on the disk should fail before changing anything, but it left a journal"

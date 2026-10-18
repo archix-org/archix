@@ -203,7 +203,7 @@ impl Archive {
         let mut attempt = 1;
         loop {
             match self.fetch_once(url, dest) {
-                Err(e) if attempt < ATTEMPTS && !url.starts_with("file://") => {
+                Err(e) if attempt < ATTEMPTS && !url.starts_with("file://") && !crate::fetch::is_disk_full(&e) => {
                     eprintln!("warning: {e:#}; trying again");
                     pause(attempt);
                 }

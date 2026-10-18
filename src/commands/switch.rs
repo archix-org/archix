@@ -618,6 +618,24 @@ fn carry_aur_hashes(packages: &mut BTreeMap<String, Locked>, current: Option<&Ge
     }
 }
 
+/// A build that failed on a nearly full disk says nothing about its recipe, so no other version is tried.
+fn short_of_build_space(paths: &Paths, cache: &std::path::Path) -> Option<String> {
+    const ROOM: u64 = 1 << 30;
+    [paths.state.join("chroot"), cache.to_path_buf(), std::env::temp_dir()]
+        .into_iter()
+        .filter(|dir| dir.exists())
+        .find_map(|dir| {
+            let free = archix::conflicts::free_space(&dir)?;
+            (free < ROOM).then(|| {
+                format!(
+                    "{} has only {} MiB free, which is likely why the build failed; nothing was changed. Free some space (`archix gc`, `pacman -Sc`) and try again",
+                    dir.display(),
+                    free >> 20
+                )
+            })
+        })
+}
+
 /// Builds the AUR packages a switch installs; a base that can't be built is moved to the nearest version per policy.
 #[allow(clippy::too_many_arguments)]
 fn build_aur(
@@ -656,6 +674,9 @@ fn build_aur(
             }
             Err(error) => error,
         };
+        if let Some(short) = short_of_build_space(paths, &cache) {
+            return Err(error.context(short));
+        }
         let Some(failed) = error
             .downcast_ref::<BuildFailed>()
             .filter(|failed| !failed.base.contains(':'))

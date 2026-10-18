@@ -341,6 +341,11 @@ pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
     Ok(())
 }
 
+/// Bytes free on the filesystem holding `path`.
+pub fn free_space(path: &Path) -> Option<u64> {
+    space(path).map(|(free, _)| free)
+}
+
 /// Bytes available to unprivileged users, as pacman counts them, and the filesystem's size.
 fn space(path: &Path) -> Option<(u64, u64)> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
@@ -349,11 +354,6 @@ fn space(path: &Path) -> Option<(u64, u64)> {
         let block = stat.f_frsize as u64;
         (stat.f_bavail as u64 * block, stat.f_blocks as u64 * block)
     })
-}
-
-#[cfg(test)]
-fn free_bytes(path: &Path) -> Option<u64> {
-    space(path).map(|(free, _)| free)
 }
 
 #[cfg(test)]
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn space_counts_what_replaced_packages_free() {
         let dir = tempfile::tempdir().unwrap();
-        let free = free_bytes(dir.path()).unwrap();
+        let free = free_space(dir.path()).unwrap();
         assert!(check_space(dir.path(), free * 2, 0).is_err());
         assert!(check_space(dir.path(), free * 2, free * 2).is_ok() || free < SPARE);
         let err = check_space(dir.path(), free + SPARE, 0).unwrap_err().to_string();
