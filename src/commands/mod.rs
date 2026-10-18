@@ -1,3 +1,4 @@
+mod eject;
 mod helper;
 mod init;
 mod lock;
@@ -60,6 +61,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     }
     missing == 0
 }
+pub use eject::eject;
 pub use switch::{boot_check, cache_push, declare_and_switch, gc, generations, hook_record, rescue, rollback, switch};
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";

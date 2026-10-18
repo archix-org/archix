@@ -110,6 +110,49 @@ fn own_path() -> Result<PathBuf> {
     })
 }
 
+fn root(paths: &Paths) -> PathBuf {
+    paths
+        .pacman_conf
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or(Path::new("/"))
+        .to_path_buf()
+}
+
+/// The rescue hook's files, which put it into every initramfs mkinitcpio builds.
+pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
+    let root = root(paths);
+    [
+        "etc/mkinitcpio.conf.d/archix-rescue.conf",
+        "etc/initcpio/install/archix-rescue",
+        "etc/initcpio/hooks/archix-rescue",
+        "usr/lib/archix/archix-rescue.service",
+    ]
+    .iter()
+    .map(|path| root.join(path))
+    .collect()
+}
+
+/// Takes every integration file off, for `archix eject`.
+pub fn remove(paths: &Paths) -> Result<()> {
+    let root = root(paths);
+    let mut gone = vec![
+        root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service"),
+        root.join("etc/systemd/system/archix-boot.service"),
+    ];
+    gone.extend(files(paths, Path::new("archix")).into_iter().map(|(path, _)| path));
+    gone.extend(rescue_files(paths));
+    for path in gone {
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("removing {}", path.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Writes the integration files that are missing or out of date, and boot ones only while archix manages booting.
 pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
     let archix = own_path()?;

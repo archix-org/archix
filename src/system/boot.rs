@@ -281,7 +281,8 @@ fn free_bytes(dir: &Path) -> Result<u64> {
     Ok(stat.f_bavail * stat.f_frsize)
 }
 
-fn sbctl_has_keys() -> bool {
+/// Whether sbctl has signing keys, which is when archix signs by default.
+pub fn sbctl_has_keys() -> bool {
     Command::new("sbctl")
         .args(["status", "--json"])
         .output()
@@ -538,6 +539,11 @@ pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
     else {
         return Ok(());
     };
+    write_default(esp, &entry)
+}
+
+/// Names `entry` as systemd-boot's default in loader.conf.
+fn write_default(esp: &str, entry: &str) -> Result<()> {
     let conf = Path::new(esp).join("loader/loader.conf");
     let mut lines: Vec<String> = fs::read_to_string(&conf)
         .unwrap_or_default()
@@ -554,6 +560,128 @@ pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
         .stderr(std::process::Stdio::null())
         .status();
     Ok(())
+}
+
+/// Installed kernel packages by pkgbase, each with the version of the modules directory it owns.
+pub fn installed_kernels() -> Vec<(String, String)> {
+    let local = Path::new("/var/lib/pacman/local");
+    let mut kernels: Vec<(String, String)> = fs::read_dir(MODULES)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let base = fs::read_to_string(entry.path().join("pkgbase"))
+                .ok()?
+                .trim()
+                .to_string();
+            let version = entry.file_name().to_string_lossy().into_owned();
+            (owned_version(local, &base).as_deref() == Some(version.as_str())).then_some((base, version))
+        })
+        .collect();
+    kernels.sort();
+    kernels
+}
+
+/// How systemd-boot starts each kernel without archix: plain entries for /boot's kernel and initramfs when the ESP is /boot, else UKIs mkinitcpio's preset writes to EFI/Linux, which kernel updates rebuild. Makes `default`'s the default, then takes archix's entries and UKIs off.
+pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: bool) -> Result<Vec<String>> {
+    let plain = fs::canonicalize(esp).ok() == fs::canonicalize("/boot").ok();
+    let cmdline = fs::read_to_string("/etc/kernel/cmdline")
+        .map(|text| text.trim().to_string())
+        .ok()
+        .filter(|text| !text.is_empty())
+        .context("the kernel command line isn't in /etc/kernel/cmdline, where archix writes kernel_params; nothing was changed")?;
+    let mut written = Vec::new();
+    let mut default_id = None;
+    for (base, version) in kernels {
+        // mkinitcpio's pacman hook keeps this copy; a preset reads the kernel from it.
+        let vmlinuz = PathBuf::from(format!("/boot/vmlinuz-{base}"));
+        if !vmlinuz.is_file() {
+            fs::copy(Path::new(MODULES).join(version).join("vmlinuz"), &vmlinuz)
+                .with_context(|| format!("copying {}", vmlinuz.display()))?;
+        }
+        let id = if plain {
+            run(Command::new("mkinitcpio").args(["-p", base]), "mkinitcpio")?;
+            let microcode: String = ["amd-ucode.img", "intel-ucode.img"]
+                .iter()
+                .filter(|image| Path::new(esp).join(image).is_file())
+                .map(|image| format!("initrd /{image}\n"))
+                .collect();
+            for (suffix, initramfs) in [
+                ("", format!("initramfs-{base}.img")),
+                ("-fallback", format!("initramfs-{base}-fallback.img")),
+            ] {
+                if !Path::new(esp).join(&initramfs).is_file() {
+                    if suffix.is_empty() {
+                        bail!("mkinitcpio -p {base} wrote no {esp}/{initramfs}");
+                    }
+                    continue;
+                }
+                let name = format!("arch-{base}{suffix}.conf");
+                let path = entries_dir(esp).join(&name);
+                if !path.exists() {
+                    let text = format!(
+                        "title Arch Linux ({base}{suffix})\nlinux /vmlinuz-{base}\n{microcode}initrd /{initramfs}\noptions {cmdline}\n"
+                    );
+                    crate::durable::write(&path, text.as_bytes())?;
+                    written.push(path.display().to_string());
+                }
+            }
+            if sign {
+                run(
+                    Command::new("sbctl")
+                        .env("ESP_PATH", esp)
+                        .args(["sign", "-s"])
+                        .arg(&vmlinuz),
+                    "sbctl sign",
+                )?;
+            }
+            format!("arch-{base}.conf")
+        } else {
+            let preset = PathBuf::from(format!("/etc/mkinitcpio.d/{base}.preset"));
+            let uki = linux_dir(esp).join(format!("arch-{base}.efi"));
+            let line = format!("default_uki=\"{}\"", uki.display());
+            let text = fs::read_to_string(&preset).with_context(|| format!("reading {}", preset.display()))?;
+            if !text.lines().any(|existing| existing.trim() == line) {
+                let text = format!(
+                    "{}\n# archix eject: a UKI on the ESP, which systemd-boot lists by itself\n{line}\n",
+                    text.trim_end()
+                );
+                crate::durable::write(&preset, text.as_bytes())?;
+            }
+            fs::create_dir_all(linux_dir(esp))?;
+            run(Command::new("mkinitcpio").args(["-p", base]), "mkinitcpio")?;
+            if !uki.is_file() {
+                bail!("mkinitcpio -p {base} wrote no {}", uki.display());
+            }
+            if sign {
+                run(
+                    Command::new("sbctl")
+                        .env("ESP_PATH", esp)
+                        .args(["sign", "-s"])
+                        .arg(&uki),
+                    "sbctl sign",
+                )?;
+            }
+            written.push(uki.display().to_string());
+            format!("arch-{base}.efi")
+        };
+        if base == default || default_id.is_none() {
+            default_id = Some(id);
+        }
+    }
+    let Some(default_id) = default_id else {
+        bail!("no installed kernel package owns a directory in {MODULES}; nothing was changed");
+    };
+    write_default(esp, &default_id)?;
+    for (_, _, path) in entries(esp) {
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    match fs::remove_dir_all(uki_dir(esp)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing archix's UKIs"),
+        _ => {}
+    }
+    written.insert(0, format!("default {default_id}"));
+    Ok(written)
 }
 
 /// Generations whose entries pruning never takes: the one this boot came from and the current one, which a failed switch falls back to.

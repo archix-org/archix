@@ -101,6 +101,18 @@ enum Command {
     Generations,
     /// Delete old generations and cached files no kept generation needs
     Gc,
+    /// Stop managing this machine: systemd-boot starts the distro's kernels without archix, and archix's hooks and boot service come off
+    Eject {
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+        /// Put back the files archix replaced and delete the ones it created
+        #[arg(long)]
+        restore_originals: bool,
+        /// Also delete /var/lib/archix, /var/cache/archix and archix's btrfs snapshots
+        #[arg(long)]
+        purge: bool,
+    },
     /// Declare packages in installed.lua and install them (pacman-style: archix -S <packages>)
     Install {
         #[arg(required = true)]
@@ -320,6 +332,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Rollback { .. } => Some("rollback"),
         Command::Recover { .. } => Some("recover"),
         Command::Gc => Some("gc"),
+        Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
         _ => None,
@@ -424,6 +437,14 @@ fn run() -> Result<ExitCode> {
         }
         Command::Gc => {
             commands::gc()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Eject {
+            noconfirm,
+            restore_originals,
+            purge,
+        } => {
+            commands::eject(noconfirm, restore_originals, purge)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Cache(Cache::Push { dir }) => {
@@ -606,6 +627,7 @@ fn run() -> Result<ExitCode> {
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc
+        | Command::Eject { .. }
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
