@@ -14,10 +14,11 @@ static MAJORS: LazyLock<BTreeMap<String, usize>> = LazyLock::new(|| {
         .collect()
 });
 
-/// The first `parts` dot-separated parts of a version's pkgver, epoch included.
+/// The first `parts` dot-separated parts of a version's pkgver, epoch included; 0 takes them all.
 fn major(version: &str, parts: usize) -> String {
     let (epoch, rest) = version.split_once(':').map_or(("", version), |(e, r)| (e, r));
     let pkgver = rest.rsplit_once('-').map_or(rest, |(v, _)| v);
+    let parts = if parts == 0 { usize::MAX } else { parts };
     let head: Vec<&str> = pkgver.split('.').take(parts).collect();
     if epoch.is_empty() {
         head.join(".")
@@ -41,6 +42,10 @@ pub fn crossing(name: &str, from: &str, to: &str, configured: &BTreeMap<String, 
     }
     let parts = *MAJORS.get(name)?;
     let (old, new) = (major(from, parts), major(to, parts));
+    if parts == 0 {
+        return (old != new)
+            .then(|| format!("goes back to an older build, and {name} won't open a profile a newer build used"));
+    }
     (old != new)
         .then(|| format!("goes back from major version {old} to {new}, and {name} migrates its data between them"))
 }
@@ -93,6 +98,23 @@ mod tests {
             "upgrades are fine"
         );
         assert!(crossing("tree", "2.2-1", "1.8-1", &none).is_none());
+    }
+
+    #[test]
+    fn browsers_refuse_profiles_a_newer_version_used() {
+        let none = BTreeMap::new();
+        assert!(
+            crossing("firefox", "146.0.1-1", "146.0-1", &none).is_some(),
+            "Firefox refuses a profile from any newer build"
+        );
+        assert!(crossing("firefox", "146.0.1-2", "146.0.1-1", &none).is_none());
+        assert!(crossing("thunderbird", "145.0-1", "144.0.1-1", &none).is_some());
+        assert!(crossing("chromium", "141.0.7390.54-1", "140.0.7339.207-1", &none).is_some());
+        assert!(
+            crossing("chromium", "141.0.7390.54-1", "141.0.7390.40-1", &none).is_none(),
+            "Chromium checks the major version"
+        );
+        assert!(crossing("brave-bin", "1:1.84.10-1", "1:1.83.120-1", &none).is_some());
     }
 
     #[test]

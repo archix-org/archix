@@ -1,5 +1,5 @@
 {
-  "_comment": "Packages whose on-disk data a newer version migrates, so going back across a major version can break or corrupt it; each value is how many leading version parts make the major version.",
+  "_comment": "Packages whose on-disk data a newer version migrates, so going back across a major version can break or corrupt it; each value is how many leading version parts make the major version, and 0 means every older version counts, as for browsers that refuse a profile any newer build used.",
   "postgresql": 1,
   "mariadb": 2,
   "mysql": 2,
@@ -9,5 +9,15 @@
   "nextcloud": 1,
   "mattermost": 2,
   "redis": 1,
-  "valkey": 1
+  "valkey": 1,
+  "firefox": 0,
+  "firefox-developer-edition": 0,
+  "firefox-esr": 0,
+  "librewolf": 0,
+  "thunderbird": 0,
+  "chromium": 1,
+  "google-chrome": 1,
+  "microsoft-edge-stable-bin": 1,
+  "brave-bin": 2,
+  "vivaldi": 2
 }
