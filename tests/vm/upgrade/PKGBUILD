@@ -1,0 +1,15 @@
+pkgname=archix
+pkgver=1
+pkgrel=1
+pkgdesc="archix, packaged for the upgrade test from the binaries next to this file"
+arch=(x86_64)
+license=(MIT)
+options=(!strip !debug)
+source=(archix archix-static)
+sha256sums=(SKIP SKIP)
+
+package() {
+  install -Dm755 archix "$pkgdir/usr/bin/archix"
+  ln -s archix "$pkgdir/usr/bin/ax"
+  install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
+}

@@ -9,6 +9,8 @@ if [ "$suite" = rollback ]; then
   dir=/vm/rollback date=2026-06-01 size=16G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 elif [ "$suite" = nvidia ]; then
   dir=/vm/nvidia date=2026-06-01 size=24G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
+elif [ "$suite" = upgrade ]; then
+  dir=/vm/upgrade packages=(base linux mkinitcpio systemd-ukify)
 fi
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
@@ -46,8 +48,26 @@ sed 's|/etc/pacman.d/mirrorlist|/tmp/mirrorlist|' /tmp/pacman.conf > /tmp/pacstr
 for attempt in 1 2 3; do pacstrap -C /tmp/pacstrap.conf -K /mnt "${packages[@]}" >/dev/null && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done
 cp /tmp/pacman.conf /mnt/etc/pacman.conf
 cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
-install -Dm755 "$archix" /mnt/usr/bin/archix
-install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
+if [ "$suite" = upgrade ]; then
+  # archix is a package from a local repo, so switches upgrade it and rollbacks downgrade it: 1 is the previous release, 2 and 3 this tree.
+  useradd -r builder 2>/dev/null || true
+  mkdir -p /mnt/srv/archix-repo /mnt/srv/archix-next
+  for version in 1 2 3; do
+    build=$(mktemp -d)
+    binary=/work/archix-static; [ "$version" = 1 ] && binary=/work/old/archix-static
+    sed "s/^pkgver=.*/pkgver=$version/" "$dir/PKGBUILD" > "$build/PKGBUILD"
+    cp "$binary" "$build/archix"; cp "$binary" "$build/archix-static"
+    chown -R builder "$build"
+    runuser -u builder -- bash -c "cd $build && makepkg --nodeps >/dev/null"
+    cp "$build/archix-$version-1-x86_64.pkg.tar.zst" /mnt/srv/archix-next/
+  done
+  cp /mnt/srv/archix-next/archix-1-1-x86_64.pkg.tar.zst /mnt/srv/archix-repo/
+  repo-add -q /mnt/srv/archix-repo/archix-self.db.tar.gz /mnt/srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst
+  arch-chroot /mnt pacman -U --noconfirm /srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst >/dev/null
+else
+  install -Dm755 "$archix" /mnt/usr/bin/archix
+  install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
+fi
 bootctl --esp-path=/mnt/boot --no-variables install >/dev/null
 # The ESP in fstab, as on any real install: early boot units must not wait on it in a cycle.
 echo "UUID=$(blkid -s UUID -o value "$esp") /boot vfat defaults 0 2" >> /mnt/etc/fstab

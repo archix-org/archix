@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix-managed generations in QEMU with OVMF; `run.sh` tests boot entries, Secure Boot and rescue, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across rollbacks.
+# Boots archix-managed generations in QEMU with OVMF; `run.sh` tests boot entries, Secure Boot and rescue, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across rollbacks, `run.sh upgrade` archix upgrading from the previous release (ARCHIX_OLD, a tag).
 set -euo pipefail
 suite=${1:-boot}
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -10,8 +10,15 @@ mounts=(-v "$root":/src:ro -v archix-target:/target -v archix-cargo:/root/.cargo
 docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
   cargo build --locked --release && cp /target/release/archix /work/archix
   cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+if [ "$suite" = upgrade ]; then
+  rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old"
+  git -C "$root" archive "${ARCHIX_OLD:-0.1.0-dogfood}" | tar -x -C "$work/old-src"
+  docker run --rm -v "$work":/work -v archix-target:/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR=/target/old archix-arch-test bash -c 'set -e
+    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/old/x86_64-unknown-linux-musl/release/archix /work/old/archix-static'
+fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" archix-arch-test /vm/build-image.sh
 if [ "$suite" = rollback ] || [ "$suite" = nvidia ]; then mounts+=(-e VM_TIMEOUT=14400 -e VM_MEM=8192 -e VM_CPUS=6); fi
+if [ "$suite" = upgrade ]; then mounts+=(-e VM_TIMEOUT=7200); fi
 docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh
