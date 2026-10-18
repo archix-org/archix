@@ -130,6 +130,36 @@ fn a_crash_after_the_lock_is_written_puts_the_config_and_lock_back() {
 
 #[test]
 #[ignore]
+fn a_switch_under_sudo_leaves_the_config_owned_by_its_owner() {
+    use std::os::unix::fs::MetadataExt;
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let chown = std::process::Command::new("chown")
+        .args(["-R", "1000:1000"])
+        .arg(setup.dir.path())
+        .status()
+        .unwrap();
+    assert!(chown.success());
+    setup.ok(&["install", "tree", "--noconfirm"]);
+    for file in ["archix.lock", "lua/hosts/box/installed.lua"] {
+        let meta = fs::metadata(setup.dir.path().join(file)).unwrap();
+        println!(
+            "{file}: uid {} gid {} mode {:o}",
+            meta.uid(),
+            meta.gid(),
+            meta.mode() & 0o7777
+        );
+        assert_eq!(
+            (meta.uid(), meta.gid()),
+            (1000, 1000),
+            "{file} should stay owned by the config's owner"
+        );
+    }
+    setup.ok(&["remove", "tree", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn installing_a_package_the_config_already_declares_adds_no_duplicate() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");

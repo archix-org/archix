@@ -186,6 +186,115 @@ fn adding_packages_one_at_a_time_reuses_one_uki() {
 
 #[test]
 #[ignore]
+fn without_a_trustworthy_booted_entry_boot_check_rolls_nothing_back() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    let body = format!(
+        r#"boot = {{ loader = "systemd-boot", esp = "{ESP}", entries = 5 }}, kernel_params = {{ "root=/dev/vda2", "rw" }}"#
+    );
+    let setup = Setup::new(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let older = current();
+    setup.set_body(&["tree"], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let newest = current();
+    let cmdline = ("ARCHIX_TEST_CMDLINE", "root=/dev/vda2 rw");
+    for (case, entry) in [
+        (
+            "no LoaderEntrySelected, as when firmware starts a UKI or BOOTX64.EFI directly",
+            "",
+        ),
+        ("an entry from outside archix", "memtest86+.conf"),
+        ("an entry of a generation archix doesn't have", "archix-999.conf"),
+    ] {
+        let out = setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry)], &["boot-check"]);
+        println!("boot-check with {case}:\n{out}");
+        assert_eq!(current(), newest, "{case}: nothing may roll back");
+    }
+    let entry = format!("archix-{older}.conf");
+    let out = setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    println!("boot-check with {entry}:\n{out}");
+    assert_eq!(
+        current(),
+        older,
+        "booting generation {older}'s own entry rolls back to it"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn gc_keeps_every_uki_a_remaining_entry_starts() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    let body = |n: u32| {
+        let params = if n < 8 {
+            r#""root=/dev/vda2", "rw""#
+        } else {
+            r#""root=/dev/vda2", "rw", "quiet""#
+        };
+        format!(
+            r#"boot = {{ loader = "systemd-boot", esp = "{ESP}", entries = 5 }}, kernel_params = {{ {params} }}, generations = {{ keep = 3, keep_days = 0 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#
+        )
+    };
+    let setup = Setup::new(&[], &body(0));
+    setup.ok(&["switch", "--noconfirm"]);
+    let booted = current();
+    let cmdline = format!("root=/dev/vda2 rw archix.generation={booted}");
+    let env = [("ARCHIX_TEST_CMDLINE", cmdline.as_str())];
+    for n in 1..=15 {
+        let init = setup.read("init.lua").unwrap();
+        fs::write(setup.dir.path().join("init.lua"), init.replace(&body(n - 1), &body(n))).unwrap();
+        setup.ok_env(&env, &["switch", "--noconfirm"]);
+    }
+    println!(
+        "archix gc, booted into generation {booted}:\n{}",
+        setup.ok_env(&env, &["gc"])
+    );
+    let files = esp_files();
+    println!(
+        "ESP after 15 switches (the kernel command line changed at the 8th) and gc:\n{}",
+        files.join("\n")
+    );
+    let entries: Vec<&String> = files
+        .iter()
+        .filter(|f| f.starts_with("loader/entries/archix-"))
+        .collect();
+    let started: BTreeSet<String> = entries
+        .iter()
+        .map(|entry| uki(entry.trim_start_matches("loader/entries/")))
+        .collect();
+    for uki in &started {
+        assert!(
+            Path::new(uki).is_file(),
+            "an entry starts {uki}, which gc deleted:\n{}",
+            files.join("\n")
+        );
+    }
+    let on_esp: BTreeSet<String> = files
+        .iter()
+        .filter(|f| f.starts_with("EFI/archix/"))
+        .map(|f| format!("{ESP}/{f}"))
+        .collect();
+    assert_eq!(on_esp, started, "every UKI left is one an entry starts");
+    assert!(
+        files.contains(&format!("loader/entries/archix-{booted}.conf")),
+        "the booted generation keeps its entry"
+    );
+    assert_eq!(
+        started.len(),
+        2,
+        "the booted generation's UKI and the one from after the command line changed"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
 fn rescue_restores_packages_without_pacman() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");

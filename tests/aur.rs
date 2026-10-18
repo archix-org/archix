@@ -242,3 +242,55 @@ fn a_package_cache_shares_builds_and_package_files_between_machines() {
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
+
+#[test]
+#[ignore]
+fn an_aur_package_standing_in_for_a_repo_package_is_used_only_when_declared() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        provides: &["glibc=9.99"],
+        ..TestPkg::new("archix-test-libc", "9.99")
+    });
+    aur.publish(TestPkg {
+        depends: &["glibc>=9"],
+        ..TestPkg::new("archix-test-needs-libc9", "1.0")
+    });
+    let setup = Setup::new(&[], &format!("aur = {{ url = {:?} }}", aur.url()));
+    let before = setup.read("archix.lock").unwrap();
+    let init = setup.read("init.lua").unwrap();
+    let with = |names: &str| init.replacen("packages = { ", &format!("packages = {{ {names}"), 1);
+    fs::write(
+        setup.dir.path().join("init.lua"),
+        with(r#""archix-test-needs-libc9", "#),
+    )
+    .unwrap();
+    let output = setup.run(&["lock", "--noconfirm"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("archix lock, a package needing glibc>=9 that only an AUR stand-in provides:\n{text}");
+    assert!(
+        !output.status.success(),
+        "the stand-in wasn't declared, so locking must fail:\n{text}"
+    );
+    assert!(
+        text.contains("archix-test-libc") && text.contains("standing in for glibc"),
+        "{text}"
+    );
+    assert_eq!(setup.read("archix.lock").unwrap(), before);
+
+    fs::write(
+        setup.dir.path().join("init.lua"),
+        with(r#""archix-test-needs-libc9", "archix-test-libc", "#),
+    )
+    .unwrap();
+    let out = setup.ok(&["lock", "--noconfirm"]);
+    println!("archix lock with the stand-in declared:\n{out}");
+    let lock = setup.lock();
+    assert!(lock.packages.contains_key("archix-test-libc") && lock.packages.contains_key("archix-test-needs-libc9"));
+    fs::write(setup.dir.path().join("init.lua"), init).unwrap();
+    fs::write(setup.dir.path().join("archix.lock"), before).unwrap();
+}

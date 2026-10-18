@@ -17,12 +17,12 @@ pub fn kernel_cmdline() -> String {
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
 
-/// The boot entry systemd-boot started, or ARCHIX_TEST_ENTRY in a debug build.
+/// The boot entry systemd-boot started, or ARCHIX_TEST_ENTRY in a debug build, where empty means the variable is missing.
 pub fn selected_entry() -> Option<String> {
     if cfg!(debug_assertions)
         && let Ok(entry) = std::env::var("ARCHIX_TEST_ENTRY")
     {
-        return Some(entry);
+        return (!entry.is_empty()).then_some(entry);
     }
     crate::system::boot::read_selected_entry()
 }

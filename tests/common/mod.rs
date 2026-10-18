@@ -214,6 +214,7 @@ pub struct TestPkg<'a> {
     pub version: &'a str,
     pub depends: &'a [&'a str],
     pub makedepends: &'a [&'a str],
+    pub provides: &'a [&'a str],
     pub build: &'a str,
     pub package: &'a str,
 }
@@ -225,6 +226,7 @@ impl<'a> TestPkg<'a> {
             version,
             depends: &[],
             makedepends: &[],
+            provides: &[],
             build: "true",
             package: "",
         }
@@ -234,7 +236,7 @@ impl<'a> TestPkg<'a> {
 /// An AUR served from local bare git repos plus a metadata dump, so AUR tests don't depend on aur.archlinux.org.
 pub struct LocalAur {
     dir: TempDir,
-    published: Vec<(String, String)>,
+    published: Vec<(String, String, Vec<String>)>,
 }
 
 impl LocalAur {
@@ -272,13 +274,14 @@ impl LocalAur {
         let list = |items: &[&str]| items.iter().map(|i| format!("'{i}'")).collect::<Vec<_>>().join(" ");
         let pkgbuild = format!(
             "pkgname={name}\npkgver={version}\npkgrel=1\npkgdesc='archix test package {name}'\narch=('any')\n\
-             license=('MIT')\ndepends=({depends})\nmakedepends=({makedepends})\n\
+             license=('MIT')\ndepends=({depends})\nmakedepends=({makedepends})\nprovides=({provides})\n\
              build() {{\n  {build}\n}}\n\
              package() {{\n  install -d \"$pkgdir/usr/share/{name}\"\n  echo {version} > \"$pkgdir/usr/share/{name}/version\"\n  {package}\n}}\n",
             name = pkg.name,
             version = pkg.version,
             depends = list(pkg.depends),
             makedepends = list(pkg.makedepends),
+            provides = list(pkg.provides),
             build = pkg.build,
             package = pkg.package,
         );
@@ -293,6 +296,9 @@ impl LocalAur {
         for dep in pkg.depends {
             srcinfo.push_str(&format!("\tdepends = {dep}\n"));
         }
+        for provided in pkg.provides {
+            srcinfo.push_str(&format!("\tprovides = {provided}\n"));
+        }
         srcinfo.push_str(&format!("\npkgname = {}\n", pkg.name));
         fs::write(work.join("PKGBUILD"), pkgbuild).unwrap();
         fs::write(work.join(".SRCINFO"), srcinfo).unwrap();
@@ -303,14 +309,17 @@ impl LocalAur {
         );
         LocalAur::git(&work, &["push", "--quiet", "origin", "master"]);
 
-        self.published.retain(|(name, _)| name != pkg.name);
-        self.published
-            .push((pkg.name.to_string(), format!("{}-1", pkg.version)));
+        self.published.retain(|(name, _, _)| name != pkg.name);
+        self.published.push((
+            pkg.name.to_string(),
+            format!("{}-1", pkg.version),
+            pkg.provides.iter().map(|p| p.to_string()).collect(),
+        ));
         let entries: Vec<serde_json::Value> = self
             .published
             .iter()
-            .map(|(name, version)| {
-                serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Popularity": 0.0 })
+            .map(|(name, version, provides)| {
+                serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Provides": provides, "Popularity": 0.0 })
             })
             .collect();
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());

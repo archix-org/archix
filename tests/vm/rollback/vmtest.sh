@@ -148,6 +148,13 @@ case $stage in
     say "PASS: rolled forward at runtime; the running kernel keeps its modules"
 
     ax gc > /dev/console 2>&1 || fail "archix gc"
+    [ -f "/boot/loader/entries/archix-$booted.conf" ] || fail "gc removed the entry of generation $booted, which this boot came from"
+    for entry in /boot/loader/entries/archix-*.conf; do
+      uki=$(sed -n 's|^efi /|/boot/|p' "$entry")
+      [ -f "$uki" ] || fail "after gc, $entry starts $uki, which is gone"
+    done
+    ls /boot/loader/entries /boot/EFI/archix > /dev/console
+    say "PASS: after a real reboot into generation $booted, gc kept its entry and every entry's UKI"
     ax rollback "$(recall old)" --noconfirm > /dev/console 2>&1 || fail "archix rollback after gc"
     [ "$(glibc)" = 2.43 ] || fail "rollback after gc should restore glibc 2.43"
     say "PASS: rollback still works after gc"

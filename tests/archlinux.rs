@@ -126,6 +126,41 @@ fn a_package_newer_than_the_locked_snapshot_is_refused_and_the_date_stays() {
 
 #[test]
 #[ignore]
+fn with_the_archive_unreachable_a_name_the_snapshot_lacks_is_refused_not_taken_from_the_aur() {
+    let dir = config(&["base"]);
+    stdout(&archix(dir.path(), &["update", "--to", "2026-08-19", "--noconfirm"]));
+    let path = dir.path().join(LOCK_FILE);
+    let before = fs::read_to_string(&path).unwrap();
+    // Nothing listens on port 9, so the newest snapshot can't be checked; the 2026-08-19 databases are cached already.
+    fs::write(
+        dir.path().join("init.lua"),
+        r#"return { packages = { "base", "cadical" }, archive_url = "http://127.0.0.1:9" }"#,
+    )
+    .unwrap();
+    let output = archix(dir.path(), &["lock"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("archix lock, cadical added, archive unreachable:\n{text}");
+    assert!(
+        !output.status.success(),
+        "with the archive unreachable, cadical can't be verified, so locking must fail:\n{text}"
+    );
+    assert!(
+        text.contains("couldn't verify against the archive") && text.contains("`cadical`"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("new AUR package"),
+        "the AUR's cadical mustn't even be offered:\n{text}"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+#[ignore]
 fn unknown_packages_fail_to_lock() {
     let dir = config(&["base", "definitely-not-a-package"]);
     let output = archix(dir.path(), &["lock"]);

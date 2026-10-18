@@ -231,6 +231,56 @@ fn a_recipe_needing_newer_libraries_than_the_snapshot_is_refused_before_building
     assert!(!dir.path().join("archix.lock").exists());
 }
 
+#[test]
+#[ignore]
+fn with_the_archive_unreachable_a_recipe_needing_newer_libraries_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_archix"))
+            .args(["--config", dir.path().to_str().unwrap(), "--host", "box"])
+            .args(args)
+            .env("XDG_CACHE_HOME", dir.path().join(".cache"))
+            .output()
+            .unwrap()
+    };
+    fs::write(dir.path().join("init.lua"), r#"return { packages = { "base" } }"#).unwrap();
+    assert!(run(&["update", "--to", "2026-06-01", "--noconfirm"]).status.success());
+    let before = fs::read_to_string(dir.path().join("archix.lock")).unwrap();
+    let recipe_dir = dir.path().join("pkgbuilds/archix-test-newdep");
+    fs::create_dir_all(&recipe_dir).unwrap();
+    fs::write(
+        recipe_dir.join("PKGBUILD"),
+        recipe("archix-test-newdep", "1", "'glibc>=2.44'", "  true"),
+    )
+    .unwrap();
+    // Nothing listens on port 9, so the newest snapshot can't be checked; the 2026-06-01 databases are cached already.
+    fs::write(
+        dir.path().join("init.lua"),
+        r#"return { packages = { "base", "archix-test-newdep" }, archive_url = "http://127.0.0.1:9" }"#,
+    )
+    .unwrap();
+    let output = run(&["lock", "--noconfirm"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("archix lock with a recipe needing glibc>=2.44, archive unreachable:\n{text}");
+    assert!(
+        !output.status.success(),
+        "glibc>=2.44 can't be verified, so locking must fail:\n{text}"
+    );
+    assert!(
+        text.contains("couldn't verify against the archive") && text.contains("`glibc>=2.44`"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("glibc-eac") && !text.contains("glibc-git"),
+        "no AUR stand-in for glibc:\n{text}"
+    );
+    assert_eq!(fs::read_to_string(dir.path().join("archix.lock")).unwrap(), before);
+}
+
 fn recipe(name: &str, version: &str, depends: &str, package: &str) -> String {
     format!(
         "pkgname={name}\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\ndepends=({depends})\n\
