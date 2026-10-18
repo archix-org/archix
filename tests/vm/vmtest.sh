@@ -88,9 +88,9 @@ case $stage in
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should still be enforcing after eject"
     systemctl cat archix-boot.service > /dev/null 2>&1 && fail "archix-boot.service should be gone"
     say "PASS: after eject, the plain entry booted with Secure Boot enforcing"
+    pacman -Syu --noconfirm > /dev/console 2>&1 || fail "pacman -Syu after eject"
     pacman -U --noconfirm "$(sed -n 's|^Server = \(http://[^/]*\)/.*|\1|p' /etc/pacman.d/mirrorlist | head -1)/packages/l/linux/linux-7.2.8.arch1-2-x86_64.pkg.tar.zst" > /dev/console 2>&1 \
       || fail "plain pacman changing the kernel after eject"
-    pacman -Syu --noconfirm > /dev/console 2>&1 || fail "pacman -Syu after eject"
     sbctl verify 2>&1 | grep -q "/boot/vmlinuz-linux is signed" || fail "sbctl's hook should re-sign the new kernel: $(sbctl verify 2>&1 | head -5)"
     echo 6 > "$state/stage"
     systemctl reboot
