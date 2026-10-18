@@ -145,9 +145,7 @@ impl Lockfile {
 
     /// Writes through a temp file and rename, so a crash never leaves a half-written lock.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp = path.with_extension("lock.tmp");
-        fs::write(&tmp, self.render()).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+        crate::durable::write_config(path, self.render().as_bytes())
     }
 
     pub fn render(&self) -> String {
