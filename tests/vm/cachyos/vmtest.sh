@@ -52,6 +52,24 @@ interrupt_after() {
   done
   fail "pacman never got to $count packages"
 }
+# Runs archix in the background and kills it while a pacman hook holds the transaction that installs $1.
+kill_after_installing() {
+  local target=$1; shift
+  printf '[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = %s\n\n[Action]\nWhen = PostTransaction\nExec = /bin/sh -c "touch /run/archix-vmtest-stalled; sleep 600"\n' "$target" > /etc/pacman.d/hooks/zz-archix-vmtest-stall.hook
+  setsid archix --host archix-vm "$@" > "$state/killed.log" 2>&1 < /dev/null &
+  local pid=$!
+  for _ in $(seq 1200); do
+    if [ -e /run/archix-vmtest-stalled ]; then
+      kill -9 "$pid"; kill_comm archix; kill_comm pacman; kill_comm sleep
+      rm -f /etc/pacman.d/hooks/zz-archix-vmtest-stall.hook /run/archix-vmtest-stalled
+      nap
+      return 0
+    fi
+    kill -0 "$pid" 2>/dev/null || { tail -20 "$state/killed.log" > /dev/console; fail "archix $* finished before pacman installed $target"; }
+    nap
+  done
+  fail "pacman never installed $target during archix $*"
+}
 say "stage $stage: booted generation $booted, current generation $(current), kernel $(uname -r)"
 
 case $stage in
@@ -118,7 +136,7 @@ case $stage in
     say "PASS: rolled forward at runtime from archix's copies"
 
     say "killing a rollback halfway"
-    interrupt_after kill 1 rollback "$(recall old)" --noconfirm
+    kill_after_installing htop rollback "$(recall old)" --noconfirm
     journal_open || fail "the killed rollback should leave a journal"
     ax recover --rollback > /dev/console 2>&1 || fail "archix recover --rollback after a killed rollback"
     journal_open && fail "recover --rollback left the journal"
