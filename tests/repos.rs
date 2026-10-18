@@ -48,10 +48,15 @@ impl LocalRepo {
 
     /// Builds a tiny package with makepkg and adds it to the repo.
     fn publish(&self, name: &str, version: &str) {
+        self.publish_with(name, version, "");
+    }
+
+    /// Like `publish`, with more shell for its package().
+    fn publish_with(&self, name: &str, version: &str, package: &str) {
         let work = TempDir::new().unwrap();
         let pkgbuild = format!(
             "pkgname={name}\npkgver={version}\npkgrel=1\narch=('any')\nlicense=('MIT')\n\
-             package() {{\n  install -d \"$pkgdir/usr/share/archix-third/{name}\"\n  echo {version} > \"$pkgdir/usr/share/archix-third/{name}/version\"\n}}\n"
+             package() {{\n  install -d \"$pkgdir/usr/share/archix-third/{name}\"\n  echo {version} > \"$pkgdir/usr/share/archix-third/{name}/version\"\n  {package}\n}}\n"
         );
         fs::write(work.path().join("PKGBUILD"), pkgbuild).unwrap();
         run(Command::new("chown").arg("-R").arg("archix-build:").arg(work.path()));
@@ -92,6 +97,34 @@ fn forget(name: &str) {
             }
         }
     }
+}
+
+#[test]
+#[ignore]
+fn a_rollback_never_takes_a_keyring_back() {
+    let _system = lock_system();
+    let repo = LocalRepo::new("archix-third");
+    let keyring = "install -Dm644 /dev/null \"$pkgdir/usr/share/pacman/keyrings/archix-test.gpg\"";
+    repo.publish_with("archix-test-keyring", "1.0", keyring);
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
+        repo.server()
+    );
+    let setup = Setup::new(&["archix-test-keyring"], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    repo.publish_with("archix-test-keyring", "2.0", keyring);
+    setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
+
+    let out = setup.ok(&["rollback", "--noconfirm"]);
+    assert!(
+        out.contains("keeping archix-test-keyring 2.0-1, newer than this generation's 1.0-1: an older keyring trusts keys revoked since"),
+        "{out}"
+    );
+    assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
