@@ -309,6 +309,7 @@ const STALLED: &str = "/run/archix-test-stalled";
 /// Holds the next transaction that installs tree in a pacman hook for a few seconds, and marks when it starts.
 fn stall_on_tree() {
     let _ = fs::remove_file(STALLED);
+    fs::create_dir_all("/etc/pacman.d/hooks").unwrap();
     fs::write(
         STALL_HOOK,
         format!("[Trigger]\nOperation = Install\nType = Package\nTarget = tree\n\n[Action]\nWhen = PostTransaction\nExec = /bin/sh -c 'touch {STALLED}; sleep 5'\n"),
