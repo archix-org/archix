@@ -231,8 +231,11 @@ fn a_package_cache_shares_builds_and_package_files_between_machines() {
             }
         }
     }
+    // The other machine gets the committed lock, so its switch resolves nothing and needs no archive; locking an AUR package would.
+    setup.set_body(&["archix-test-cached", "tree"], &body(""));
     let offline = body(", archive_url = \"http://127.0.0.1:9\"");
-    setup.set_body(&["archix-test-cached", "tree"], &offline);
+    let init = setup.read("init.lua").unwrap();
+    fs::write(setup.dir.path().join("init.lua"), init.replace(&body(""), &offline)).unwrap();
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
         out.contains("build from the package cache"),

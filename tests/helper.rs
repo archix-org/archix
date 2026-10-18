@@ -141,7 +141,13 @@ fn a_switch_under_sudo_leaves_the_config_owned_by_its_owner() {
         .unwrap();
     assert!(chown.success());
     setup.ok(&["install", "tree", "--noconfirm"]);
-    for file in ["archix.lock", "lua/hosts/box/installed.lua", "lua/hosts/box", "lua/hosts", "lua"] {
+    for file in [
+        "archix.lock",
+        "lua/hosts/box/installed.lua",
+        "lua/hosts/box",
+        "lua/hosts",
+        "lua",
+    ] {
         let meta = fs::metadata(setup.dir.path().join(file)).unwrap();
         println!(
             "{file}: uid {} gid {} mode {:o}",

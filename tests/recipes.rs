@@ -181,6 +181,8 @@ fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
 #[test]
 #[ignore]
 fn a_recipe_needing_newer_libraries_than_the_snapshot_is_refused_before_building() {
+    // Root shares /var/cache/archix, whose snapshot databases a concurrent test's gc may prune.
+    let _system = lock_system();
     let dir = tempfile::TempDir::new().unwrap();
     fs::write(
         dir.path().join("init.lua"),
@@ -234,6 +236,8 @@ fn a_recipe_needing_newer_libraries_than_the_snapshot_is_refused_before_building
 #[test]
 #[ignore]
 fn with_the_archive_unreachable_a_recipe_needing_newer_libraries_is_refused() {
+    // Root shares /var/cache/archix, whose snapshot databases a concurrent test's gc may prune.
+    let _system = lock_system();
     let dir = tempfile::TempDir::new().unwrap();
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_archix"))
