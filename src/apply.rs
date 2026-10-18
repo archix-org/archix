@@ -332,7 +332,7 @@ impl Drop for TrialKeyring {
 }
 
 /// Copies a directory's files and subdirectories, leaving out sockets such as a running gpg-agent's.
-fn copy_regular(from: &Path, to: &Path) -> Result<()> {
+pub fn copy_regular(from: &Path, to: &Path) -> Result<()> {
     fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
     for entry in fs::read_dir(from)
         .with_context(|| format!("reading {}", from.display()))?

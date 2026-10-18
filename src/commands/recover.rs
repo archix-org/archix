@@ -42,7 +42,10 @@ fn repair_keyring(paths: &Paths, journal: &Journal) -> Result<()> {
         .arg(&gnupg)
         .args(["--kill", "all"])
         .output();
-    fs::rename(&gnupg, &aside).with_context(|| format!("moving {} aside", gnupg.display()))?;
+    if fs::rename(&gnupg, &aside).is_err() {
+        apply::copy_regular(&gnupg, &aside)?;
+        fs::remove_dir_all(&gnupg).with_context(|| format!("removing {}", gnupg.display()))?;
+    }
     for args in [&["--init"][..], &["--populate"][..]] {
         let status = Command::new("pacman-key")
             .args(args)
