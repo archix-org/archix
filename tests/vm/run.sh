@@ -7,7 +7,9 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-vm.XXXXXX)}
 echo "work dir: $work"
-docker build -t archix-arch-test "$root/tests/arch" >/tmp/archix-docker-build.log 2>&1 || { cat /tmp/archix-docker-build.log; exit 1; }
+build_log=$(mktemp)
+docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
+rm -f "$build_log"
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
 docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
   cargo build --locked --release && cp /target/release/archix /work/archix
