@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -157,6 +158,18 @@ fn run_package_step(
                 args.extend(taken_over.iter().map(String::as_str));
                 pacman(&args)?;
             }
+            let keyrings = incoming_keyrings(&tx.install);
+            if !keyrings.is_empty() {
+                let mut args = vec![
+                    OsStr::new("-U"),
+                    OsStr::new("--noconfirm"),
+                    OsStr::new("--nodeps"),
+                    OsStr::new("--nodeps"),
+                    OsStr::new("--needed"),
+                ];
+                args.extend(keyrings.iter().map(|path| path.as_os_str()));
+                pacman(&args)?;
+            }
             // -dd: the lock is a complete set, and what still depends on old versions is removed by the Remove step that follows.
             let mut args = vec![
                 OsStr::new("-U"),
@@ -224,20 +237,134 @@ fn run_package_step(
     }
 }
 
+/// Incoming packages that ship a pacman keyring; they're installed on their own first, so pacman checks the rest against the keys they add.
+fn incoming_keyrings(files: &[PathBuf]) -> Vec<PathBuf> {
+    files
+        .iter()
+        .filter(|file| {
+            file.file_name()
+                .is_some_and(|name| name.to_string_lossy().contains("-keyring-"))
+        })
+        .filter(|file| {
+            crate::conflicts::contents(file).is_ok_and(|contents| {
+                contents
+                    .files
+                    .iter()
+                    .any(|path| path.starts_with(crate::pacman::KEYRINGS) && path.ends_with(".gpg"))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+/// A copy of pacman's keyring that also trusts what incoming keyring packages add, removed with any gpg-agent it started when dropped.
+struct TrialKeyring(PathBuf);
+
+impl TrialKeyring {
+    fn new(keyrings: &[PathBuf]) -> Result<TrialKeyring> {
+        let trial = TrialKeyring(std::env::temp_dir().join(format!("archix-keyring-{}", std::process::id())));
+        let gnupg = trial.gnupg();
+        let import = trial.0.join("keyrings");
+        copy_regular(Path::new("/etc/pacman.d/gnupg"), &gnupg)?;
+        fs::set_permissions(&gnupg, fs::Permissions::from_mode(0o700))?;
+        fs::create_dir_all(&import)?;
+        let mut names = Vec::new();
+        for keyring in keyrings {
+            let status = Command::new("bsdtar")
+                .args(["-xf"])
+                .arg(keyring)
+                .arg("-C")
+                .arg(&trial.0)
+                .arg(crate::pacman::KEYRINGS)
+                .status()
+                .context("running bsdtar")?;
+            if !status.success() {
+                bail!("couldn't read the keyring in {}", keyring.display());
+            }
+            for file in fs::read_dir(trial.0.join(crate::pacman::KEYRINGS))?.flatten() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if let Some(stem) = name.strip_suffix(".gpg") {
+                    names.push(stem.to_string());
+                }
+                fs::rename(file.path(), import.join(&name))?;
+            }
+        }
+        let output = Command::new("pacman-key")
+            .arg("--gpgdir")
+            .arg(&gnupg)
+            .arg("--populate-from")
+            .arg(&import)
+            .arg("--populate")
+            .args(&names)
+            .output()
+            .context("running pacman-key")?;
+        if !output.status.success() {
+            bail!(
+                "pacman-key couldn't load the incoming keyrings: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(trial)
+    }
+
+    fn gnupg(&self) -> PathBuf {
+        self.0.join("gnupg")
+    }
+}
+
+impl Drop for TrialKeyring {
+    fn drop(&mut self) {
+        let _ = Command::new("gpgconf")
+            .arg("--homedir")
+            .arg(self.gnupg())
+            .args(["--kill", "all"])
+            .output();
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Copies a directory's files and subdirectories, leaving out sockets such as a running gpg-agent's.
+fn copy_regular(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
+    for entry in fs::read_dir(from)
+        .with_context(|| format!("reading {}", from.display()))?
+        .flatten()
+    {
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_regular(&entry.path(), &target)?;
+        } else if kind.is_file() {
+            fs::copy(entry.path(), &target).with_context(|| format!("copying {}", entry.path().display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Has pacman load every incoming package without installing it, so a bad signature or unknown key fails before the Remove step runs.
 pub fn check_packages(tx: &Transaction) -> Result<()> {
     if tx.install.is_empty() {
         return Ok(());
     }
-    let output = Command::new("pacman")
-        .args([
-            "-U",
-            "--print",
-            "--noconfirm",
-            ASK_REMOVE_CONFLICTS,
-            "--nodeps",
-            "--nodeps",
-        ])
+    let keyrings = incoming_keyrings(&tx.install);
+    let trial = if keyrings.is_empty() {
+        None
+    } else {
+        Some(TrialKeyring::new(&keyrings)?)
+    };
+    let mut pacman = Command::new("pacman");
+    pacman.args([
+        "-U",
+        "--print",
+        "--noconfirm",
+        ASK_REMOVE_CONFLICTS,
+        "--nodeps",
+        "--nodeps",
+    ]);
+    if let Some(trial) = &trial {
+        pacman.arg("--gpgdir").arg(trial.gnupg());
+    }
+    let output = pacman
         .args(&tx.install)
         .env(TRANSACTION_ENV, "1")
         .output()
