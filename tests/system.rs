@@ -284,6 +284,134 @@ fn the_firewall_and_environment_come_from_the_config() {
     assert!(!std::path::Path::new("/etc/profile.d/archix-environment.sh").exists());
 }
 
+/// Seconds since the epoch, for `journalctl --since @…`.
+fn now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    format!("@{}", secs - 1)
+}
+
+/// What pid 1 logged since `since`.
+fn pid1_log(since: &str) -> String {
+    let output = Command::new("journalctl")
+        .args(["--since", since, "-o", "cat", "_PID=1"])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+#[ignore]
+fn tmpfiles_sysusers_and_modules_load_apply_on_the_switch_that_changes_them() {
+    let _system = lock_system();
+    let _ = fs::remove_dir("/run/archix-tmpfiles-test");
+    let modules_load = || systemctl(&["show", "-P", "InvocationID", "systemd-modules-load.service"]);
+    let before = modules_load();
+    let body = r##"files = {
+        ["/etc/tmpfiles.d/archix-test.conf"] = { text = "d /run/archix-tmpfiles-test 0755 root root -\n" },
+        ["/etc/sysusers.d/archix-test.conf"] = { text = "u archix-sysuser - \"archix test\"\n" },
+        ["/etc/modules-load.d/archix-test.conf"] = { text = "# no modules, so loading them can't fail in a container\n" },
+    }"##;
+    let setup = Setup::new(&[], body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let user = Command::new("getent")
+        .args(["passwd", "archix-sysuser"])
+        .output()
+        .unwrap();
+    let after = modules_load();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let _ = Command::new("userdel").arg("archix-sysuser").status();
+    assert!(
+        fs::metadata("/run/archix-tmpfiles-test").is_ok_and(|meta| meta.is_dir()),
+        "systemd-tmpfiles --create should run when tmpfiles.d changes"
+    );
+    assert!(
+        user.status.success(),
+        "systemd-sysusers should run when sysusers.d changes"
+    );
+    assert!(
+        !after.is_empty() && after != before,
+        "systemd-modules-load should run again when modules-load.d changes ({before:?} -> {after:?})"
+    );
+}
+
+#[test]
+#[ignore]
+fn dbus_and_logind_config_reloads_them_without_a_restart() {
+    let _system = lock_system();
+    let pids = || {
+        (
+            systemctl(&["show", "-P", "MainPID", "dbus.service"]),
+            systemctl(&["show", "-P", "MainPID", "systemd-logind.service"]),
+        )
+    };
+    let before = pids();
+    assert!(
+        before.0 != "0" && before.1 != "0",
+        "dbus and logind should be running: {before:?}"
+    );
+    let since = now();
+    let body = r#"files = {
+        ["/etc/dbus-1/system.d/archix-test.conf"] = { text = "<busconfig></busconfig>\n" },
+        ["/etc/systemd/logind.conf.d/archix-test.conf"] = { text = "[Login]\n" },
+    }"#;
+    let setup = Setup::new(&[], body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let log = pid1_log(&since);
+    let after = pids();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        after, before,
+        "dbus and logind keep their processes, since a restart ends every session"
+    );
+    for unit in ["D-Bus System Message Bus", "User Login Management"] {
+        assert!(
+            log.lines()
+                .any(|line| line.starts_with("Reloaded") && line.contains(unit)),
+            "{unit} should be reloaded:\n{log}"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn changed_user_units_reload_the_running_user_managers() {
+    let _system = lock_system();
+    let unit = |text: &str| {
+        format!(
+            r#"files = {{ ["/etc/systemd/user/archix-test-user.service"] = {{ text = "[Service]\nType=oneshot\nExecStart=/usr/bin/echo {text}\n" }} }}"#
+        )
+    };
+    assert!(
+        Command::new("systemctl")
+            .args(["start", "user@0.service"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let user = |args: &[&str]| {
+        let output = Command::new("systemctl")
+            .args(["--user", "-M", "root@"])
+            .args(args)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let setup = Setup::new(&[], &unit("one"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(user(&["cat", "archix-test-user.service"]).contains("echo one"));
+    setup.set_body(&[], &unit("two"));
+    setup.ok(&["switch", "--noconfirm"]);
+    let stale = user(&["show", "-P", "NeedDaemonReload", "archix-test-user.service"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(stale, "no", "root's user manager should have reloaded the changed unit");
+}
+
 #[test]
 #[ignore]
 fn changing_a_drop_in_restarts_its_service() {
