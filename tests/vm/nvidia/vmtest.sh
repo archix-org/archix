@@ -7,7 +7,7 @@ stage=$(cat "$state/stage" 2>/dev/null || echo 1)
 config=/etc/archix/init.lua
 ax() { archix --host archix-vm "$@"; }
 say() { echo "VMTEST: $*" > /dev/console; }
-fail() { say "FAIL: $*"; { ax generations; dkms status; pacman -Q | grep -i nvidia; } > /dev/console 2>&1; echo failed > "$state/stage"; sync; systemctl poweroff; exit 1; }
+fail() { say "FAIL: $*"; { ax generations; command -v dkms >/dev/null && dkms status; pacman -Q | grep -i nvidia; } > /dev/console 2>&1; echo failed > "$state/stage"; sync; systemctl poweroff; exit 1; }
 current() { ax generations | awk '$1 == "*" { print $2 }'; }
 remember() { echo "$2" > "$state/$1"; }
 recall() { cat "$state/$1"; }
