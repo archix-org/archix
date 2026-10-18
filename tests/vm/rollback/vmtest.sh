@@ -28,6 +28,7 @@ dkms_module() {
   [ "$have" = "$want" ] || fail "v4l2loopback $want should be built by DKMS for $(uname -r), found '${have:-nothing}': $(dkms status 2>&1 | head -5)"
   case $(modinfo -n v4l2loopback) in */updates/dkms/*) ;; *) fail "v4l2loopback should come from DKMS, not $(modinfo -n v4l2loopback)" ;; esac
   modprobe v4l2loopback || fail "v4l2loopback $want should load on $(uname -r)"
+  dkms status v4l2loopback | grep -q "v4l2loopback/$want, $(uname -r), x86_64: installed" || fail "dkms should list v4l2loopback/$want as installed for $(uname -r): $(dkms status v4l2loopback)"
 }
 journal_open() { [ -e /var/lib/archix/journal.json ]; }
 # Files that reference a GLIBC symbol version the installed glibc lacks; empty when the system is consistent.

@@ -172,6 +172,9 @@ fn run_package_step(
             }
             args.extend(tx.install.iter().map(|path| path.as_os_str()));
             pacman(&args)?;
+            for failed in crate::system::dkms::reconcile(Path::new(crate::system::boot::MODULES)) {
+                eprintln!("warning: {failed} failed, so DKMS may not remove that module's files later");
+            }
             restore_running_modules(paths)
         }
         Step::Remove => {
