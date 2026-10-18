@@ -114,6 +114,36 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
 
 #[test]
 #[ignore]
+fn the_first_switch_with_boot_entries_already_has_a_rescue_entry() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    // A machine where archix has never managed booting: the package's static binary, but none of the hook files yet.
+    let staticbin = Path::new("/usr/lib/archix/archix-static");
+    fs::create_dir_all(staticbin.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_archix"), staticbin).unwrap();
+    for hook in [
+        "/etc/initcpio/install/archix-rescue",
+        "/etc/initcpio/hooks/archix-rescue",
+        "/usr/lib/archix/archix-rescue.service",
+        "/etc/mkinitcpio.conf.d/archix-rescue.conf",
+    ] {
+        let _ = fs::remove_file(hook);
+    }
+    let setup = Setup::new(&[], &boot_body(""));
+    setup.ok(&["switch", "--noconfirm"]);
+    let first = entries();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let _ = fs::remove_file(staticbin);
+    assert!(
+        first.iter().any(|entry| entry.ends_with("-rescue.conf")),
+        "a power cut in the next switch needs the rescue hook in this generation's initramfs: {first:?}"
+    );
+}
+
+#[test]
+#[ignore]
 fn eject_hands_booting_to_a_uki_mkinitcpio_keeps_building() {
     let _system = lock_system();
     let _ = fs::remove_dir_all(ESP);
