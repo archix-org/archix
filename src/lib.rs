@@ -21,6 +21,7 @@ pub mod luagen;
 pub mod options;
 pub mod pacman;
 pub mod paths;
+pub mod pending;
 pub mod plan;
 pub mod recipes;
 pub mod repos;

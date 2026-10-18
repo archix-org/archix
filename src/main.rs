@@ -326,23 +326,55 @@ fn needs_root(command: &Command) -> Option<&'static str> {
     }
 }
 
-/// The lock that keeps two archix runs from changing the system at once; held until the process exits.
-static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
+/// Puts back config files a killed switch had rewritten, under the exclusive lock; a run that doesn't hold it takes it only if it's free.
+fn settle_pending(holding: bool) {
+    let paths = archix::paths::Paths::system();
+    if !is_root() || !archix::pending::exists(&paths) {
+        return;
+    }
+    let _lock = match holding {
+        true => None,
+        false => match running_file().ok().filter(try_lock) {
+            Some(file) => Some(file),
+            None => return,
+        },
+    };
+    match archix::pending::settle(&paths) {
+        Ok(restored) => {
+            if let Some(note) = archix::pending::describe(&restored, "an unfinished switch") {
+                eprintln!("{note}");
+            }
+        }
+        Err(e) => eprintln!("warning: couldn't put back the config an unfinished switch changed: {e:#}"),
+    }
+}
 
-fn hold_exclusive() -> Result<()> {
-    use std::io::Write as _;
-    use std::os::fd::AsRawFd;
+fn running_file() -> Result<fs::File> {
     let dir = archix::paths::Paths::system().state;
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join("running");
-    let mut file = fs::OpenOptions::new()
+    fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
         .open(&path)
-        .with_context(|| format!("opening {}", path.display()))?;
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        .with_context(|| format!("opening {}", path.display()))
+}
+
+fn try_lock(file: &fs::File) -> bool {
+    use std::os::fd::AsRawFd;
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// The lock that keeps two archix runs from changing the system at once; held until the process exits.
+static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
+
+fn hold_exclusive() -> Result<()> {
+    use std::io::Write as _;
+    let path = archix::paths::Paths::system().state.join("running");
+    let mut file = running_file()?;
+    if !try_lock(&file) {
         let who = fs::read_to_string(&path).unwrap_or_default();
         anyhow::bail!(
             "another archix is already running ({}); wait for it to finish",
@@ -371,6 +403,7 @@ fn run() -> Result<ExitCode> {
     if changes_things {
         hold_exclusive()?;
     }
+    settle_pending(changes_things);
     match command {
         Command::HookRecord => {
             commands::hook_record();
@@ -440,6 +473,7 @@ fn run() -> Result<ExitCode> {
             _ => None,
         };
         commands::recover(mode, allow_unsafe_downgrade)?;
+        settle_pending(true);
         return Ok(ExitCode::SUCCESS);
     }
     let hostname = match cli.host {
@@ -471,6 +505,18 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
+    let guards_config = match &command {
+        Command::Install { temp: false, path, .. } | Command::Remove { path, .. } => Some(path.as_deref()),
+        Command::Switch { .. } | Command::Upgrade { .. } | Command::Pick(_) => Some(None),
+        _ => None,
+    };
+    let _config_guard = match guards_config {
+        Some(path) if is_root() => Some(archix::pending::begin(
+            &archix::paths::Paths::system(),
+            &archix::pending::config_files(&cli.config, &hostname, path),
+        )?),
+        _ => None,
+    };
     let edit = match &command {
         Command::Install {
             packages,
