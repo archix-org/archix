@@ -391,7 +391,7 @@ fn gc_keeps_every_uki_a_remaining_entry_starts() {
         .collect();
     assert_eq!(on_esp, started, "every UKI left is one an entry starts");
     assert!(
-        files.contains(&format!("loader/entries/archix-{booted}.conf")),
+        crate::entries().contains(&format!("archix-{booted}.conf")),
         "the booted generation keeps its entry"
     );
     assert_eq!(
