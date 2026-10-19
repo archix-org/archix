@@ -268,6 +268,7 @@ fn rollback_transaction(
             urls,
             file,
             sha256,
+            size: None,
         });
     }
     let fetched = fetch_all(

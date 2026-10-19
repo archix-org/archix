@@ -488,6 +488,7 @@ fn wanted_file(archive: &Archive, date: Date, name: &str, pkg: &Locked, repos: &
             file: pkg.file.clone(),
             urls: Vec::new(),
             sha256: (!pkg.sha256.is_empty()).then(|| pkg.sha256.clone()),
+            size: None,
         };
     }
     let custom = repos.iter().find(|repo| repo.name == pkg.repo && repo.custom.is_some());
@@ -504,6 +505,7 @@ fn wanted_file(archive: &Archive, date: Date, name: &str, pkg: &Locked, repos: &
         file: pkg.file.clone(),
         urls,
         sha256: Some(pkg.sha256.clone()),
+        size: None,
     }
 }
 

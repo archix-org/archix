@@ -238,6 +238,7 @@ pub fn fit(
             urls,
             file,
             sha256: None,
+            size: None,
         };
         let fetched = fetch_all(
             archive,

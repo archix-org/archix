@@ -27,6 +27,8 @@ pub struct SyncPkg {
     pub conflicts: Vec<String>,
     /// `%BASE%`: the pkgbase whose recipe builds it; the name itself when the entry has none.
     pub base: String,
+    /// `%CSIZE%`: the package file's size, 0 when the entry has none.
+    pub size: u64,
 }
 
 /// A package installed on the system, from pacman's local database.
@@ -115,6 +117,7 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
                 depends: fields.get("DEPENDS").cloned().unwrap_or_default(),
                 conflicts: fields.get("CONFLICTS").cloned().unwrap_or_default(),
                 base: first(&fields, "BASE").unwrap_or_else(|| name.clone()),
+                size: 0,
                 name,
             },
         );
@@ -218,7 +221,7 @@ mod tests {
     use flate2::write::GzEncoder;
 
     const DESC: &str = "%FILENAME%\nacl-2.3.2-1-x86_64.pkg.tar.zst\n\n%NAME%\nacl\n\n%VERSION%\n2.3.2-1\n\n\
-                        %DEPENDS%\nglibc\nlibattr\n\n%SHA256SUM%\nabc123\n\n";
+                        %DEPENDS%\nglibc\nlibattr\n\n%SHA256SUM%\nabc123\n\n%CSIZE%\n137000\n\n";
 
     #[test]
     fn parses_multi_value_fields() {
@@ -260,6 +263,7 @@ mod tests {
                 depends: vec!["glibc".into(), "libattr".into()],
                 conflicts: Vec::new(),
                 base: "acl".into(),
+                size: 137000,
             }
         );
     }

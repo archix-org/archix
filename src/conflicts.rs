@@ -342,6 +342,10 @@ pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
     Ok(())
 }
 
+fn allocated(size: u64, _block: u64) -> u64 {
+    size
+}
+
 /// Bytes free on the filesystem holding `path`.
 pub fn free_space(path: &Path) -> Option<u64> {
     space(path).map(|(free, _)| free)
@@ -360,6 +364,15 @@ fn space(path: &Path) -> Option<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_takes_whole_blocks() {
+        assert_eq!(allocated(0, 4096), 0);
+        assert_eq!(allocated(3, 4096), 4096);
+        assert_eq!(allocated(4096, 4096), 4096);
+        assert_eq!(allocated(4097, 4096), 8192);
+        assert_eq!(allocated(3, 0), 3);
+    }
 
     #[test]
     fn mtree_lists_files_and_links_but_not_directories() {

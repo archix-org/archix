@@ -816,6 +816,7 @@ fn third_party_fallback(
             file: pkg.file.clone(),
             urls: repo.urls(&pkg.file),
             sha256: Some(pkg.sha256.clone()),
+            size: None,
         };
         if fetch_all(
             archive,

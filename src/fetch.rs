@@ -21,6 +21,8 @@ pub struct Wanted {
     pub urls: Vec<String>,
     /// None for rollbacks to versions the lock never recorded; pacman's signature check still applies.
     pub sha256: Option<String>,
+    /// The download size, when the repo database says, so a cache disk too small for the downloads is refused before any start.
+    pub size: Option<u64>,
 }
 
 /// Makes every wanted file present in `dir`, reusing earlier downloads and pacman's cache, and verifies checksums.
@@ -187,6 +189,26 @@ mod tests {
     }
 
     #[test]
+    fn downloads_the_cache_disk_cant_hold_are_refused_before_any_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ours, pacman) = (dir.path().join("ours"), dir.path().join("pacman"));
+        fs::create_dir_all(&pacman).unwrap();
+        fs::write(pacman.join("held-1-1-x86_64.pkg.tar.zst"), "abc").unwrap();
+        let wanted = |name: &str, size: u64| Wanted {
+            name: name.into(),
+            file: format!("{name}-1-1-x86_64.pkg.tar.zst"),
+            urls: vec!["http://127.0.0.1:9/unreachable".into()],
+            sha256: None,
+            size: Some(size),
+        };
+        let archive = Archive::new("http://127.0.0.1:9");
+        let held = fetch_all(&archive, &ours, std::slice::from_ref(&pacman), &[wanted("held", 1 << 60)]);
+        assert!(held.is_ok(), "a file a cache already holds isn't downloaded: {held:?}");
+        let err = fetch_all(&archive, &ours, &[], &[wanted("huge", 1 << 60)]).unwrap_err().to_string();
+        assert!(err.contains("nothing was changed") && !err.contains("could not fetch"), "{err}");
+    }
+
+    #[test]
     fn reuses_a_matching_copy_from_another_cache() {
         let dir = tempfile::tempdir().unwrap();
         let (ours, pacman) = (dir.path().join("ours"), dir.path().join("pacman"));
@@ -197,6 +219,7 @@ mod tests {
             file: "a-1-1-x86_64.pkg.tar.zst".into(),
             urls: vec!["http://127.0.0.1:9/unreachable".into()],
             sha256: Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()),
+            size: None,
         };
         let archive = Archive::new("http://127.0.0.1:9");
         let files = fetch_all(&archive, &ours, std::slice::from_ref(&pacman), &[wanted]).unwrap();

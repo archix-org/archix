@@ -225,6 +225,7 @@ impl Builder<'_> {
                     file: file.clone(),
                     urls: Vec::new(),
                     sha256: Some(sha256.clone()),
+                    size: None,
                 })
                 .collect();
             let Ok(paths) = fetch_all(self.archive, &self.paths.packages(), &[], &wanted) else {
@@ -312,6 +313,7 @@ impl Builder<'_> {
                 file: pkg.filename.clone(),
                 urls: vec![format!("{}/{}", self.archive.repo_url(date, &repo), pkg.filename)],
                 sha256: Some(pkg.sha256.clone()),
+                size: None,
             });
         }
         fetch_all(self.archive, &self.paths.pacman_cache, &[], &wanted).map(|_| ())
@@ -418,6 +420,7 @@ impl Builder<'_> {
                     file: pkg.filename.clone(),
                     urls: vec![format!("{}/{}", self.archive.repo_url(date, repo), pkg.filename)],
                     sha256: Some(pkg.sha256.clone()),
+                    size: None,
                 });
             }
             files.extend(fetch_all(
