@@ -2,8 +2,7 @@
 # Kills the deployment switch at every step and at timed points, on an image built at DATE (plus TARGET_PACKAGES) with TO_DATE's update prefetched.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-kill.XXXXXX)}
-echo "work dir: $work"
+. "$root/tests/vm/work-dir.sh" kill
 build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"

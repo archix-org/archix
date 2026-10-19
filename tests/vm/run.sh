@@ -5,8 +5,7 @@ suite=${1:-boot}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 # One build volume per checkout, as in tests/arch/run.sh.
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
-work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-vm.XXXXXX)}
-echo "work dir: $work"
+. "$root/tests/vm/work-dir.sh" vm
 build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"

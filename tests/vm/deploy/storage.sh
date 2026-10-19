@@ -2,8 +2,7 @@
 # Measures deployment storage against an in-place upgrade on ext4, btrfs and btrfs with zstd, for the four-month and one-week updates.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-storage.XXXXXX)}
-echo "work dir: $work"
+. "$root/tests/vm/work-dir.sh" storage
 build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"

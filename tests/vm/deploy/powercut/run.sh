@@ -2,8 +2,7 @@
 # Power-cut replay of a switch on a target disk; FS, TARGET_PACKAGES, and REPLAY_POINTS (evenly spaced log prefixes instead of flush points).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
-work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-powercut.XXXXXX)}
-echo "work dir: $work"
+. "$root/tests/vm/work-dir.sh" powercut
 build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"

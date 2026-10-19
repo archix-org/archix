@@ -17,13 +17,18 @@ attach() {
   root=$(losetup --show -f -o "$rs" --sizelimit "$rz" "$1")
   mount ${opts:+-o $opts} "$root" /mnt && mount "$esp" /mnt/efi
 }
-detach() {
+holders() {
   for p in /proc/[0-9]*; do
     [ "$p" = "/proc/$$" ] && continue
-    if readlink "$p/root" "$p/cwd" "$p"/fd/* 2> /dev/null | grep -q '^/mnt'; then
-      say "left running with files on the disk: $(tr '\0' ' ' < "$p/cmdline")"
-      kill -KILL "${p#/proc/}"
-    fi
+    readlink "$p/root" "$p/cwd" "$p"/fd/* 2> /dev/null | grep -q '^/mnt' && echo "${p#/proc/}"
+  done
+}
+detach() {
+  # Killed processes take a moment to exit and close their files, so only what's still there after 10 s counts as left running.
+  for _ in $(seq 10); do [ -z "$(holders)" ] && break; sleep 1; done
+  for pid in $(holders); do
+    say "left running with files on the disk: $(tr '\0' ' ' < "/proc/$pid/cmdline" 2> /dev/null)"
+    kill -KILL "$pid" 2> /dev/null
   done
   sleep 1
   for m in $(findmnt -rn -o TARGET | grep '^/mnt' | sort -r); do umount "$m" || { say "FAIL: $m stays mounted"; exit 1; }; done
