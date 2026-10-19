@@ -23,6 +23,9 @@ pub struct BootPlan {
     /// Also write a protected entry with the command line Easy Anti-Cheat Linux v2 asks for.
     #[serde(default)]
     pub anticheat: bool,
+    /// Boots systemd-boot tries the new entry before falling back to an older one; 0 turns boot counting off.
+    #[serde(default)]
+    pub tries: u32,
 }
 
 /// The entries one generation gets: the normal one, a rescue twin and a protected twin.
@@ -219,10 +222,36 @@ fn entry_name(generation: u32, variant: Variant) -> String {
     }
 }
 
+/// A generation's normal entry, with systemd-boot's boot counter when it gets `tries` attempts: archix-N+3.conf becomes archix-N.conf once a boot reaches boot-complete.target, and archix-N+0-3.conf is skipped for an older entry after three failed ones.
+fn counted_entry_name(generation: u32, tries: u32) -> String {
+    match tries {
+        0 => entry_name(generation, Variant::Normal),
+        tries => format!("archix-{generation}+{tries}.conf"),
+    }
+}
+
+/// Whether systemd-boot has used up a generation's tries without a boot reaching boot-complete.target.
+pub fn failed_to_boot(paths: &Paths, generation: u32) -> bool {
+    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
+        return false;
+    };
+    entries(esp.trim()).iter().any(|(number, extra, path)| {
+        *number == generation && !extra && is_bad(&path.file_name().unwrap_or_default().to_string_lossy())
+    })
+}
+
+/// An entry systemd-boot has given up on: no tries left.
+pub fn is_bad(name: &str) -> bool {
+    name.split_once('+')
+        .and_then(|(_, counters)| counters.split(['-', '.']).next())
+        .is_some_and(|left| left == "0")
+}
+
 /// The generation an entry file (archix-N.conf, archix-N-rescue.conf, or a pre-sharing archix-N.efi) belongs to, and whether it's an extra one.
 fn parse_entry(name: &str) -> Option<(u32, bool)> {
     let stem = name.strip_prefix("archix-")?;
     let stem = stem.strip_suffix(".conf").or_else(|| stem.strip_suffix(".efi"))?;
+    let stem = stem.split('+').next().unwrap_or(stem);
     let (number, extra) = match stem.strip_suffix("-rescue").or_else(|| stem.strip_suffix("-protected")) {
         Some(number) => (number, true),
         None => (stem, false),
@@ -481,10 +510,19 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             plan.generation,
             relative.display()
         );
-        crate::durable::write(
-            &entries_dir(&plan.esp).join(entry_name(plan.generation, *variant)),
-            text.as_bytes(),
-        )?;
+        let name = match variant {
+            Variant::Normal => {
+                // A rerun of this step, as after a power cut, starts the generation's tries over.
+                for (number, extra, path) in entries(&plan.esp) {
+                    if number == plan.generation && !extra && path.extension().is_some_and(|ext| ext == "conf") {
+                        fs::remove_file(path)?;
+                    }
+                }
+                counted_entry_name(plan.generation, plan.tries)
+            }
+            _ => entry_name(plan.generation, *variant),
+        };
+        crate::durable::write(&entries_dir(&plan.esp).join(name), text.as_bytes())?;
     }
     let _ = fs::remove_dir_all(&work);
     Ok(version)
@@ -918,6 +956,22 @@ mod tests {
         assert_eq!(parse_entry(&entry), Some((12, true)));
         assert_eq!(parse_entry("archix-7.efi"), Some((7, false)));
         assert_eq!(parse_entry("arch.conf"), None);
+    }
+
+    #[test]
+    fn entries_with_boot_counters_keep_their_generation() {
+        for name in [
+            "archix-9+3.conf",
+            "archix-9+2-1.conf",
+            "archix-9+0-3.conf",
+            "archix-9.conf",
+        ] {
+            assert_eq!(parse_entry(name), Some((9, false)), "{name}");
+        }
+        assert_eq!(parse_entry("archix-9-rescue.conf"), Some((9, true)));
+        assert!(is_bad("archix-9+0-3.conf") && !is_bad("archix-9+1-2.conf") && !is_bad("archix-9.conf"));
+        assert_eq!(counted_entry_name(9, 3), "archix-9+3.conf");
+        assert_eq!(counted_entry_name(9, 0), "archix-9.conf");
     }
 
     #[test]

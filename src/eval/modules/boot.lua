@@ -20,6 +20,11 @@ return {
         default = 5,
         description = "How many of the newest generations keep a boot entry; fewer if the ESP runs out of room.",
       },
+      tries = archix.option {
+        type = t.int,
+        default = 3,
+        description = "How many boots systemd-boot tries a new generation's entry before it falls back to the newest older one, which archix then rolls back to; a boot that reaches boot-complete.target counts as good. 0 turns boot counting off.",
+      },
       secure_boot = archix.option {
         type = t.nullable(t.bool),
         default = archix.null,

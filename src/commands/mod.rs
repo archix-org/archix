@@ -122,6 +122,7 @@ struct BootSettings {
     secure_boot: Option<bool>,
     cmdline: String,
     protected_entry: bool,
+    tries: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -309,6 +310,10 @@ fn declared(config: &Value) -> Result<Declared> {
                     },
                     cmdline: params.join(" "),
                     protected_entry: boot.get("protected_entry") == Some(&Value::Bool(true)),
+                    tries: match boot.get("tries") {
+                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
+                        _ => 3,
+                    },
                 })
             }
             _ => None,

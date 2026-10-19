@@ -181,14 +181,19 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             esp: declared.boot.as_ref().map(|boot| boot.esp.clone()),
             boot: declared.boot.as_ref().map(|boot| {
                 format!(
-                    "{} {} {:?} {:?} {:?} {}{}",
+                    "{} {} {:?} {:?} {:?} {}{}{}",
                     boot.kernel,
                     boot.cmdline,
                     boot.microcode,
                     boot.secure_boot,
                     boot.entries,
                     boot.esp,
-                    if boot.protected_entry { " protected" } else { "" }
+                    if boot.protected_entry { " protected" } else { "" },
+                    if boot.tries == 3 {
+                        String::new()
+                    } else {
+                        format!(" tries {}", boot.tries)
+                    }
                 )
             }),
         },
@@ -427,6 +432,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             keep: boot.entries,
             secure_boot: boot.secure_boot,
             anticheat: boot.protected_entry,
+            tries: boot.tries,
         });
     }
     if declared.snapshots && snapshot::root_is_btrfs() {
@@ -1249,6 +1255,18 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
     }
     match store.current()? {
         Some(current) if current == booted => Ok(()),
+        Some(current) if system::boot::failed_to_boot(&paths, current) => {
+            let note = format!(
+                "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, and archix rolled back to it"
+            );
+            println!("{note}");
+            roll_back(Some(booted), true, None)?;
+            let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+            notes.push_str(&note);
+            notes.push('\n');
+            let _ = fs::write(paths.notes(), notes);
+            Ok(())
+        }
         Some(current) => {
             println!("archix: booted generation {booted}, but {current} is current; rolling back to {booted}");
             roll_back(Some(booted), true, None)
