@@ -523,7 +523,12 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             _ => entry_name(plan.generation, *variant),
         };
         crate::durable::write(&entries_dir(&plan.esp).join(name), text.as_bytes())?;
+        crate::durable::write(
+            &entry_records(paths).join(entry_name(plan.generation, *variant)),
+            text.as_bytes(),
+        )?;
     }
+    record_entries(paths, &plan.esp)?;
     let _ = fs::remove_dir_all(&work);
     Ok(version)
 }
@@ -844,10 +849,63 @@ pub fn booted_generation(cmdline: &str) -> Option<u32> {
 /// The generation this boot came from: the command line's, else the boot menu entry systemd-boot started (LoaderEntrySelected).
 pub fn booted() -> Option<u32> {
     let cmdline = crate::testhooks::kernel_cmdline();
-    booted_generation(&cmdline).or_else(|| match crate::testhooks::selected_entry() {
-        Some(entry) => parse_entry(&entry).map(|(number, _)| number),
-        None => None,
+    booted_generation(&cmdline).or_else(|| {
+        let entry = crate::testhooks::selected_entry()?;
+        let (number, _) = parse_entry(&entry)?;
+        entry_unchanged(&Paths::system(), &entry).then_some(number)
     })
+}
+
+/// The entry systemd-boot started when it names an archix generation but isn't what archix wrote there.
+pub fn tampered_selected_entry() -> Option<String> {
+    if booted_generation(&crate::testhooks::kernel_cmdline()).is_some() {
+        return None;
+    }
+    let entry = crate::testhooks::selected_entry()?;
+    parse_entry(&entry)?;
+    (!entry_unchanged(&Paths::system(), &entry)).then_some(entry)
+}
+
+/// Where archix keeps a copy of each boot entry it wrote, on the root filesystem, which unlike the ESP holds no unsigned input to trust.
+fn entry_records(paths: &Paths) -> PathBuf {
+    paths.state.join("boot").join("entries")
+}
+
+/// The id systemd-boot reports for an entry file: its name without the boot counters.
+fn entry_id(name: &str) -> String {
+    match name.split_once('+') {
+        Some((stem, _)) => format!("{stem}.conf"),
+        None => name.to_string(),
+    }
+}
+
+/// Whether the entry systemd-boot reports by `id` is still what archix wrote; entries from before archix kept copies pass.
+fn entry_unchanged(paths: &Paths, id: &str) -> bool {
+    let Ok(record) = fs::read(entry_records(paths).join(id)) else {
+        return true;
+    };
+    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
+        return false;
+    };
+    let dir = entries_dir(esp.trim());
+    fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|file| entry_id(&file.file_name().to_string_lossy()) == id)
+        .is_some_and(|file| fs::read(file.path()).is_ok_and(|text| text == record))
+}
+
+/// Keeps copies of every archix entry on the ESP that has none, such as ones written before archix kept them.
+fn record_entries(paths: &Paths, esp: &str) -> Result<()> {
+    for (_, _, path) in entries(esp) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let record = entry_records(paths).join(entry_id(&name));
+        if path.extension().is_some_and(|ext| ext == "conf") && !record.exists() {
+            crate::durable::write(&record, &fs::read(&path)?)?;
+        }
+    }
+    Ok(())
 }
 
 /// systemd-boot's LoaderEntrySelected: 4 bytes of attributes, then the entry's id in UTF-16LE.

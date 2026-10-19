@@ -1224,6 +1224,11 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         None => system::boot::booted(),
     };
     let Some(booted) = booted else {
+        if let Some(entry) = system::boot::tampered_selected_entry() {
+            println!(
+                "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it may have been changed on the ESP; not rolling anything back"
+            );
+        }
         return Ok(());
     };
     let paths = Paths::system();
