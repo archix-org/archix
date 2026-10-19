@@ -371,6 +371,9 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         .map(str::to_string)
         .collect();
     let secure_boot = plan.secure_boot.unwrap_or_else(sbctl_has_keys);
+    let pcr_key = Path::new(PCR_PRIVATE_KEY)
+        .is_file()
+        .then(|| fs::read(PCR_PUBLIC_KEY).unwrap_or_default());
     let rescue_hook = Path::new("/etc/initcpio/install/archix-rescue").exists();
     let vmlinuz = Path::new(MODULES).join(&version).join("vmlinuz");
     let microcode: Vec<PathBuf> = plan.microcode.iter().map(|m| Path::new(&plan.esp).join(m)).collect();
@@ -400,7 +403,15 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             }
             Variant::Normal => {}
         }
-        let key = payload_key(&vmlinuz, &microcode, &initramfs, &cmdline, &release_text, secure_boot)?;
+        let key = payload_key(
+            &vmlinuz,
+            &microcode,
+            &initramfs,
+            &cmdline,
+            &release_text,
+            secure_boot,
+            pcr_key.as_deref(),
+        )?;
         let dest = shared.join(format!("{version}{suffix}-{key}.efi"));
         if !dest.exists() {
             let release_file = work.join(format!("os-release{suffix}"));
@@ -415,6 +426,12 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             ukify.args(["--cmdline", &cmdline, "--uname", &version]);
             ukify.arg("--os-release").arg(format!("@{}", release_file.display()));
             ukify.arg("--output").arg(&output);
+            if pcr_key.is_some() {
+                ukify.arg(format!("--pcr-private-key={PCR_PRIVATE_KEY}"));
+                if Path::new(PCR_PUBLIC_KEY).is_file() {
+                    ukify.arg(format!("--pcr-public-key={PCR_PUBLIC_KEY}"));
+                }
+            }
             run(&mut ukify, "ukify build")?;
             if secure_boot {
                 run(
@@ -556,7 +573,11 @@ fn remove_unused_ukis_but(esp: &str, keep: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// What a UKI is built from, hashed: generations whose kernel, microcode, initramfs (which mkinitcpio builds reproducibly), command line and os-release match share one UKI.
+/// The key systemd-measure signs PCR 11 policies with, where kernel-install's ukify plugin and systemd-cryptenroll look for it.
+const PCR_PRIVATE_KEY: &str = "/etc/systemd/tpm2-pcr-private-key.pem";
+const PCR_PUBLIC_KEY: &str = "/etc/systemd/tpm2-pcr-public-key.pem";
+
+/// What a UKI is built from, hashed: generations whose kernel, microcode, initramfs (which mkinitcpio builds reproducibly), command line, os-release and PCR policy key match share one UKI.
 fn payload_key(
     vmlinuz: &Path,
     microcode: &[PathBuf],
@@ -564,6 +585,7 @@ fn payload_key(
     cmdline: &str,
     os_release: &str,
     signed: bool,
+    pcr_key: Option<&[u8]>,
 ) -> Result<String> {
     let mut parts = vec![crate::fetch::sha256(vmlinuz)?];
     for file in microcode {
@@ -573,6 +595,9 @@ fn payload_key(
     parts.push(crate::fetch::sha256_bytes(cmdline.as_bytes()));
     parts.push(crate::fetch::sha256_bytes(os_release.as_bytes()));
     parts.push(signed.to_string());
+    if let Some(pcr_key) = pcr_key {
+        parts.push(crate::fetch::sha256_bytes(pcr_key));
+    }
     Ok(crate::fetch::sha256_bytes(parts.join("\n").as_bytes())[..12].to_string())
 }
 
