@@ -19,6 +19,10 @@ attach() {
   mount ${opts:+-o $opts} "$root" /mnt && mount "$esp" /mnt/efi
 }
 detach() {
+  for p in /proc/[0-9]*; do
+    case $(readlink "$p/root" 2> /dev/null) in /mnt*) say "left running in the chroot: $(tr '\0' ' ' < "$p/cmdline")"; kill -KILL "${p#/proc/}" ;; esac
+  done
+  sleep 1
   for m in $(findmnt -rn -o TARGET | grep '^/mnt' | sort -r); do umount "$m" || { say "FAIL: $m stays mounted"; exit 1; }; done
   losetup -d "$esp" "$root"
 }
