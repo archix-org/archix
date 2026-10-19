@@ -70,6 +70,27 @@ case $stage in
     grep -q "^generation $(cat "$state/rescued")," /var/lib/archix/last-rescue || fail "rescue should restore the generation whose entry was booted, not $(cat /var/lib/archix/last-rescue)"
     [ "$(current)" = "$(cat "$state/rescued")" ] || fail "booting an older rescue entry should roll back to it"
     say "PASS: an older generation's rescue entry restored that generation without pacman"
+    good=$(current)
+    echo "$good" > "$state/good"
+    # A kernel that finds no init in the initramfs and can't mount the root without its modules panics, and panic=3 reboots it.
+    sed -i 's|"console=ttyS0" }|"console=ttyS0", "rdinit=/archix-no-such-init", "panic=3" }|' "$config"
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a generation that can't boot"
+    bad=$(current)
+    echo "$bad" > "$state/bad"
+    [ -f "/boot/loader/entries/archix-$bad+3.conf" ] || fail "the new entry should count three boot tries: $(ls /boot/loader/entries)"
+    say "PASS: generation $bad's entry gets three boot tries; rebooting into a kernel that panics"
+    echo 5 > "$state/stage"
+    systemctl reboot
+    ;;
+  5)
+    good=$(cat "$state/good") bad=$(cat "$state/bad")
+    ls /boot/loader/entries > /dev/console
+    [ "$booted" = "$good" ] || fail "after three failed boots of generation $bad, systemd-boot should start generation $good, not $booted"
+    [ "$(current)" = "$good" ] || fail "archix should roll back to generation $good after $bad failed to boot"
+    [ -f "/boot/loader/entries/archix-$bad+0-3.conf" ] || fail "generation $bad's entry should be marked bad: $(ls /boot/loader/entries)"
+    grep -q "generation $bad didn't finish booting" /var/lib/archix/notes || fail "the login note should say generation $bad didn't boot: $(cat /var/lib/archix/notes)"
+    say "PASS: generation $bad failed to boot three times, systemd-boot fell back to $good, and archix rolled back to it"
+    sed -i 's|, "rdinit=/archix-no-such-init", "panic=3" }| }|' "$config"
     archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
     ls /boot/loader/entries > /dev/console
     for gone in /etc/systemd/system/archix-boot.service /etc/systemd/system/sysinit.target.wants/archix-boot.service /etc/pacman.d/hooks/archix.hook \
@@ -79,10 +100,10 @@ case $stage in
     ls /boot/loader/entries/archix-* > /dev/null 2>&1 && fail "eject should remove archix's boot entries"
     grep -qx "default arch-linux.conf" /boot/loader/loader.conf || fail "eject should make arch-linux.conf the default: $(cat /boot/loader/loader.conf)"
     say "PASS: eject wrote a plain boot entry and took archix's entries, hooks and service off"
-    echo 5 > "$state/stage"
+    echo 6 > "$state/stage"
     systemctl reboot
     ;;
-  5)
+  6)
     selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
     [ "$selected" = arch-linux.conf ] || fail "after eject the plain entry should boot, not '$selected'"
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should still be enforcing after eject"
@@ -92,10 +113,10 @@ case $stage in
     pacman -U --noconfirm "$(sed -n 's|^Server = \(http://[^/]*\)/.*|\1|p' /etc/pacman.d/mirrorlist | head -1)/packages/l/linux/linux-7.2.8.arch1-2-x86_64.pkg.tar.zst" > /dev/console 2>&1 \
       || fail "plain pacman changing the kernel after eject"
     sbctl verify 2>&1 | grep -q "/boot/vmlinuz-linux is signed" || fail "sbctl's hook should re-sign the new kernel: $(sbctl verify 2>&1 | head -5)"
-    echo 6 > "$state/stage"
+    echo 7 > "$state/stage"
     systemctl reboot
     ;;
-  6)
+  7)
     selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
     [ "$selected" = arch-linux.conf ] || fail "the plain entry should still boot, not '$selected'"
     [ "$(uname -r)" = 7.2.8-arch1-2 ] || fail "the kernel plain pacman installed should boot, not $(uname -r)"
