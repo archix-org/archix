@@ -99,6 +99,7 @@ struct Declared {
     aur_url: String,
     aur_review: bool,
     archive_url: String,
+    archive_mirrors: Vec<String>,
     lock_warn_after_days: u32,
     package_caches: Vec<String>,
     build_on_host: BTreeSet<String>,
@@ -240,6 +241,7 @@ fn declared(config: &Value) -> Result<Declared> {
             _ => aur::DEFAULT_URL.to_string(),
         },
         package_caches: strings("package_caches"),
+        archive_mirrors: strings("archive_mirrors"),
         lock_warn_after_days: match map.get("lock_warn_after_days") {
             Some(Value::Int(days)) => u32::try_from(*days).unwrap_or(0),
             _ => 30,

@@ -82,7 +82,9 @@ pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
         let _ = write!(text, "\n[{}]\n", repo.name);
         match &repo.custom {
             None => {
-                let _ = writeln!(text, "Server = {}", archive.repo_url(date, &repo.name));
+                for url in archive.repo_urls(date, &repo.name) {
+                    let _ = writeln!(text, "Server = {url}");
+                }
             }
             Some(custom) => {
                 let _ = writeln!(text, "SigLevel = {}", custom.sig_level);

@@ -33,7 +33,9 @@ pub(super) fn current_lock(
 ) -> Result<(HostLock, bool)> {
     let mut lockfile = load_lockfile(target)?;
     let old = lockfile.hosts.get(target.host).cloned();
-    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
+    let archive = Archive::new(&declared.archive_url)
+        .with_mirrors(&declared.archive_mirrors)
+        .with_caches(&declared.package_caches);
     let updating = !matches!(snapshot, Snapshot::Locked);
     let date = match (snapshot, &old) {
         (Snapshot::On(date), _) => date,

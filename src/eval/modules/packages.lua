@@ -65,6 +65,11 @@ return {
       default = "https://archive.archlinux.org",
       description = "The Arch Linux Archive, or a mirror of it with the same layout (repos/YYYY/MM/DD/...), that locks resolve and download from.",
     },
+    archive_mirrors = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "Copies of the archive with its layout, tried in order when archive_url is down or lacks a file, for locking, downloads, rollbacks and recovery.",
+    },
     third_party_fallback = archix.option {
       type = t.enum { "ask", "fallback", "fail" },
       default = "ask",

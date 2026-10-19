@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -31,6 +32,14 @@ pub fn configured_mirrors(state: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+pub fn remember_mirrors(state: &Path, mirrors: &[String]) -> Result<()> {
+    if configured_mirrors(state) == mirrors {
+        return Ok(());
+    }
+    fs::create_dir_all(state)?;
+    crate::durable::write(&state.join("archive-mirrors"), mirrors.join("\n").as_bytes())
+}
+
 /// The package caches `switch` last used, for rollback and recover.
 pub fn configured_caches(state: &Path) -> Vec<String> {
     fs::read_to_string(state.join("package-caches"))
@@ -51,9 +60,11 @@ pub fn remember_caches(state: &Path, caches: &[String]) -> Result<()> {
     crate::durable::write(&state.join("package-caches"), caches.join("\n").as_bytes())
 }
 
-/// The archive and package caches `switch` last used, for commands that don't evaluate the config.
+/// The archive, its mirrors and the package caches `switch` last used, for commands that don't evaluate the config.
 pub fn for_system(state: &Path) -> Archive {
-    Archive::new(&configured(state)).with_caches(&configured_caches(state))
+    Archive::new(&configured(state))
+        .with_mirrors(&configured_mirrors(state))
+        .with_caches(&configured_caches(state))
 }
 
 pub fn remember(state: &Path, url: &str) -> Result<()> {
@@ -106,6 +117,10 @@ pub struct Archive {
     agent: ureq::Agent,
     /// Package caches (directories or HTTP mirrors of archix's package store) tried before the archive.
     caches: Vec<String>,
+    /// Copies of the archive with its layout, tried in order when it fails or lacks a file.
+    mirrors: Vec<String>,
+    /// Set once the archive fails to answer, so later requests go straight to the mirrors.
+    down: AtomicBool,
 }
 
 impl Archive {
@@ -122,7 +137,54 @@ impl Archive {
             base: base.trim_end_matches('/').to_string(),
             agent,
             caches: Vec::new(),
+            mirrors: Vec::new(),
+            down: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_mirrors(mut self, mirrors: &[String]) -> Archive {
+        self.mirrors = mirrors
+            .iter()
+            .map(|mirror| mirror.trim_end_matches('/').to_string())
+            .collect();
+        self
+    }
+
+    /// Where to look for `url`: on the archive, then on each mirror; a URL not on the archive is just itself.
+    fn sources(&self, url: &str) -> Vec<String> {
+        let rest = match url.strip_prefix(&self.base) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+            _ => return vec![url.to_string()],
+        };
+        let skip_archive = self.down.load(Ordering::Relaxed) && !self.mirrors.is_empty();
+        let archive = (!skip_archive).then(|| url.to_string());
+        archive
+            .into_iter()
+            .chain(self.mirrors.iter().map(|mirror| format!("{mirror}{rest}")))
+            .collect()
+    }
+
+    /// Tries `attempt` on each source of `url` in turn until one has it; an archive that fails is skipped from then on.
+    fn on_sources(&self, url: &str, attempt: impl Fn(&str) -> Result<bool>) -> Result<bool> {
+        let sources = self.sources(url);
+        let mut sources = sources.iter().peekable();
+        while let Some(source) = sources.next() {
+            let Some(next) = sources.peek() else {
+                return attempt(source);
+            };
+            match attempt(source) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(e) if crate::fetch::is_disk_full(&e) => return Err(e),
+                Err(e) => {
+                    if source == url {
+                        self.down.store(true, Ordering::Relaxed);
+                    }
+                    eprintln!("warning: {e:#}; trying {next}");
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn with_caches(mut self, caches: &[String]) -> Archive {
@@ -136,6 +198,11 @@ impl Archive {
     /// Where each package cache would hold `path` (a package file, or `aur-builds/...` for a build record).
     pub fn cache_urls(&self, path: &str) -> Vec<String> {
         self.caches.iter().map(|cache| format!("{cache}/{path}")).collect()
+    }
+
+    /// A repo snapshot on the archive and then on each mirror, for pacman's Server lines.
+    pub fn repo_urls(&self, date: Date, repo: &str) -> Vec<String> {
+        self.sources(&self.repo_url(date, repo))
     }
 
     pub fn repo_url(&self, date: Date, repo: &str) -> String {
@@ -193,8 +260,12 @@ impl Archive {
         format!("{}/packages/{first}/{name}/{file}", self.base)
     }
 
-    /// Whether `url` exists, retrying a flaky connection a few times.
+    /// Whether `url` exists on the archive or a mirror, retrying a flaky connection a few times.
     fn exists(&self, url: &str) -> Result<bool> {
+        self.on_sources(url, |source| self.exists_at(source))
+    }
+
+    fn exists_at(&self, url: &str) -> Result<bool> {
         let mut attempt = 1;
         loop {
             match self.agent.head(url).call() {
@@ -210,8 +281,12 @@ impl Archive {
         }
     }
 
-    /// Downloads via a per-process `.part` file so partial downloads never look complete; false if missing.
+    /// Downloads via a per-process `.part` file so partial downloads never look complete, from a mirror when the archive fails or lacks it; false if missing.
     pub fn fetch(&self, url: &str, dest: &Path) -> Result<bool> {
+        self.on_sources(url, |source| self.fetch_from(source, dest))
+    }
+
+    fn fetch_from(&self, url: &str, dest: &Path) -> Result<bool> {
         let mut attempt = 1;
         loop {
             match self.fetch_once(url, dest) {
@@ -278,6 +353,47 @@ mod level_tests {
         assert_eq!(
             super::beyond_cpu(files.into_iter(), "x86_64 x86_64_v2 x86_64_v3"),
             ["zlib (x86_64_v4)"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    #[test]
+    fn a_file_the_archive_lacks_comes_from_the_first_mirror_that_has_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let url = |name: &str| format!("file://{}/{name}", dir.path().display());
+        fs::create_dir_all(dir.path().join("second/packages/t/tree")).unwrap();
+        fs::write(dir.path().join("second/packages/t/tree/tree.pkg"), "from the second").unwrap();
+        let archive = Archive::new(&url("archive")).with_mirrors(&[url("first"), url("second/")]);
+        let dest = dir.path().join("tree.pkg");
+        assert!(archive.fetch(&archive.package_url("tree", "tree.pkg"), &dest).unwrap());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "from the second");
+        assert!(!archive.fetch(&archive.package_url("jq", "jq.pkg"), &dest).unwrap());
+    }
+
+    #[test]
+    fn an_archive_that_failed_is_skipped_and_other_urls_stay_as_they_are() {
+        let archive = Archive::new("https://archive.test").with_mirrors(&["https://mirror.test".to_string()]);
+        let date: Date = "2026-09-09".parse().unwrap();
+        assert_eq!(
+            archive.repo_urls(date, "core"),
+            [
+                "https://archive.test/repos/2026/09/09/core/os/x86_64",
+                "https://mirror.test/repos/2026/09/09/core/os/x86_64"
+            ]
+        );
+        assert_eq!(
+            archive.sources("https://archive.testing/x"),
+            ["https://archive.testing/x"]
+        );
+        archive.down.store(true, Ordering::Relaxed);
+        assert_eq!(archive.sources("https://archive.test/x"), ["https://mirror.test/x"]);
+        assert_eq!(
+            Archive::new("https://archive.test").sources("https://archive.test/x"),
+            ["https://archive.test/x"]
         );
     }
 }

@@ -80,9 +80,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         eprintln!("{warning}");
     }
     let installed = read_local_db(&paths.local_db())?;
-    let archive = Archive::new(&declared.archive_url).with_caches(&declared.package_caches);
+    let archive = Archive::new(&declared.archive_url)
+        .with_mirrors(&declared.archive_mirrors)
+        .with_caches(&declared.package_caches);
     archix::archive::remember(&paths.state, &declared.archive_url)?;
     archix::archive::remember_caches(&paths.state, &declared.package_caches)?;
+    archix::archive::remember_mirrors(&paths.state, &declared.archive_mirrors)?;
     let beyond = archix::archive::beyond_cpu(
         lock.packages
             .iter()
