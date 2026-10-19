@@ -231,10 +231,16 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
             .arg(&auth),
         "sign-efi-sig-list",
     )?;
-    run(
+    // efivarfs marks existing variables immutable, and efi-updatevar doesn't lift that itself.
+    let was_immutable = set_immutable(Path::new(DBX), false)?;
+    let written = run(
         Command::new("efi-updatevar").arg("-a").arg("-f").arg(&auth).arg("dbx"),
         "efi-updatevar",
-    )?;
+    );
+    if was_immutable {
+        let _ = set_immutable(Path::new(DBX), true);
+    }
+    written?;
     let _ = fs::remove_dir_all(&work);
     let now: BTreeSet<String> = dbx()?.iter().map(|(_, hash)| hex(hash)).collect();
     let missing: Vec<&Signed> = images.iter().filter(|image| !now.contains(&image.hash)).collect();
@@ -256,6 +262,29 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
         backup.display()
     );
     Ok(())
+}
+
+/// Sets or clears a file's immutable flag, returning whether it was set.
+fn set_immutable(path: &Path, on: bool) -> Result<bool> {
+    use std::os::fd::AsRawFd;
+    const IMMUTABLE: libc::c_int = 0x10;
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("opening {}", path.display())),
+    };
+    let mut flags: libc::c_int = 0;
+    if unsafe { libc::ioctl(file.as_raw_fd(), libc::FS_IOC_GETFLAGS, &mut flags) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("reading the flags of {}", path.display()));
+    }
+    let was = flags & IMMUTABLE != 0;
+    let wanted = if on { flags | IMMUTABLE } else { flags & !IMMUTABLE };
+    if wanted != flags && unsafe { libc::ioctl(file.as_raw_fd(), libc::FS_IOC_SETFLAGS, &wanted) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("changing the flags of {}", path.display()));
+    }
+    Ok(was)
 }
 
 fn on_path(program: &str) -> bool {

@@ -112,6 +112,11 @@ fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp()
     setup.set_body(&[], &body(3));
     setup.ok(&["switch", "--noconfirm"]);
     let gone = !Path::new(&first).exists();
+    let in_use = Path::new(&uki(&format!("archix-{}.conf", current())))
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let listed = setup.run(&["secure-boot", "revoke", "--dry-run"]);
     let listed = String::from_utf8_lossy(&listed.stdout).to_string() + &String::from_utf8_lossy(&listed.stderr);
     setup.set_body(&[], "");
@@ -122,7 +127,9 @@ fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp()
     );
     assert!(gone, "pruning removes the first UKI");
     assert!(
-        listed.contains("1 boot image archix signed and no longer uses") && listed.contains(&efitools[..16]),
+        listed.contains("archix signed and no longer uses")
+            && listed.contains(&efitools[..16])
+            && !listed.contains(&in_use),
         "{listed}"
     );
 }
