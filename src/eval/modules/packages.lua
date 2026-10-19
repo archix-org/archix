@@ -53,7 +53,7 @@ return {
     package_caches = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what `archix cache push` copied. Repo packages are checked against the lock's sha256; AUR builds are taken as the cache's build records say, so list only caches you control.",
+      description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what `archix cache push` copied. Repo packages and AUR builds are checked against the lock's sha256; an AUR build the lock has no sha256 for yet is taken as the cache's build record says, so list only caches you control.",
     },
     package_cache_push = archix.option {
       type = t.nullable(t.str),
