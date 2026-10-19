@@ -118,3 +118,98 @@ fn init_describes_the_machine_so_nothing_needs_to_change() {
             .success()
     );
 }
+
+const HANDMADE: &str = "archix-test-handmade";
+
+/// A package built by hand and installed with pacman -U, which no repo or the AUR has.
+fn install_handmade(work: &std::path::Path) {
+    let root = work.join("pkg");
+    fs::create_dir_all(root.join("usr/bin")).unwrap();
+    fs::create_dir_all(root.join("etc")).unwrap();
+    let script = root.join("usr/bin").join(HANDMADE);
+    fs::write(&script, "#!/bin/sh\necho handmade\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(root.join("etc").join(format!("{HANDMADE}.conf")), "setting = 1\n").unwrap();
+    fs::write(
+        root.join(".PKGINFO"),
+        format!(
+            "pkgname = {HANDMADE}\npkgbase = {HANDMADE}\npkgver = 1.2-3\npkgdesc = made by hand\nurl = https://example.org\n\
+             builddate = 1700000000\npackager = test\nsize = 40\narch = any\nlicense = MIT\nbackup = etc/{HANDMADE}.conf\ndepend = bash\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".INSTALL"),
+        format!("post_install() {{\n  touch /var/tmp/{HANDMADE}-installed\n}}\n"),
+    )
+    .unwrap();
+    let file = work.join(format!("{HANDMADE}-1.2-3-any.pkg.tar.zst"));
+    let made = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "bsdtar -czf .MTREE --format=mtree --options='!all,use-set,type,uid,gid,mode,time,size,sha256,link' .PKGINFO .INSTALL usr etc \
+             && bsdtar -cf - .MTREE .PKGINFO .INSTALL usr etc | zstd -q > {}",
+            file.display()
+        ))
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    pacman(&["-U", file.to_str().unwrap()]);
+}
+
+#[test]
+#[ignore]
+fn init_rebuilds_a_package_no_repo_has_from_its_installed_files() {
+    let _system = lock_system();
+    let work = tempfile::tempdir().unwrap();
+    install_handmade(work.path());
+    let config = work.path().join("cfg");
+    let (ok, out) = archix(config.to_str().unwrap(), &["init", "--defaults"]);
+    let recipe = config.join("pkgbuilds").join(HANDMADE);
+    let pkgbuild = fs::read_to_string(recipe.join("PKGBUILD")).unwrap_or_default();
+    let install = fs::read_to_string(recipe.join(format!("{HANDMADE}.install"))).unwrap_or_default();
+    let declared = fs::read_to_string(config.join("lua/hosts/initbox/installed.lua")).unwrap_or_default();
+    let host = fs::read_to_string(config.join("lua/hosts/initbox/init.lua")).unwrap_or_default();
+    // As on another machine with the same config: the package isn't installed, and switch builds it from the recipe.
+    pacman(&["-Rdd", HANDMADE]);
+    let _ = fs::remove_file(format!("/var/tmp/{HANDMADE}-installed"));
+    let setup = Setup::with_files(
+        &[HANDMADE],
+        "",
+        &[
+            (&format!("pkgbuilds/{HANDMADE}/PKGBUILD"), &pkgbuild),
+            (&format!("pkgbuilds/{HANDMADE}/{HANDMADE}.install"), &install),
+        ],
+    );
+    let _ = fs::copy(
+        recipe.join("files.tar.zst"),
+        setup.dir.path().join("pkgbuilds").join(HANDMADE).join("files.tar.zst"),
+    );
+    let switched = setup.run(&["switch", "--noconfirm"]);
+    let script = fs::read(format!("/usr/bin/{HANDMADE}")).unwrap_or_default();
+    let mode = fs::metadata(format!("/usr/bin/{HANDMADE}"))
+        .map(|m| m.permissions().mode() & 0o777)
+        .unwrap_or(0);
+    let scriptlet_ran = std::path::Path::new(&format!("/var/tmp/{HANDMADE}-installed")).exists();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(ok, "init failed:\n{out}");
+    assert!(
+        pkgbuild.contains("depends=('bash')") && pkgbuild.contains("install="),
+        "{pkgbuild}\n{out}"
+    );
+    assert!(declared.contains(&format!("\"{HANDMADE}\"")), "{declared}");
+    assert!(
+        !host.contains(&format!("ignored_packages = {{ \"{HANDMADE}\"")),
+        "{host}"
+    );
+    assert!(
+        switched.status.success(),
+        "{}",
+        String::from_utf8_lossy(&switched.stderr)
+    );
+    assert_eq!(script, b"#!/bin/sh\necho handmade\n");
+    assert_eq!(mode, 0o755);
+    assert!(scriptlet_ran, "the install scriptlet comes along");
+}
