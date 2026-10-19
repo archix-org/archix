@@ -24,6 +24,7 @@ pub mod paths;
 pub mod pending;
 pub mod plan;
 pub mod recipes;
+pub mod repack;
 pub mod repos;
 pub mod resolve;
 pub mod soname;

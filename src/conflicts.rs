@@ -108,7 +108,7 @@ fn mtree_entries(text: &str) -> Vec<(String, u64)> {
         .collect()
 }
 
-fn unescape(path: &str) -> String {
+pub(crate) fn unescape(path: &str) -> String {
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
