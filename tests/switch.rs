@@ -921,6 +921,22 @@ fn downloads_the_package_store_cant_hold_are_refused_before_any_starts() {
 
 #[test]
 #[ignore]
+fn a_switch_copies_its_packages_to_package_cache_push() {
+    let _system = lock_system();
+    let dir = std::path::Path::new("/var/tmp/archix-push-test");
+    let _ = fs::remove_dir_all(dir);
+    let body = format!(r#"package_cache_push = "file://{}""#, dir.display());
+    let setup = Setup::new(&["tree"], &body);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let pushed = dir.join(&setup.lock().packages["tree"].file).is_file();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    fs::remove_dir_all(dir).ok();
+    assert!(pushed, "{out}");
+}
+
+#[test]
+#[ignore]
 fn an_old_lock_is_called_out() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "lock_warn_after_days = 1");
