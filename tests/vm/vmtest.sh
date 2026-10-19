@@ -94,6 +94,50 @@ case $stage in
     grep -q "^preferred" /boot/loader/loader.conf && fail "the rollback to $good should drop preferred: $(cat /boot/loader/loader.conf)"
     say "PASS: generation $bad failed to boot three times, systemd-boot fell back to $good, and archix rolled back to it"
     sed -i 's|, "init=/usr/bin/false", "panic=3" }| }|' "$config"
+    # A generation with a UKI of its own, which entries = 1 and two more generations then prune off the ESP; a copy is kept to try booting once it's revoked.
+    sed -i 's|"console=ttyS0" }|"console=ttyS0", "archix.revoketest" }|' "$config"
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a generation with a UKI of its own"
+    own=$(ls /boot/loader/entries/archix-"$(current)".conf /boot/loader/entries/archix-"$(current)"+*.conf 2> /dev/null | head -1)
+    revoked=$(sed -nE 's#^(efi|uki) /#/boot/#p' "$own")
+    cp "$revoked" /var/tmp/revoked.efi || fail "copying $revoked"
+    sed -i 's|, "archix.revoketest" }| }|; s|protected_entry = true }|protected_entry = true, entries = 1 }|' "$config"
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch back to the shared UKI"
+    sed -i 's|^  files = {|  files = {\n    ["/etc/archix-revoketest"] = { text = "1" },|' "$config"
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a third generation"
+    [ -e "$revoked" ] && fail "pruning should take $revoked off the ESP"
+    # An entry archix didn't write, standing in for Microsoft's: revoking must leave it in dbx.
+    kek=/var/lib/sbctl/keys/KEK
+    hash-to-efi-sig-list /usr/lib/systemd/boot/efi/linuxx64.efi.stub /var/tmp/foreign.esl > /dev/null || fail "hashing the stand-in"
+    sign-efi-sig-list -a -k "$kek/KEK.key" -c "$kek/KEK.pem" dbx /var/tmp/foreign.esl /var/tmp/foreign.auth > /dev/null || fail "signing the stand-in"
+    efi-updatevar -a -f /var/tmp/foreign.auth dbx || fail "appending the stand-in to dbx"
+    foreign=$(od -An -tx1 -j44 -N32 /var/tmp/foreign.esl | tr -d ' \n')
+    hash-to-efi-sig-list /var/tmp/revoked.efi /var/tmp/revoked.esl > /dev/null || fail "hashing the copy"
+    target=$(od -An -tx1 -j44 -N32 /var/tmp/revoked.esl | tr -d ' \n')
+    say "efivarfs before revoking: $(stat -f -c 'blocks=%b free=%f size=%S' /sys/firmware/efi/efivars)"
+    archix secure-boot revoke --dry-run > /dev/console 2>&1 || fail "revoke --dry-run"
+    archix secure-boot revoke --noconfirm > /dev/console 2>&1 || fail "revoke"
+    dbx=$(efi-readvar -v dbx)
+    echo "$dbx" | grep -qi "$foreign" || fail "the entry archix didn't write should still be in dbx: $dbx"
+    echo "$dbx" | grep -qi "$target" || fail "dbx should list the pruned UKI $target: $dbx"
+    archix secure-boot revoke --dry-run 2>&1 | grep -q "nothing to revoke" || fail "a second revoke should find nothing left"
+    say "PASS: revoke appended the pruned UKIs to dbx and kept the entry it didn't write"
+    mkdir -p /boot/EFI/revoketest
+    cp /var/tmp/revoked.efi /boot/EFI/revoketest/revoked.efi
+    printf 'title revoked\nefi /EFI/revoketest/revoked.efi\n' > /boot/loader/entries/revoketest.conf
+    echo "reboot-on-error yes" >> /boot/loader/loader.conf
+    current > "$state/before-revoked"
+    bootctl set-oneshot revoketest.conf || fail "bootctl set-oneshot revoketest.conf"
+    echo 6 > "$state/stage"
+    systemctl reboot
+    ;;
+  6)
+    selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
+    [ "$selected" = revoketest.conf ] && fail "the firmware should refuse the revoked UKI"
+    [ "$(current)" = "$(cat "$state/before-revoked")" ] || fail "the refused boot shouldn't change the current generation"
+    bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
+    say "PASS: the firmware refused the revoked UKI and the default entry booted instead ($selected)"
+    rm -rf /boot/EFI/revoketest /boot/loader/entries/revoketest.conf
+    sed -i '/^reboot-on-error/d' /boot/loader/loader.conf
     archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
     ls /boot/loader/entries > /dev/console
     for gone in /etc/systemd/system/archix-boot.service /etc/systemd/system/sysinit.target.wants/archix-boot.service /etc/pacman.d/hooks/archix.hook \
@@ -103,10 +147,10 @@ case $stage in
     ls /boot/loader/entries/archix-* > /dev/null 2>&1 && fail "eject should remove archix's boot entries"
     grep -qx "default arch-linux.conf" /boot/loader/loader.conf || fail "eject should make arch-linux.conf the default: $(cat /boot/loader/loader.conf)"
     say "PASS: eject wrote a plain boot entry and took archix's entries, hooks and service off"
-    echo 6 > "$state/stage"
+    echo 7 > "$state/stage"
     systemctl reboot
     ;;
-  6)
+  7)
     selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
     [ "$selected" = arch-linux.conf ] || fail "after eject the plain entry should boot, not '$selected'"
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should still be enforcing after eject"
@@ -116,10 +160,10 @@ case $stage in
     pacman -U --noconfirm "$(sed -n 's|^Server = \(http://[^/]*\)/.*|\1|p' /etc/pacman.d/mirrorlist | head -1)/packages/l/linux/linux-7.2.8.arch1-2-x86_64.pkg.tar.zst" > /dev/console 2>&1 \
       || fail "plain pacman changing the kernel after eject"
     sbctl verify 2>&1 | grep -q "/boot/vmlinuz-linux is signed" || fail "sbctl's hook should re-sign the new kernel: $(sbctl verify 2>&1 | head -5)"
-    echo 7 > "$state/stage"
+    echo 8 > "$state/stage"
     systemctl reboot
     ;;
-  7)
+  8)
     selected=$(tail -c +5 /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\000')
     [ "$selected" = arch-linux.conf ] || fail "the plain entry should still boot, not '$selected'"
     [ "$(uname -r)" = 7.2.8-arch1-2 ] || fail "the kernel plain pacman installed should boot, not $(uname -r)"
