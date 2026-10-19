@@ -136,6 +136,27 @@ fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp()
 
 #[test]
 #[ignore]
+fn status_and_switch_say_when_systemd_boot_is_too_old_to_count_boots() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    // Every LoaderFeatures bit below Type #1 UKI entries, as systemd-boot 257 reports them, and every one 262 has.
+    let old = ("ARCHIX_TEST_LOADER_FEATURES", "65535");
+    let new = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&[], &boot_body(""));
+    let switched = setup.ok_env(&[old], &["switch", "--noconfirm"]);
+    let status_old = setup.ok_env(&[old], &["status"]);
+    let status_new = setup.ok_env(&[new], &["status"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let warning = "boot counting is off: the systemd-boot that started this boot is older than 260";
+    assert!(switched.contains(warning), "{switched}");
+    assert!(status_old.contains(warning), "{status_old}");
+    assert!(!status_new.contains("boot counting is off"), "{status_new}");
+}
+
+#[test]
+#[ignore]
 fn with_systemds_pcr_key_every_uki_carries_a_signed_pcr_policy() {
     let _system = lock_system();
     fs::create_dir_all(ESP).unwrap();

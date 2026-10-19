@@ -795,6 +795,10 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
     Ok(written)
 }
 
+fn default_generation(_esp: &str) -> Option<u32> {
+    None
+}
+
 /// Generations whose entries pruning never takes: the one this boot came from and the current one, which a failed switch falls back to.
 pub fn protected_generations(paths: &Paths) -> BTreeSet<u32> {
     [crate::generations::Store::new(paths).current().ok().flatten(), booted()]
@@ -1140,6 +1144,25 @@ mod tests {
             "generation 5 still boots the UKI it shares with 4"
         );
         assert_eq!(entries(esp).iter().map(|(n, _, _)| *n).collect::<Vec<_>>(), [5]);
+    }
+
+    #[test]
+    fn pruning_never_takes_the_generation_default_falls_back_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().join("esp");
+        fs::create_dir_all(esp.join("loader")).unwrap();
+        fs::write(
+            esp.join("loader/loader.conf"),
+            "timeout 2\ndefault archix-3.conf\npreferred archix-5.conf\n",
+        )
+        .unwrap();
+        let paths = Paths::under(&dir.path().join("root"));
+        fs::create_dir_all(paths.state.join("boot")).unwrap();
+        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
+        assert_eq!(default_generation(esp.to_str().unwrap()), Some(3));
+        assert!(protected_generations(&paths).contains(&3));
+        fs::write(esp.join("loader/loader.conf"), "default arch-linux.conf\n").unwrap();
+        assert_eq!(default_generation(esp.to_str().unwrap()), None);
     }
 
     #[test]

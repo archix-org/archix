@@ -44,6 +44,10 @@ case $stage in
   3)
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
     say "PASS: booted a signed entry with Secure Boot enforcing"
+    systemctl is-failed -q archix-boot-complete.service && fail "archix-boot-complete.service failed: $(journalctl -u archix-boot-complete.service -b --no-pager | tail -5)"
+    grep -qx "default archix-$(current).conf" /boot/loader/loader.conf && ! grep -q "^preferred" /boot/loader/loader.conf \
+      || fail "once generation $(current) booted fine, it should be the default and nothing preferred: $(cat /boot/loader/loader.conf)"
+    say "PASS: a generation that booted fine became systemd-boot's default"
     archix secure-boot check > /dev/console 2>&1 || fail "secure-boot check should pass"
     archix secure-boot check --anticheat > /dev/console 2>&1 && fail "the anti-cheat check can't pass with a self-signed kernel"
     [ -f "/boot/loader/entries/archix-$(current)-protected.conf" ] || fail "protected_entry should write a protected entry"
