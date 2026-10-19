@@ -18,6 +18,11 @@ return {
         default = {},
         description = "AUR packages built directly on the host with makepkg instead of in a clean chroot.",
       },
+      require_locked_build = archix.option {
+        type = t.bool,
+        default = false,
+        description = "Install only the AUR and recipe builds archix.lock records: one that no package cache has is refused instead of built here, since a build here differs from it byte for byte.",
+      },
       skip_check = archix.option {
         type = t.list_of(t.str),
         default = {},

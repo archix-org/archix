@@ -372,8 +372,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     };
     let mut versioned = Vec::new();
     let mut recorded = false;
+    let mut differs = Vec::new();
     for (name, path) in &built {
         if let Some(pkg) = lock.packages.get_mut(name) {
+            if !pkg.sha256.is_empty() && pkg.sha256 != sha256(path)? {
+                differs.push(name.as_str());
+            }
             // The first build of a recipe at the lock's snapshot is the one the lock names; package caches must serve that one.
             if pkg.sha256.is_empty() {
                 pkg.sha256 = sha256(path)?;
@@ -399,6 +403,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             pkg.file = file.unwrap_or(pkg.file);
             generation.packages.insert(name.clone(), pkg);
         }
+    }
+    if !differs.is_empty() {
+        println!(
+            "built {} here, which differs from the build archix.lock records (another machine's, or an earlier one); its sources are pinned, so it's the same code. aur.require_locked_build refuses that instead",
+            differs.join(", ")
+        );
     }
     if !versioned.is_empty() {
         println!(
@@ -691,6 +701,7 @@ fn build_aur(
         git: &git,
         snapshot_cache: &cache,
         skip_check: &declared.skip_check,
+        require_locked: declared.require_locked_build,
     };
     let recipes = recipes(target, declared)?;
     let mut moved = BTreeSet::new();

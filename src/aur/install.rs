@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use super::build::{Builder, Job, SetupFailed};
+use super::build::{Builder, Job, NotInCache, SetupFailed};
 use super::git::AurGit;
 use super::srcinfo::{self, SrcInfo, dep_name};
 use crate::lock::{AUR_REPO, HostLock, LOCAL_REPO};
@@ -188,7 +188,7 @@ impl<'a> Installer<'a> {
             sources: &sources,
         };
         let files = self.builder.build(job).map_err(|error| {
-            if error.is::<SetupFailed>() {
+            if error.is::<SetupFailed>() || error.is::<NotInCache>() {
                 return error;
             }
             anyhow::Error::new(BuildFailed {

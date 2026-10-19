@@ -114,6 +114,7 @@ struct Declared {
     package_caches: Vec<String>,
     build_on_host: BTreeSet<String>,
     skip_check: BTreeSet<String>,
+    require_locked_build: bool,
     missing_versions: Option<Nearest>,
     boot: Option<BootSettings>,
     snapshots: bool,
@@ -292,6 +293,7 @@ fn declared(config: &Value) -> Result<Declared> {
             },
             _ => BTreeSet::new(),
         },
+        require_locked_build: matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("require_locked_build") == Some(&Value::Bool(true))),
         boot: match map.get("boot") {
             Some(Value::Map(boot)) if matches!(boot.get("loader"), Some(Value::Str(_))) => {
                 let text = |key: &str, default: &str| match boot.get(key) {

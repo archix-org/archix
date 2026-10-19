@@ -168,6 +168,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             git: &git,
             snapshot_cache: &cache,
             skip_check: &declared.skip_check,
+            require_locked: declared.require_locked_build,
         };
         Installer::new(&builder, &temp, &declared.build_on_host, Some(&recipes))?.build(&aur_names)?
     };

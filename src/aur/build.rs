@@ -28,6 +28,8 @@ pub struct Builder<'a> {
     pub snapshot_cache: &'a Path,
     /// Bases built with makepkg --nocheck.
     pub skip_check: &'a BTreeSet<String>,
+    /// Install only the builds archix.lock records, never one made here instead.
+    pub require_locked: bool,
 }
 
 /// One AUR base to build at a commit, against a snapshot, with these already-built AUR packages installed first.
@@ -117,12 +119,19 @@ impl Builder<'_> {
                     .iter()
                     .zip(&record.sha256)
                     .all(|((_, path), sha)| crate::fetch::sha256(path).is_ok_and(|have| have == *sha));
-            if intact {
+            let as_locked = files
+                .iter()
+                .zip(&record.sha256)
+                .all(|((name, _), sha)| locked.get(name).is_none_or(|want| want == sha));
+            if intact && (as_locked || !self.require_locked) {
                 return Ok(files);
             }
         }
         if let Some(files) = self.cached_build(base, commit, date, &record, locked) {
             return Ok(files);
+        }
+        if self.require_locked && !locked.is_empty() {
+            return Err(anyhow::Error::new(NotInCache(base.to_string())));
         }
 
         ensure_user()?;
@@ -613,6 +622,22 @@ fn chown(dir: &Path) -> Result<()> {
         "chown",
     )
 }
+
+/// The lock records a build of this base that no package cache has, and aur.require_locked_build forbids building it here.
+#[derive(Debug)]
+pub struct NotInCache(pub String);
+
+impl std::fmt::Display for NotInCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "archix.lock records a build of {} that no package cache has, and aur.require_locked_build doesn't allow building it here; nothing was changed. List a package cache that has it in package_caches, or turn the option off",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NotInCache {}
 
 /// Preparing the build (the chroot, the signing keys) failed, which says nothing about the recipe, so no other version is offered.
 #[derive(Debug)]
