@@ -36,6 +36,20 @@ same_as_before() {
   [ "$missing" = 0 ] || fail "$1: $missing packages are missing files"
 }
 
+# The swap brings /usr and pacman's database back, but what the upgrade changed outside /usr stays: report what that broke, then repair it so the next step starts clean.
+outside_usr() {
+  local missing packages=() name version file
+  missing=$(pacman -Qk 2>&1 | grep -oE "^warning: [^:]+: [^ ]+ \(No such file or directory\)" | cut -d' ' -f2-3)
+  say "METRIC $fs $1 missing_outside_usr=$(echo -n "$missing" | grep -c .) files=$(echo "$missing" | tr '\n' ' ')"
+  for name in $(echo "$missing" | cut -d: -f1 | sort -u); do
+    version=$(grep "^$name " "$state/before" | cut -d' ' -f2)
+    file=$(ls /var/cache/pacman/pkg/"$name-$version"-*.pkg.tar.zst 2> /dev/null | head -1)
+    [ -n "$file" ] && packages+=("$file")
+  done
+  [ ${#packages[@]} = 0 ] || pacman -U --noconfirm "${packages[@]}" > /dev/null 2>&1 || fail "$1: reinstalling ${packages[*]}"
+  same_as_before "$1"
+}
+
 # Files pacman's checks find changed, missing or torn; config files edited on purpose count too, so it's compared against the count before.
 altered() { pacman -Qkk 2>&1 | grep -cE '\((No such file or directory|Size mismatch|SHA256 checksum mismatch|Symlink path mismatch)\)'; }
 
@@ -98,7 +112,7 @@ a_b() {
   measure "a-b-$clone-swap" swap
   say "METRIC $fs a-b-$clone kept used=$(used) inodes=$(inodes) usr_bytes=$(du -sxb /usr | cut -f1) both_bytes=$(du -sxbc /usr /usr.next | tail -1 | cut -f1)"
   measure "a-b-$clone-rollback" swap
-  same_as_before "a-b-$clone-rollback"
+  outside_usr "a-b-$clone-rollback"
   measure "a-b-$clone-drop" drop_next
 }
 if [ "$fs" = btrfs ]; then
