@@ -3,7 +3,6 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 
 use archix::generations::Store;
@@ -273,7 +272,12 @@ fn a_cache_build_that_isnt_the_locked_one_is_not_used() {
     );
     let setup = Setup::new(&[name], &body);
     setup.ok(&["switch", "--noconfirm"]);
-    let built = cached_file(Path::new("/var/cache/archix/pkg"), name);
+    let built = fs::read_dir("/var/cache/archix/pkg")
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.to_string_lossy().contains(name) && path.to_string_lossy().ends_with(".pkg.tar.zst"))
+        .unwrap();
     let locked = setup.lock().packages[name].sha256.clone();
     assert_eq!(
         locked,
