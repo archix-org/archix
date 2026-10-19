@@ -194,7 +194,7 @@ impl Builder<'_> {
             let text = serde_json::to_string(&Record {
                 files: files.clone(),
                 sha256: hashes,
-                sources: super::sources::pins(&dir, info)?,
+                sources: super::sources::pins(&dir, info),
             })?;
             crate::durable::write(&record, text.as_bytes())?;
             Ok(files

@@ -79,36 +79,43 @@ pub fn floating(info: &SrcInfo) -> Vec<Floating> {
     found
 }
 
-/// What a finished build in `dir` (makepkg's SRCDEST) got for each floating source: a commit or a sha256.
-pub fn pins(dir: &Path, info: &SrcInfo) -> Result<BTreeMap<String, String>> {
+/// What a finished build in `dir` (makepkg's SRCDEST) got for each floating source: a commit or a sha256; one it can't tell is left unpinned with a warning.
+pub fn pins(dir: &Path, info: &SrcInfo) -> BTreeMap<String, String> {
     let mut pins = BTreeMap::new();
     for source in floating(info) {
-        let pin = match &source.kind {
-            Kind::Git { name, branch } => {
-                let reference = match branch {
-                    Some(branch) => format!("refs/heads/{branch}^{{commit}}"),
-                    None => "HEAD^{commit}".to_string(),
-                };
-                let out = Command::new("git")
-                    .args(["-c", "safe.directory=*", "-C"])
-                    .arg(dir.join(name))
-                    .args(["rev-parse", "--verify", &reference])
-                    .output()
-                    .with_context(|| format!("running git for {}", source.entry))?;
-                if !out.status.success() {
-                    bail!(
-                        "finding the commit {} was built from: {}",
-                        source.entry,
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                }
-                String::from_utf8_lossy(&out.stdout).trim().to_string()
+        match pin(dir, &source.kind) {
+            Ok(pin) => {
+                pins.insert(source.entry, pin);
             }
-            Kind::Unchecked { file } => crate::fetch::sha256(&dir.join(file))?,
-        };
-        pins.insert(source.entry, pin);
+            Err(e) => eprintln!(
+                "warning: couldn't tell what {} was when built, so archix.lock doesn't pin it: {e:#}",
+                source.entry
+            ),
+        }
     }
-    Ok(pins)
+    pins
+}
+
+fn pin(dir: &Path, kind: &Kind) -> Result<String> {
+    match kind {
+        Kind::Git { name, branch } => {
+            let reference = match branch {
+                Some(branch) => format!("refs/heads/{branch}^{{commit}}"),
+                None => "HEAD^{commit}".to_string(),
+            };
+            let out = Command::new("git")
+                .args(["-c", "safe.directory=*", "-C"])
+                .arg(dir.join(name))
+                .args(["rev-parse", "--verify", &reference])
+                .output()
+                .context("running git")?;
+            if !out.status.success() {
+                bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        }
+        Kind::Unchecked { file } => crate::fetch::sha256(&dir.join(file)),
+    }
 }
 
 /// Lines to append to a PKGBUILD so it builds `pins` again: git sources at their commit, unchecked downloads checked against their sha256.
@@ -317,7 +324,7 @@ mod tests {
         git(&["clone", "-q", "--mirror", "work", "plain"]);
         std::fs::write(dir.path().join("data.txt"), "abc").unwrap();
         std::fs::write(dir.path().join("bin-x86_64"), "").unwrap();
-        let pins = pins(dir.path(), &info()).unwrap();
+        let pins = pins(dir.path(), &info());
         assert_eq!(pins["foo::git+https://example.org/foo.git"], main);
         assert_eq!(pins["git+https://example.org/bar.git#branch=dev?signed"], dev);
         assert_eq!(
