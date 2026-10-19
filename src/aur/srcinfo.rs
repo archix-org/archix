@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
 
 use crate::archive::ARCH;
@@ -12,6 +14,10 @@ pub struct SrcInfo {
     /// Fingerprints of the keys allowed to sign the sources.
     pub validpgpkeys: Vec<String>,
     pub packages: Vec<SrcPkg>,
+    /// `source` and `source_x86_64`, by array name.
+    pub sources: BTreeMap<String, Vec<String>>,
+    /// The checksum arrays, such as `sha256sums` or `b2sums_x86_64`, by array name.
+    pub sums: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,6 +65,10 @@ impl Fields {
 pub fn parse(text: &str) -> Result<SrcInfo> {
     let (mut base, mut pkgver, mut pkgrel, mut epoch) = (None, None, None, None);
     let (mut makedepends, mut checkdepends, mut validpgpkeys) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut sources, mut sums) = (
+        BTreeMap::<String, Vec<String>>::new(),
+        BTreeMap::<String, Vec<String>>::new(),
+    );
     let mut defaults = Fields::default();
     let mut packages: Vec<(String, Fields)> = Vec::new();
     for line in text.lines() {
@@ -78,6 +88,12 @@ pub fn parse(text: &str) -> Result<SrcInfo> {
             ("validpgpkeys", None) => validpgpkeys.push(value.to_string()),
             (k, None) if k == format!("makedepends{arch_specific}") => makedepends.push(value.to_string()),
             (k, None) if k == format!("checkdepends{arch_specific}") => checkdepends.push(value.to_string()),
+            (k, None) if k == "source" || k == format!("source{arch_specific}") => {
+                sources.entry(k.to_string()).or_default().push(value.to_string());
+            }
+            (k, None) if is_checksum_array(k, &arch_specific) => {
+                sums.entry(k.to_string()).or_default().push(value.to_string())
+            }
             (key, None) => defaults.add(key, value),
             (key, Some((_, fields))) => fields.add(key, value),
         }
@@ -114,7 +130,17 @@ pub fn parse(text: &str) -> Result<SrcInfo> {
         checkdepends,
         validpgpkeys,
         packages,
+        sources,
+        sums,
     })
+}
+
+/// Whether `key` is one of makepkg's checksum arrays, for every architecture or this one.
+fn is_checksum_array(key: &str, arch_specific: &str) -> bool {
+    let key = key.strip_suffix(arch_specific).unwrap_or(key);
+    ["ck", "md5", "sha1", "sha224", "sha256", "sha384", "sha512", "b2"]
+        .iter()
+        .any(|algorithm| key == format!("{algorithm}sums"))
 }
 
 /// The package name in a dependency string such as `python>=3.12` or `sh: optional`.
@@ -129,7 +155,9 @@ mod tests {
 
     const SPLIT: &str = "pkgbase = foo\n\tpkgdesc = d\n\tpkgver = 1.2\n\tpkgrel = 3\n\tepoch = 2\n\
         \tarch = x86_64\n\tmakedepends = cmake\n\tmakedepends_x86_64 = nasm\n\tcheckdepends = python\n\
-        \tdepends = glibc\n\tdepends_x86_64 = lib32-glibc\n\tdepends_aarch64 = nope\n\tvalidpgpkeys = 7C20ADCD35D9797789B6BCC046D62DD9F1DE636E\n\n\
+        \tdepends = glibc\n\tdepends_x86_64 = lib32-glibc\n\tdepends_aarch64 = nope\n\tvalidpgpkeys = 7C20ADCD35D9797789B6BCC046D62DD9F1DE636E\n\
+        \tsource = foo::git+https://example.org/foo.git\n\tsource = data.tar.gz\n\tsource_x86_64 = https://example.org/bin\n\
+        \tsha256sums = SKIP\n\tsha256sums = abc\n\tb2sums_x86_64 = SKIP\n\tsource_aarch64 = nope\n\n\
         pkgname = foo\n\tprovides = foo-bin=1.2\n\n\
         pkgname = foo-docs\n\tarch = any\n\tdepends = foo>=1.2\n";
 
@@ -141,6 +169,14 @@ mod tests {
         assert_eq!(info.makedepends, ["cmake", "nasm"]);
         assert_eq!(info.checkdepends, ["python"]);
         assert_eq!(info.validpgpkeys, ["7C20ADCD35D9797789B6BCC046D62DD9F1DE636E"]);
+        assert_eq!(
+            info.sources["source"],
+            ["foo::git+https://example.org/foo.git", "data.tar.gz"]
+        );
+        assert_eq!(info.sources["source_x86_64"], ["https://example.org/bin"]);
+        assert!(!info.sources.contains_key("source_aarch64"));
+        assert_eq!(info.sums["sha256sums"], ["SKIP", "abc"]);
+        assert_eq!(info.sums["b2sums_x86_64"], ["SKIP"]);
         let foo = info.package("foo").unwrap();
         assert_eq!(foo.depends, ["glibc", "lib32-glibc"]);
         assert_eq!(foo.provides, ["foo-bin=1.2"]);
