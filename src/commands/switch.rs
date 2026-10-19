@@ -1206,7 +1206,6 @@ pub fn cache_push(dir: &std::path::Path) -> Result<()> {
     let (private_records, private_files) = archix::aur::build::private_builds(&paths);
     let mut copied = 0;
     let mut copy_dir = |from: &std::path::Path, to: &std::path::Path| -> Result<()> {
-        fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
         for entry in fs::read_dir(from).into_iter().flatten().flatten() {
             let (source, dest) = (entry.path(), to.join(entry.file_name()));
             if private_records.contains(&source) || private_files.contains(&*entry.file_name().to_string_lossy()) {
@@ -1219,6 +1218,8 @@ pub fn cache_push(dir: &std::path::Path) -> Result<()> {
             {
                 continue;
             }
+            // Created only for something to copy, so a base with only private builds leaves no trace.
+            fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
             // Through a temporary name, so a machine reading the cache never sees half a file.
             let tmp = to.join(format!(".{}.part", entry.file_name().to_string_lossy()));
             fs::copy(&source, &tmp).with_context(|| format!("copying {}", source.display()))?;
