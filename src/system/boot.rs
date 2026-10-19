@@ -914,6 +914,14 @@ pub fn read_selected_entry() -> Option<String> {
     efivar_string(&fs::read(VAR).ok()?)
 }
 
+fn loader_counts_boots(_features: u64) -> bool {
+    false
+}
+
+fn efivar_u64(_bytes: &[u8]) -> Option<u64> {
+    None
+}
+
 fn efivar_string(bytes: &[u8]) -> Option<String> {
     let units: Vec<u16> = bytes
         .get(4..)?
@@ -972,6 +980,57 @@ mod tests {
                 .contains("archix-2.efi"),
             "a generation without an entry leaves the default alone"
         );
+    }
+
+    #[test]
+    fn a_counted_entry_is_preferred_and_the_last_proven_one_stays_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().join("esp");
+        let entries = esp.join("loader/entries");
+        fs::create_dir_all(&entries).unwrap();
+        for name in ["archix-3.conf", "archix-5+3.conf"] {
+            fs::write(entries.join(name), "title t\n").unwrap();
+        }
+        fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-3.conf\n").unwrap();
+        let paths = Paths::under(&dir.path().join("root"));
+        fs::create_dir_all(paths.state.join("boot")).unwrap();
+        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
+        let loader = || fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+        set_default_entry(&paths, 5).unwrap();
+        assert_eq!(loader(), "timeout 2\ndefault archix-3.conf\npreferred archix-5.conf\n");
+        fs::rename(entries.join("archix-5+3.conf"), entries.join("archix-5.conf")).unwrap();
+        fs::write(entries.join("archix-6+3.conf"), "title t\n").unwrap();
+        set_default_entry(&paths, 6).unwrap();
+        assert_eq!(
+            loader(),
+            "timeout 2\ndefault archix-5.conf\npreferred archix-6.conf\n",
+            "a preferred entry that booted becomes the fallback"
+        );
+        set_default_entry(&paths, 3).unwrap();
+        assert_eq!(loader(), "timeout 2\ndefault archix-3.conf\n");
+    }
+
+    #[test]
+    fn only_a_loader_with_uki_entries_and_preferred_counts_boots() {
+        let systemd_262 = 0b1111_1111_1111_1111_1111;
+        let systemd_257 = (1 << 4) | (1 << 0);
+        assert!(loader_counts_boots(systemd_262));
+        assert!(!loader_counts_boots(systemd_257));
+        assert!(!loader_counts_boots(0));
+        let mut bytes = vec![6, 0, 0, 0];
+        bytes.extend(0x1234_u64.to_le_bytes());
+        assert_eq!(efivar_u64(&bytes), Some(0x1234));
+    }
+
+    #[test]
+    fn an_entry_names_its_uki_with_an_efi_or_uki_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let esp = dir.path().to_str().unwrap();
+        for key in ["efi", "uki"] {
+            let entry = dir.path().join(format!("{key}.conf"));
+            fs::write(&entry, format!("title t\n{key} /EFI/archix/a.efi\n")).unwrap();
+            assert_eq!(uki_of(esp, &entry), Some(dir.path().join("EFI/archix/a.efi")), "{key}");
+        }
     }
 
     #[test]
