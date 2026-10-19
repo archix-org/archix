@@ -279,7 +279,12 @@ fn uki_of(esp: &str, entry: &Path) -> Option<PathBuf> {
         return Some(entry.to_path_buf());
     }
     let text = fs::read_to_string(entry).ok()?;
-    let path = text.lines().find_map(|line| line.strip_prefix("efi"))?.trim();
+    let path = text
+        .lines()
+        .find_map(|line| match line.split_once(char::is_whitespace) {
+            Some(("efi" | "uki", path)) => Some(path.trim()),
+            _ => None,
+        })?;
     Some(Path::new(esp).join(path.trim_start_matches('/')))
 }
 
@@ -503,10 +508,13 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         fs::rename(&tmp, dest)?;
     }
     crate::durable::sync_dir(&shared.join("x"))?;
+    let counted = plan.tries > 0 && loader_counts_boots(crate::testhooks::loader_features());
+    // systemd-boot counts tries only for entries that start their UKI with `uki`.
+    let key = if counted { "uki" } else { "efi" };
     for (variant, title, dest) in &ukis {
         let relative = dest.strip_prefix(&plan.esp).unwrap_or(dest);
         let text = format!(
-            "title {title}\nversion {}\nsort-key archix\nefi /{}\n",
+            "title {title}\nversion {}\nsort-key archix\n{key} /{}\n",
             plan.generation,
             relative.display()
         );
@@ -518,7 +526,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
                         fs::remove_file(path)?;
                     }
                 }
-                counted_entry_name(plan.generation, plan.tries)
+                counted_entry_name(plan.generation, if counted { plan.tries } else { 0 })
             }
             _ => entry_name(plan.generation, *variant),
         };
@@ -568,40 +576,62 @@ fn payload_key(
     Ok(crate::fetch::sha256_bytes(parts.join("\n").as_bytes())[..12].to_string())
 }
 
-/// Makes systemd-boot start `generation` by default, so a rollback survives the next reboot instead of booting the newest entry.
+/// Makes systemd-boot start `generation` by default, so a rollback survives the next reboot instead of booting the newest entry. An entry still counting its tries is only `preferred`, which systemd-boot passes over once it's bad for `default`: the newest default that has booted.
 pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
     let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
         return Ok(());
     };
     let esp = esp.trim();
-    let Some(entry) = entries(esp)
-        .into_iter()
-        .filter(|(number, extra, _)| *number == generation && !extra)
-        .map(|(_, _, path)| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
-        .min_by_key(|name| !name.ends_with(".conf"))
-    else {
+    let entry_of = |generation: u32| {
+        entries(esp)
+            .into_iter()
+            .filter(|(number, extra, _)| *number == generation && !extra)
+            .map(|(_, _, path)| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+            .min_by_key(|name| !name.ends_with(".conf"))
+    };
+    let Some(entry) = entry_of(generation) else {
         return Ok(());
     };
-    write_default(esp, &entry)
+    if !entry.contains('+') {
+        return write_loader(esp, Some(&entry_id(&entry)), None);
+    }
+    let conf = fs::read_to_string(Path::new(esp).join("loader/loader.conf")).unwrap_or_default();
+    let setting = |key: &str| {
+        conf.lines()
+            .find_map(|line| match line.split_once(char::is_whitespace) {
+                Some((name, value)) if name == key => Some(value.trim().to_string()),
+                _ => None,
+            })
+    };
+    let booted_preferred = setting("preferred")
+        .and_then(|id| parse_entry(&id))
+        .and_then(|(number, _)| entry_of(number))
+        .filter(|name| !name.contains('+'))
+        .map(|name| entry_id(&name));
+    let default = booted_preferred.or_else(|| setting("default"));
+    write_loader(esp, default.as_deref(), Some(&entry_id(&entry)))
 }
 
-/// Names `entry` as systemd-boot's default in loader.conf.
-fn write_default(esp: &str, entry: &str) -> Result<()> {
+/// Names systemd-boot's `default` and `preferred` entries in loader.conf, dropping either when it's None.
+fn write_loader(esp: &str, default: Option<&str>, preferred: Option<&str>) -> Result<()> {
     let conf = Path::new(esp).join("loader/loader.conf");
     let mut lines: Vec<String> = fs::read_to_string(&conf)
         .unwrap_or_default()
         .lines()
-        .filter(|line| line.split_whitespace().next() != Some("default"))
+        .filter(|line| !matches!(line.split_whitespace().next(), Some("default" | "preferred")))
         .map(str::to_string)
         .collect();
-    lines.push(format!("default {entry}"));
+    lines.extend(default.map(|id| format!("default {id}")));
+    lines.extend(preferred.map(|id| format!("preferred {id}")));
     crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())?;
-    // An EFI variable set by `bootctl set-default` would override loader.conf.
-    let _ = Command::new("bootctl")
-        .args(["set-default", ""])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // EFI variables set by `bootctl set-default` or `set-preferred` would override loader.conf.
+    for verb in ["set-default", "set-preferred"] {
+        let _ = Command::new("bootctl")
+            .args([verb, ""])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
     Ok(())
 }
 
@@ -715,7 +745,7 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
     let Some(default_id) = default_id else {
         bail!("no installed kernel package owns a directory in {MODULES}; nothing was changed");
     };
-    write_default(esp, &default_id)?;
+    write_loader(esp, Some(&default_id), None)?;
     for (_, _, path) in entries(esp) {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
@@ -914,12 +944,23 @@ pub fn read_selected_entry() -> Option<String> {
     efivar_string(&fs::read(VAR).ok()?)
 }
 
-fn loader_counts_boots(_features: u64) -> bool {
-    false
+/// systemd-boot's LoaderFeatures, a bit set of what the loader that started this boot supports.
+pub fn read_loader_features() -> u64 {
+    const VAR: &str = "/sys/firmware/efi/efivars/LoaderFeatures-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+    fs::read(VAR).ok().and_then(|bytes| efivar_u64(&bytes)).unwrap_or(0)
 }
 
-fn efivar_u64(_bytes: &[u8]) -> Option<u64> {
-    None
+/// Whether the loader counts boots of an entry archix can write (systemd-boot counts only `linux` and `uki` entries, 258 added `uki`) and falls back past a bad one (260's `preferred`).
+fn loader_counts_boots(features: u64) -> bool {
+    const BOOT_COUNTING: u64 = 1 << 4;
+    const TYPE1_UKI: u64 = 1 << 16;
+    const ENTRY_PREFERRED: u64 = 1 << 19;
+    let needed = BOOT_COUNTING | TYPE1_UKI | ENTRY_PREFERRED;
+    features & needed == needed
+}
+
+fn efivar_u64(bytes: &[u8]) -> Option<u64> {
+    Some(u64::from_le_bytes(bytes.get(4..12)?.try_into().ok()?))
 }
 
 fn efivar_string(bytes: &[u8]) -> Option<String> {

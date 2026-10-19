@@ -23,7 +23,7 @@ return {
       tries = archix.option {
         type = t.int,
         default = 3,
-        description = "How many boots systemd-boot tries a new generation's entry before it falls back to the newest older one, which archix then rolls back to; a boot that reaches boot-complete.target counts as good. 0 turns boot counting off.",
+        description = "How many boots systemd-boot tries a new generation's entry before it falls back to the last generation that booted, which archix then rolls back to; a boot that reaches boot-complete.target counts as good. Needs systemd-boot 260 or newer on the ESP; 0 turns boot counting off.",
       },
       secure_boot = archix.option {
         type = t.nullable(t.bool),

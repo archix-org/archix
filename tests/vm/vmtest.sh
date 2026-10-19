@@ -78,6 +78,8 @@ case $stage in
     bad=$(current)
     echo "$bad" > "$state/bad"
     [ -f "/boot/loader/entries/archix-$bad+3.conf" ] || fail "the new entry should count three boot tries: $(ls /boot/loader/entries)"
+    grep -qx "preferred archix-$bad.conf" /boot/loader/loader.conf && grep -qx "default archix-$good.conf" /boot/loader/loader.conf \
+      || fail "loader.conf should prefer generation $bad and fall back to $good: $(cat /boot/loader/loader.conf)"
     say "PASS: generation $bad's entry gets three boot tries; rebooting into a kernel that panics"
     echo 5 > "$state/stage"
     systemctl reboot
@@ -89,6 +91,7 @@ case $stage in
     [ "$(current)" = "$good" ] || fail "archix should roll back to generation $good after $bad failed to boot"
     [ -f "/boot/loader/entries/archix-$bad+0-3.conf" ] || fail "generation $bad's entry should be marked bad: $(ls /boot/loader/entries)"
     grep -q "generation $bad didn't finish booting" /var/lib/archix/notes || fail "the login note should say generation $bad didn't boot: $(cat /var/lib/archix/notes)"
+    grep -q "^preferred" /boot/loader/loader.conf && fail "the rollback to $good should drop preferred: $(cat /boot/loader/loader.conf)"
     say "PASS: generation $bad failed to boot three times, systemd-boot fell back to $good, and archix rolled back to it"
     sed -i 's|, "init=/usr/bin/false", "panic=3" }| }|' "$config"
     archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
