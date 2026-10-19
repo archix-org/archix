@@ -38,13 +38,13 @@ fn entry_id(file: &str) -> String {
     }
 }
 
-/// The entry file behind an id, whatever its boot counters say.
+/// The entry file behind an id or a file name, whatever its boot counters say.
 fn entry_file(id: &str) -> String {
     let file = fs::read_dir(format!("{ESP}/loader/entries"))
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .find(|file| entry_id(file) == id)
+        .find(|file| entry_id(file) == entry_id(id))
         .unwrap_or_else(|| panic!("no entry {id}"));
     format!("{ESP}/loader/entries/{file}")
 }
