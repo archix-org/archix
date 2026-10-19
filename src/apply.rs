@@ -560,6 +560,11 @@ mod tests {
         let file = fs::File::create(&lock).unwrap();
         assert!(held_open(&lock));
         drop(file);
-        assert!(!held_open(&lock), "a lock left by a killed pacman is stale");
+        // Another test forking can hold every fd of this process until its child execs.
+        let stale = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            !held_open(&lock)
+        });
+        assert!(stale, "a lock left by a killed pacman is stale");
     }
 }
