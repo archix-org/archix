@@ -157,6 +157,54 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
     );
 }
 
+#[test]
+#[ignore]
+fn a_build_that_differs_from_the_locked_one_is_said_and_can_be_refused() {
+    let _system = lock_system();
+    let setup = Setup::with_files(
+        &["archix-test-local"],
+        "",
+        &[("pkgbuilds/archix-test-local/PKGBUILD", &pkgbuild("1.0"))],
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let locked = setup.lock().packages["archix-test-local"].sha256.clone();
+    // As on a machine that never built it: no package, no build record, no built file.
+    let forget_the_build = || {
+        Command::new("pacman")
+            .args(["-Rdd", "--noconfirm", "archix-test-local"])
+            .status()
+            .unwrap();
+        let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-local");
+        for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {
+            if file.file_name().to_string_lossy().contains("archix-test-local-") {
+                fs::remove_file(file.path()).unwrap();
+            }
+        }
+    };
+    forget_the_build();
+    let rebuilt = setup.ok(&["switch", "--noconfirm"]);
+    forget_the_build();
+    let init = setup.read("init.lua").unwrap();
+    setup.write(
+        "init.lua",
+        &init.replacen("return {", "return { aur = { require_locked_build = true },", 1),
+    );
+    let refused = setup.run(&["switch", "--noconfirm"]);
+    let refused_said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    let refused_installed = installed("archix-test-local").is_some();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(!locked.is_empty());
+    assert!(
+        rebuilt.contains("built archix-test-local here, which differs from the build archix.lock records"),
+        "{rebuilt}"
+    );
+    assert!(
+        !refused.status.success() && !refused_installed && refused_said.contains("aur.require_locked_build"),
+        "{refused_said}"
+    );
+}
+
 const NEW_FILE_PATCH: &str = "--- /dev/null\n+++ b/ARCHIX-PATCHED\n@@ -0,0 +1 @@\n+patched by archix\n";
 
 #[test]
