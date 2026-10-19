@@ -9,6 +9,7 @@ trap 'umount -R "$view" 2> /dev/null; rmdir "$view"' EXIT
 mount --bind "$root" "$view"
 for tree in usr etc opt boot; do mount --bind "$dep/$tree" "$view/$tree"; done
 mount --bind "$dep/pacman" "$view/var/lib/pacman/local"
-pacman --root "$view" --dbpath "$view/var/lib/pacman" -Qkk 2>&1 \
+# Findings only: the per-package totals on stdout would interleave with them mid-line.
+pacman --root "$view" --dbpath "$view/var/lib/pacman" -Qkk 2>&1 > /dev/null \
   | grep -E '\((No such file or directory|Size mismatch|SHA256 checksum mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch)\)' \
-  | sed "s|$view||" | sort || true
+  | sed "s|$view||g" | sort || true
