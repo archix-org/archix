@@ -28,6 +28,18 @@ pub struct Wanted {
 /// Makes every wanted file present in `dir`, reusing earlier downloads and pacman's cache, and verifies checksums.
 pub fn fetch_all(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], wanted: &[Wanted]) -> Result<Vec<PathBuf>> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let downloads: u64 = wanted
+        .iter()
+        .filter(|item| {
+            !std::iter::once(dir)
+                .chain(also_look_in.iter().map(PathBuf::as_path))
+                .any(|cache| cache.join(&item.file).is_file())
+        })
+        .filter_map(|item| item.size)
+        .sum();
+    if downloads > 0 {
+        crate::conflicts::check_space(dir, downloads, 0)?;
+    }
     let next = AtomicUsize::new(0);
     let full = AtomicBool::new(false);
     let errors = Mutex::new(Vec::new());
@@ -202,10 +214,20 @@ mod tests {
             size: Some(size),
         };
         let archive = Archive::new("http://127.0.0.1:9");
-        let held = fetch_all(&archive, &ours, std::slice::from_ref(&pacman), &[wanted("held", 1 << 60)]);
+        let held = fetch_all(
+            &archive,
+            &ours,
+            std::slice::from_ref(&pacman),
+            &[wanted("held", 1 << 60)],
+        );
         assert!(held.is_ok(), "a file a cache already holds isn't downloaded: {held:?}");
-        let err = fetch_all(&archive, &ours, &[], &[wanted("huge", 1 << 60)]).unwrap_err().to_string();
-        assert!(err.contains("nothing was changed") && !err.contains("could not fetch"), "{err}");
+        let err = fetch_all(&archive, &ours, &[], &[wanted("huge", 1 << 60)])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nothing was changed") && !err.contains("could not fetch"),
+            "{err}"
+        );
     }
 
     #[test]

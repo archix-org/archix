@@ -550,6 +550,46 @@ fn third_party_repos(paths: &Paths) -> Vec<Repo> {
         .collect()
 }
 
+/// Sizes the official packages in `wanted` that no local cache holds, from the snapshot's repo databases, which only a switch that downloads anyway fetches.
+fn add_download_sizes(
+    archive: &Archive,
+    paths: &Paths,
+    date: Date,
+    packages: &BTreeMap<String, Locked>,
+    wanted: &mut [Wanted],
+) {
+    let held = |item: &Wanted| {
+        [paths.packages(), paths.pacman_cache.clone()]
+            .iter()
+            .any(|dir| dir.join(&item.file).is_file())
+    };
+    let repos: BTreeSet<String> = wanted
+        .iter()
+        .filter(|item| !held(item))
+        .filter_map(|item| packages.get(&item.name))
+        .map(|pkg| pkg.repo.clone())
+        .filter(|repo| is_official(repo))
+        .collect();
+    if repos.is_empty() {
+        return;
+    }
+    let repos: Vec<String> = repos.into_iter().collect();
+    let Some(db) = user_cache()
+        .ok()
+        .and_then(|cache| archive.snapshot_db(&cache, date, &repos).ok())
+    else {
+        return;
+    };
+    let mut sizes = BTreeMap::new();
+    for repo in &repos {
+        let synced = archix::pacman::read_sync_db(&db.join("sync").join(format!("{repo}.db"))).unwrap_or_default();
+        sizes.extend(synced.into_values().map(|pkg| (pkg.filename, pkg.size)));
+    }
+    for item in wanted {
+        item.size = sizes.get(&item.file).copied().filter(|size| *size > 0);
+    }
+}
+
 /// Downloads everything `changes` installs and builds the transaction that ends at exactly `packages`.
 fn transaction_for(
     archive: &Archive,
@@ -580,6 +620,7 @@ fn transaction_for(
             Change::Reason { .. } => {}
         }
     }
+    add_download_sizes(archive, paths, date, packages, &mut wanted);
     install.extend(fetch_all(
         archive,
         &paths.packages(),

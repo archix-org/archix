@@ -117,7 +117,7 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
                 depends: fields.get("DEPENDS").cloned().unwrap_or_default(),
                 conflicts: fields.get("CONFLICTS").cloned().unwrap_or_default(),
                 base: first(&fields, "BASE").unwrap_or_else(|| name.clone()),
-                size: 0,
+                size: first(&fields, "CSIZE").and_then(|size| size.parse().ok()).unwrap_or(0),
                 name,
             },
         );

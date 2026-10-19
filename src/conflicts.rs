@@ -211,10 +211,14 @@ fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTr
             .cloned()
             .unwrap_or_else(|| root.to_path_buf())
     };
+    let mut blocks: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    let mut on_disk =
+        |mount: &PathBuf, size: u64| allocated(size, *blocks.entry(mount.clone()).or_insert_with(|| block_size(mount)));
     let mut adds: BTreeMap<PathBuf, u64> = BTreeMap::new();
     for package in incoming {
         for (file, size) in package.files.iter().zip(&package.sizes) {
-            *adds.entry(mount_of(file)).or_default() += size;
+            let mount = mount_of(file);
+            *adds.entry(mount.clone()).or_default() += on_disk(&mount, *size);
         }
     }
     let mut frees: BTreeMap<PathBuf, u64> = BTreeMap::new();
@@ -232,7 +236,8 @@ fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTr
             .is_ok_and(|file| GzDecoder::new(file).read_to_string(&mut mtree).is_ok());
         if read {
             for (file, size) in mtree_entries(&mtree) {
-                *frees.entry(mount_of(&file)).or_default() += size;
+                let mount = mount_of(&file);
+                *frees.entry(mount.clone()).or_default() += on_disk(&mount, size);
             }
         } else if let Some(size) = desc
             .get("SIZE")
@@ -342,8 +347,24 @@ pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
     Ok(())
 }
 
-fn allocated(size: u64, _block: u64) -> u64 {
-    size
+/// The space a file of `size` bytes takes on a filesystem that allocates `block` bytes at a time.
+fn allocated(size: u64, block: u64) -> u64 {
+    match block {
+        0 => size,
+        block => size.div_ceil(block) * block,
+    }
+}
+
+/// The filesystem's allocation unit at `path`, 0 when it can't be read.
+fn block_size(path: &Path) -> u64 {
+    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return 0;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    match unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } {
+        0 => stat.f_frsize as u64,
+        _ => 0,
+    }
 }
 
 /// Bytes free on the filesystem holding `path`.
