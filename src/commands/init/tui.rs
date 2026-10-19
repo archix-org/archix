@@ -93,6 +93,7 @@ enum Control {
     Users,
     Groups,
     Services,
+    Repack,
 }
 
 /// One focusable line: a choice's option, a toggle, a text field, a checklist item or a button.
@@ -259,6 +260,14 @@ impl<'a> App<'a> {
                 .iter()
                 .map(|(unit, on)| (unit.clone(), if *on { "enabled".into() } else { "disabled".into() }))
                 .collect(),
+            Control::Repack => facts
+                .repack_candidates
+                .iter()
+                .map(|candidate| {
+                    let size = candidate.size().div_ceil(1 << 20);
+                    (candidate.name.clone(), format!("{size} MiB · {}", candidate.licenses()))
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -272,6 +281,7 @@ impl<'a> App<'a> {
                 | Control::Users
                 | Control::Groups
                 | Control::Services
+                | Control::Repack
         )
     }
 
@@ -290,6 +300,7 @@ impl<'a> App<'a> {
             Control::Users => answers.users.contains(&name()),
             Control::Groups => answers.groups.contains(&name()),
             Control::Services => answers.services.contains(&name()),
+            Control::Repack => answers.repack.contains(&name()),
             _ => false,
         }
     }
@@ -315,6 +326,7 @@ impl<'a> App<'a> {
             Control::Users => set(&mut answers.users, name, on),
             Control::Groups => set(&mut answers.groups, name, on),
             Control::Services => set(&mut answers.services, name, on),
+            Control::Repack => set(&mut answers.repack, name, on),
             _ => {}
         }
     }
@@ -338,6 +350,9 @@ impl<'a> App<'a> {
                     controls.push(Control::Orphans);
                 }
                 controls.push(Control::Strict);
+                if !facts.repack_candidates.is_empty() {
+                    controls.push(Control::Repack);
+                }
                 if !facts.aur_packages.is_empty() {
                     controls.extend([Control::AurReview, Control::MissingVersions]);
                 }
@@ -860,10 +875,16 @@ impl<'a> App<'a> {
                         some_of(&ids, 4)
                     )));
                 }
-                if !facts.repacked.is_empty() {
+                let picked: Vec<String> = facts
+                    .repack_candidates
+                    .iter()
+                    .filter(|candidate| answers.repack.contains(&candidate.name))
+                    .map(|candidate| candidate.name.clone())
+                    .collect();
+                if !picked.is_empty() {
                     lines.push(done(format!(
-                        "rebuilt from their installed files, since no repo or the AUR has them: {}",
-                        some_of(&facts.repacked, 6)
+                        "rebuilt as recipes from their installed files, which stay out of the config: {}",
+                        some_of(&picked, 6)
                     )));
                 }
                 for (name, why) in &facts.left_alone {
@@ -1201,6 +1222,9 @@ impl<'a> App<'a> {
                     Control::Settings => "Settings",
                     Control::Users => "Users",
                     Control::Groups => "Groups",
+                    Control::Repack => {
+                        "In no repo or the AUR: rebuild as recipes from their installed files, kept out of the config and package caches"
+                    }
                     _ => "Services that differ from their preset",
                 };
                 lines.push(heading(title));
@@ -1309,8 +1333,7 @@ mod tests {
             packages: vec!["base".into(), "yay-bin".into()],
             aur_packages: vec!["yay-bin".into()],
             unknown: Vec::new(),
-            repacks: Vec::new(),
-            repacked: Vec::new(),
+            repack_candidates: Vec::new(),
             left_alone: Vec::new(),
             orphans: vec!["old-dep".into()],
             optional: vec!["libfido2".into()],

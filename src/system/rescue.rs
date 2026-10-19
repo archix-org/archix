@@ -269,7 +269,7 @@ fn remove_dropped(root: &Path, paths: &Paths, dropped: &[String]) -> Result<()> 
     Ok(())
 }
 
-fn decoder(path: &Path) -> Result<Box<dyn Read>> {
+pub(crate) fn decoder(path: &Path) -> Result<Box<dyn Read>> {
     let mut magic = [0u8; 4];
     File::open(path)?.read_exact(&mut magic)?;
     let file = File::open(path)?;

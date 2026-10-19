@@ -1202,11 +1202,16 @@ fn push_to_cache(declared: &Declared) {
 /// Copies this machine's package files, their signatures and its AUR build records into a package cache directory, skipping what it already holds.
 pub fn cache_push(dir: &std::path::Path) -> Result<()> {
     let paths = Paths::system();
+    // Builds of private recipes, init's rebuilds of installed packages, may hold files that aren't anyone else's to have.
+    let (private_records, private_files) = archix::aur::build::private_builds(&paths);
     let mut copied = 0;
     let mut copy_dir = |from: &std::path::Path, to: &std::path::Path| -> Result<()> {
         fs::create_dir_all(to).with_context(|| format!("creating {}", to.display()))?;
         for entry in fs::read_dir(from).into_iter().flatten().flatten() {
             let (source, dest) = (entry.path(), to.join(entry.file_name()));
+            if private_records.contains(&source) || private_files.contains(&*entry.file_name().to_string_lossy()) {
+                continue;
+            }
             if !source.is_file()
                 || dest
                     .metadata()

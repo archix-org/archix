@@ -104,9 +104,8 @@ struct Facts {
     packages: Vec<String>,
     aur_packages: Vec<String>,
     unknown: Vec<String>,
-    /// Packages in no repo or the AUR that init rebuilds as recipes from their installed files, and the ones of them it declares.
-    repacks: Vec<Installed>,
-    repacked: Vec<String>,
+    /// Explicitly installed packages in no repo or the AUR that init can rebuild as recipes from their installed files, if you pick them.
+    repack_candidates: Vec<Candidate>,
     /// Explicitly installed packages in no repo or the AUR that stay alone, with why.
     left_alone: Vec<(String, String)>,
     orphans: Vec<String>,
@@ -138,6 +137,8 @@ struct Home {
 /// The choices that shape the config; every field starts at the recommended answer.
 #[derive(Debug, Clone, PartialEq)]
 struct Answers {
+    /// Packages in no repo or the AUR to rebuild as recipes from their installed files; none unless picked.
+    repack: BTreeSet<String>,
     location: String,
     git: bool,
     /// Write managed files read-only, like the Nix store.
@@ -182,6 +183,7 @@ const MISSING_VERSIONS: [(&str, &str); 3] = [
 impl Answers {
     fn recommended(facts: &Facts) -> Answers {
         Answers {
+            repack: BTreeSet::new(),
             location: String::new(),
             git: facts.git,
             read_only: false,
@@ -281,7 +283,7 @@ impl Host {
     }
 }
 
-pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
+pub fn init(config_dir: &Path, host: &str, defaults: bool, repack: &[String]) -> Result<()> {
     require_root("init")?;
     let interactive = !defaults;
     if interactive && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
@@ -291,7 +293,16 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool) -> Result<()> {
     let paths = Paths::system();
     eprintln!("reading this system");
     let facts = gather(&paths, config_dir)?;
-    let answers = Answers::recommended(&facts);
+    let mut answers = Answers::recommended(&facts);
+    for name in repack {
+        if let Some((_, why)) = facts.left_alone.iter().find(|(left, _)| left == name) {
+            bail!("{name} can't be rebuilt from its installed files: {why}");
+        }
+        if !facts.repack_candidates.iter().any(|candidate| candidate.name == *name) {
+            bail!("{name} isn't an installed package that no repo or the AUR has, so there's nothing to rebuild");
+        }
+        answers.repack.insert(name.clone());
+    }
     let answers = if interactive {
         match tui::run(&facts, host, answers)? {
             Some(answers) => answers,
@@ -339,9 +350,20 @@ fn write_and_lock(
 ) -> Result<()> {
     let dir = settle_location(config_dir, chosen)?;
     let config = build(facts, answers, &dir, host);
-    if !facts.repacks.is_empty() {
+    let mut repacks: Vec<&Installed> = Vec::new();
+    for pkg in picked_repacks(facts, answers)
+        .into_iter()
+        .flat_map(|candidate| &candidate.closure)
+    {
+        if !repacks.iter().any(|have| have.name == pkg.name) {
+            repacks.push(pkg);
+        }
+    }
+    if !repacks.is_empty() {
         let mut size = 0;
-        for pkg in &facts.repacks {
+        let mut left_out = Vec::new();
+        for pkg in &repacks {
+            left_out.extend(pkg.left_out.iter().map(|path| format!("/{path}")));
             size += repack::write_recipe(
                 pkg,
                 Path::new("/"),
@@ -350,13 +372,20 @@ fn write_and_lock(
             )?
             .size;
         }
-        let names: Vec<String> = facts.repacks.iter().map(|pkg| pkg.name.clone()).collect();
+        let names: Vec<String> = repacks.iter().map(|pkg| pkg.name.clone()).collect();
         done(format!(
-            "{} no repo or the AUR has, rebuilt from their installed files in pkgbuilds/ ({} MiB): {}",
+            "{} no repo or the AUR has, rebuilt as recipes in pkgbuilds/; their files ({} MiB) stay in {}, out of the config and package caches: {}",
             count(names.len(), "package", "packages"),
             size.div_ceil(1 << 20),
+            paths.cache.join("sources").display(),
             some_of(&names, 8)
         ));
+        if !left_out.is_empty() {
+            note(format!(
+                "config files you edited and no cached package file has as shipped are left out of the recipes, and stay on disk as they are: {}",
+                some_of(&left_out, 8)
+            ));
+        }
     }
 
     section("Lock");
@@ -491,10 +520,11 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
             .collect();
     }
     let explicit_foreign: BTreeSet<String> = foreign_explicit.iter().cloned().collect();
-    let (repacks, repacked, left_alone) = choose_repacks(&explicit_foreign, &unknown, |name| {
-        repack::read(Path::new("/"), name, &[])
+    let caches = package_caches();
+    let (repack_candidates, left_alone) = choose_repacks(&explicit_foreign, &unknown, |name| {
+        repack::read(Path::new("/"), name, &caches)
     });
-    let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).chain(&repacked).cloned().collect();
+    let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).cloned().collect();
     packages.sort();
     packages.dedup();
     let (orphans, optional): (Vec<String>, Vec<String>) = all_orphans
@@ -595,8 +625,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         packages,
         aur_packages,
         unknown,
-        repacks,
-        repacked,
+        repack_candidates,
         left_alone,
         orphans,
         optional,
@@ -616,12 +645,62 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     })
 }
 
+/// Where package files of installed versions may still be: pacman's cache, and the build caches yay and paru keep in each home.
+fn package_caches() -> Vec<PathBuf> {
+    let mut caches = vec![PathBuf::from("/var/cache/pacman/pkg")];
+    let homes = fs::read_dir("/home")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|home| home.path());
+    for home in homes.chain([PathBuf::from("/root")]) {
+        caches.extend([home.join(".cache/yay"), home.join(".cache/paru/clone")]);
+    }
+    caches
+}
+
+/// A package init can rebuild as a recipe, with the packages in no repo or the AUR it needs, which are rebuilt along with it.
+struct Candidate {
+    name: String,
+    closure: Vec<Installed>,
+}
+
+impl Candidate {
+    /// What its installed files take, the packages it needs included.
+    fn size(&self) -> u64 {
+        self.closure
+            .iter()
+            .flat_map(|pkg| &pkg.entries)
+            .map(|entry| match entry.kind {
+                repack::Kind::File { size, .. } => size,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    fn licenses(&self) -> String {
+        self.closure
+            .first()
+            .map(|pkg| pkg.licenses.join(" "))
+            .unwrap_or_default()
+    }
+}
+
+/// The candidates `answers` picked.
+fn picked_repacks<'a>(facts: &'a Facts, answers: &Answers) -> Vec<&'a Candidate> {
+    facts
+        .repack_candidates
+        .iter()
+        .filter(|candidate| answers.repack.contains(&candidate.name))
+        .collect()
+}
+
 /// Which packages in no repo or the AUR init rebuilds as recipes: each explicitly installed one whose files are as pacman installed them, with the ones of those packages it depends on; the rest stay alone, with why.
 fn choose_repacks(
     explicit: &BTreeSet<String>,
     unknown: &[String],
     read: impl Fn(&str) -> std::result::Result<Installed, String>,
-) -> (Vec<Installed>, Vec<String>, Vec<(String, String)>) {
+) -> (Vec<Candidate>, Vec<(String, String)>) {
     let read: BTreeMap<&str, std::result::Result<Installed, String>> =
         unknown.iter().map(|name| (name.as_str(), read(name))).collect();
     let mut providers: BTreeMap<&str, &str> = unknown.iter().map(|name| (name.as_str(), name.as_str())).collect();
@@ -632,7 +711,7 @@ fn choose_repacks(
                 .or_insert(name);
         }
     }
-    let (mut repacks, mut repacked, mut left) = (Vec::<Installed>::new(), Vec::new(), Vec::new());
+    let (mut candidates, mut left) = (Vec::new(), Vec::new());
     for wanted in unknown.iter().filter(|name| explicit.contains(*name)) {
         let mut closure = vec![wanted.as_str()];
         let mut problem = None;
@@ -658,25 +737,29 @@ fn choose_repacks(
         }
         match problem {
             Some(why) => left.push((wanted.clone(), why)),
-            None => {
-                repacked.push(wanted.clone());
-                for name in closure {
-                    if let Ok(pkg) = &read[name]
-                        && !repacks.iter().any(|have| have.name == name)
-                    {
-                        repacks.push(pkg.clone());
-                    }
-                }
-            }
+            None => candidates.push(Candidate {
+                name: wanted.clone(),
+                closure: closure
+                    .iter()
+                    .filter_map(|name| read[name].as_ref().ok().cloned())
+                    .collect(),
+            }),
         }
     }
-    (repacks, repacked, left)
+    (candidates, left)
 }
 
 /// The config `answers` make of `facts`.
 fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
+    let mut packages = facts.packages.clone();
+    packages.extend(
+        picked_repacks(facts, answers)
+            .iter()
+            .map(|candidate| candidate.name.clone()),
+    );
+    packages.sort();
     let mut config = Host {
-        packages: facts.packages.clone(),
+        packages,
         ..Host::default()
     };
     for (i, (key, value)) in facts.settings.iter().enumerate() {
@@ -714,7 +797,11 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     let mut ignored: Vec<String> = facts
         .unknown
         .iter()
-        .filter(|name| !facts.repacks.iter().any(|pkg| pkg.name == **name))
+        .filter(|name| {
+            !picked_repacks(facts, answers)
+                .iter()
+                .any(|candidate| candidate.closure.iter().any(|pkg| pkg.name == **name))
+        })
         .cloned()
         .collect();
     if answers.keep_orphans {
@@ -929,10 +1016,16 @@ fn report(facts: &Facts, answers: &Answers) {
         "{} declared{from_aur}",
         count(facts.packages.len(), "package", "packages")
     ));
-    if !facts.repacked.is_empty() {
-        done(format!(
-            "rebuilt from their installed files, since no repo or the AUR has them: {}",
-            some_of(&facts.repacked, 8)
+    let offered: Vec<String> = facts
+        .repack_candidates
+        .iter()
+        .filter(|candidate| !answers.repack.contains(&candidate.name))
+        .map(|candidate| candidate.name.clone())
+        .collect();
+    if !offered.is_empty() {
+        note(format!(
+            "in no repo or the AUR, kept in ignored_packages; `archix init --repack NAME` rebuilds one as a recipe from its installed files instead: {}",
+            some_of(&offered, 8)
         ));
     }
     for (name, why) in &facts.left_alone {
@@ -1291,16 +1384,17 @@ mod tests {
             .map(String::from)
             .to_vec();
         let explicit = BTreeSet::from(["app", "broken", "uses-broken"].map(String::from));
-        let (repacks, repacked, left) = choose_repacks(&explicit, &unknown, |name| match name {
+        let (candidates, left) = choose_repacks(&explicit, &unknown, |name| match name {
             "app" => Ok(pkg("app", &["libdep.so=1-64", "bash"], &[])),
             "libdep" => Ok(pkg("libdep", &[], &["libdep.so=1-64"])),
             "broken" => Err("usr/bin/x changed since pacman installed it".into()),
             "uses-broken" => Ok(pkg("uses-broken", &["broken>=2"], &[])),
             _ => Ok(pkg(name, &[], &[])),
         });
-        let names: Vec<&str> = repacks.iter().map(|pkg| pkg.name.as_str()).collect();
-        assert_eq!(names, ["app", "libdep"]);
-        assert_eq!(repacked, ["app"]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].name, "app");
+        let closure: Vec<&str> = candidates[0].closure.iter().map(|pkg| pkg.name.as_str()).collect();
+        assert_eq!(closure, ["app", "libdep"]);
         assert_eq!(
             left,
             [

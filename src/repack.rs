@@ -61,7 +61,7 @@ pub struct Written {
 }
 
 /// The installed `name` from pacman's local database under `root`, if every file it owns is still as pacman installed it (the config files it lets you edit aside), else why not.
-pub fn read(root: &Path, name: &str, _caches: &[PathBuf]) -> std::result::Result<Installed, String> {
+pub fn read(root: &Path, name: &str, caches: &[PathBuf]) -> std::result::Result<Installed, String> {
     let local = root.join("var/lib/pacman/local");
     let entry = fs::read_dir(&local)
         .into_iter()
@@ -96,13 +96,28 @@ pub fn read(root: &Path, name: &str, _caches: &[PathBuf]) -> std::result::Result
         .map(str::to_string)
         .collect();
     let entries = parse_mtree(&mtree);
+    let version = first("VERSION");
+    let (mut originals, mut left_out) = (BTreeMap::new(), Vec::new());
     for entry in &entries {
         let on_disk = root.join(&entry.path);
+        if let Kind::File { sha256, .. } = &entry.kind
+            && backup.contains(&entry.path)
+        {
+            let unedited = sha256
+                .as_ref()
+                .is_some_and(|want| crate::fetch::sha256(&on_disk).is_ok_and(|have| have == *want));
+            if !unedited {
+                match original(caches, name, &version, &entry.path, sha256.as_deref()) {
+                    Some(bytes) => {
+                        originals.insert(entry.path.clone(), bytes);
+                    }
+                    None => left_out.push(entry.path.clone()),
+                }
+            }
+            continue;
+        }
         let meta = fs::symlink_metadata(&on_disk).map_err(|_| format!("{} is missing", entry.path))?;
         if let Kind::File { size, sha256 } = &entry.kind {
-            if backup.contains(&entry.path) {
-                continue;
-            }
             let same = match sha256 {
                 Some(sha256) => crate::fetch::sha256(&on_disk).is_ok_and(|have| have == *sha256),
                 None => meta.len() == *size,
@@ -114,7 +129,7 @@ pub fn read(root: &Path, name: &str, _caches: &[PathBuf]) -> std::result::Result
     }
     Ok(Installed {
         name: name.to_string(),
-        version: first("VERSION"),
+        version,
         desc: first("DESC"),
         url: first("URL"),
         arch: first("ARCH"),
@@ -128,9 +143,48 @@ pub fn read(root: &Path, name: &str, _caches: &[PathBuf]) -> std::result::Result
         backup,
         install: fs::read_to_string(entry.join("install")).ok(),
         entries,
-        originals: BTreeMap::new(),
-        left_out: Vec::new(),
+        originals,
+        left_out,
     })
+}
+
+/// A config file as the package shipped it, from that package version's file in one of `caches` (or a directory in one named after the package, as yay and paru keep them), if it matches the sha256 pacman recorded.
+fn original(caches: &[PathBuf], name: &str, version: &str, path: &str, sha256: Option<&str>) -> Option<Vec<u8>> {
+    let want = sha256?;
+    let prefix = format!("{name}-{version}-");
+    let candidates = caches
+        .iter()
+        .flat_map(|cache| [cache.clone(), cache.join(name)])
+        .flat_map(|dir| fs::read_dir(dir).into_iter().flatten().flatten())
+        .map(|entry| entry.path())
+        .filter(|file| {
+            let file_name = file.file_name().unwrap_or_default().to_string_lossy();
+            file_name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.split_once(".pkg.tar"))
+                .is_some_and(|(arch, _)| !arch.contains('-'))
+        });
+    for file in candidates {
+        let Ok(decoder) = crate::system::rescue::decoder(&file) else {
+            continue;
+        };
+        let mut archive = tar::Archive::new(decoder);
+        let Ok(entries) = archive.entries() else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let mut entry = entry;
+            if entry.path().ok().as_deref() != Some(Path::new(path)) {
+                continue;
+            }
+            let mut bytes = Vec::new();
+            if entry.read_to_end(&mut bytes).is_ok() && crate::fetch::sha256_bytes(&bytes) == want {
+                return Some(bytes);
+            }
+            break;
+        }
+    }
+    None
 }
 
 /// The entries of a package's mtree, without the package's own metadata files such as `.PKGINFO`.
@@ -189,15 +243,16 @@ fn parse_mtree(text: &str) -> Vec<Entry> {
 }
 
 /// Writes `dir` (pkgbuilds/<name>) as a recipe that builds `pkg` again from its files under `root`, returning the size of the file archive.
-pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -> Result<Written> {
+pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, sources: &Path) -> Result<Written> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let archive = dir.join("files.tar.zst");
+    fs::create_dir_all(sources).with_context(|| format!("creating {}", sources.display()))?;
+    let archive = sources.join(format!(".{}.part", pkg.name));
     let encoder = zstd::Encoder::new(
         fs::File::create(&archive).with_context(|| format!("creating {}", archive.display()))?,
         19,
     )?;
     let mut tar = tar::Builder::new(encoder);
-    for entry in &pkg.entries {
+    for entry in pkg.entries.iter().filter(|entry| !pkg.left_out.contains(&entry.path)) {
         let mut header = tar::Header::new_ustar();
         header.set_mode(entry.mode);
         header.set_uid(entry.uid);
@@ -214,6 +269,12 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -
                 header.set_size(0);
                 tar.append_link(&mut header, &entry.path, target)?;
             }
+            Kind::File { .. } if pkg.originals.contains_key(&entry.path) => {
+                let bytes = &pkg.originals[&entry.path];
+                header.set_entry_type(tar::EntryType::Regular);
+                header.set_size(bytes.len() as u64);
+                tar.append_data(&mut header, &entry.path, bytes.as_slice())?;
+            }
             Kind::File { .. } => {
                 let path = root.join(&entry.path);
                 let file = fs::File::open(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -224,13 +285,16 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -
         }
     }
     tar.into_inner()?.finish()?.sync_all()?;
+    let sha256 = crate::fetch::sha256(&archive)?;
+    let kept = sources.join(&sha256);
+    fs::rename(&archive, &kept).with_context(|| format!("renaming {}", archive.display()))?;
     let (epoch, rest) = match pkg.version.split_once(':') {
         Some((epoch, rest)) => (Some(epoch), rest),
         None => (None, pkg.version.as_str()),
     };
     let (pkgver, pkgrel) = rest.rsplit_once('-').unwrap_or((rest, "1"));
     let mut text = format!(
-        "# Made by archix init from the installed {} {}, which no repo or the AUR has: its files as pacman installed them.\npkgname={}\n",
+        "# Made by archix init from the installed {} {}, which no repo or the AUR has; its files are kept in /var/cache/archix/sources, not in the config.\n# archix: private\npkgname={}\n",
         pkg.name, pkg.version, pkg.name
     );
     if let Some(epoch) = epoch {
@@ -238,6 +302,12 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -
     }
     let _ = writeln!(text, "pkgver={pkgver}\npkgrel={pkgrel}\npkgdesc={}", quote(&pkg.desc));
     let _ = writeln!(text, "arch=({})\nurl={}", quote(&pkg.arch), quote(&pkg.url));
+    let backup: Vec<String> = pkg
+        .backup
+        .iter()
+        .filter(|path| !pkg.left_out.contains(path))
+        .cloned()
+        .collect();
     for (key, values) in [
         ("license", &pkg.licenses),
         ("groups", &pkg.groups),
@@ -246,7 +316,7 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -
         ("provides", &pkg.provides),
         ("conflicts", &pkg.conflicts),
         ("replaces", &pkg.replaces),
-        ("backup", &pkg.backup),
+        ("backup", &backup),
     ] {
         if !values.is_empty() {
             let quoted: Vec<String> = values.iter().map(|value| quote(value)).collect();
@@ -263,13 +333,13 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -
     let _ = writeln!(
         text,
         "source=('files.tar.zst')\nnoextract=('files.tar.zst')\nsha256sums=('{}')\n",
-        crate::fetch::sha256(&archive)?
+        sha256
     );
     text.push_str("package() {\n  bsdtar --numeric-owner -xpf \"$srcdir/files.tar.zst\" -C \"$pkgdir\"\n}\n");
     fs::write(dir.join("PKGBUILD"), text)?;
     Ok(Written {
-        size: fs::metadata(&archive)?.len(),
-        archive,
+        size: fs::metadata(&kept)?.len(),
+        archive: kept,
     })
 }
 

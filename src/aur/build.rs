@@ -61,6 +61,39 @@ struct Record {
     /// What the build's sources were: each git source's commit and the sha256 of each unchecked download.
     #[serde(default)]
     sources: BTreeMap<String, String>,
+    /// Built from a recipe marked private, as init's rebuilds of installed packages are, so it never goes to a package cache.
+    #[serde(default)]
+    private: bool,
+}
+
+/// The build records and package files of private builds, which `archix cache push` leaves out.
+pub fn private_builds(paths: &Paths) -> (BTreeSet<PathBuf>, BTreeSet<String>) {
+    let (mut records, mut files) = (BTreeSet::new(), BTreeSet::new());
+    let bases = fs::read_dir(paths.cache.join("aur-builds"))
+        .into_iter()
+        .flatten()
+        .flatten();
+    for path in bases
+        .flat_map(|base| fs::read_dir(base.path()).into_iter().flatten().flatten())
+        .map(|e| e.path())
+    {
+        let Some(record) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Record>(&text).ok())
+        else {
+            continue;
+        };
+        if record.private {
+            files.extend(record.files.into_iter().map(|(_, file)| file));
+            records.insert(path);
+        }
+    }
+    (records, files)
+}
+
+/// Whether a recipe is marked private: its builds, which hold files that may not be shared, never go to a package cache.
+fn is_private(dir: &Path) -> bool {
+    fs::read_to_string(dir.join("PKGBUILD")).is_ok_and(|text| text.lines().any(|line| line == "# archix: private"))
 }
 
 /// What the build of `base` at `commit` and `date` recorded its sources were, from its build record.
@@ -144,7 +177,10 @@ impl Builder<'_> {
             fs::remove_dir_all(&dir)?;
         }
         match recipe {
-            Some(recipe) => crate::recipes::copy_dir(recipe, &dir)?,
+            Some(recipe) => {
+                crate::recipes::copy_dir(recipe, &dir)?;
+                self.supply_kept_sources(base, &dir, info)?;
+            }
             None => self.git.export(base, commit, &dir)?,
         }
         let tail = super::sources::pinned_tail(info, sources);
@@ -204,6 +240,7 @@ impl Builder<'_> {
                 files: files.clone(),
                 sha256: hashes,
                 sources: super::sources::pins(&dir, info),
+                private: is_private(&dir),
             })?;
             crate::durable::write(&record, text.as_bytes())?;
             Ok(files
@@ -213,6 +250,28 @@ impl Builder<'_> {
         });
         let _ = fs::remove_dir_all(&dir);
         result
+    }
+
+    /// Copies into the build directory the local sources a recipe names that archix keeps by sha256 rather than in the config, as init's rebuilds of installed packages do.
+    fn supply_kept_sources(&self, base: &str, dir: &Path, info: &SrcInfo) -> Result<()> {
+        let sums = info.sums.get("sha256sums");
+        for (index, entry) in info.sources.get("source").into_iter().flatten().enumerate() {
+            if entry.contains("://") || entry.contains("::") || dir.join(entry).exists() {
+                continue;
+            }
+            let Some(sha256) = sums.and_then(|sums| sums.get(index)).filter(|sum| *sum != "SKIP") else {
+                continue;
+            };
+            let kept = self.paths.cache.join("sources").join(sha256);
+            if !kept.is_file() {
+                bail!(
+                    "{base} needs {entry} (sha256 {sha256}), which archix keeps in {} on the machine that made the recipe, not in the config; it isn't on this one",
+                    kept.parent().unwrap_or(&kept).display()
+                );
+            }
+            fs::copy(&kept, dir.join(entry)).with_context(|| format!("copying {}", kept.display()))?;
+        }
+        Ok(())
     }
 
     /// A build another machine made of the same recipe at the same snapshot, from a package cache: its record, then the files at the record's hashes.

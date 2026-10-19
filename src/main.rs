@@ -31,6 +31,9 @@ enum Command {
         /// Take every question's default without asking
         #[arg(long)]
         defaults: bool,
+        /// Rebuild this package, which no repo or the AUR has, as a recipe from its installed files; its files stay out of the config and package caches
+        #[arg(long, value_name = "PACKAGE")]
+        repack: Vec<String>,
     },
     /// Print the evaluated configuration as JSON
     Eval,
@@ -555,8 +558,8 @@ fn run() -> Result<ExitCode> {
         Some(host) => host,
         None => system_hostname()?,
     };
-    if let Command::Init { defaults } = command {
-        commands::init(&cli.config, &hostname, defaults)?;
+    if let Command::Init { defaults, repack } = command {
+        commands::init(&cli.config, &hostname, defaults, &repack)?;
         return Ok(ExitCode::SUCCESS);
     }
     if matches!(command, Command::Options { .. }) && !cli.config.join("init.lua").is_file() {
