@@ -892,6 +892,35 @@ fn a_full_mount_other_than_root_stops_the_switch() {
 
 #[test]
 #[ignore]
+fn downloads_the_package_store_cant_hold_are_refused_before_any_starts() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    for cached in fs::read_dir("/var/cache/pacman/pkg").unwrap().flatten() {
+        if cached.file_name().to_string_lossy().starts_with("tree-") {
+            fs::remove_file(cached.path()).unwrap();
+        }
+    }
+    let store = setup.paths.packages();
+    fs::create_dir_all(&store).unwrap();
+    let mounted = std::process::Command::new("mount")
+        .args(["-t", "tmpfs", "-o", "size=16k", "tmpfs"])
+        .arg(&store)
+        .status()
+        .unwrap();
+    assert!(mounted.success());
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    std::process::Command::new("umount").arg(&store).status().unwrap();
+    assert!(
+        err.contains(&*store.to_string_lossy())
+            && err.contains("nothing was changed")
+            && !err.contains("downloading tree"),
+        "{err}"
+    );
+    assert!(installed("tree").is_none());
+}
+
+#[test]
+#[ignore]
 fn an_old_lock_is_called_out() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "lock_warn_after_days = 1");
