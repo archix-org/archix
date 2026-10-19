@@ -159,6 +159,14 @@ impl<'a> Installer<'a> {
         repo_deps.sort();
         repo_deps.dedup();
         let on_host = info.packages.iter().any(|pkg| self.on_host.contains(&pkg.name));
+        let locked: BTreeMap<String, String> = info
+            .packages
+            .iter()
+            .filter_map(|pkg| {
+                let sha256 = &self.lock.packages.get(&pkg.name)?.sha256;
+                (!sha256.is_empty()).then(|| (pkg.name.clone(), sha256.clone()))
+            })
+            .collect();
         let job = Job {
             base,
             dir: self.dirs.get(base).map(PathBuf::as_path),
@@ -169,6 +177,7 @@ impl<'a> Installer<'a> {
             inputs: &inputs,
             repo_deps: &repo_deps,
             on_host,
+            locked: &locked,
         };
         let files = self.builder.build(job).map_err(|error| {
             if error.is::<SetupFailed>() {

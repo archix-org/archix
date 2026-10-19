@@ -48,7 +48,7 @@ pub struct Locked {
     pub version: String,
     pub repo: String,
     pub file: String,
-    /// Empty for AUR packages in the lock: builds aren't bit-for-bit reproducible, so the commit is what's locked.
+    /// For AUR and recipe packages, the first build of the locked commit at the lock's snapshot, which package caches have to match; empty until it's built.
     #[serde(default)]
     pub sha256: String,
     #[serde(default)]
@@ -111,10 +111,22 @@ impl HostLock {
         }
     }
 
-    /// Carries `old`'s pins over to a fresh resolution at the same date, for packages still in the closure.
+    /// Carries over to a fresh resolution at the same date what it can't work out again: `old`'s pins, and the build hashes of AUR and recipe packages still at the same commit.
     pub fn keep_pins(&mut self, old: &HostLock) {
         if old.date != self.date {
             return;
+        }
+        for (name, fresh) in self
+            .packages
+            .iter_mut()
+            .filter(|(_, pkg)| pkg.is_built() && pkg.sha256.is_empty())
+        {
+            if let Some(before) = old.packages.get(name)
+                && before.commit == fresh.commit
+                && before.version == fresh.version
+            {
+                fresh.sha256 = before.sha256.clone();
+            }
         }
         for name in &old.pinned {
             if let (Some(pinned), Some(fresh)) = (old.packages.get(name), self.packages.get(name)) {

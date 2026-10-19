@@ -367,8 +367,14 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         )?
     };
     let mut versioned = Vec::new();
+    let mut recorded = false;
     for (name, path) in &built {
         if let Some(pkg) = lock.packages.get_mut(name) {
+            // The first build of a recipe at the lock's snapshot is the one the lock names; package caches must serve that one.
+            if pkg.sha256.is_empty() {
+                pkg.sha256 = sha256(path)?;
+                recorded = true;
+            }
             let file = path.file_name().map(|f| f.to_string_lossy().into_owned());
             if let Some(version) = file.as_deref().and_then(|f| built_version(name, f))
                 && version != pkg.version
@@ -387,6 +393,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "recorded the versions these packages gave themselves while building: {}",
             versioned.join(", ")
         );
+    }
+    if !versioned.is_empty() || recorded {
         let mut lockfile = load_lockfile(target)?;
         lockfile.hosts.insert(target.host.to_string(), lock.clone());
         store_lockfile(target, &lockfile)?;

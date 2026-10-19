@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,8 @@ pub struct Job<'a> {
     /// The dependencies (build and of `inputs`) that come from the repos rather than the AUR.
     pub repo_deps: &'a [String],
     pub on_host: bool,
+    /// The sha256 archix.lock records for each package's build, which a package cache's copy has to match.
+    pub locked: &'a BTreeMap<String, String>,
 }
 
 /// The files one build produced, so the same commit and snapshot never needs building twice.
@@ -79,6 +81,7 @@ impl Builder<'_> {
             inputs,
             repo_deps,
             on_host,
+            locked,
         } = job;
         let record = self.record(base, commit, date);
         if let Ok(text) = fs::read_to_string(&record)
@@ -98,7 +101,7 @@ impl Builder<'_> {
                 return Ok(files);
             }
         }
-        if let Some(files) = self.cached_build(base, commit, date, &record) {
+        if let Some(files) = self.cached_build(base, commit, date, &record, locked) {
             return Ok(files);
         }
 
@@ -177,7 +180,14 @@ impl Builder<'_> {
     }
 
     /// A build another machine made of the same recipe at the same snapshot, from a package cache: its record, then the files at the record's hashes.
-    fn cached_build(&self, base: &str, commit: &str, date: Date, record: &Path) -> Option<Vec<(String, PathBuf)>> {
+    fn cached_build(
+        &self,
+        base: &str,
+        commit: &str,
+        date: Date,
+        record: &Path,
+        locked: &BTreeMap<String, String>,
+    ) -> Option<Vec<(String, PathBuf)>> {
         let relative = format!("aur-builds/{base}/{commit}-{date}.json");
         for url in self.archive.cache_urls(&relative) {
             let fetched = record.with_extension("cached");
@@ -193,6 +203,17 @@ impl Builder<'_> {
                 continue;
             };
             if cached.sha256.len() != cached.files.len() {
+                continue;
+            }
+            let swapped = cached
+                .files
+                .iter()
+                .zip(&cached.sha256)
+                .find(|((name, _), sha256)| locked.get(name).is_some_and(|want| want != *sha256));
+            if let Some(((name, _), _)) = swapped {
+                eprintln!(
+                    "warning: the package cache at {url} has a build of {name} that doesn't match archix.lock; building it here instead"
+                );
                 continue;
             }
             let wanted: Vec<Wanted> = cached
