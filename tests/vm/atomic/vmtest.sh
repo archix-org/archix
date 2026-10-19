@@ -83,12 +83,12 @@ drop_next() {
   rm -rf /var/lib/archix-next-db
 }
 # Once: /usr becomes a subvolume of its own, so a clone is a snapshot.
-usr_to_subvolume() { btrfs -q subvolume create /usr.sub && cp -a --reflink=always /usr/. /usr.sub/ && mv --exchange /usr /usr.sub && rm -rf /usr.sub; }
+usr_to_subvolume() { btrfs -q subvolume create /usr.sub && cp -a --reflink=always /usr/. /usr.sub/ && mv -T --exchange /usr /usr.sub && rm -rf /usr.sub; }
 copy_db() { rm -rf /var/lib/archix-next-db && mkdir -p /var/lib/archix-next-db && cp -a /var/lib/pacman/local /var/lib/pacman/sync /var/lib/archix-next-db/; }
 upgrade_copy() {
   unshare -m --propagation private sh -c 'mount --bind /usr.next /usr && exec pacman -Su --noconfirm --dbpath /var/lib/archix-next-db'
 }
-swap() { mv --exchange /usr /usr.next && mv --exchange /var/lib/pacman/local /var/lib/archix-next-db/local; }
+swap() { mv -T --exchange /usr /usr.next && mv -T --exchange /var/lib/pacman/local /var/lib/archix-next-db/local; }
 a_b() {
   local clone=$1
   drop_next
