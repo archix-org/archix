@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""flatten LOWER UPPER OUT: turns an unmounted overlay (metacopy, redirect_dir, index and xino off) into the plain tree OUT.
-
-Unchanged files become hardlinks to LOWER, UPPER's files and symlinks are moved in, whiteouts are deletions,
-and an opaque directory hides what LOWER has under it. No file data is copied.
-"""
+# flatten LOWER UPPER OUT: turns an unmounted overlay (metacopy, redirect_dir, index, xino off) into OUT, hardlinking unchanged files from LOWER.
 import os
 import stat
 import sys
@@ -33,7 +29,7 @@ def is_dir(st):
     return st is not None and stat.S_ISDIR(st.st_mode)
 
 
-def build(rel, meta):
+def build(rel, meta, times=None):
     up, lo, dst = (os.path.join(base, rel) for base in (upper, lower, out))
     os.mkdir(dst)
     up_st, lo_st = lstat(up), lstat(lo)
@@ -59,8 +55,9 @@ def build(rel, meta):
             os.link(l, os.path.join(dst, name), follow_symlinks=False)
     os.chown(dst, meta.st_uid, meta.st_gid)
     os.chmod(dst, stat.S_IMODE(meta.st_mode))
-    os.utime(dst, ns=(meta.st_atime_ns, meta.st_mtime_ns))
+    times = times or meta
+    os.utime(dst, ns=(times.st_atime_ns, times.st_mtime_ns))
 
 
-# The upper root is a directory the switch made, so the tree's root takes the lower root's ownership and mode.
-build("", os.lstat(lower))
+# The switch made the upper root, so the root takes the lower's owner and mode but the upper's times, which `touch -c /usr` sets.
+build("", os.lstat(lower), os.lstat(upper))

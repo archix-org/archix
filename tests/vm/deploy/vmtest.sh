@@ -42,6 +42,8 @@ case $stage in
       [ "$(pacman -Q "$name" | cut -d' ' -f2)" = "$new" ] || fail "$name should be at $new in deployment 2"
     done < "$state/upgrades"
     [ -e /var/lib/archix-deploy/activated-2 ] || fail "deployment 2's /var changes should be applied on its first boot"
+    [ "$(systemctl show -P ConditionResult systemd-update-done.service)" = yes ] \
+      || fail "the new /usr should be newer than /etc/.updated, so ConditionNeedsUpdate units run: /usr $(stat -c %y /usr), /etc/.updated $(stat -c %y /etc/.updated)"
     "$lib/check-deployment" 1 | cmp -s - "$state/altered-1" || fail "deployment 1 changed: $("$lib/check-deployment" 1 | diff "$state/altered-1" - | head -5)"
     say "PASS: deployment 2 booted with every upgrade, /var activated, deployment 1 unchanged"
     bootctl set-oneshot archix-1.conf || fail "bootctl set-oneshot"
