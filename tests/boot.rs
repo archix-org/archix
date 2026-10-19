@@ -71,6 +71,64 @@ fn inspect(entry: &str) -> String {
 
 #[test]
 #[ignore]
+fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp() {
+    let _system = lock_system();
+    let _ = fs::remove_dir_all(ESP);
+    fs::create_dir_all(ESP).unwrap();
+    if !Path::new("/var/lib/sbctl/keys/db/db.key").exists() {
+        let made = Command::new("sbctl")
+            .env("ESP_PATH", ESP)
+            .arg("create-keys")
+            .status()
+            .unwrap();
+        assert!(made.success());
+    }
+    pacman(&["-S", "--needed", "efitools"]);
+    let body = |n: u32| {
+        format!(
+            r#"boot = {{ loader = "systemd-boot", esp = "{ESP}", entries = 1, secure_boot = true }}, kernel_params = {{ "root=/dev/vda2", "rw", "archix.test={n}" }}"#
+        )
+    };
+    let setup = Setup::new(&[], &body(1));
+    setup.ok(&["switch", "--noconfirm"]);
+    let first = uki(&format!("archix-{}.conf", current()));
+    let esl = std::env::temp_dir().join("archix-first.esl");
+    assert!(
+        Command::new("hash-to-efi-sig-list")
+            .arg(&first)
+            .arg(&esl)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let efitools: String = fs::read(&esl).unwrap()[44..76]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let recorded = fs::read_to_string("/var/lib/archix/boot/signed").unwrap_or_default();
+    // Two more UKIs, so pruning takes the first once it's neither new nor current.
+    setup.set_body(&[], &body(2));
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], &body(3));
+    setup.ok(&["switch", "--noconfirm"]);
+    let gone = !Path::new(&first).exists();
+    let listed = setup.run(&["secure-boot", "revoke", "--dry-run"]);
+    let listed = String::from_utf8_lossy(&listed.stdout).to_string() + &String::from_utf8_lossy(&listed.stderr);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        recorded.contains(&efitools),
+        "archix records the hash efitools computes, {efitools}:\n{recorded}"
+    );
+    assert!(gone, "pruning removes the first UKI");
+    assert!(
+        listed.contains("1 boot image archix signed and no longer uses") && listed.contains(&efitools[..16]),
+        "{listed}"
+    );
+}
+
+#[test]
+#[ignore]
 fn with_systemds_pcr_key_every_uki_carries_a_signed_pcr_policy() {
     let _system = lock_system();
     fs::create_dir_all(ESP).unwrap();
