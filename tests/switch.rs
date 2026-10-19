@@ -130,8 +130,8 @@ fn archive_mirrors_stand_in_when_the_archive_is_down() {
     setup.set_body(&[], body);
     setup.ok(&["switch", "--noconfirm"]);
     let mirrors = archix::archive::configured_mirrors(&setup.paths.state);
-    // A snapshot nothing has fetched yet, which only the mirror can serve.
-    let updated = setup.run(&["update", "--to", "2026-09-09", "--noconfirm"]);
+    // A snapshot no other test fetches, which only the mirror can serve.
+    let updated = setup.run(&["update", "--to", "2026-09-08", "--noconfirm"]);
     let date = setup.lock().date.to_string();
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
@@ -141,7 +141,7 @@ fn archive_mirrors_stand_in_when_the_archive_is_down() {
         "switch records the mirrors for rollback and recover"
     );
     assert!(updated.status.success(), "{}", String::from_utf8_lossy(&updated.stderr));
-    assert_eq!(date, "2026-09-09");
+    assert_eq!(date, "2026-09-08");
 }
 
 #[test]
