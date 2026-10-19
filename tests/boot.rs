@@ -56,13 +56,56 @@ fn current() -> u32 {
 /// The UKI a boot menu entry starts.
 fn uki(entry: &str) -> String {
     let text = fs::read_to_string(entry_file(entry)).unwrap();
-    let path = text.lines().find_map(|line| line.strip_prefix("efi ")).unwrap().trim();
+    let path = text
+        .lines()
+        .find_map(|line| line.strip_prefix("efi ").or_else(|| line.strip_prefix("uki ")))
+        .unwrap()
+        .trim();
     format!("{ESP}{path}")
 }
 
 fn inspect(entry: &str) -> String {
     let output = Command::new("ukify").args(["inspect", &uki(entry)]).output().unwrap();
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+#[ignore]
+fn with_systemds_pcr_key_every_uki_carries_a_signed_pcr_policy() {
+    let _system = lock_system();
+    fs::create_dir_all(ESP).unwrap();
+    let (private, public) = (
+        "/etc/systemd/tpm2-pcr-private-key.pem",
+        "/etc/systemd/tpm2-pcr-public-key.pem",
+    );
+    let setup = Setup::new(&["tree"], &boot_body(""));
+    setup.ok(&["switch", "--noconfirm"]);
+    let unsigned = inspect(&format!("archix-{}.conf", current()));
+    let openssl = |args: &[&str]| assert!(Command::new("openssl").args(args).status().unwrap().success());
+    openssl(&[
+        "genpkey",
+        "-quiet",
+        "-algorithm",
+        "RSA",
+        "-pkeyopt",
+        "rsa_keygen_bits:2048",
+        "-out",
+        private,
+    ]);
+    openssl(&["pkey", "-in", private, "-pubout", "-out", public]);
+    // Same kernel, initramfs and command line, so only the key tells this UKI from the last one.
+    setup.set_body(&[], &boot_body(""));
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let signed = inspect(&format!("archix-{}.conf", current()));
+    fs::remove_file(private).unwrap();
+    fs::remove_file(public).unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(!unsigned.contains(".pcrsig"), "{unsigned}");
+    assert!(
+        signed.contains(".pcrsig") && signed.contains(".pcrpkey"),
+        "{signed}\n{out}"
+    );
 }
 
 #[test]
