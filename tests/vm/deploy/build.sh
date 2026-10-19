@@ -57,6 +57,7 @@ install -Dm755 "${TEST_SCRIPT:-/vm/deploy/vmtest.sh}" /mnt/usr/local/bin/archix-
 if [ -n "${POWERCUT:-}" ]; then
   install -Dm755 /work/replay-log /mnt/usr/local/bin/replay-log
   for tool in invariant check-point; do install -Dm755 "/vm/deploy/powercut/$tool" "/mnt/usr/local/lib/archix-powercut/$tool"; done
+  echo "${REPLAY_POINTS:-}" > /mnt/etc/archix-powercut-points
 fi
 printf '[Unit]\nDescription=archix deployment prototype test\nAfter=multi-user.target network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-proto-test\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target\n' \
   > /mnt/etc/systemd/system/archix-proto-test.service

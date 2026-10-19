@@ -1,6 +1,5 @@
 #!/bin/bash
-# In the runner VM: switches the target disk (vdb) through dm-log-writes (log on vdc), then replays the log onto a pristine
-# copy (vdd) and checks every flush point as a power cut there would leave it.
+# In the runner VM: switches the target (vdb) through dm-log-writes (log on vdc), then replays onto a pristine copy (vdd), checking each point.
 set -u
 state=/var/lib/archix-powercut
 mkdir -p "$state"
@@ -42,12 +41,20 @@ done
 umount /target && dmsetup remove froot
 say "baselines: $(for f in "$state"/baselines/*; do echo -n "deployment ${f##*/} $(wc -l < "$f") findings; "; done)"
 
-say "replaying every flush point"
-replay-log --log "$log" --replay "$pristine" --check flush --fsck /usr/local/lib/archix-powercut/check-point > "$state/replay.log" 2>&1
+# With REPLAY_POINTS set at build, the states checked are that many evenly spaced prefixes of the log rather than the flush points.
+check=flush
+if [ -s /etc/archix-powercut-points ]; then
+  entries=$(replay-log --log "$log" --num-entries)
+  check=$((entries / $(cat /etc/archix-powercut-points) + 1))
+  say "replaying $entries log entries, checking every $check"
+else
+  say "replaying every flush point"
+fi
+replay-log --log "$log" --replay "$pristine" --check "$check" --fsck /usr/local/lib/archix-powercut/check-point > "$state/replay.log" 2>&1
 status=$?
 points=$(cat "$state/points" 2> /dev/null || echo 0)
 tail -5 "$state/replay.log" > /dev/console
 [ "$status" = 0 ] || fail "replay stopped at point $points: $(tail -3 "$state/check.log")"
-say "PASS: $points flush points replayed, each one fscked and booting a complete deployment"
+say "PASS: $points points replayed ($check), each one fscked and booting a complete deployment"
 say "OK"
 systemctl poweroff

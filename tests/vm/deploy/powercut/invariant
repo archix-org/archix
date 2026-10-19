@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""invariant ROOT ESP BASELINES: checks a replayed disk state the way a boot would see it.
-
-Every archix entry systemd-boot can read names a committed deployment whose UKI is intact; the entry systemd-boot
-would pick names one; `current` names one; and the picked deployment's `pacman -Qkk` findings equal its baseline
-(BASELINES/<generation>, from check-deployment on the finished image). Exits non-zero, saying why, if any fails.
-"""
+# invariant ROOT ESP BASELINES: every readable entry, the picked one and `current` name committed deployments, and the picked one matches its baseline.
 import functools
 import hashlib
 import os

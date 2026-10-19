@@ -1,6 +1,5 @@
 #!/bin/bash
-# In a privileged container: kills the switch on /work/disk.img at each step and at timed points, then checks the disk boots a complete
-# deployment and that the next switch finishes. Mounts are dropped after each kill, as a reboot would.
+# Kills the switch on /work/disk.img at each step and at timed points, then checks the disk boots a whole deployment and the next switch finishes.
 set -uo pipefail
 fs=${FS:-ext4}
 opts=; [ "$fs" = btrfs ] && opts=subvol=@

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Power-cut replay of a deployment switch: builds a target image and a runner image, then boots the runner with the target,
-# a log disk and a pristine copy of the target attached. FS=ext4|btrfs is the target's filesystem.
+# Power-cut replay of a switch on a target disk; FS, TARGET_PACKAGES, and REPLAY_POINTS (evenly spaced log prefixes instead of flush points).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
 work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-powercut.XXXXXX)}
@@ -19,8 +18,9 @@ build() {
   docker run --rm --privileged --network host -v "$work/$dir":/work -v "$work/replay-log":/work/replay-log:ro -v "$root/tests/vm":/vm:ro \
     -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e DATE="${DATE:-2026-10-03}" "$@" archix-arch-test /vm/deploy/build.sh
 }
-build target -e FS="${FS:-ext4}" -e PREFETCH_TO="${TO_DATE:-2026-10-10}"
-build runner -e FS=ext4 -e POWERCUT=1 -e EXTRA_PACKAGES="lvm2 dosfstools e2fsprogs btrfs-progs" -e TEST_SCRIPT=/vm/deploy/powercut/vmtest.sh
+build target -e FS="${FS:-ext4}" -e PREFETCH_TO="${TO_DATE:-2026-10-10}" -e EXTRA_PACKAGES="${TARGET_PACKAGES:-}"
+build runner -e FS=ext4 -e POWERCUT=1 -e REPLAY_POINTS="${REPLAY_POINTS:-}" -e EXTRA_PACKAGES="lvm2 dosfstools e2fsprogs btrfs-progs" \
+  -e TEST_SCRIPT=/vm/deploy/powercut/vmtest.sh
 cp --sparse=always "$work/target/disk.img" "$work/pristine.img"
 truncate -s 16G "$work/log.img"
 docker run --rm --device /dev/kvm -v "$work":/work archix-arch-test bash -c '

@@ -1,6 +1,5 @@
 #!/bin/bash
-# Prototype switch: stages the next deployment from the current one, runs `pacman "$@"` in it, builds its UKI and commits it.
-# ROOT is the target root (/ for the running system), ESP its ESP; DEPLOY_INJECT is a command run in the staging chroot after pacman.
+# Prototype switch: stages the next deployment, runs `pacman "$@"` in it, builds its UKI and commits; env ROOT, ESP, DEPLOY_INJECT, DEPLOY_MARK.
 set -euo pipefail
 root=${ROOT:-/}
 esp=${ESP:-$root/efi}
