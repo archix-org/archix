@@ -100,6 +100,7 @@ struct Declared {
     aur_review: bool,
     archive_url: String,
     archive_mirrors: Vec<String>,
+    package_cache_push: Option<String>,
     lock_warn_after_days: u32,
     package_caches: Vec<String>,
     build_on_host: BTreeSet<String>,
@@ -242,6 +243,10 @@ fn declared(config: &Value) -> Result<Declared> {
         },
         package_caches: strings("package_caches"),
         archive_mirrors: strings("archive_mirrors"),
+        package_cache_push: match map.get("package_cache_push") {
+            Some(Value::Str(dir)) if !dir.is_empty() => Some(dir.clone()),
+            _ => None,
+        },
         lock_warn_after_days: match map.get("lock_warn_after_days") {
             Some(Value::Int(days)) => u32::try_from(*days).unwrap_or(0),
             _ => 30,

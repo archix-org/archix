@@ -55,6 +55,11 @@ return {
       default = {},
       description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what `archix cache push` copied. Repo packages are checked against the lock's sha256; AUR builds are taken as the cache's build records say, so list only caches you control.",
     },
+    package_cache_push = archix.option {
+      type = t.nullable(t.str),
+      default = nil,
+      description = "A package cache directory (file:///mnt/nas/archix) every switch copies this machine's new package files, signatures and AUR build records into, as `archix cache push` does, so other machines get its exact third-party versions and AUR builds. A failed copy only warns.",
+    },
     lock_warn_after_days = archix.option {
       type = t.int,
       default = 30,

@@ -284,6 +284,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "switched to generation {} (snapshot {}); no package changes were needed",
             created.number, lock.date
         );
+        push_to_cache(&declared);
         print_hooks(&system_change);
         let failures = run_hooks(&paths, &system_change, &BTreeSet::new());
         return report_soft_failures(&failures, "the new generation is current");
@@ -469,6 +470,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     super::lock::write_deferred()?;
     soft_failures.extend(run_hooks(&paths, &system_change, &rewritten));
     println!("switched to {name}");
+    push_to_cache(&declared);
     reboot_notice();
     report_soft_failures(&soft_failures, "the new generation is current")
 }
@@ -1161,6 +1163,16 @@ pub fn generations() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Copies what this machine keeps into `package_cache_push`, so other machines find it there; a cache that can't be written only warns.
+fn push_to_cache(declared: &Declared) {
+    let Some(dir) = &declared.package_cache_push else {
+        return;
+    };
+    if let Err(e) = cache_push(std::path::Path::new(dir.strip_prefix("file://").unwrap_or(dir))) {
+        eprintln!("warning: couldn't copy this machine's packages to the package cache at {dir}: {e:#}");
+    }
 }
 
 /// Copies this machine's package files, their signatures and its AUR build records into a package cache directory, skipping what it already holds.
