@@ -624,10 +624,7 @@ fn finish_flatpak(
 /// The current generation's built-file hashes for AUR packages still locked at the same commit.
 fn carry_aur_hashes(packages: &mut BTreeMap<String, Locked>, current: Option<&Generation>) {
     let Some(current) = current else { return };
-    for (name, pkg) in packages
-        .iter_mut()
-        .filter(|(_, pkg)| pkg.is_built() && pkg.sha256.is_empty())
-    {
+    for (name, pkg) in packages.iter_mut().filter(|(_, pkg)| pkg.is_built()) {
         if let Some(previous) = current.packages.get(name)
             && previous.commit == pkg.commit
             && previous.version == pkg.version

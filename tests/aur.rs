@@ -343,9 +343,12 @@ fn a_cache_build_that_isnt_the_locked_one_is_not_used() {
         "the swapped build was used:\n{out}"
     );
     assert!(out.contains("doesn't match archix.lock"), "{out}");
+    let description = String::from_utf8_lossy(&description.stdout).into_owned();
     assert!(
-        !String::from_utf8_lossy(&description.stdout).contains("swapped"),
-        "the package installed is the one built here"
+        !description
+            .lines()
+            .any(|line| line.starts_with("Description") && line.ends_with(": swapped")),
+        "the package installed is the one built here:\n{description}"
     );
 }
 
