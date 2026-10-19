@@ -12,6 +12,8 @@ stage=$archix/deploy/.staging-$gen
 view=$archix/.view-$gen
 fs=$(stat -f -c %T "$root")
 say() { echo "deploy-switch: $*" >&2; }
+# DEPLOY_MARK, when set, is run with the name of each step as it starts, as the power-cut harness logs them.
+mark() { [ -z "${DEPLOY_MARK:-}" ] || $DEPLOY_MARK "$1"; }
 
 unmount_view() {
   umount -R "$view" 2> /dev/null || true
@@ -26,6 +28,7 @@ for old in "$archix"/deploy/.staging-* "$archix"/.view-*; do
   btrfs subvolume delete "$old" > /dev/null 2>&1 || rm -rf "$old"
 done
 
+mark stage
 say "staging deployment $gen from $current on $fs"
 overlay() {
   local tree=$1 lower=$2
@@ -54,6 +57,7 @@ mount --bind "$stage/etc" "$view/etc"
 mount --bind "$stage/.merged/var" "$view/var"
 mount --bind "$stage/pacman" "$view/var/lib/pacman/local"
 
+mark transact
 say "running pacman $*"
 arch-chroot "$view" pacman --noconfirm "$@"
 if [ -n "${DEPLOY_INJECT:-}" ]; then
@@ -64,6 +68,7 @@ arch-chroot "$view" ukify build --linux /boot/vmlinuz-linux --initrd /boot/initr
 unmount_view
 rmdir "$view"
 
+mark flatten
 if [ "$fs" != btrfs ]; then
   for tree in usr opt boot; do "$lib/flatten" "$archix/$current/$tree" "$stage/.upper/$tree" "$stage/$tree"; done
 fi
@@ -71,9 +76,12 @@ mv "$stage/.upper/var" "$stage/var-upper"
 rm -rf "$stage/.upper" "$stage/.work" "$stage/.merged"
 
 say "committing deployment $gen"
+mark commit-sync
 sync -f "$archix"
+mark commit-rename
 mv -T "$stage" "$archix/deploy/$gen"
 sync -f "$archix"
+mark commit-esp
 mkdir -p "$esp/EFI/archix" "$esp/loader/entries"
 cp "$archix/deploy/$gen/boot/archix.efi" "$esp/EFI/archix/.$gen.efi.tmp"
 sync -f "$esp"
@@ -85,7 +93,9 @@ sed "s/^default .*/default archix-$gen.conf/" "$esp/loader/loader.conf" > "$esp/
 sync -f "$esp"
 mv "$esp/loader/.loader.conf.tmp" "$esp/loader/loader.conf"
 sync -f "$esp"
+mark commit-current
 ln -sfn "deploy/$gen" "$archix/.current.tmp"
 mv -T "$archix/.current.tmp" "$archix/current"
 sync -f "$archix"
+mark done
 say "deployment $gen is current; it takes effect at the next boot"

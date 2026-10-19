@@ -1,0 +1,36 @@
+#!/bin/bash
+# Run by replay-log at each flush point: checks a copy-on-write snapshot of the replayed disk as a boot after a power cut there would see it.
+set -u
+state=/var/lib/archix-powercut
+pristine=/dev/vdd
+read -r esp_start esp_size root_start root_size fs opts < "$state/layout"
+point=$(($(cat "$state/points" 2> /dev/null || echo 0) + 1))
+echo "$point" > "$state/points"
+log() { echo "point $point: $*" >> "$state/check.log"; echo "point $point: ${*:0:200}" > /dev/console; }
+cleanup() {
+  umount /check/root /check/esp 2> /dev/null
+  dmsetup remove sesp sroot snap 2> /dev/null
+  losetup -d "$cow" 2> /dev/null
+  rm -f /dev/shm/cow
+}
+truncate -s 4G /dev/shm/cow
+cow=$(losetup -f --show /dev/shm/cow)
+trap cleanup EXIT
+dmsetup create snap --table "0 $(blockdev --getsz "$pristine") snapshot $pristine $cow N 8" || { log "no snapshot"; exit 2; }
+dmsetup create sesp --table "0 $esp_size linear /dev/mapper/snap $esp_start"
+dmsetup create sroot --table "0 $root_size linear /dev/mapper/snap $root_start"
+mkdir -p /check/root /check/esp
+# The firmware reads the ESP before anything repairs it, so it's checked unrepaired, and fsck's view is only noted.
+fsck.vfat -n /dev/mapper/sesp > /dev/null 2>&1 || log "note: fsck.vfat finds problems on the ESP"
+if [ "$fs" = btrfs ]; then
+  btrfs check --readonly /dev/mapper/sroot > /dev/null 2>&1 || { log "btrfs check fails"; exit 1; }
+else
+  e2fsck -fy /dev/mapper/sroot > /dev/null 2>&1
+  [ $? -le 1 ] || { log "e2fsck can't repair the root"; exit 1; }
+fi
+mount ${opts:+-o $opts} /dev/mapper/sroot /check/root || { log "the root doesn't mount"; exit 1; }
+mount -o ro /dev/mapper/sesp /check/esp || { log "the ESP doesn't mount"; exit 1; }
+out=$(/usr/local/lib/archix-powercut/invariant /check/root /check/esp "$state/baselines" 2>&1)
+status=$?
+log "$out"
+exit $status

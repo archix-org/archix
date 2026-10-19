@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+"""invariant ROOT ESP BASELINES: checks a replayed disk state the way a boot would see it.
+
+Every archix entry systemd-boot can read names a committed deployment whose UKI is intact; the entry systemd-boot
+would pick names one; `current` names one; and the picked deployment's `pacman -Qkk` findings equal its baseline
+(BASELINES/<generation>, from check-deployment on the finished image). Exits non-zero, saying why, if any fails.
+"""
+import functools
+import hashlib
+import os
+import re
+import subprocess
+import sys
+
+root, esp, baselines = sys.argv[1:4]
+problems = []
+
+
+def strverscmp(a, b):
+    """systemd's version order, enough for names made of letters, digits and punctuation."""
+    pa = re.findall(r"\d+|\D+", a)
+    pb = re.findall(r"\d+|\D+", b)
+    for x, y in zip(pa, pb):
+        if x.isdigit() and y.isdigit():
+            if int(x) != int(y):
+                return (int(x) > int(y)) - (int(x) < int(y))
+        elif x != y:
+            return (x > y) - (x < y)
+    return (len(pa) > len(pb)) - (len(pa) < len(pb))
+
+
+def read(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def sha(path):
+    data = read(path)
+    return hashlib.sha256(data).hexdigest() if data is not None else None
+
+
+entries = {}
+entries_dir = os.path.join(esp, "loader/entries")
+for name in os.listdir(entries_dir) if os.path.isdir(entries_dir) else []:
+    if name.startswith(".") or not name.endswith(".conf"):
+        continue
+    text = (read(os.path.join(entries_dir, name)) or b"").decode(errors="replace")
+    efi = [line.split(None, 1)[1].strip() for line in text.splitlines() if line.startswith("efi ") and len(line.split(None, 1)) == 2]
+    if efi:
+        entries[name] = efi[0]
+
+default = None
+conf = (read(os.path.join(esp, "loader/loader.conf")) or b"").decode(errors="replace")
+for line in conf.splitlines():
+    if line.startswith("default "):
+        default = line.split(None, 1)[1].strip()
+ordered = sorted(entries, key=functools.cmp_to_key(lambda a, b: -strverscmp(a, b)))
+picked = default if default in entries else (ordered[0] if ordered else None)
+if picked is None:
+    problems.append("no boot entry systemd-boot can start")
+
+
+def generation(entry):
+    m = re.fullmatch(r"archix-(\d+)\.conf", entry)
+    return m.group(1) if m else None
+
+
+def committed(gen):
+    return os.path.isdir(os.path.join(root, "archix/deploy", gen, "usr"))
+
+
+for entry, efi in entries.items():
+    gen = generation(entry)
+    if gen is None:
+        continue
+    if not committed(gen):
+        problems.append(f"{entry} names deployment {gen}, which isn't committed")
+        continue
+    if sha(os.path.join(esp, efi.lstrip("/"))) != sha(os.path.join(root, "archix/deploy", gen, "boot/archix.efi")):
+        problems.append(f"{entry}'s UKI {efi} isn't deployment {gen}'s")
+
+current = os.readlink(os.path.join(root, "archix/current")) if os.path.islink(os.path.join(root, "archix/current")) else None
+if current is None or not committed(current.removeprefix("deploy/")):
+    problems.append(f"current names {current}, which isn't a committed deployment")
+
+booted = generation(picked) if picked else None
+if booted and committed(booted):
+    findings = subprocess.run(
+        ["/usr/local/lib/archix-deploy/check-deployment", booted, root], capture_output=True, text=True
+    ).stdout
+    want = read(os.path.join(baselines, booted))
+    if want is None:
+        problems.append(f"no baseline for deployment {booted}")
+    elif findings != want.decode():
+        problems.append(f"deployment {booted} differs from its baseline: {findings[:300]!r}")
+
+print(f"picked {picked}, current {current}, entries {sorted(entries)}")
+for problem in problems:
+    print(f"PROBLEM: {problem}")
+sys.exit(1 if problems else 0)

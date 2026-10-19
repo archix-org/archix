@@ -1,0 +1,78 @@
+#!/bin/bash
+# In a privileged container: measures the space an in-place upgrade and a deployment switch take on /work/disk.img, keeping 2 deployments and then 1.
+set -euo pipefail
+fs=${FS:-ext4}
+opts=; [ "$fs" = btrfs ] && opts="subvol=@${BTRFS_OPTS:+,$BTRFS_OPTS}"
+lib=/vm/deploy/proto
+cp --sparse=always /work/disk.img /work/inplace.img
+
+attach() {
+  local img=$1 parts
+  parts=$(sfdisk -J "$img" | python -c "import json,sys; p=json.load(sys.stdin)['partitiontable']['partitions']; print(p[0]['start']*512, p[0]['size']*512, p[1]['start']*512, p[1]['size']*512)")
+  read -r es ez rs rz <<< "$parts"
+  esp=$(losetup --show -f -o "$es" --sizelimit "$ez" "$img")
+  root=$(losetup --show -f -o "$rs" --sizelimit "$rz" "$img")
+  mount ${opts:+-o "$opts"} "$root" /mnt
+  mount "$esp" /mnt/efi
+}
+detach() {
+  umount -R /mnt
+  losetup -d "$esp" "$root"
+}
+trap 'umount -R /mnt 2> /dev/null; losetup -D' EXIT
+
+# Bytes in use on the root (btrfs: data and metadata used, not allocated), inodes on ext4, bytes on the ESP.
+usage() {
+  sync
+  local used inodes=-
+  if [ "$fs" = btrfs ]; then
+    btrfs filesystem sync /mnt
+    used=$(btrfs filesystem usage -b /mnt | awk '$1 == "Used:" { print $2; exit }')
+  else
+    read -r used inodes < <(df -B1 --output=used,iused /mnt | tail -1)
+  fi
+  echo "$used $inodes $(df -B1 --output=used /mnt/efi | tail -1)"
+}
+report() {
+  local label=$1 before=$2 after=$3
+  read -r b bi be <<< "$before"
+  read -r a ai ae <<< "$after"
+  printf 'STORAGE: %-34s root %+8.0f MB  inodes %8s  ESP %+6.0f MB  (root %.0f MB in use)\n' "$label" \
+    "$(((a - b) / 1000000))" "$([ "$ai" = - ] && echo - || echo $((ai - bi)))" "$(((ae - be) / 1000000))" "$((a / 1000000))"
+}
+timed() {
+  local start=$(date +%s.%N)
+  "$@" > /dev/null 2>&1
+  echo "STORAGE: $(awk -v s="$start" -v e="$(date +%s.%N)" 'BEGIN { printf "%.1f", e - s }') s for ${*: -1}" >&2
+}
+
+attach /work/inplace.img
+echo "STORAGE: $FS${BTRFS_OPTS:+ ($BTRFS_OPTS)}, $DATE to ${TO_DATE}: $(grep -c . /mnt/var/lib/prefetched-upgrades) packages to upgrade"
+echo "STORAGE: deployment 1's usr is $(du -sb /mnt/archix/deploy/1/usr | cut -f1) bytes; the package cache $(du -sb /mnt/var/cache/pacman/pkg | cut -f1) bytes"
+for tree in usr etc opt boot; do mount --bind "/mnt/archix/deploy/1/$tree" "/mnt/$tree"; done
+mount --bind /mnt/archix/deploy/1/pacman /mnt/var/lib/pacman/local
+before=$(usage)
+inplace() {
+  arch-chroot /mnt pacman --noconfirm -Su
+  arch-chroot /mnt ukify build --linux /boot/vmlinuz-linux --initrd /boot/initramfs-linux.img --cmdline @/etc/kernel/cmdline --output /boot/archix.efi
+  cp /mnt/boot/archix.efi /mnt/efi/EFI/archix/1.efi
+}
+timed inplace
+report "in place" "$before" "$(usage)"
+detach
+rm /work/inplace.img
+
+attach /work/disk.img
+before=$(usage)
+switch() { ROOT=/mnt ESP=/mnt/efi "$lib/deploy-switch" -Su; }
+timed switch
+two=$(usage)
+report "switch, 2 deployments kept" "$before" "$two"
+echo "STORAGE: deployment 2's /var changes: $(du -sb /mnt/archix/deploy/2/var-upper | cut -f1) bytes"
+drop() {
+  if [ "$fs" = btrfs ]; then btrfs subvolume delete --commit-after /mnt/archix/deploy/1; else rm -rf /mnt/archix/deploy/1; fi
+  rm /mnt/efi/loader/entries/archix-1.conf /mnt/efi/EFI/archix/1.efi
+}
+timed drop
+report "switch, then 1 deployment kept" "$before" "$(usage)"
+detach

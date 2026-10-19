@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds /work/disk.img for the deployment prototype: an ESP and an ext4 or btrfs root, Arch pacstrapped at $DATE and laid out as deployment 1.
+# Builds /work/disk.img for the deployment prototype: an ESP and an ext4 or btrfs root (mounted with BTRFS_OPTS), Arch pacstrapped at $DATE and laid out as deployment 1.
 set -euo pipefail
 archive=${ARCHIVE:-https://archive.archlinux.org}
 date=${DATE:-2026-10-03}
 fs=${FS:-ext4}
 proto=/vm/deploy/proto
-packages=(base linux mkinitcpio systemd-ukify python arch-install-scripts libcap)
+packages=(base linux mkinitcpio systemd-ukify python arch-install-scripts libcap ${EXTRA_PACKAGES:-})
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
 img=/work/disk.img
 rm -f "$img" /work/vars.fd
@@ -27,8 +27,8 @@ rootflags=
 if [ "$fs" = btrfs ]; then
   mkfs.btrfs -q -L archixroot "$root"
   mount "$root" /mnt && btrfs -q subvolume create /mnt/@ && umount /mnt
-  mount -o subvol=@ "$root" /mnt
-  rootflags=" rootflags=subvol=@"
+  mount -o "subvol=@${BTRFS_OPTS:+,$BTRFS_OPTS}" "$root" /mnt
+  rootflags=" rootflags=subvol=@${BTRFS_OPTS:+,$BTRFS_OPTS}"
 else
   mkfs.ext4 -q -L archixroot "$root"
   mount "$root" /mnt
@@ -53,7 +53,11 @@ install -Dm644 "$proto/archix-deploy.install" /mnt/etc/initcpio/install/archix-d
 install -Dm755 "$proto/activate-deployment" /mnt/usr/local/lib/archix-deploy/activate-deployment
 install -Dm644 "$proto/archix-deploy-activate.service" /mnt/etc/systemd/system/archix-deploy-activate.service
 for tool in deploy-switch flatten check-deployment; do install -Dm755 "$proto/$tool" "/mnt/usr/local/lib/archix-deploy/$tool"; done
-install -Dm755 /vm/deploy/vmtest.sh /mnt/usr/local/bin/archix-proto-test
+install -Dm755 "${TEST_SCRIPT:-/vm/deploy/vmtest.sh}" /mnt/usr/local/bin/archix-proto-test
+if [ -n "${POWERCUT:-}" ]; then
+  install -Dm755 /work/replay-log /mnt/usr/local/bin/replay-log
+  for tool in invariant check-point; do install -Dm755 "/vm/deploy/powercut/$tool" "/mnt/usr/local/lib/archix-powercut/$tool"; done
+fi
 printf '[Unit]\nDescription=archix deployment prototype test\nAfter=multi-user.target network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-proto-test\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target\n' \
   > /mnt/etc/systemd/system/archix-proto-test.service
 echo 'HOOKS+=(archix-deploy)' > /mnt/etc/mkinitcpio.conf.d/archix-deploy.conf
@@ -78,5 +82,13 @@ mkdir -p /mnt/efi/EFI/archix /mnt/efi/loader/entries
 cp "$deploy/boot/archix.efi" /mnt/efi/EFI/archix/1.efi
 printf 'title archix deployment 1\nefi /EFI/archix/1.efi\n' > /mnt/efi/loader/entries/archix-1.conf
 printf 'timeout 2\nconsole-mode keep\ndefault archix-1.conf\n' > /mnt/efi/loader/loader.conf
+# For an offline switch: the next snapshot's databases and package files, already in the image.
+if [ -n "${PREFETCH_TO:-}" ]; then
+  sed "s|^Include = /etc/pacman.d/mirrorlist|Server = $archive/repos/${PREFETCH_TO//-//}/\$repo/os/\$arch|" /mnt/etc/pacman.conf > /mnt/root/prefetch.conf
+  arch-chroot /mnt pacman --config /root/prefetch.conf -Sy --needed --noconfirm archlinux-keyring > /dev/null
+  arch-chroot /mnt pacman --config /root/prefetch.conf -Suw --noconfirm > /dev/null
+  arch-chroot /mnt pacman -Qu | tee /mnt/var/lib/prefetched-upgrades
+  rm /mnt/root/prefetch.conf
+fi
 lsinitcpio "$deploy/boot/initramfs-linux.img" | grep -E 'archix-deploy|mount-deployment'
 ls -la /mnt/archix /mnt/archix/deploy/1 /mnt/efi/loader/entries
