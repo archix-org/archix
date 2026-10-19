@@ -160,19 +160,42 @@ fn install_handmade(work: &std::path::Path) {
 
 #[test]
 #[ignore]
-fn init_rebuilds_a_package_no_repo_has_from_its_installed_files() {
+fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_config() {
     let _system = lock_system();
     let work = tempfile::tempdir().unwrap();
     install_handmade(work.path());
+    let conf = format!("/etc/{HANDMADE}.conf");
+    fs::write(&conf, "setting = 2\n").unwrap();
+    // pacman -U from a path keeps no copy; one in pacman's cache gives init the config file as shipped.
+    let built = work.path().join(format!("{HANDMADE}-1.2-3-any.pkg.tar.zst"));
+    fs::copy(
+        &built,
+        format!("/var/cache/pacman/pkg/{HANDMADE}-1.2-3-any.pkg.tar.zst"),
+    )
+    .unwrap();
+
+    let unpicked = work.path().join("unpicked");
+    let (unpicked_ok, unpicked_out) = archix(unpicked.to_str().unwrap(), &["init", "--defaults"]);
+    let unpicked_host = fs::read_to_string(unpicked.join("lua/hosts/initbox/init.lua")).unwrap_or_default();
+
     let config = work.path().join("cfg");
-    let (ok, out) = archix(config.to_str().unwrap(), &["init", "--defaults"]);
+    let (ok, out) = archix(config.to_str().unwrap(), &["init", "--defaults", "--repack", HANDMADE]);
     let recipe = config.join("pkgbuilds").join(HANDMADE);
+    let mut in_recipe: Vec<String> = fs::read_dir(&recipe)
+        .map(|dir| {
+            dir.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    in_recipe.sort();
     let pkgbuild = fs::read_to_string(recipe.join("PKGBUILD")).unwrap_or_default();
     let install = fs::read_to_string(recipe.join(format!("{HANDMADE}.install"))).unwrap_or_default();
     let declared = fs::read_to_string(config.join("lua/hosts/initbox/installed.lua")).unwrap_or_default();
-    let host = fs::read_to_string(config.join("lua/hosts/initbox/init.lua")).unwrap_or_default();
-    // As on another machine with the same config: the package isn't installed, and switch builds it from the recipe.
+
+    // As on another switch that has to build it: the package isn't installed, and the recipe holds no files.
     pacman(&["-Rdd", HANDMADE]);
+    let _ = fs::remove_file(&conf);
     let _ = fs::remove_file(format!("/var/tmp/{HANDMADE}-installed"));
     let setup = Setup::with_files(
         &[HANDMADE],
@@ -182,28 +205,49 @@ fn init_rebuilds_a_package_no_repo_has_from_its_installed_files() {
             (&format!("pkgbuilds/{HANDMADE}/{HANDMADE}.install"), &install),
         ],
     );
-    let _ = fs::copy(
-        recipe.join("files.tar.zst"),
-        setup.dir.path().join("pkgbuilds").join(HANDMADE).join("files.tar.zst"),
-    );
     let switched = setup.run(&["switch", "--noconfirm"]);
     let script = fs::read(format!("/usr/bin/{HANDMADE}")).unwrap_or_default();
     let mode = fs::metadata(format!("/usr/bin/{HANDMADE}"))
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0);
+    let shipped_conf = fs::read_to_string(&conf).unwrap_or_default();
     let scriptlet_ran = std::path::Path::new(&format!("/var/tmp/{HANDMADE}-installed")).exists();
+    let push = work.path().join("push");
+    let pushed = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["cache", "push", push.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let mut in_cache = Vec::new();
+    let mut dirs = vec![push.clone()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if entry.file_type().unwrap().is_dir() {
+                dirs.push(entry.path());
+            }
+            in_cache.push(entry.path().display().to_string());
+        }
+    }
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-    assert!(ok, "init failed:\n{out}");
+    let _ = fs::remove_file(format!("/var/cache/pacman/pkg/{HANDMADE}-1.2-3-any.pkg.tar.zst"));
+
+    assert!(unpicked_ok, "{unpicked_out}");
     assert!(
-        pkgbuild.contains("depends=('bash')") && pkgbuild.contains("install="),
-        "{pkgbuild}\n{out}"
+        unpicked_host.contains(&format!("\"{HANDMADE}\"")) && !unpicked.join("pkgbuilds").exists(),
+        "--defaults leaves it in ignored_packages and rebuilds nothing:\n{unpicked_host}"
+    );
+    assert!(unpicked_out.contains("--repack NAME"), "{unpicked_out}");
+    assert!(ok, "init failed:\n{out}");
+    assert_eq!(
+        in_recipe,
+        ["PKGBUILD".to_string(), format!("{HANDMADE}.install")],
+        "only the recipe goes into the config"
+    );
+    assert!(
+        pkgbuild.contains("# archix: private") && pkgbuild.contains(&format!("backup=('etc/{HANDMADE}.conf')")),
+        "{pkgbuild}"
     );
     assert!(declared.contains(&format!("\"{HANDMADE}\"")), "{declared}");
-    assert!(
-        !host.contains(&format!("ignored_packages = {{ \"{HANDMADE}\"")),
-        "{host}"
-    );
     assert!(
         switched.status.success(),
         "{}",
@@ -211,5 +255,14 @@ fn init_rebuilds_a_package_no_repo_has_from_its_installed_files() {
     );
     assert_eq!(script, b"#!/bin/sh\necho handmade\n");
     assert_eq!(mode, 0o755);
+    assert_eq!(
+        shipped_conf, "setting = 1\n",
+        "the config file as the package shipped it, not the edited one"
+    );
     assert!(scriptlet_ran, "the install scriptlet comes along");
+    assert!(pushed.status.success(), "{}", String::from_utf8_lossy(&pushed.stderr));
+    assert!(
+        !in_cache.iter().any(|path| path.contains(HANDMADE)),
+        "its build stays out of package caches: {in_cache:?}"
+    );
 }
