@@ -72,8 +72,8 @@ case $stage in
     say "PASS: an older generation's rescue entry restored that generation without pacman"
     good=$(current)
     echo "$good" > "$state/good"
-    # A kernel that finds no init in the initramfs and can't mount the root without its modules panics, and panic=3 reboots it.
-    sed -i 's|"console=ttyS0" }|"console=ttyS0", "rdinit=/archix-no-such-init", "panic=3" }|' "$config"
+    # An init that exits at once makes the kernel panic ("Attempted to kill init"), and panic=3 reboots it.
+    sed -i 's|"console=ttyS0" }|"console=ttyS0", "init=/usr/bin/false", "panic=3" }|' "$config"
     archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a generation that can't boot"
     bad=$(current)
     echo "$bad" > "$state/bad"
@@ -90,7 +90,7 @@ case $stage in
     [ -f "/boot/loader/entries/archix-$bad+0-3.conf" ] || fail "generation $bad's entry should be marked bad: $(ls /boot/loader/entries)"
     grep -q "generation $bad didn't finish booting" /var/lib/archix/notes || fail "the login note should say generation $bad didn't boot: $(cat /var/lib/archix/notes)"
     say "PASS: generation $bad failed to boot three times, systemd-boot fell back to $good, and archix rolled back to it"
-    sed -i 's|, "rdinit=/archix-no-such-init", "panic=3" }| }|' "$config"
+    sed -i 's|, "init=/usr/bin/false", "panic=3" }| }|' "$config"
     archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
     ls /boot/loader/entries > /dev/console
     for gone in /etc/systemd/system/archix-boot.service /etc/systemd/system/sysinit.target.wants/archix-boot.service /etc/pacman.d/hooks/archix.hook \
