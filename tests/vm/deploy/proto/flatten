@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""flatten LOWER UPPER OUT: turns an unmounted overlay (metacopy, redirect_dir, index and xino off) into the plain tree OUT.
+
+Unchanged files become hardlinks to LOWER, UPPER's files and symlinks are moved in, whiteouts are deletions,
+and an opaque directory hides what LOWER has under it. No file data is copied.
+"""
+import os
+import stat
+import sys
+
+lower, upper, out = sys.argv[1:4]
+
+
+def lstat(path):
+    try:
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def whiteout(st):
+    return st is not None and stat.S_ISCHR(st.st_mode) and st.st_rdev == 0
+
+
+def opaque(path):
+    try:
+        return os.getxattr(path, "trusted.overlay.opaque", follow_symlinks=False) == b"y"
+    except OSError:
+        return False
+
+
+def is_dir(st):
+    return st is not None and stat.S_ISDIR(st.st_mode)
+
+
+def build(rel, meta):
+    up, lo, dst = (os.path.join(base, rel) for base in (upper, lower, out))
+    os.mkdir(dst)
+    up_st, lo_st = lstat(up), lstat(lo)
+    names = set(os.listdir(up)) if is_dir(up_st) else set()
+    if is_dir(lo_st) and not (is_dir(up_st) and opaque(up)):
+        names |= set(os.listdir(lo))
+    for name in sorted(names):
+        child = os.path.join(rel, name)
+        u, l = os.path.join(up, name), os.path.join(lo, name)
+        u_st = lstat(u)
+        if whiteout(u_st):
+            continue
+        if u_st is not None:
+            if is_dir(u_st):
+                build(child, u_st)
+            else:
+                os.rename(u, os.path.join(dst, name))
+            continue
+        l_st = os.lstat(l)
+        if is_dir(l_st):
+            build(child, l_st)
+        else:
+            os.link(l, os.path.join(dst, name), follow_symlinks=False)
+    os.chown(dst, meta.st_uid, meta.st_gid)
+    os.chmod(dst, stat.S_IMODE(meta.st_mode))
+    os.utime(dst, ns=(meta.st_atime_ns, meta.st_mtime_ns))
+
+
+# The upper root is a directory the switch made, so the tree's root takes the lower root's ownership and mode.
+build("", os.lstat(lower))

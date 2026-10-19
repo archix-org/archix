@@ -1,0 +1,14 @@
+#!/bin/bash
+# check-deployment N [ROOT]: prints what `pacman -Qkk` finds wrong in deployment N, checked through a view of it, one sorted line per finding.
+set -euo pipefail
+gen=$1
+root=${2:-/}
+dep=$root/archix/deploy/$gen
+view=$(mktemp -d /run/archix-check.XXXXXX)
+trap 'umount -R "$view" 2> /dev/null; rmdir "$view"' EXIT
+mount --bind "$root" "$view"
+for tree in usr etc opt boot; do mount --bind "$dep/$tree" "$view/$tree"; done
+mount --bind "$dep/pacman" "$view/var/lib/pacman/local"
+pacman --root "$view" --dbpath "$view/var/lib/pacman" -Qkk 2>&1 \
+  | grep -E '\((No such file or directory|Size mismatch|SHA256 checksum mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch)\)' \
+  | sed "s|$view||" | sort || true

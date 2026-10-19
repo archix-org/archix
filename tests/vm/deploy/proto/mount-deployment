@@ -1,0 +1,22 @@
+#!/bin/bash
+# In the initrd: bind-mounts the deployment the selected boot entry belongs to, else the current one, over /sysroot.
+root=/sysroot
+var=/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
+gen=
+if [ -r "$var" ]; then
+  selected=$(tail -c +5 "$var" | tr -d '\000')
+  case $selected in
+    archix-[0-9]*) gen=${selected#archix-}; gen=${gen%%[!0-9]*} ;;
+  esac
+fi
+dep=$root/archix/deploy/$gen
+if [ -z "$gen" ] || [ ! -d "$dep/usr" ]; then
+  dep=$root/archix/$(readlink "$root/archix/current")
+fi
+for tree in usr etc opt boot; do
+  mount --bind "$dep/$tree" "$root/$tree" || exit 1
+done
+mount --bind "$dep/pacman" "$root/var/lib/pacman/local" || exit 1
+mkdir -p /run/archix
+echo "${dep##*/}" > /run/archix/deployment
+echo "archix: booting deployment ${dep##*/}"

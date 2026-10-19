@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Builds the deployment prototype's VM image and boots it through its stages; FS=ext4|btrfs, DATE the base snapshot.
+set -euo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+work=${ARCHIX_VM_WORK:-$(mktemp -d /tmp/archix-deploy.XXXXXX)}
+echo "work dir: $work"
+build_log=$(mktemp)
+docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
+rm -f "$build_log"
+archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
+mounts=(-v "$work":/work -v "$root/tests/vm":/vm:ro -e FS="${FS:-ext4}" -e DATE="${DATE:-2026-10-03}")
+docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" \
+  archix-arch-test /vm/deploy/build.sh
+docker run --rm --network host --device /dev/kvm "${mounts[@]}" -e VM_TIMEOUT=3600 -e VM_MEM=4096 -e VM_CPUS=4 archix-arch-test /vm/boot.sh

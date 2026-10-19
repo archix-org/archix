@@ -1,0 +1,12 @@
+[Unit]
+Description=Mount the archix deployment this boot belongs to
+DefaultDependencies=no
+Requires=sysroot.mount
+After=sysroot.mount
+Before=initrd-root-fs.target initrd-parse-etc.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/archix-deploy/mount-deployment
+StandardOutput=journal+console

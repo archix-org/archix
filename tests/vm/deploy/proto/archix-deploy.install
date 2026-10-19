@@ -1,0 +1,17 @@
+#!/bin/bash
+
+build() {
+    add_binary bash
+    add_binary mount
+    add_binary tail
+    add_binary tr
+    add_binary readlink
+    add_binary mkdir
+    add_file /usr/local/lib/archix-deploy/mount-deployment /usr/lib/archix-deploy/mount-deployment 755
+    add_file /usr/local/lib/archix-deploy/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service
+    add_symlink /usr/lib/systemd/system/initrd-root-fs.target.wants/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service
+}
+
+help() {
+    echo "archix deployments (prototype): mounts the selected deployment's /usr, /etc, /opt, /boot and pacman database over /sysroot"
+}

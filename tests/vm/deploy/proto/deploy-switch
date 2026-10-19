@@ -1,0 +1,91 @@
+#!/bin/bash
+# Prototype switch: stages the next deployment from the current one, runs `pacman "$@"` in it, builds its UKI and commits it.
+# ROOT is the target root (/ for the running system), ESP its ESP; DEPLOY_INJECT is a command run in the staging chroot after pacman.
+set -euo pipefail
+root=${ROOT:-/}
+esp=${ESP:-$root/efi}
+archix=$root/archix
+lib=$(dirname "$(readlink -f "$0")")
+current=$(readlink "$archix/current")
+gen=$(($(ls "$archix/deploy" | grep -E '^[0-9]+$' | sort -n | tail -1) + 1))
+stage=$archix/deploy/.staging-$gen
+view=$archix/.view-$gen
+fs=$(stat -f -c %T "$root")
+say() { echo "deploy-switch: $*" >&2; }
+
+unmount_view() {
+  umount -R "$view" 2> /dev/null || true
+  for tree in usr opt boot var; do umount "$stage/.merged/$tree" 2> /dev/null || true; done
+}
+trap unmount_view EXIT
+
+# A staging tree a crash left behind was never committed, so it goes.
+for old in "$archix"/deploy/.staging-* "$archix"/.view-*; do
+  [ -e "$old" ] || continue
+  umount -R "$old" 2> /dev/null || true
+  btrfs subvolume delete "$old" > /dev/null 2>&1 || rm -rf "$old"
+done
+
+say "staging deployment $gen from $current on $fs"
+overlay() {
+  local tree=$1 lower=$2
+  mkdir -p "$stage/.upper/$tree" "$stage/.work/$tree" "$stage/.merged/$tree"
+  mount -t overlay overlay \
+    -o "lowerdir=$lower,upperdir=$stage/.upper/$tree,workdir=$stage/.work/$tree,metacopy=off,redirect_dir=off,index=off,xino=off" \
+    "$stage/.merged/$tree"
+}
+if [ "$fs" = btrfs ]; then
+  btrfs -q subvolume snapshot "$archix/$current" "$stage"
+  rm -rf "$stage/var-upper"
+else
+  mkdir -p "$stage"
+  cp -a "$archix/$current/etc" "$archix/$current/pacman" "$stage/"
+  for tree in usr opt boot; do overlay "$tree" "$archix/$current/$tree"; done
+fi
+overlay var "$root/var"
+
+tree_of() {
+  if [ "$fs" = btrfs ]; then echo "$stage/$1"; else echo "$stage/.merged/$1"; fi
+}
+mkdir -p "$view"
+mount --bind "$root" "$view"
+for tree in usr opt boot; do mount --bind "$(tree_of "$tree")" "$view/$tree"; done
+mount --bind "$stage/etc" "$view/etc"
+mount --bind "$stage/.merged/var" "$view/var"
+mount --bind "$stage/pacman" "$view/var/lib/pacman/local"
+
+say "running pacman $*"
+arch-chroot "$view" pacman --noconfirm "$@"
+if [ -n "${DEPLOY_INJECT:-}" ]; then
+  arch-chroot "$view" sh -c "$DEPLOY_INJECT"
+fi
+arch-chroot "$view" ukify build --linux /boot/vmlinuz-linux --initrd /boot/initramfs-linux.img \
+  --cmdline @/etc/kernel/cmdline --output /boot/archix.efi > /dev/null
+unmount_view
+rmdir "$view"
+
+if [ "$fs" != btrfs ]; then
+  for tree in usr opt boot; do "$lib/flatten" "$archix/$current/$tree" "$stage/.upper/$tree" "$stage/$tree"; done
+fi
+mv "$stage/.upper/var" "$stage/var-upper"
+rm -rf "$stage/.upper" "$stage/.work" "$stage/.merged"
+
+say "committing deployment $gen"
+sync -f "$archix"
+mv -T "$stage" "$archix/deploy/$gen"
+sync -f "$archix"
+mkdir -p "$esp/EFI/archix" "$esp/loader/entries"
+cp "$archix/deploy/$gen/boot/archix.efi" "$esp/EFI/archix/.$gen.efi.tmp"
+sync -f "$esp"
+mv "$esp/EFI/archix/.$gen.efi.tmp" "$esp/EFI/archix/$gen.efi"
+printf 'title archix deployment %s\nefi /EFI/archix/%s.efi\n' "$gen" "$gen" > "$esp/loader/entries/.archix-$gen.conf.tmp"
+sync -f "$esp"
+mv "$esp/loader/entries/.archix-$gen.conf.tmp" "$esp/loader/entries/archix-$gen.conf"
+sed "s/^default .*/default archix-$gen.conf/" "$esp/loader/loader.conf" > "$esp/loader/.loader.conf.tmp"
+sync -f "$esp"
+mv "$esp/loader/.loader.conf.tmp" "$esp/loader/loader.conf"
+sync -f "$esp"
+ln -sfn "deploy/$gen" "$archix/.current.tmp"
+mv -T "$archix/.current.tmp" "$archix/current"
+sync -f "$archix"
+say "deployment $gen is current; it takes effect at the next boot"

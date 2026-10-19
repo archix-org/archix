@@ -1,0 +1,22 @@
+#!/bin/bash
+# On a deployment's first boot, before services start: applies what its transaction wrote under /var, creating or replacing files and never deleting.
+set -euo pipefail
+dep=$(cat /run/archix/deployment)
+upper=/archix/deploy/$dep/var-upper
+done_file=/var/lib/archix-deploy/activated-$dep
+[ -d "$upper" ] && [ ! -e "$done_file" ] || exit 0
+cd "$upper"
+find . -mindepth 1 | while read -r path; do
+  # A whiteout (a character device 0/0) is a deletion the transaction made; state under /var is never deleted.
+  if [ -c "$path" ] && [ "$(stat -c %t%T "$path")" = 00 ]; then continue; fi
+  if [ -d "$path" ] && [ ! -L "$path" ]; then
+    mkdir -p "/var/$path"
+    chown --reference="$path" "/var/$path"
+    chmod --reference="$path" "/var/$path"
+  else
+    cp -a "$path" "/var/$path.archix-new" && mv -T "/var/$path.archix-new" "/var/$path"
+  fi
+done
+mkdir -p /var/lib/archix-deploy
+touch "$done_file"
+echo "archix: applied deployment $dep's /var changes"

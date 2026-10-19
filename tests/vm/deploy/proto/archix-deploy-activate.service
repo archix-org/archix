@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply this archix deployment's /var changes on its first boot
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target systemd-sysusers.service systemd-tmpfiles-setup.service
+ConditionPathExists=/run/archix/deployment
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/archix-deploy/activate-deployment
+StandardOutput=journal+console
+
+[Install]
+WantedBy=sysinit.target
