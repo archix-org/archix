@@ -84,10 +84,8 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
         64,
         "the generation records the built file"
     );
-    assert!(
-        setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"),
-        "built packages are reused"
-    );
+    let again = setup.ok(&["switch", "--noconfirm"]);
+    assert!(again.contains("nothing to do"), "built packages are reused:\n{again}");
 
     aur.publish(TestPkg::new("archix-test-lib", "1.1"));
     let declined = setup.run(&["update", "--to", IMAGE_SNAPSHOT]);
@@ -313,7 +311,7 @@ fn a_cache_build_that_isnt_the_locked_one_is_not_used() {
     let pack = Command::new("sh")
         .arg("-c")
         .arg(format!(
-            "cd {} && bsdtar -cf - .PKGINFO .MTREE usr | zstd -q -o {}",
+            "cd {} && bsdtar -cf - .PKGINFO .MTREE usr | zstd -q -f -o {}",
             work.path().display(),
             file.display()
         ))
