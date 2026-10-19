@@ -43,7 +43,7 @@ return {
       revoke_unused = archix.option {
         type = t.bool,
         default = false,
-        description = "After every switch, add the boot images archix signed and no entry uses any more to dbx, as `archix secure-boot revoke` does, so the firmware refuses them. Needs Secure Boot keys from sbctl as files, and declares efitools.",
+        description = "Experimental, tested on OVMF only: after every switch, add the boot images archix signed and no entry uses any more to dbx, as `archix secure-boot revoke` does, so the firmware refuses them. Needs Secure Boot keys from sbctl as files, and declares efitools.",
       },
       snapshots = archix.option {
         type = t.bool,

@@ -233,7 +233,7 @@ enum SecureBoot {
         #[arg(long)]
         anticheat: bool,
     },
-    /// Add the boot images archix signed and no longer uses to dbx, signed with your KEK, so the firmware refuses them
+    /// Experimental, tested on OVMF only: add the boot images archix signed and no longer uses to dbx, signed with your KEK, so the firmware refuses them
     Revoke {
         /// List them without writing dbx
         #[arg(long)]
