@@ -122,6 +122,30 @@ fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
 
 #[test]
 #[ignore]
+fn archive_mirrors_stand_in_when_the_archive_is_down() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let body = r#"archive_url = "http://127.0.0.1:9", archive_mirrors = { "https://archive.archlinux.org" }"#;
+    setup.set_body(&[], body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let mirrors = archix::archive::configured_mirrors(&setup.paths.state);
+    // A snapshot nothing has fetched yet, which only the mirror can serve.
+    let updated = setup.run(&["update", "--to", "2026-09-09", "--noconfirm"]);
+    let date = setup.lock().date.to_string();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        mirrors,
+        ["https://archive.archlinux.org"],
+        "switch records the mirrors for rollback and recover"
+    );
+    assert!(updated.status.success(), "{}", String::from_utf8_lossy(&updated.stderr));
+    assert_eq!(date, "2026-09-09");
+}
+
+#[test]
+#[ignore]
 fn archive_url_points_locking_at_a_mirror() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");

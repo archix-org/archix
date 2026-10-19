@@ -19,6 +19,18 @@ pub fn configured(state: &Path) -> String {
         .unwrap_or_else(|| ARCHIVE_URL.to_string())
 }
 
+/// The archive mirrors `switch` last used, for rollback and recover.
+pub fn configured_mirrors(state: &Path) -> Vec<String> {
+    fs::read_to_string(state.join("archive-mirrors"))
+        .map(|text| {
+            text.lines()
+                .map(str::to_string)
+                .filter(|line| !line.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The package caches `switch` last used, for rollback and recover.
 pub fn configured_caches(state: &Path) -> Vec<String> {
     fs::read_to_string(state.join("package-caches"))
