@@ -39,7 +39,7 @@ same_as_before() {
 # The swap brings /usr and pacman's database back, but what the upgrade changed outside /usr stays: report what that broke, then repair it so the next step starts clean.
 outside_usr() {
   local missing packages=() name version file
-  missing=$(pacman -Qk 2>&1 | grep -oE "^warning: [^:]+: [^ ]+ \(No such file or directory\)" | cut -d' ' -f2-3)
+  missing=$(pacman -Qk 2>&1 | grep -oE "warning: [^:]+: [^ ]+ \(No such file or directory\)" | cut -d' ' -f2-3)
   say "METRIC $fs $1 missing_outside_usr=$(echo -n "$missing" | grep -c .) files=$(echo "$missing" | tr '\n' ' ')"
   for name in $(echo "$missing" | cut -d: -f1 | sort -u); do
     version=$(grep "^$name " "$state/before" | cut -d' ' -f2)
