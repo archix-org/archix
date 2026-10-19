@@ -106,7 +106,7 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
     };
     commit("first");
     fs::write(upstream.join("data"), "first").unwrap();
-    let recipe = "pkgname=archix-test-vcs\npkgver=1\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
+    let recipe = "pkgname=archix-test-vcs\npkgver=1\npkgrel=1\narch=(any)\nlicense=(MIT)\nmakedepends=(git)\n\
                   source=('repo::git+file:///var/tmp/archix-test-vcs/repo' 'data::file:///var/tmp/archix-test-vcs/data')\n\
                   sha256sums=('SKIP' 'SKIP')\n\
                   package() {\n  install -Dm644 \"$srcdir/repo/content\" \"$pkgdir/opt/archix-test-vcs/content\"\n  install -Dm644 \"$srcdir/data\" \"$pkgdir/opt/archix-test-vcs/data\"\n}\n";
