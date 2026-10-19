@@ -65,6 +65,91 @@ fn local_recipes_are_locked_by_content_and_built_in_the_chroot() {
     assert!(installed("archix-test-local").is_none());
 }
 
+#[test]
+#[ignore]
+fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
+    let _system = lock_system();
+    let upstream = std::path::Path::new("/var/tmp/archix-test-vcs");
+    let _ = fs::remove_dir_all(upstream);
+    fs::create_dir_all(upstream.join("repo")).unwrap();
+    let git = |args: &[&str]| {
+        let status = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "init.defaultBranch=main",
+                "-C",
+            ])
+            .arg(upstream.join("repo"))
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    // The build user clones a repository root owns.
+    assert!(
+        Command::new("git")
+            .args(["config", "--system", "--add", "safe.directory", "*"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    git(&["init", "-q"]);
+    let commit = |content: &str| {
+        fs::write(upstream.join("repo/content"), content).unwrap();
+        git(&["add", "content"]);
+        git(&["commit", "-qm", content]);
+    };
+    commit("first");
+    fs::write(upstream.join("data"), "first").unwrap();
+    let recipe = "pkgname=archix-test-vcs\npkgver=1\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
+                  source=('repo::git+file:///var/tmp/archix-test-vcs/repo' 'data::file:///var/tmp/archix-test-vcs/data')\n\
+                  sha256sums=('SKIP' 'SKIP')\n\
+                  package() {\n  install -Dm644 \"$srcdir/repo/content\" \"$pkgdir/opt/archix-test-vcs/content\"\n  install -Dm644 \"$srcdir/data\" \"$pkgdir/opt/archix-test-vcs/data\"\n}\n";
+    let setup = Setup::with_files(
+        &["archix-test-vcs"],
+        "",
+        &[("pkgbuilds/archix-test-vcs/PKGBUILD", recipe)],
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let installed_content = || fs::read_to_string("/opt/archix-test-vcs/content").unwrap_or_default();
+    assert_eq!(installed_content(), "first");
+    // As on a machine that never built it: no package, no build record, no built file.
+    let forget_the_build = || {
+        Command::new("pacman")
+            .args(["-Rdd", "--noconfirm", "archix-test-vcs"])
+            .status()
+            .unwrap();
+        let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-vcs");
+        for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {
+            if file.file_name().to_string_lossy().contains("archix-test-vcs-") {
+                fs::remove_file(file.path()).unwrap();
+            }
+        }
+    };
+    commit("second");
+    forget_the_build();
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let rebuilt = installed_content();
+    fs::write(upstream.join("data"), "second").unwrap();
+    forget_the_build();
+    let changed_download = setup.run(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        rebuilt, "first",
+        "the rebuild should build the commit the first build got:\n{out}"
+    );
+    assert!(
+        !changed_download.status.success() && installed("archix-test-vcs").is_none(),
+        "a download that changed since the first build should fail its check:\n{}",
+        String::from_utf8_lossy(&changed_download.stderr)
+    );
+}
+
 const NEW_FILE_PATCH: &str = "--- /dev/null\n+++ b/ARCHIX-PATCHED\n@@ -0,0 +1 @@\n+patched by archix\n";
 
 #[test]
