@@ -3,6 +3,7 @@
 mod common;
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 use archix::generations::Store;
@@ -255,6 +256,95 @@ fn skip_check_builds_a_recipe_whose_tests_fail() {
     assert_eq!(installed("archix-test-failing-check").as_deref(), Some("1.0-1"));
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn a_cache_build_that_isnt_the_locked_one_is_not_used() {
+    let _system = lock_system();
+    let name = "archix-test-swapped";
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new(name, "1.0"));
+    let cache = TempDir::new().unwrap();
+    let body = format!(
+        "aur = {{ url = {:?} }}, package_caches = {{ {:?} }}",
+        aur.url(),
+        format!("file://{}", cache.path().display())
+    );
+    let setup = Setup::new(&[name], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let built = cached_file(Path::new("/var/cache/archix/pkg"), name);
+    let locked = setup.lock().packages[name].sha256.clone();
+    assert_eq!(
+        locked,
+        archix::fetch::sha256(&built).unwrap(),
+        "the lock records the build it was made with"
+    );
+    setup.ok(&["cache", "push", cache.path().to_str().unwrap()]);
+    let (init, lock) = (setup.read("init.lua").unwrap(), setup.read("archix.lock").unwrap());
+
+    // Whoever can write to the cache swaps in another build of the same package, and a record that names it.
+    let record = fs::read_dir(cache.path().join("aur-builds").join(name))
+        .unwrap()
+        .flatten()
+        .next()
+        .unwrap()
+        .path();
+    let text = fs::read_to_string(&record).unwrap();
+    let file = cache.path().join(built.file_name().unwrap());
+    let work = TempDir::new().unwrap();
+    let unpack = Command::new("bsdtar")
+        .arg("-xf")
+        .arg(&file)
+        .arg("-C")
+        .arg(work.path())
+        .status()
+        .unwrap();
+    assert!(unpack.success());
+    let pkginfo = work.path().join(".PKGINFO");
+    let info = fs::read_to_string(&pkginfo)
+        .unwrap()
+        .replace("pkgdesc = archix test package", "pkgdesc = swapped");
+    fs::write(&pkginfo, info).unwrap();
+    let pack = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cd {} && bsdtar -cf - .PKGINFO .MTREE usr | zstd -q -o {}",
+            work.path().display(),
+            file.display()
+        ))
+        .status()
+        .unwrap();
+    assert!(pack.success());
+    let swapped = archix::fetch::sha256(&file).unwrap();
+    fs::write(&record, text.replace(&locked, &swapped)).unwrap();
+
+    // Another machine with the committed lock and nothing built locally.
+    setup.set_body(&[], &body);
+    setup.ok(&["switch", "--noconfirm"]);
+    let _ = fs::remove_dir_all("/var/cache/archix/aur-builds");
+    for dir in ["/var/cache/archix/pkg", "/var/cache/pacman/pkg"] {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().contains(name) {
+                fs::remove_file(entry.path()).unwrap();
+            }
+        }
+    }
+    setup.write("init.lua", &init);
+    setup.write("archix.lock", &lock);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let description = Command::new("pacman").args(["-Qi", name]).output().unwrap();
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        !out.contains("build from the package cache"),
+        "the swapped build was used:\n{out}"
+    );
+    assert!(out.contains("doesn't match archix.lock"), "{out}");
+    assert!(
+        !String::from_utf8_lossy(&description.stdout).contains("swapped"),
+        "the package installed is the one built here"
+    );
 }
 
 #[test]
