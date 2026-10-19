@@ -40,7 +40,7 @@ pub fn secure_boot_revoke(dry_run: bool, noconfirm: bool) -> Result<()> {
     if !dry_run {
         require_root("secure-boot revoke")?;
     }
-    archix::system::revoke::revoke(&Paths::system(), dry_run, &|question| {
+    archix::system::revoke::revoke(&Paths::system(), dry_run, false, &|question| {
         if noconfirm { Ok(true) } else { confirm(question) }
     })
 }
@@ -134,6 +134,7 @@ struct BootSettings {
     cmdline: String,
     protected_entry: bool,
     tries: u32,
+    revoke_unused: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -330,6 +331,7 @@ fn declared(config: &Value) -> Result<Declared> {
                         Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
                         _ => 3,
                     },
+                    revoke_unused: boot.get("revoke_unused") == Some(&Value::Bool(true)),
                 })
             }
             _ => None,
@@ -413,6 +415,9 @@ fn declared(config: &Value) -> Result<Declared> {
         ];
         if boot.secure_boot == Some(true) {
             needed.push("sbctl".to_string());
+        }
+        if boot.revoke_unused {
+            needed.push("efitools".to_string());
         }
         // A boot-time rollback reinstalls the kernel, and DKMS can only rebuild its modules for it with that kernel's headers.
         if declared

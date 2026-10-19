@@ -477,6 +477,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     // The generation is current by now, so what was recorded after the journal took its writes (Flatpak commits) is written directly.
     super::lock::write_deferred()?;
     soft_failures.extend(run_hooks(&paths, &system_change, &rewritten));
+    if declared.boot.as_ref().is_some_and(|boot| boot.revoke_unused)
+        && let Err(e) = system::revoke::revoke(&paths, false, true, &|_| Ok(true))
+    {
+        soft_failures.push(format!("revoking boot images no entry uses: {e:#}"));
+    }
     println!("switched to {name}");
     push_to_cache(&declared);
     reboot_notice();

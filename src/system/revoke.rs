@@ -140,7 +140,7 @@ fn kek() -> Result<(PathBuf, PathBuf)> {
 }
 
 /// Adds the hashes of boot images archix signed and no longer uses to dbx, signed with sbctl's KEK and appended, so every other entry stays as it is.
-pub fn revoke(paths: &Paths, dry_run: bool, confirm: &dyn Fn(&str) -> Result<bool>) -> Result<()> {
+pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&str) -> Result<bool>) -> Result<()> {
     let esp = fs::read_to_string(paths.state.join("boot").join("esp"))
         .context("archix hasn't written boot entries on this machine")?;
     let esp = PathBuf::from(esp.trim());
@@ -156,7 +156,9 @@ pub fn revoke(paths: &Paths, dry_run: bool, confirm: &dyn Fn(&str) -> Result<boo
     let ours = current.iter().filter(|(owner, _)| *owner == OWNER).count();
     let images = to_revoke(&signed(paths), &on_esp(&esp), &in_dbx);
     if images.is_empty() {
-        println!("nothing to revoke: every boot image archix signed is still on the ESP or already in dbx");
+        if !automatic {
+            println!("nothing to revoke: every boot image archix signed is still on the ESP or already in dbx");
+        }
         return Ok(());
     }
     println!(

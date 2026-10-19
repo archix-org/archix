@@ -102,9 +102,6 @@ case $stage in
     cp "$revoked" /var/tmp/revoked.efi || fail "copying $revoked"
     sed -i 's|, "archix.revoketest" }| }|; s|protected_entry = true }|protected_entry = true, entries = 1 }|' "$config"
     archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch back to the shared UKI"
-    sed -i 's|^  files = {|  files = {\n    ["/etc/archix-revoketest"] = { text = "1" },|' "$config"
-    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a third generation"
-    [ -e "$revoked" ] && fail "pruning should take $revoked off the ESP"
     # An entry archix didn't write, standing in for Microsoft's: revoking must leave it in dbx.
     kek=/var/lib/sbctl/keys/KEK
     hash-to-efi-sig-list /usr/lib/systemd/boot/efi/linuxx64.efi.stub /var/tmp/foreign.esl > /dev/null || fail "hashing the stand-in"
@@ -114,13 +111,16 @@ case $stage in
     hash-to-efi-sig-list /var/tmp/revoked.efi /var/tmp/revoked.esl > /dev/null || fail "hashing the copy"
     target=$(od -An -tx1 -j44 -N32 /var/tmp/revoked.esl | tr -d ' \n')
     say "efivarfs before revoking: $(stat -f -c 'blocks=%b free=%f size=%S' /sys/firmware/efi/efivars)"
-    archix secure-boot revoke --dry-run > /dev/console 2>&1 || fail "revoke --dry-run"
-    archix secure-boot revoke --noconfirm > /dev/console 2>&1 || fail "revoke"
+    # A third generation prunes the UKI off the ESP, and revoke_unused puts it in dbx.
+    sed -i 's|^  files = {|  files = {\n    ["/etc/archix-revoketest"] = { text = "1" },|; s|entries = 1 }|entries = 1, revoke_unused = true }|' "$config"
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch to a third generation"
+    [ -e "$revoked" ] && fail "pruning should take $revoked off the ESP"
     dbx=$(efi-readvar -v dbx)
     echo "$dbx" | grep -qi "$foreign" || fail "the entry archix didn't write should still be in dbx: $dbx"
     echo "$dbx" | grep -qi "$target" || fail "dbx should list the pruned UKI $target: $dbx"
-    archix secure-boot revoke --dry-run 2>&1 | grep -q "nothing to revoke" || fail "a second revoke should find nothing left"
-    say "PASS: revoke appended the pruned UKIs to dbx and kept the entry it didn't write"
+    say "efivarfs after revoking: $(stat -f -c 'blocks=%b free=%f size=%S' /sys/firmware/efi/efivars)"
+    archix secure-boot revoke --dry-run 2>&1 | grep -q "nothing to revoke" || fail "revoke should find nothing left"
+    say "PASS: revoke_unused appended the pruned UKIs to dbx and kept the entry archix didn't write"
     mkdir -p /boot/EFI/revoketest
     cp /var/tmp/revoked.efi /boot/EFI/revoketest/revoked.efi
     printf 'title revoked\nefi /EFI/revoketest/revoked.efi\n' > /boot/loader/entries/revoketest.conf
