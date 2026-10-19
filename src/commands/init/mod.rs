@@ -342,7 +342,13 @@ fn write_and_lock(
     if !facts.repacks.is_empty() {
         let mut size = 0;
         for pkg in &facts.repacks {
-            size += repack::write_recipe(pkg, Path::new("/"), &dir.join("pkgbuilds").join(&pkg.name))?;
+            size += repack::write_recipe(
+                pkg,
+                Path::new("/"),
+                &dir.join("pkgbuilds").join(&pkg.name),
+                &paths.cache.join("sources"),
+            )?
+            .size;
         }
         let names: Vec<String> = facts.repacks.iter().map(|pkg| pkg.name.clone()).collect();
         done(format!(
@@ -485,8 +491,9 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
             .collect();
     }
     let explicit_foreign: BTreeSet<String> = foreign_explicit.iter().cloned().collect();
-    let (repacks, repacked, left_alone) =
-        choose_repacks(&explicit_foreign, &unknown, |name| repack::read(Path::new("/"), name));
+    let (repacks, repacked, left_alone) = choose_repacks(&explicit_foreign, &unknown, |name| {
+        repack::read(Path::new("/"), name, &[])
+    });
     let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).chain(&repacked).cloned().collect();
     packages.sort();
     packages.dedup();

@@ -1,10 +1,10 @@
 //! Turns an installed package that no repo or the AUR has, one built by hand or gone from the AUR, into a recipe: its files as pacman installed them, with its metadata and install script.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use flate2::read::GzDecoder;
@@ -48,10 +48,20 @@ pub struct Installed {
     pub backup: Vec<String>,
     pub install: Option<String>,
     pub entries: Vec<Entry>,
+    /// Config files you edited, as the package file in a cache shipped them.
+    pub originals: BTreeMap<String, Vec<u8>>,
+    /// Config files you edited that no cached package file has as shipped, which the recipe leaves out.
+    pub left_out: Vec<String>,
+}
+
+/// Where a recipe's file archive went, and its size.
+pub struct Written {
+    pub archive: PathBuf,
+    pub size: u64,
 }
 
 /// The installed `name` from pacman's local database under `root`, if every file it owns is still as pacman installed it (the config files it lets you edit aside), else why not.
-pub fn read(root: &Path, name: &str) -> std::result::Result<Installed, String> {
+pub fn read(root: &Path, name: &str, _caches: &[PathBuf]) -> std::result::Result<Installed, String> {
     let local = root.join("var/lib/pacman/local");
     let entry = fs::read_dir(&local)
         .into_iter()
@@ -118,6 +128,8 @@ pub fn read(root: &Path, name: &str) -> std::result::Result<Installed, String> {
         backup,
         install: fs::read_to_string(entry.join("install")).ok(),
         entries,
+        originals: BTreeMap::new(),
+        left_out: Vec::new(),
     })
 }
 
@@ -177,7 +189,7 @@ fn parse_mtree(text: &str) -> Vec<Entry> {
 }
 
 /// Writes `dir` (pkgbuilds/<name>) as a recipe that builds `pkg` again from its files under `root`, returning the size of the file archive.
-pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path) -> Result<u64> {
+pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, _sources: &Path) -> Result<Written> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let archive = dir.join("files.tar.zst");
     let encoder = zstd::Encoder::new(
@@ -255,7 +267,10 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path) -> Result<u64> {
     );
     text.push_str("package() {\n  bsdtar --numeric-owner -xpf \"$srcdir/files.tar.zst\" -C \"$pkgdir\"\n}\n");
     fs::write(dir.join("PKGBUILD"), text)?;
-    Ok(fs::metadata(&archive)?.len())
+    Ok(Written {
+        size: fs::metadata(&archive)?.len(),
+        archive,
+    })
 }
 
 fn quote(value: &str) -> String {
@@ -312,10 +327,48 @@ mod tests {
         root
     }
 
+    /// A package file in a cache that ships the config file as it was packaged.
+    fn cache_with_original(conf: &str) -> tempfile::TempDir {
+        let cache = tempfile::tempdir().unwrap();
+        let file = fs::File::create(cache.path().join("handmade-1:1.2-3-x86_64.pkg.tar.zst")).unwrap();
+        let mut tar = tar::Builder::new(zstd::Encoder::new(file, 3).unwrap().auto_finish());
+        let mut header = tar::Header::new_ustar();
+        header.set_size(conf.len() as u64);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, "etc/handmade.conf", conf.as_bytes())
+            .unwrap();
+        tar.into_inner().unwrap();
+        cache
+    }
+
+    fn archive_contents(archive: &Path) -> Vec<String> {
+        let mut tar = tar::Archive::new(zstd::Decoder::new(fs::File::open(archive).unwrap()).unwrap());
+        let mut seen = Vec::new();
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let header = entry.header().clone();
+            let mut content = String::new();
+            entry.read_to_string(&mut content).unwrap();
+            seen.push(format!(
+                "{} {:o} {} {} {}",
+                entry.path().unwrap().display(),
+                header.mode().unwrap(),
+                header.uid().unwrap(),
+                header
+                    .link_name()
+                    .unwrap()
+                    .map(|l| l.display().to_string())
+                    .unwrap_or_default(),
+                content
+            ));
+        }
+        seen
+    }
+
     #[test]
     fn an_installed_package_reads_back_with_its_files() {
         let root = installed_root("#!/bin/sh", "edited\n");
-        let pkg = read(root.path(), "handmade").unwrap();
+        let pkg = read(root.path(), "handmade", &[]).unwrap();
         assert_eq!(pkg.version, "1:1.2-3");
         assert_eq!(pkg.depends, ["bash", "glibc>=2.40"]);
         assert_eq!(pkg.backup, ["etc/handmade.conf"]);
@@ -338,79 +391,99 @@ mod tests {
         assert_eq!((doc.mode, doc.uid, doc.gid, doc.mtime), (0o644, 1000, 1000, 7));
         assert_eq!(pkg.entries[5].kind, Kind::Link("handmade".into()));
         assert_eq!(pkg.entries[4].mode, 0o755);
+        assert_eq!(
+            pkg.left_out,
+            ["etc/handmade.conf"],
+            "an edited config file with no packaged original is left out"
+        );
+        assert!(pkg.originals.is_empty());
+    }
+
+    #[test]
+    fn an_edited_config_file_comes_from_the_package_file_in_a_cache() {
+        let root = installed_root("#!/bin/sh", "edited\n");
+        let cache = cache_with_original("old\n");
+        let pkg = read(root.path(), "handmade", &[cache.path().to_path_buf()]).unwrap();
+        assert_eq!(pkg.originals["etc/handmade.conf"], b"old\n");
+        assert!(pkg.left_out.is_empty());
+        let tampered = cache_with_original("not what was installed\n");
+        let pkg = read(root.path(), "handmade", &[tampered.path().to_path_buf()]).unwrap();
+        assert_eq!(
+            pkg.left_out,
+            ["etc/handmade.conf"],
+            "a cached file that doesn't match the mtree isn't used"
+        );
     }
 
     #[test]
     fn a_package_whose_files_changed_since_it_was_installed_is_not_read() {
         let root = installed_root("#!/bin/bash", "old\n");
         assert_eq!(
-            read(root.path(), "handmade").unwrap_err(),
+            read(root.path(), "handmade", &[]).unwrap_err(),
             "usr/bin/handmade changed since pacman installed it"
         );
         fs::remove_file(root.path().join("usr/share/my doc")).unwrap();
         fs::write(root.path().join("usr/bin/handmade"), "#!/bin/sh").unwrap();
         assert_eq!(
-            read(root.path(), "handmade").unwrap_err(),
+            read(root.path(), "handmade", &[]).unwrap_err(),
             "usr/share/my doc is missing"
         );
-        assert_eq!(read(root.path(), "other").unwrap_err(), "it isn't installed");
+        assert_eq!(read(root.path(), "other", &[]).unwrap_err(), "it isn't installed");
     }
 
     #[test]
-    fn the_recipe_builds_the_same_package_from_its_files() {
+    fn the_recipe_keeps_its_files_outside_the_config_and_leaves_edits_out() {
         let root = installed_root("#!/bin/sh", "edited\n");
-        let pkg = read(root.path(), "handmade").unwrap();
+        let pkg = read(root.path(), "handmade", &[]).unwrap();
         let dir = root.path().join("pkgbuilds/handmade");
-        let size = write_recipe(&pkg, root.path(), &dir).unwrap();
-        let archive = dir.join("files.tar.zst");
-        assert_eq!(size, fs::metadata(&archive).unwrap().len());
-        let expected = format!(
-            "# Made by archix init from the installed handmade 1:1.2-3, which no repo or the AUR has: its files as pacman installed them.\n\
-             pkgname=handmade\nepoch=1\npkgver=1.2\npkgrel=3\npkgdesc='made by '\\''hand'\\'''\narch=('x86_64')\nurl='https://example.org'\n\
-             license=('MIT')\ngroups=('tools')\ndepends=('bash' 'glibc>=2.40')\noptdepends=('python: for the script')\n\
-             provides=('handmade-bin=1.2')\nconflicts=('handmade-git')\nreplaces=('old-handmade')\nbackup=('etc/handmade.conf')\n\
-             install=handmade.install\noptions=('!strip' '!debug' '!lto' '!zipman' '!purge' 'docs' 'libtool' 'staticlibs' 'emptydirs')\n\
-             source=('files.tar.zst')\nnoextract=('files.tar.zst')\nsha256sums=('{}')\n\n\
-             package() {{\n  bsdtar --numeric-owner -xpf \"$srcdir/files.tar.zst\" -C \"$pkgdir\"\n}}\n",
-            crate::fetch::sha256(&archive).unwrap()
-        );
-        assert_eq!(fs::read_to_string(dir.join("PKGBUILD")).unwrap(), expected);
+        let sources = root.path().join("var/cache/archix/sources");
+        let written = write_recipe(&pkg, root.path(), &dir, &sources).unwrap();
+        let sha = crate::fetch::sha256(&written.archive).unwrap();
+        assert_eq!(written.archive, sources.join(&sha));
+        assert_eq!(written.size, fs::metadata(&written.archive).unwrap().len());
+        let mut in_config: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        in_config.sort();
         assert_eq!(
-            fs::read_to_string(dir.join("handmade.install")).unwrap(),
-            "post_install() {\n  true\n}\n"
+            in_config,
+            ["PKGBUILD", "handmade.install"],
+            "no files of the package go into the config"
         );
-        let mut tar = tar::Archive::new(zstd::Decoder::new(fs::File::open(&archive).unwrap()).unwrap());
-        let mut seen = Vec::new();
-        for entry in tar.entries().unwrap() {
-            let mut entry = entry.unwrap();
-            let header = entry.header().clone();
-            let mut content = String::new();
-            entry.read_to_string(&mut content).unwrap();
-            seen.push(format!(
-                "{} {:o} {} {} {}",
-                entry.path().unwrap().display(),
-                header.mode().unwrap(),
-                header.uid().unwrap(),
-                header
-                    .link_name()
-                    .unwrap()
-                    .map(|l| l.display().to_string())
-                    .unwrap_or_default(),
-                content
-            ));
-        }
+        let pkgbuild = fs::read_to_string(dir.join("PKGBUILD")).unwrap();
+        let mut lines = pkgbuild.lines();
         assert_eq!(
-            seen,
+            lines.next(),
+            Some(
+                "# Made by archix init from the installed handmade 1:1.2-3, which no repo or the AUR has; its files are kept in /var/cache/archix/sources, not in the config."
+            )
+        );
+        assert_eq!(lines.next(), Some("# archix: private"));
+        assert!(!pkgbuild.contains("backup="), "{pkgbuild}");
+        assert!(pkgbuild.contains(&format!("sha256sums=('{sha}')")), "{pkgbuild}");
+        assert!(pkgbuild.contains("install=handmade.install"), "{pkgbuild}");
+        assert_eq!(
+            archive_contents(&written.archive),
             [
                 "etc 755 0  ",
-                "etc/handmade.conf 644 0  edited\n",
                 "usr 755 0  ",
                 "usr/bin 755 0  ",
                 "usr/bin/handmade 755 0  #!/bin/sh",
                 "usr/bin/hm 777 0 handmade ",
                 "usr/share 755 0  ",
                 "usr/share/my doc 644 1000  doc",
-            ]
+            ],
+            "the edited config file isn't in the archive"
+        );
+        let cache = cache_with_original("old\n");
+        let pkg = read(root.path(), "handmade", &[cache.path().to_path_buf()]).unwrap();
+        let written = write_recipe(&pkg, root.path(), &dir, &sources).unwrap();
+        assert!(archive_contents(&written.archive).contains(&"etc/handmade.conf 644 0  old\n".to_string()));
+        assert!(
+            fs::read_to_string(dir.join("PKGBUILD"))
+                .unwrap()
+                .contains("backup=('etc/handmade.conf')")
         );
     }
 }
