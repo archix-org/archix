@@ -50,6 +50,17 @@ outside_usr() {
   same_as_before "$1"
 }
 
+# Files only the rolled-back packages owned outside /usr, which the upgrade wrote there and the swap leaves behind: pacman refuses the next upgrade over them.
+leftovers() {
+  local owned files=() path
+  owned() { grep -hv -e '^%' -e '/$' -e '^$' "$1"/*/files | sort -u; }
+  while read -r path; do
+    [ -e "/$path" ] || [ -L "/$path" ] && files+=("/$path")
+  done < <(comm -23 <(owned /var/lib/archix-next-db/local) <(owned /var/lib/pacman/local) | grep -v '^usr/')
+  say "METRIC $fs $1 leftover_outside_usr=${#files[@]} files=$(echo "${files[@]:0:8}")"
+  [ ${#files[@]} = 0 ] || rm -f "${files[@]}"
+}
+
 # Files pacman's checks find changed, missing or torn; config files edited on purpose count too, so it's compared against the count before.
 altered() { pacman -Qkk 2>&1 | grep -cE '\((No such file or directory|Size mismatch|SHA256 checksum mismatch|Symlink path mismatch)\)'; }
 
@@ -113,6 +124,7 @@ a_b() {
   say "METRIC $fs a-b-$clone kept used=$(used) inodes=$(inodes) usr_bytes=$(du -sxb /usr | cut -f1) both_bytes=$(du -sxbc /usr /usr.next | tail -1 | cut -f1)"
   measure "a-b-$clone-rollback" swap
   outside_usr "a-b-$clone-rollback"
+  leftovers "a-b-$clone-rollback"
   measure "a-b-$clone-drop" drop_next
 }
 if [ "$fs" = btrfs ]; then
@@ -128,13 +140,13 @@ fi
 if [ "$fs" = btrfs ]; then clone_snapshot; else clone_hardlinks; fi
 copy_db
 upgrade_copy > /var/log/measure-a-b-killed.log 2>&1 &
-sleep 30
+sleep 10
 pkill -9 -x pacman
 wait
 say "METRIC $fs a-b-killed live_altered_files=$(($(altered) - baseline)) live_packages_changed=$(pacman -Q | diff "$state/before" - | grep -c '^>')"
 drop_next
 pacman -Su --noconfirm > /var/log/measure-in-place-killed.log 2>&1 &
-sleep 30
+sleep 10
 pkill -9 -x pacman
 wait
 rm -f /var/lib/pacman/db.lck
