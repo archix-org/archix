@@ -18,16 +18,35 @@ fn boot_body(extra: &str) -> String {
     )
 }
 
+/// Entry ids, as systemd-boot reports them: the file names without their boot counters.
 fn entries() -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(format!("{ESP}/loader/entries"))
         .map(|dir| {
             dir.flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .map(|e| entry_id(&e.file_name().to_string_lossy()))
                 .collect()
         })
         .unwrap_or_default();
     names.sort();
     names
+}
+
+fn entry_id(file: &str) -> String {
+    match file.split_once('+') {
+        Some((stem, _)) => format!("{stem}.conf"),
+        None => file.to_string(),
+    }
+}
+
+/// The entry file behind an id, whatever its boot counters say.
+fn entry_file(id: &str) -> String {
+    let file = fs::read_dir(format!("{ESP}/loader/entries"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|file| entry_id(file) == id)
+        .unwrap_or_else(|| panic!("no entry {id}"));
+    format!("{ESP}/loader/entries/{file}")
 }
 
 fn current() -> u32 {
@@ -36,7 +55,7 @@ fn current() -> u32 {
 
 /// The UKI a boot menu entry starts.
 fn uki(entry: &str) -> String {
-    let text = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap();
+    let text = fs::read_to_string(entry_file(entry)).unwrap();
     let path = text.lines().find_map(|line| line.strip_prefix("efi ")).unwrap().trim();
     format!("{ESP}{path}")
 }
@@ -58,7 +77,7 @@ fn every_generation_gets_a_signed_boot_entry_and_boots_back() {
     assert!(entries().contains(&entry), "{:?}", entries());
     let info = inspect(&entry);
     assert!(info.contains("root=/dev/vda2"), "{info}");
-    let menu = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap();
+    let menu = fs::read_to_string(entry_file(&entry)).unwrap();
     assert!(
         menu.contains(&format!("generation {with_tree}")),
         "the entry's title names the generation:\n{menu}"
@@ -247,7 +266,7 @@ fn adding_packages_one_at_a_time_reuses_one_uki() {
     // bootctl refuses an ESP that isn't a FAT partition, as this one isn't; the VM boot suite has systemd-boot read real entries.
     for generation in first..=current() {
         let entry = format!("archix-{generation}.conf");
-        let menu = fs::read_to_string(format!("{ESP}/loader/entries/{entry}")).unwrap_or_default();
+        let menu = fs::read_to_string(entry_file(&entry)).unwrap_or_default();
         println!("{entry}:\n{menu}");
         assert!(
             menu.contains(&format!("generation {generation})")) && Path::new(&uki(&entry)).is_file(),
@@ -287,6 +306,23 @@ fn without_a_trustworthy_booted_entry_boot_check_rolls_nothing_back() {
         assert_eq!(current(), newest, "{case}: nothing may roll back");
     }
     let entry = format!("archix-{older}.conf");
+    // Someone with write access to the ESP edits the entry that booted, here to start another generation's UKI.
+    let file = entry_file(&entry);
+    let written = fs::read_to_string(&file).unwrap();
+    fs::write(
+        &file,
+        written.replace(&format!("version {older}"), &format!("version {newest}")),
+    )
+    .unwrap();
+    let out = setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    println!("boot-check with an edited {entry}:\n{out}");
+    assert_eq!(
+        current(),
+        newest,
+        "an entry that isn't what archix wrote may not roll anything back"
+    );
+    assert!(out.contains("isn't the entry archix wrote"), "{out}");
+    fs::write(&file, written).unwrap();
     let out = setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
     println!("boot-check with {entry}:\n{out}");
     assert_eq!(
