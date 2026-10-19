@@ -26,6 +26,7 @@ use archix::pacman::{LocalPkg, read_local_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
 use archix::recipes::Recipes;
+use archix::repack::{self, Installed};
 use archix::repos::Custom;
 
 use super::lock::pending;
@@ -103,6 +104,11 @@ struct Facts {
     packages: Vec<String>,
     aur_packages: Vec<String>,
     unknown: Vec<String>,
+    /// Packages in no repo or the AUR that init rebuilds as recipes from their installed files, and the ones of them it declares.
+    repacks: Vec<Installed>,
+    repacked: Vec<String>,
+    /// Explicitly installed packages in no repo or the AUR that stay alone, with why.
+    left_alone: Vec<(String, String)>,
     orphans: Vec<String>,
     /// Installed as dependencies that only something's optional dependencies want; kept as dependencies via `prefer`.
     optional: Vec<String>,
@@ -333,13 +339,26 @@ fn write_and_lock(
 ) -> Result<()> {
     let dir = settle_location(config_dir, chosen)?;
     let config = build(facts, answers, &dir, host);
+    if !facts.repacks.is_empty() {
+        let mut size = 0;
+        for pkg in &facts.repacks {
+            size += repack::write_recipe(pkg, Path::new("/"), &dir.join("pkgbuilds").join(&pkg.name))?;
+        }
+        let names: Vec<String> = facts.repacks.iter().map(|pkg| pkg.name.clone()).collect();
+        done(format!(
+            "{} no repo or the AUR has, rebuilt from their installed files in pkgbuilds/ ({} MiB): {}",
+            count(names.len(), "package", "packages"),
+            size.div_ceil(1 << 20),
+            some_of(&names, 8)
+        ));
+    }
 
     section("Lock");
     write_config(&dir, host, &config)?;
     let mut config = config;
     let evaluation = evaluate(&dir, host)?;
     let mut declared = declared(&evaluation.config)?;
-    let mut lock = lock_as_installed(&declared, facts, paths)?;
+    let mut lock = lock_as_installed(&declared, facts, paths, &dir)?;
     let swapped = swapped_providers(&lock, facts, &declared);
     let evaluation = if swapped.is_empty() {
         evaluation
@@ -352,7 +371,7 @@ fn write_and_lock(
         write_host(&dir, host, &config)?;
         let evaluation = evaluate(&dir, host)?;
         declared = super::declared(&evaluation.config)?;
-        lock = lock_as_installed(&declared, facts, paths)?;
+        lock = lock_as_installed(&declared, facts, paths, &dir)?;
         evaluation
     };
     let target = Target {
@@ -465,7 +484,10 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
             .cloned()
             .collect();
     }
-    let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).cloned().collect();
+    let explicit_foreign: BTreeSet<String> = foreign_explicit.iter().cloned().collect();
+    let (repacks, repacked, left_alone) =
+        choose_repacks(&explicit_foreign, &unknown, |name| repack::read(Path::new("/"), name));
+    let mut packages: Vec<String> = explicit.iter().chain(&aur_packages).chain(&repacked).cloned().collect();
     packages.sort();
     packages.dedup();
     let (orphans, optional): (Vec<String>, Vec<String>) = all_orphans
@@ -566,6 +588,9 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         packages,
         aur_packages,
         unknown,
+        repacks,
+        repacked,
+        left_alone,
         orphans,
         optional,
         settings,
@@ -582,6 +607,63 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         flatpak_gone,
         dotfiles,
     })
+}
+
+/// Which packages in no repo or the AUR init rebuilds as recipes: each explicitly installed one whose files are as pacman installed them, with the ones of those packages it depends on; the rest stay alone, with why.
+fn choose_repacks(
+    explicit: &BTreeSet<String>,
+    unknown: &[String],
+    read: impl Fn(&str) -> std::result::Result<Installed, String>,
+) -> (Vec<Installed>, Vec<String>, Vec<(String, String)>) {
+    let read: BTreeMap<&str, std::result::Result<Installed, String>> =
+        unknown.iter().map(|name| (name.as_str(), read(name))).collect();
+    let mut providers: BTreeMap<&str, &str> = unknown.iter().map(|name| (name.as_str(), name.as_str())).collect();
+    for (name, pkg) in &read {
+        for provided in pkg.iter().flat_map(|pkg| &pkg.provides) {
+            providers
+                .entry(archix::aur::srcinfo::dep_name(provided))
+                .or_insert(name);
+        }
+    }
+    let (mut repacks, mut repacked, mut left) = (Vec::<Installed>::new(), Vec::new(), Vec::new());
+    for wanted in unknown.iter().filter(|name| explicit.contains(*name)) {
+        let mut closure = vec![wanted.as_str()];
+        let mut problem = None;
+        let mut next = 0;
+        while let Some(&name) = closure.get(next) {
+            next += 1;
+            match &read[name] {
+                Err(why) if name == wanted => problem = Some(why.clone()),
+                Err(why) => problem = Some(format!("it needs {name}, and {why}")),
+                Ok(pkg) => {
+                    for dep in &pkg.depends {
+                        if let Some(&provider) = providers.get(archix::aur::srcinfo::dep_name(dep))
+                            && !closure.contains(&provider)
+                        {
+                            closure.push(provider);
+                        }
+                    }
+                }
+            }
+            if problem.is_some() {
+                break;
+            }
+        }
+        match problem {
+            Some(why) => left.push((wanted.clone(), why)),
+            None => {
+                repacked.push(wanted.clone());
+                for name in closure {
+                    if let Ok(pkg) = &read[name]
+                        && !repacks.iter().any(|have| have.name == name)
+                    {
+                        repacks.push(pkg.clone());
+                    }
+                }
+            }
+        }
+    }
+    (repacks, repacked, left)
 }
 
 /// The config `answers` make of `facts`.
@@ -622,7 +704,12 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     if !answers.strict {
         config.set("undeclared_packages", Lua::str("warn"));
     }
-    let mut ignored = facts.unknown.clone();
+    let mut ignored: Vec<String> = facts
+        .unknown
+        .iter()
+        .filter(|name| !facts.repacks.iter().any(|pkg| pkg.name == **name))
+        .cloned()
+        .collect();
     if answers.keep_orphans {
         ignored.extend(facts.orphans.iter().cloned());
     }
@@ -835,10 +922,15 @@ fn report(facts: &Facts, answers: &Answers) {
         "{} declared{from_aur}",
         count(facts.packages.len(), "package", "packages")
     ));
-    if !facts.unknown.is_empty() {
+    if !facts.repacked.is_empty() {
+        done(format!(
+            "rebuilt from their installed files, since no repo or the AUR has them: {}",
+            some_of(&facts.repacked, 8)
+        ));
+    }
+    for (name, why) in &facts.left_alone {
         warn(format!(
-            "not in any repo or the AUR, so archix leaves them alone: {}",
-            some_of(&facts.unknown, 8)
+            "{name} is in no repo or the AUR, and archix leaves it alone: {why}"
         ));
     }
     if !facts.orphans.is_empty() {
@@ -1125,7 +1217,7 @@ fn evaluate(dir: &Path, host: &str) -> Result<Evaluation> {
 }
 
 /// Locks the snapshot the installed official packages were built for, then pins every version that differs from it.
-fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths) -> Result<HostLock> {
+fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths, dir: &Path) -> Result<HostLock> {
     let machine = &facts.machine;
     let archive = Archive::new(ARCHIVE_URL);
     let newest = machine
@@ -1146,7 +1238,7 @@ fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths) -> Resul
     let date = best_snapshot(&archive, &user_cache()?, day, latest, &official, &machine.local)?;
     let dates = BTreeSet::from([date]);
     let git = aur_git(declared)?;
-    let recipes = Recipes::none();
+    let recipes = Recipes::load(dir, &declared.patches, &user_cache()?)?;
     let aur = aur_source(&git, declared, &archive, None, false, &recipes);
     fit(
         &archive,
@@ -1179,6 +1271,43 @@ fn swapped_providers(lock: &HostLock, facts: &Facts, declared: &Declared) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreign_packages_are_repacked_with_their_foreign_dependencies_or_left_alone_with_why() {
+        let pkg = |name: &str, depends: &[&str], provides: &[&str]| Installed {
+            name: name.into(),
+            depends: depends.iter().map(|d| d.to_string()).collect(),
+            provides: provides.iter().map(|p| p.to_string()).collect(),
+            ..Default::default()
+        };
+        let unknown: Vec<String> = ["app", "broken", "dep-only", "libdep", "uses-broken"]
+            .map(String::from)
+            .to_vec();
+        let explicit = BTreeSet::from(["app", "broken", "uses-broken"].map(String::from));
+        let (repacks, repacked, left) = choose_repacks(&explicit, &unknown, |name| match name {
+            "app" => Ok(pkg("app", &["libdep.so=1-64", "bash"], &[])),
+            "libdep" => Ok(pkg("libdep", &[], &["libdep.so=1-64"])),
+            "broken" => Err("usr/bin/x changed since pacman installed it".into()),
+            "uses-broken" => Ok(pkg("uses-broken", &["broken>=2"], &[])),
+            _ => Ok(pkg(name, &[], &[])),
+        });
+        let names: Vec<&str> = repacks.iter().map(|pkg| pkg.name.as_str()).collect();
+        assert_eq!(names, ["app", "libdep"]);
+        assert_eq!(repacked, ["app"]);
+        assert_eq!(
+            left,
+            [
+                (
+                    "broken".to_string(),
+                    "usr/bin/x changed since pacman installed it".to_string()
+                ),
+                (
+                    "uses-broken".to_string(),
+                    "it needs broken, and usr/bin/x changed since pacman installed it".to_string()
+                ),
+            ]
+        );
+    }
 
     fn machine(names: &[&str]) -> BTreeMap<String, LocalPkg> {
         names

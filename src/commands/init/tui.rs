@@ -860,11 +860,14 @@ impl<'a> App<'a> {
                         some_of(&ids, 4)
                     )));
                 }
-                if !facts.unknown.is_empty() {
-                    lines.push(warn(format!(
-                        "not in any repo or the AUR, so left alone: {}",
-                        some_of(&facts.unknown, 6)
+                if !facts.repacked.is_empty() {
+                    lines.push(done(format!(
+                        "rebuilt from their installed files, since no repo or the AUR has them: {}",
+                        some_of(&facts.repacked, 6)
                     )));
+                }
+                for (name, why) in &facts.left_alone {
+                    lines.push(warn(format!("{name} is in no repo or the AUR, so left alone: {why}")));
                 }
                 if !facts.flatpak_gone.is_empty() {
                     lines.push(warn(format!(
@@ -1306,6 +1309,9 @@ mod tests {
             packages: vec!["base".into(), "yay-bin".into()],
             aur_packages: vec!["yay-bin".into()],
             unknown: Vec::new(),
+            repacks: Vec::new(),
+            repacked: Vec::new(),
+            left_alone: Vec::new(),
             orphans: vec!["old-dep".into()],
             optional: vec!["libfido2".into()],
             unreproducible: vec!["zapret-list-update.timer".into()],
