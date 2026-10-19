@@ -27,7 +27,7 @@ detach() {
   umount -R /mnt
   losetup -d "$esp" "$root"
 }
-trap 'umount -R /mnt 2> /dev/null; losetup -D' EXIT
+trap 'umount -R /mnt 2> /dev/null || true; losetup -D' EXIT
 
 # Bytes in use on the root (btrfs: data and metadata used, not allocated), inodes on ext4, bytes on the ESP.
 usage() {
