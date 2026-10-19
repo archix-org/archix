@@ -144,10 +144,16 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
         rebuilt, "first",
         "the rebuild should build the commit the first build got:\n{out}"
     );
-    assert!(
-        !changed_download.status.success() && installed("archix-test-vcs").is_none(),
-        "a download that changed since the first build should fail its check:\n{}",
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&changed_download.stdout),
         String::from_utf8_lossy(&changed_download.stderr)
+    );
+    assert!(
+        !changed_download.status.success()
+            && installed("archix-test-vcs").is_none()
+            && said.contains("data ... FAILED"),
+        "a download that changed since the first build should fail its check:\n{said}"
     );
 }
 
