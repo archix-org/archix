@@ -92,6 +92,7 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
     // The build user clones a repository root owns.
     assert!(
         Command::new("git")
+            .current_dir("/")
             .args(["config", "--system", "--add", "safe.directory", "*"])
             .status()
             .unwrap()
