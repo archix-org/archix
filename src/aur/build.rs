@@ -45,6 +45,8 @@ pub struct Job<'a> {
     pub on_host: bool,
     /// The sha256 archix.lock records for each package's build, which a package cache's copy has to match.
     pub locked: &'a BTreeMap<String, String>,
+    /// What archix.lock records the first build's sources were, which this build gets again.
+    pub sources: &'a BTreeMap<String, String>,
 }
 
 /// The files one build produced, so the same commit and snapshot never needs building twice.
@@ -54,6 +56,23 @@ struct Record {
     /// sha256 of each file, so a file a crash tore is built again instead of reused.
     #[serde(default)]
     sha256: Vec<String>,
+    /// What the build's sources were: each git source's commit and the sha256 of each unchecked download.
+    #[serde(default)]
+    sources: BTreeMap<String, String>,
+}
+
+/// What the build of `base` at `commit` and `date` recorded its sources were, from its build record.
+pub fn recorded_sources(paths: &Paths, base: &str, commit: &str, date: Date) -> BTreeMap<String, String> {
+    let record = paths
+        .cache
+        .join("aur-builds")
+        .join(base)
+        .join(format!("{commit}-{date}.json"));
+    fs::read_to_string(record)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Record>(&text).ok())
+        .map(|record| record.sources)
+        .unwrap_or_default()
 }
 
 impl Builder<'_> {
@@ -82,6 +101,7 @@ impl Builder<'_> {
             repo_deps,
             on_host,
             locked,
+            sources,
         } = job;
         let record = self.record(base, commit, date);
         if let Ok(text) = fs::read_to_string(&record)
@@ -117,6 +137,12 @@ impl Builder<'_> {
         match recipe {
             Some(recipe) => crate::recipes::copy_dir(recipe, &dir)?,
             None => self.git.export(base, commit, &dir)?,
+        }
+        let tail = super::sources::pinned_tail(info, sources);
+        if !tail.is_empty() {
+            let pkgbuild = dir.join("PKGBUILD");
+            let text = fs::read_to_string(&pkgbuild).with_context(|| format!("reading {}", pkgbuild.display()))?;
+            fs::write(&pkgbuild, text + &tail)?;
         }
         chown(&dir)?;
         eprintln!(
@@ -168,6 +194,7 @@ impl Builder<'_> {
             let text = serde_json::to_string(&Record {
                 files: files.clone(),
                 sha256: hashes,
+                sources: super::sources::pins(&dir, info)?,
             })?;
             crate::durable::write(&record, text.as_bytes())?;
             Ok(files
@@ -366,7 +393,9 @@ impl Builder<'_> {
 
     fn build_in_chroot(&self, dir: &Path, inputs: &[PathBuf], nocheck: bool) -> Result<()> {
         let mut cmd = devtools("makechrootpkg");
+        // Sources land in the build directory, where archix reads what the build got.
         cmd.current_dir(dir)
+            .env("SRCDEST", dir)
             .env("GNUPGHOME", self.keyring())
             .arg("-c")
             .arg("-r")
@@ -441,6 +470,7 @@ impl Builder<'_> {
             Command::new("runuser")
                 .args(["-u", BUILD_USER, "--", "env"])
                 .arg(format!("HOME={}", dir.display()))
+                .arg(format!("SRCDEST={}", dir.display()))
                 .arg(format!("GNUPGHOME={}", self.keyring().display()))
                 .args(["makepkg", "--noconfirm", "--clean"])
                 .args(nocheck.then_some("--nocheck"))

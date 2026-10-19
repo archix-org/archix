@@ -371,11 +371,11 @@ pub fn status(target: &Target) -> Result<()> {
     match floating.len() {
         0 => {}
         1 => println!(
-            "1 package builds from a VCS source, so a rebuild from its locked recipe can differ (`archix cache push` keeps the exact build): {}",
+            "1 package builds from a VCS source archix.lock has no commit for yet, so its next build takes upstream's newest code, whose git commit is then recorded: {}",
             floating[0]
         ),
         n => println!(
-            "{n} packages build from VCS sources, so rebuilds from their locked recipes can differ (`archix cache push` keeps the exact builds): {}",
+            "{n} packages build from VCS sources archix.lock has no commits for yet, so their next builds take upstream's newest code, whose git commits are then recorded: {}",
             floating.join(", ")
         ),
     }
@@ -416,7 +416,7 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
     let old_packages = old.map_or(&empty, |old| &old.packages);
     for (name, pkg) in &new.packages {
         let note = if floats(name, pkg) {
-            " (builds from a VCS source, so it floats)"
+            " (builds from a VCS source; its first build records the commit)"
         } else {
             ""
         };

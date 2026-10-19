@@ -64,6 +64,9 @@ pub struct Locked {
     /// The AUR maintainer when locked, empty for an orphaned package; None in locks from before archix recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintainer: Option<String>,
+    /// For AUR and recipe packages, what the first build's sources were, by `.SRCINFO` entry: each git source's commit and the sha256 of each download its checksums skip, which later builds reuse.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sources: BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -111,7 +114,7 @@ impl HostLock {
         }
     }
 
-    /// Carries over to a fresh resolution at the same date what it can't work out again: `old`'s pins, and the build hashes of AUR and recipe packages still at the same commit.
+    /// Carries over to a fresh resolution at the same date what it can't work out again: `old`'s pins, and the build hashes and pinned sources of AUR and recipe packages still at the same commit.
     pub fn keep_pins(&mut self, old: &HostLock) {
         if old.date != self.date {
             return;
@@ -126,6 +129,7 @@ impl HostLock {
                 && before.version == fresh.version
             {
                 fresh.sha256 = before.sha256.clone();
+                fresh.sources = before.sources.clone();
             }
         }
         for name in &old.pinned {
@@ -199,6 +203,14 @@ impl Lockfile {
                 }
                 if let Some(maintainer) = &pkg.maintainer {
                     fields.push(format!("maintainer = {}", string(maintainer)));
+                }
+                if !pkg.sources.is_empty() {
+                    let pins: Vec<String> = pkg
+                        .sources
+                        .iter()
+                        .map(|(entry, pin)| format!("{} = {}", string(entry), string(pin)))
+                        .collect();
+                    fields.push(format!("sources = {{ {} }}", pins.join(", ")));
                 }
                 fields.push(format!("explicit = {}", pkg.explicit));
                 if pkg.build_only {
@@ -293,6 +305,7 @@ mod tests {
                 base: Some("yay-bin".into()),
                 commit: Some("0123abcd".into()),
                 build_only: true,
+                sources: BTreeMap::from([("yay::git+https://example.org/yay.git".to_string(), "c0ffee".to_string())]),
                 ..Default::default()
             },
         );
@@ -329,7 +342,7 @@ mod tests {
         assert!(text.contains("[hosts.\"my.laptop\".packages]"), "{text}");
         assert!(text.contains("\"gtk+\" = { version = \"1:2.24-1\""), "{text}");
         assert!(
-            text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", explicit = false, build_only = true }"),
+            text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", sources = { \"yay::git+https://example.org/yay.git\" = \"c0ffee\" }, explicit = false, build_only = true }"),
             "{text}"
         );
     }

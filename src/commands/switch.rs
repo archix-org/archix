@@ -379,6 +379,14 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
                 pkg.sha256 = sha256(path)?;
                 recorded = true;
             }
+            // What the first build's sources were, so a rebuild of this lock gets them again.
+            if pkg.sources.is_empty()
+                && pkg.sha256 == sha256(path)?
+                && let (Some(base), Some(commit)) = (&pkg.base, &pkg.commit)
+            {
+                pkg.sources = archix::aur::build::recorded_sources(&paths, base, commit, lock.date);
+                recorded |= !pkg.sources.is_empty();
+            }
             let file = path.file_name().map(|f| f.to_string_lossy().into_owned());
             if let Some(version) = file.as_deref().and_then(|f| built_version(name, f))
                 && version != pkg.version

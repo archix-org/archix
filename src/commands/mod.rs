@@ -477,9 +477,10 @@ fn print_missing_ignored(ignored: &BTreeSet<String>, installed: &BTreeMap<String
     }
 }
 
-/// A package archix builds from a VCS checkout, which its locked recipe doesn't pin, going by the suffixes AUR helpers' devel modes use.
+/// A package archix builds from a VCS checkout that archix.lock records no commit for, going by the suffixes AUR helpers' devel modes use.
 fn floats(name: &str, pkg: &Locked) -> bool {
     pkg.is_built()
+        && pkg.sources.is_empty()
         && ["-git", "-hg", "-svn", "-bzr", "-fossil", "-darcs"]
             .iter()
             .any(|suffix| name.ends_with(suffix))

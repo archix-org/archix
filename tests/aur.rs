@@ -192,13 +192,15 @@ fn the_lock_and_status_say_which_aur_packages_float() {
     setup.write("init.lua", &init);
     let locked = setup.ok(&["lock", "--noconfirm"]);
     assert!(
-        locked.contains("+ archix-test-thing-git 1.0.r3.gabc1234-1 (builds from a VCS source, so it floats)"),
+        locked.contains(
+            "+ archix-test-thing-git 1.0.r3.gabc1234-1 (builds from a VCS source; its first build records the commit)"
+        ),
         "{locked}"
     );
     assert!(locked.contains("+ archix-test-steady 1.0-1\n"), "{locked}");
     let status = setup.ok(&["status"]);
     assert!(
-        status.contains("1 package builds from a VCS source, so a rebuild from its locked recipe can differ (`archix cache push` keeps the exact build): archix-test-thing-git"),
+        status.contains("1 package builds from a VCS source archix.lock has no commit for yet, so its next build takes upstream's newest code, whose git commit is then recorded: archix-test-thing-git"),
         "{status}"
     );
 }

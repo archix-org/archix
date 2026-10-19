@@ -167,6 +167,13 @@ impl<'a> Installer<'a> {
                 (!sha256.is_empty()).then(|| (pkg.name.clone(), sha256.clone()))
             })
             .collect();
+        let sources = info
+            .packages
+            .iter()
+            .filter_map(|pkg| self.lock.packages.get(&pkg.name))
+            .map(|pkg| pkg.sources.clone())
+            .find(|sources| !sources.is_empty())
+            .unwrap_or_default();
         let job = Job {
             base,
             dir: self.dirs.get(base).map(PathBuf::as_path),
@@ -178,6 +185,7 @@ impl<'a> Installer<'a> {
             repo_deps: &repo_deps,
             on_host,
             locked: &locked,
+            sources: &sources,
         };
         let files = self.builder.build(job).map_err(|error| {
             if error.is::<SetupFailed>() {
