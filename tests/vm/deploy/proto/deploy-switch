@@ -56,13 +56,15 @@ mount --bind "$stage/etc" "$view/etc"
 mount --bind "$stage/.merged/var" "$view/var"
 mount --bind "$stage/pacman" "$view/var/lib/pacman/local"
 
+# Its own PID namespace, so nothing the transaction starts (gpg-agent from pacman-key) outlives it or signals the live system.
+in_view() { unshare --pid --fork --kill-child arch-chroot "$view" "$@"; }
 mark transact
 say "running pacman $*"
-arch-chroot "$view" pacman --noconfirm "$@"
+in_view pacman --noconfirm "$@"
 if [ -n "${DEPLOY_INJECT:-}" ]; then
-  arch-chroot "$view" sh -c "$DEPLOY_INJECT"
+  in_view sh -c "$DEPLOY_INJECT"
 fi
-arch-chroot "$view" ukify build --linux /boot/vmlinuz-linux --initrd /boot/initramfs-linux.img \
+in_view ukify build --linux /boot/vmlinuz-linux --initrd /boot/initramfs-linux.img \
   --cmdline @/etc/kernel/cmdline --output /boot/archix.efi > /dev/null
 unmount_view
 rmdir "$view"

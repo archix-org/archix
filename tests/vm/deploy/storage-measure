@@ -16,6 +16,14 @@ attach() {
   mount "$esp" /mnt/efi
 }
 detach() {
+  for p in /proc/[0-9]*; do
+    [ "$p" = "/proc/$$" ] && continue
+    if readlink "$p/root" "$p/cwd" "$p"/fd/* 2> /dev/null | grep -q '^/mnt'; then
+      echo "STORAGE: left running with files on the disk: $(tr '\0' ' ' < "$p/cmdline")"
+      kill -KILL "${p#/proc/}"
+    fi
+  done
+  sleep 1
   umount -R /mnt
   losetup -d "$esp" "$root"
 }
