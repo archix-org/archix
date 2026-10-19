@@ -55,7 +55,9 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
             boot::entries(esp).len()
         );
     }
-    println!("  removes   archix-boot.service, the rescue initramfs hook, the pacman hook and the login notices");
+    println!(
+        "  removes   archix-boot.service and archix-boot-complete.service, the rescue initramfs hook, the pacman hook and the login notices"
+    );
     if restore_originals {
         println!(
             "  files     puts back the files archix replaced and deletes the ones it created, except /etc/kernel/cmdline"

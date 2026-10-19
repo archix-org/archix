@@ -190,6 +190,9 @@ enum Command {
         #[arg(long)]
         cmdline: Option<String>,
     },
+    /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: make its generation the default
+    #[command(hide = true)]
+    BootComplete,
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
@@ -451,7 +454,8 @@ fn run() -> Result<ExitCode> {
             with_sudo()
         );
     }
-    let changes_things = needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. });
+    let changes_things =
+        needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. } | Command::BootComplete);
     if needs_root(&command).is_some() {
         leave_login_session();
     }
@@ -507,6 +511,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::BootCheck { cmdline } => {
             commands::boot_check(cmdline)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::BootComplete => {
+            archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
@@ -676,6 +684,7 @@ fn run() -> Result<ExitCode> {
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
+        | Command::BootComplete
         | Command::SecureBoot(_)
         | Command::Cache(_)
         | Command::Sync { .. } => {

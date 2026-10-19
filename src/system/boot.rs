@@ -530,6 +530,11 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
     }
     crate::durable::sync_dir(&shared.join("x"))?;
     let counted = plan.tries > 0 && loader_counts_boots(crate::testhooks::loader_features());
+    if plan.tries > 0
+        && let Some(why) = counting_off()
+    {
+        eprintln!("warning: {why}");
+    }
     // systemd-boot counts tries only for entries that start their UKI with `uki`.
     let key = if counted { "uki" } else { "efi" };
     for (variant, title, dest) in &ukis {
@@ -795,16 +800,58 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
     Ok(written)
 }
 
-fn default_generation(_esp: &str) -> Option<u32> {
-    None
+/// The generation loader.conf's `default` names, which systemd-boot falls back to when a preferred entry runs out of tries.
+fn default_generation(esp: &str) -> Option<u32> {
+    let conf = fs::read_to_string(Path::new(esp).join("loader/loader.conf")).ok()?;
+    let id = conf
+        .lines()
+        .find_map(|line| match line.split_once(char::is_whitespace) {
+            Some(("default", id)) => Some(id.trim()),
+            _ => None,
+        })?;
+    parse_entry(&entry_id(id)).map(|(number, _)| number)
 }
 
-/// Generations whose entries pruning never takes: the one this boot came from and the current one, which a failed switch falls back to.
+/// Generations whose entries pruning never takes: the one this boot came from, the current one, which a failed switch falls back to, and the one `default` names, which a generation that doesn't boot falls back to.
 pub fn protected_generations(paths: &Paths) -> BTreeSet<u32> {
-    [crate::generations::Store::new(paths).current().ok().flatten(), booted()]
-        .into_iter()
-        .flatten()
-        .collect()
+    let esp = fs::read_to_string(paths.state.join("boot").join("esp")).unwrap_or_default();
+    [
+        crate::generations::Store::new(paths).current().ok().flatten(),
+        booted(),
+        default_generation(esp.trim()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// After a boot systemd-boot has counted as good, makes its generation the default, if it's the current one, so `default` doesn't lag until the next switch.
+pub fn promote_booted(paths: &Paths) -> Result<()> {
+    let (Some(booted), Some(current)) = (booted(), crate::generations::Store::new(paths).current()?) else {
+        return Ok(());
+    };
+    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
+        return Ok(());
+    };
+    let still_counting = entries(esp.trim()).iter().any(|(number, extra, path)| {
+        *number == booted
+            && !extra
+            && path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().contains('+'))
+    });
+    if booted != current || still_counting {
+        return Ok(());
+    }
+    set_default_entry(paths, booted)
+}
+
+/// Why a new generation's entry won't be counted, when the systemd-boot that started this boot can't do it.
+pub fn counting_off() -> Option<String> {
+    let features = crate::testhooks::loader_features();
+    (features != 0 && !loader_counts_boots(features)).then(|| {
+        "boot counting is off: the systemd-boot that started this boot is older than 260, so a generation that doesn't boot isn't passed over; `sudo bootctl update` installs the one your systemd package has".to_string()
+    })
 }
 
 /// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.

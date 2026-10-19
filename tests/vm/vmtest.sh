@@ -145,6 +145,7 @@ case $stage in
     archix eject --noconfirm > /dev/console 2>&1 || fail "archix eject"
     ls /boot/loader/entries > /dev/console
     for gone in /etc/systemd/system/archix-boot.service /etc/systemd/system/sysinit.target.wants/archix-boot.service /etc/pacman.d/hooks/archix.hook \
+      /etc/systemd/system/archix-boot-complete.service /etc/systemd/system/multi-user.target.wants/archix-boot-complete.service \
       /etc/profile.d/archix.sh /etc/mkinitcpio.conf.d/archix-rescue.conf /etc/initcpio/hooks/archix-rescue /boot/EFI/archix; do
       [ -e "$gone" ] && fail "eject should remove $gone"
     done

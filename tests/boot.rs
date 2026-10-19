@@ -322,6 +322,8 @@ fn eject_hands_booting_to_a_uki_mkinitcpio_keeps_building() {
     for gone in [
         "/etc/systemd/system/archix-boot.service",
         "/etc/systemd/system/sysinit.target.wants/archix-boot.service",
+        "/etc/systemd/system/archix-boot-complete.service",
+        "/etc/systemd/system/multi-user.target.wants/archix-boot-complete.service",
         "/etc/pacman.d/hooks/archix.hook",
         "/etc/profile.d/archix.sh",
         "/etc/xdg/autostart/archix-status.desktop",

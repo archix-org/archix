@@ -66,7 +66,15 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
          [Service]\nType=oneshot\nExecStart={} boot-check\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
         archix.display()
     );
-    let mut files = vec![(root.join("etc/systemd/system/archix-boot.service"), unit)];
+    let complete = format!(
+        "[Unit]\nDescription=archix: make a generation that booted fine the default\nAfter=systemd-bless-boot.service\n\n\
+         [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
+        archix.display()
+    );
+    let mut files = vec![
+        (root.join("etc/systemd/system/archix-boot.service"), unit),
+        (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
+    ];
     if root.join(STATIC_BINARY.trim_start_matches('/')).exists() {
         files.push((
             root.join("etc/initcpio/install/archix-rescue"),
@@ -139,6 +147,8 @@ pub fn remove(paths: &Paths) -> Result<()> {
     let mut gone = vec![
         root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service"),
         root.join("etc/systemd/system/archix-boot.service"),
+        root.join("etc/systemd/system/multi-user.target.wants/archix-boot-complete.service"),
+        root.join("etc/systemd/system/archix-boot-complete.service"),
     ];
     gone.extend(files(paths, Path::new("archix")).into_iter().map(|(path, _)| path));
     gone.extend(rescue_files(paths));
@@ -162,16 +172,29 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
         .and_then(Path::parent)
         .unwrap_or(Path::new("/"))
         .to_path_buf();
-    let wants = root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service");
+    let wants = [
+        ("sysinit.target.wants", "archix-boot.service"),
+        ("multi-user.target.wants", "archix-boot-complete.service"),
+    ]
+    .map(|(dir, unit)| {
+        (
+            root.join("etc/systemd/system").join(dir).join(unit),
+            format!("/etc/systemd/system/{unit}"),
+        )
+    });
     if boot {
-        if let Some(dir) = wants.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        if fs::symlink_metadata(&wants).is_err() {
-            std::os::unix::fs::symlink("/etc/systemd/system/archix-boot.service", &wants)?;
+        for (link, unit) in &wants {
+            if let Some(dir) = link.parent() {
+                fs::create_dir_all(dir)?;
+            }
+            if fs::symlink_metadata(link).is_err() {
+                std::os::unix::fs::symlink(unit, link)?;
+            }
         }
     } else {
-        let _ = fs::remove_file(&wants);
+        for (link, _) in &wants {
+            let _ = fs::remove_file(link);
+        }
         for (path, _) in boot_files(paths, &archix) {
             let _ = fs::remove_file(path);
         }

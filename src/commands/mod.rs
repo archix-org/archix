@@ -68,6 +68,11 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
             count(missing, "requirement isn't met", "requirements aren't met")
         );
     }
+    if Paths::system().state.join("boot").join("esp").exists()
+        && let Some(why) = archix::system::boot::counting_off()
+    {
+        println!("note: {why}");
+    }
     missing == 0
 }
 pub use eject::eject;

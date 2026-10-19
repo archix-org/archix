@@ -362,6 +362,11 @@ pub fn status(target: &Target) -> Result<()> {
     if let Some(warning) = super::lock_age_warning(lock, declared.lock_warn_after_days) {
         println!("{warning}");
     }
+    if declared.boot.as_ref().is_some_and(|boot| boot.tries > 0)
+        && let Some(why) = archix::system::boot::counting_off()
+    {
+        println!("{why}");
+    }
     let floating: Vec<&str> = lock
         .packages
         .iter()
