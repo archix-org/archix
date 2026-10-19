@@ -1,4 +1,5 @@
 pub mod apply;
+pub mod authenticode;
 pub mod blobs;
 pub mod boot;
 pub mod btrfs;
