@@ -9,6 +9,7 @@ pub mod hooks;
 pub mod merge;
 pub mod rescue;
 pub mod restart;
+pub mod revoke;
 pub mod running;
 pub mod secureboot;
 pub mod snapshot;
