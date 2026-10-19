@@ -1,0 +1,71 @@
+#!/bin/bash
+# In a privileged container: kills the switch on /work/disk.img at each step and at timed points, then checks the disk boots a complete
+# deployment and that the next switch finishes. Mounts are dropped after each kill, as a reboot would.
+set -uo pipefail
+fs=${FS:-ext4}
+opts=; [ "$fs" = btrfs ] && opts=subvol=@
+lib=/vm/deploy/proto
+invariant=/vm/deploy/powercut/invariant
+mkdir -p /usr/local/lib/archix-deploy && cp "$lib/check-deployment" /usr/local/lib/archix-deploy/
+failures=0
+say() { echo "KILLTEST: $*"; }
+
+attach() {
+  local parts
+  parts=$(sfdisk -J "$1" | python -c "import json,sys; p=json.load(sys.stdin)['partitiontable']['partitions']; print(p[0]['start']*512, p[0]['size']*512, p[1]['start']*512, p[1]['size']*512)")
+  read -r es ez rs rz <<< "$parts"
+  esp=$(losetup --show -f -o "$es" --sizelimit "$ez" "$1")
+  root=$(losetup --show -f -o "$rs" --sizelimit "$rz" "$1")
+  mount ${opts:+-o $opts} "$root" /mnt && mount "$esp" /mnt/efi
+}
+detach() {
+  for m in $(findmnt -rn -o TARGET | grep '^/mnt' | sort -r); do umount "$m" || { say "FAIL: $m stays mounted"; exit 1; }; done
+  losetup -d "$esp" "$root"
+}
+switch() { ROOT=/mnt ESP=/mnt/efi setsid "$lib/deploy-switch" -Su > /work/switch.log 2>&1; }
+
+# The finished switch, for the baselines every killed state is compared against.
+cp --sparse=always /work/disk.img /work/pristine.img
+attach /work/disk.img
+switch || { say "FAIL: the uninterrupted switch failed"; tail -20 /work/switch.log; exit 1; }
+mkdir -p /work/baselines
+for gen in 1 2; do /usr/local/lib/archix-deploy/check-deployment "$gen" /mnt > "/work/baselines/$gen"; done
+cp /work/baselines/2 /work/baselines/3
+say "baselines: deployment 1 $(wc -l < /work/baselines/1) findings, deployment 2 $(wc -l < /work/baselines/2)"
+detach
+
+check() {
+  local label=$1 out
+  out=$("$invariant" /mnt /mnt/efi /work/baselines 2>&1) || { say "FAIL: $label: $out"; failures=$((failures + 1)); return 1; }
+  say "PASS: $label: ${out%%$'\n'*}"
+}
+run_case() {
+  local label=$1
+  shift
+  cp --sparse=always /work/pristine.img /work/case.img
+  attach /work/case.img
+  "$@"
+  detach
+  attach /work/case.img
+  check "$label, after the kill"
+  if switch; then check "$label, after the next switch"; else say "FAIL: $label: the next switch failed: $(tail -3 /work/switch.log)"; failures=$((failures + 1)); fi
+  detach
+}
+
+printf '#!/bin/sh\n[ "$1" = "$KILL_AT" ] && kill -KILL -- -$(ps -o pgid= $PPID | tr -d " ")\nexit 0\n' > /usr/local/bin/kill-at
+chmod +x /usr/local/bin/kill-at
+for step in stage transact flatten commit-sync commit-rename commit-esp commit-current done; do
+  at_step() { KILL_AT=$step DEPLOY_MARK=kill-at; export KILL_AT DEPLOY_MARK; switch; unset KILL_AT DEPLOY_MARK; }
+  run_case "killed at $step" at_step
+done
+for seconds in ${KILL_SECONDS:-2 5 10 20 40 60}; do
+  after() {
+    ROOT=/mnt ESP=/mnt/efi setsid "$lib/deploy-switch" -Su > /work/switch.log 2>&1 &
+    local pid=$!
+    sleep "$seconds"
+    kill -KILL -- -"$pid" 2> /dev/null && say "killed after ${seconds} s at: $(grep deploy-switch: /work/switch.log | tail -1)" || say "finished within ${seconds} s"
+    wait "$pid"
+  }
+  run_case "killed after ${seconds} s" after
+done
+[ "$failures" = 0 ] && say OK || { say "FAIL: $failures checks failed"; exit 1; }
