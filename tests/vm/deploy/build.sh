@@ -21,7 +21,7 @@ read -r esp_start esp_size _ < <(part 0)
 read -r root_start root_size root_uuid < <(part 1)
 esp=$(losetup --show -f -o "$esp_start" --sizelimit "$esp_size" "$img")
 root=$(losetup --show -f -o "$root_start" --sizelimit "$root_size" "$img")
-trap 'umount -R /mnt 2>/dev/null || true; losetup -d "$esp" "$root" 2>/dev/null || true' EXIT
+trap 'gpgconf --homedir /mnt/etc/pacman.d/gnupg --kill all 2> /dev/null; umount -R /mnt 2>/dev/null || true; losetup -d "$esp" "$root" 2>/dev/null || true' EXIT
 mkfs.fat -F 32 -n ESP "$esp" > /dev/null
 rootflags=
 if [ "$fs" = btrfs ]; then

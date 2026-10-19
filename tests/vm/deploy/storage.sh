@@ -14,6 +14,7 @@ for fs in ext4 btrfs btrfs:compress=zstd; do
     env=(-e FS="${fs%%:*}" -e BTRFS_OPTS="$([ "$fs" = "${fs#*:}" ] || echo "${fs#*:}")" -e DATE="${range%:*}" -e TO_DATE="${range#*:}")
     docker run --rm --privileged --network host -v "$work":/work -v "$root/tests/vm":/vm:ro "${env[@]}" -e ARCHIVE="$archive" \
       -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e EXTRA_PACKAGES="$packages" -e PREFETCH_TO="${range#*:}" archix-arch-test \
-      bash -c '/vm/deploy/build.sh > /work/build.log 2>&1 || { tail -20 /work/build.log; exit 1; }; /vm/deploy/storage-measure'
+      bash -c '/vm/deploy/build.sh > /work/build.log 2>&1 || { tail -20 /work/build.log; exit 1; }'
+    docker run --rm --privileged -v "$work":/work -v "$root/tests/vm":/vm:ro "${env[@]}" archix-arch-test /vm/deploy/storage-measure
   done
 done

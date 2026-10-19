@@ -6,7 +6,7 @@ pristine=/dev/vdd
 read -r esp_start esp_size root_start root_size fs opts < "$state/layout"
 point=$(($(cat "$state/points" 2> /dev/null || echo 0) + 1))
 echo "$point" > "$state/points"
-log() { echo "point $point: $*" >> "$state/check.log"; echo "point $point: ${*:0:200}" > /dev/console; }
+log() { local msg="point $point: $*"; echo "$msg" >> "$state/check.log"; echo "${msg:0:300}" > /dev/console; }
 cleanup() {
   umount /check/root /check/esp 2> /dev/null
   dmsetup remove sesp sroot snap 2> /dev/null
