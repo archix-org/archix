@@ -36,6 +36,15 @@ pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
 pub use recover::recover;
 
 /// `archix secure-boot setup`.
+pub fn secure_boot_revoke(dry_run: bool, noconfirm: bool) -> Result<()> {
+    if !dry_run {
+        require_root("secure-boot revoke")?;
+    }
+    archix::system::revoke::revoke(&Paths::system(), dry_run, &|question| {
+        if noconfirm { Ok(true) } else { confirm(question) }
+    })
+}
+
 pub fn secure_boot_setup(microsoft: bool) -> Result<()> {
     require_root("secure-boot setup")?;
     if !microsoft {

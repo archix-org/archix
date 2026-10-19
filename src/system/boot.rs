@@ -426,6 +426,9 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             ukify.args(["--cmdline", &cmdline, "--uname", &version]);
             ukify.arg("--os-release").arg(format!("@{}", release_file.display()));
             ukify.arg("--output").arg(&output);
+            if super::revoke::any_revoked(paths) {
+                ukify.arg(format!("--section=.archix:{}", unique_id()));
+            }
             if pcr_key.is_some() {
                 ukify.arg(format!("--pcr-private-key={PCR_PRIVATE_KEY}"));
                 if Path::new(PCR_PUBLIC_KEY).is_file() {
@@ -441,6 +444,7 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
                         .arg(&output),
                     "sbctl sign",
                 )?;
+                super::revoke::record_signed(paths, &output, &dest.file_name().unwrap_or_default().to_string_lossy())?;
             }
             built.push((dest.clone(), output));
         }
@@ -571,6 +575,15 @@ fn remove_unused_ukis_but(esp: &str, keep: &[PathBuf]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Random hex that makes a UKI's hash its own: once archix has revoked images, a rebuild must never come out identical to one of them.
+fn unique_id() -> String {
+    let mut bytes = [0u8; 16];
+    if let Ok(mut random) = fs::File::open("/dev/urandom") {
+        let _ = std::io::Read::read_exact(&mut random, &mut bytes);
+    }
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The key systemd-measure signs PCR 11 policies with, where kernel-install's ukify plugin and systemd-cryptenroll look for it.

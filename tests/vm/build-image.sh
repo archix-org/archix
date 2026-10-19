@@ -7,6 +7,8 @@ dir=/vm date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sb
 # The rollback suite starts at an older snapshot and rolls glibc back, so archix itself must not need the build host's glibc.
 if [ "$suite" = rollback ]; then
   dir=/vm/rollback date=2026-06-01 size=16G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
+elif [ "$suite" = atomic ]; then
+  dir=/vm/atomic date=2026-06-01 size=24G packages=(base base-devel linux mkinitcpio systemd-ukify devtools firefox python rust git) archix=/work/archix-static
 elif [ "$suite" = nvidia ]; then
   dir=/vm/nvidia date=2026-06-01 size=24G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 elif [ "$suite" = upgrade ]; then

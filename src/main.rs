@@ -227,6 +227,15 @@ enum SecureBoot {
         #[arg(long)]
         anticheat: bool,
     },
+    /// Add the boot images archix signed and no longer uses to dbx, signed with your KEK, so the firmware refuses them
+    Revoke {
+        /// List them without writing dbx
+        #[arg(long)]
+        dry_run: bool,
+        /// Don't ask before writing dbx
+        #[arg(long)]
+        noconfirm: bool,
+    },
 }
 
 /// Turns pacman-style `-S` operations into the native command they mean.
@@ -335,6 +344,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
+        Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
         _ => None,
     }
 }
@@ -501,6 +511,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
             commands::secure_boot_setup(!no_microsoft)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::SecureBoot(SecureBoot::Revoke { dry_run, noconfirm }) => {
+            commands::secure_boot_revoke(dry_run, noconfirm)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SecureBoot(SecureBoot::Check { anticheat }) => {
