@@ -20,8 +20,8 @@ provides=('archix')
 conflicts=('archix' 'ax')
 source=("https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-x86_64-linux.tar.gz"{,.sig})
 # packaging/aur/pin.sh fills these in from the signed release.
-sha256sums=('SKIP' 'SKIP')
-validpgpkeys=()
+sha256sums=('9ef304bccca04dcd75263316a34dd611071a0e355a852bc100b896fcbe43ff1b' 'SKIP')
+validpgpkeys=('CE9A595A3355AE955DEE7BB415374E7E35BAF667')
 
 package() {
   cd "archix-$pkgver-x86_64-linux"
