@@ -48,6 +48,16 @@ needs_newer_glibc() {
 }
 # Files pacman owns that are missing from disk.
 missing_files() { pacman -Qk 2>&1 | grep -c 'No such file or directory'; }
+# What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
+findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+baseline() { local n; for n in "$@"; do findings "$n" > "$state/baseline-$n"; done; }
+# Fails unless each deployment's files are, by content, what its baseline found.
+unchanged() {
+  local what=$1 n; shift
+  for n in "$@"; do
+    findings "$n" | diff "$state/baseline-$n" - > "$state/diff-$n" || fail "$what changed deployment $n's files: $(head -c 600 "$state/diff-$n")"
+  done
+}
 # Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
 cut_power() { echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger; for _ in 1 2 3 4 5 6 7 8 9 10; do nap; done; }
@@ -83,8 +93,10 @@ case $stage in
   1)
     [ "$(glibc)" = 2.43 ] || fail "the image should have glibc 2.43 (the 2026-06-01 snapshot)"
     remember image "$(current)"
+    baseline "$(recall image)"
     sed -i 's|"devtools" }, -- packages|"devtools", "archix-test-hello", "v4l2loopback-dkms" }, -- packages|' "$config"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding the local recipe and a DKMS module"
+    unchanged "the switch adding the local recipe and a DKMS module" "$(recall image)"
     remember old "$(current)"
     [ "$(cat "/archix/deploy/$(recall old)/usr/share/archix-test-hello/built-with")" = 2.43 ] || fail "the local recipe should be built against glibc 2.43"
     [ -n "$(deployed "$(recall old)" linux-headers)" ] || fail "archix should declare linux-headers for the DKMS module by itself"
@@ -110,6 +122,7 @@ case $stage in
     say "PASS: a full disk stops the switch before it changes anything"
 
     remember kept "$kept"
+    baseline "$(recall old)"
     next 3
     say "cutting the power in the middle of the 2026-10-10 update"
     interrupt_after power 40 switch --noconfirm
@@ -120,9 +133,12 @@ case $stage in
     [ "$(glibc)" = 2.43 ] || fail "the power cut changed the running deployment's glibc"
     [ "$(missing_files)" = 0 ] || fail "files are missing after the power cut: $(pacman -Qk 2>&1 | grep 'No such file' | head -5)"
     [ -z "$(needs_newer_glibc)" ] || fail "after the power cut these need a newer glibc: $(needs_newer_glibc | head -c 400)"
-    say "PASS: a power cut mid-update left the running deployment whole"
+    unchanged "the power cut mid-update" "$(recall old)"
+    say "PASS: a power cut mid-update left the running deployment whole, by content"
     ax switch --noconfirm > /dev/console 2>&1 || fail "the update after the power cut"
     staging_left && fail "the next switch should clear the cut switch's staging tree"
+    unchanged "the 2026-10-10 update staged from it" "$(recall old)"
+    say "PASS: staging the 2026-10-10 update left deployment $(recall old)'s files as they were, by content"
     remember new "$(current)"
     [ "$(deployed "$(recall new)" glibc | cut -d+ -f1)" = 2.44 ] || fail "deployment $(recall new) should have glibc 2.44"
     next 4
@@ -172,6 +188,7 @@ case $stage in
 
     [ -d "/archix/deploy/$image" ] && fail "keep = 2 should have dropped the image's deployment $image"
     kept=$(deployments)
+    baseline "$old"
     fill_disk $((30 * 1024 * 1024))
     ax rollback "$image" --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "rebuilding a deployment with 30 MB free should fail"
     tail -5 /run/archix-vmtest-full.log > /dev/console
@@ -190,7 +207,9 @@ case $stage in
     staging_left && fail "the rebuild should clear the killed one's staging tree"
     [ -z "$(deployed "$image" archix-test-hello)" ] || fail "the rebuilt deployment $image shouldn't have the local recipe"
     [ "$(deployed "$image" glibc | cut -d+ -f1)" = 2.43 ] || fail "the rebuilt deployment $image should have glibc 2.43"
-    say "PASS: a killed rebuild changed nothing, and the next one rebuilt generation $image from the package cache"
+    unchanged "the full disk, the killed rebuild and the rebuild of generation $image" "$old"
+    [ -d "/archix/deploy/$new" ] && fail "a rebuilding rollback runs gc like a switch, so keep = 2 should have dropped deployment $new"
+    say "PASS: a killed rebuild changed nothing, and the next one rebuilt generation $image from the package cache, leaving the running deployment's files as they were"
 
     ax rollback "$new" --noconfirm > /dev/console 2>&1 || fail "rolling forward to generation $new"
     [ "$(current)" = "$new" ] || fail "deployment $new should be current"
@@ -211,13 +230,16 @@ case $stage in
     remember good "$good"
     # An init that can't run makes the kernel panic, and panic=3 reboots it so systemd-boot counts the try.
     sed -i 's|"console=ttyS0" }|"console=ttyS0", "panic=3" }|' "$config"
+    baseline "$good"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch to a deployment whose glibc gets broken"
+    unchanged "the switch staged from it" "$good"
     bad=$(current)
     remember bad "$bad"
     [ -f "/efi/loader/entries/archix-$bad+3.conf" ] || fail "the new entry should count three boot tries: $(ls /efi/loader/entries)"
     lib=$(readlink -f "/archix/deploy/$bad/usr/lib/libc.so.6")
     head -c 4096 /dev/urandom > "$lib.broken" && mv "$lib.broken" "$lib" || fail "breaking deployment $bad's glibc"
     [ "$(glibc)" = 2.44 ] && archix --version > /dev/null || fail "breaking deployment $bad's glibc touched the running one"
+    unchanged "breaking deployment $bad's glibc" "$good"
     say "broke glibc in deployment $bad; rebooting into it"
     next 7
     systemctl reboot

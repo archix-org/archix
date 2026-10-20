@@ -37,6 +37,10 @@ driver() {
   [ "$(module_version "$kernel")" = "$want" ] || fail "the nvidia module built for $kernel should be $want, not '$(module_version "$kernel")'"
   dkms status nvidia | grep -q "nvidia/$want, $kernel, x86_64: installed" || fail "dkms should show nvidia/$want installed for $kernel: $(dkms status nvidia)"
 }
+# What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
+findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+baseline() { findings "$1" > "$state/baseline-$1"; }
+unchanged() { findings "$2" | diff "$state/baseline-$2" - > "$state/diff-$2" || fail "$1 changed deployment $2's files: $(head -c 600 "$state/diff-$2")"; }
 no_driver() {
   for p in nvidia-open-dkms nvidia-utils nvidia-580xx-dkms nvidia-580xx-utils; do
     [ -z "$(pkg $p)" ] || fail "$p should be gone, but $(pkg $p) is installed"
@@ -52,8 +56,10 @@ case $stage in
   1)
     remember none "$(current)"
     no_driver
+    baseline "$(recall none)"
     sed -i 's|"devtools" }, -- packages|"devtools", "nvidia-open-dkms" }, -- packages|' "$config"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding nvidia-open-dkms"
+    unchanged "staging the driver and its DKMS build" "$(recall none)"
     remember nv_old "$(current)"
     remember old_driver "$(deployed "$(recall nv_old)" nvidia-open-dkms)"
     [ "$(deployed_module "$(recall nv_old)" "$(uname -r)")" = "$(recall old_driver | sed 's/-[^-]*$//')" ] \
@@ -68,7 +74,9 @@ case $stage in
     driver "$(recall old_driver)"
     say "PASS: deployment $(recall nv_old) boots nvidia-open-dkms $(recall old_driver), built by DKMS for $(uname -r) while staging"
     ax update --to "$to" --noconfirm > /dev/console 2>&1 || fail "archix update --to $to"
+    baseline "$(recall nv_old)"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch to the $to snapshot"
+    unchanged "staging the $to kernel and driver" "$(recall nv_old)"
     nv_new=$(current)
     remember nv_new "$nv_new"
     remember new_driver "$(deployed "$nv_new" nvidia-open-dkms)"
@@ -108,7 +116,9 @@ case $stage in
     say "PASS: deployment $(recall none), which had no driver, boots without any nvidia package or module"
 
     sed -i 's|"devtools", "nvidia-open-dkms" }, -- packages|"devtools", "nvidia-580xx-dkms" }, -- packages|' "$config"
+    baseline "$(recall none)"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding the closed driver nvidia-580xx-dkms from the AUR"
+    unchanged "staging the closed driver" "$(recall none)"
     closed=$(current)
     case $(deployed "$closed" nvidia-580xx-dkms) in 580.*) ;; *) fail "nvidia-580xx-dkms should be in deployment $closed, not '$(deployed "$closed" nvidia-580xx-dkms)'" ;; esac
     version=$(deployed "$closed" nvidia-580xx-dkms | cut -d- -f1)
@@ -121,6 +131,7 @@ case $stage in
     [ "$(deployed_module "$(recall nv_old)" "$(recall old_kernel)")" = "$(recall old_driver | sed 's/-[^-]*$//')" ] \
       || fail "the rebuilt deployment $(recall nv_old) should hold nvidia $(recall old_driver) built for $(recall old_kernel)"
     [ -z "$(deployed "$(recall nv_old)" nvidia-580xx-dkms)" ] || fail "the rebuilt deployment shouldn't have the closed driver"
+    unchanged "rebuilding deployment $(recall nv_old)" "$(recall none)"
     next 6
     systemctl reboot
     ;;

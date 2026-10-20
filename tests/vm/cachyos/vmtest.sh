@@ -24,6 +24,10 @@ booted=$(tr -d '\000' < /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0
 arch_of() { pacman -Qi "$1" 2>/dev/null | sed -n 's/^Architecture *: //p'; }
 installed() { pacman -Q "$1" > /dev/null 2>&1; }
 missing_files() { pacman -Qk 2>&1 | grep -c 'No such file or directory'; }
+# What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
+findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+baseline() { findings "$1" > "$state/baseline-$1"; }
+unchanged() { findings "$2" | diff "$state/baseline-$2" - > "$state/diff-$2" || fail "$1 changed deployment $2's files: $(head -c 600 "$state/diff-$2")"; }
 # Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
 cut_power() { echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger; for _ in 1 2 3 4 5 6 7 8 9 10; do nap; done; }
@@ -80,6 +84,7 @@ case $stage in
     say "PASS: a full disk stops the switch before it changes anything"
 
     remember kept "$kept"
+    baseline "$(recall old)"
     next 2
     say "cutting the power in the middle of the switch"
     interrupt_after power 4 switch --noconfirm
@@ -89,9 +94,11 @@ case $stage in
     [ "$(deployments)" = "$(recall kept)" ] || fail "the cut switch committed a deployment: $(deployments)"
     installed htop && ! installed git || fail "the power cut changed the running deployment's packages"
     [ "$(missing_files)" = 0 ] || fail "files are missing after the power cut: $(pacman -Qk 2>&1 | grep 'No such file' | head -5)"
-    say "PASS: a power cut mid-switch left the running deployment whole"
+    unchanged "the power cut mid-switch" "$(recall old)"
+    say "PASS: a power cut mid-switch left the running deployment whole, by content"
     ax switch --noconfirm > /dev/console 2>&1 || fail "the switch after the power cut"
     staging_left && fail "the next switch should clear the cut switch's staging tree"
+    unchanged "staging the switch after the power cut" "$(recall old)"
     remember new "$(current)"
     next 3
     systemctl reboot
@@ -102,7 +109,9 @@ case $stage in
     [ "$(arch_of git)" = x86_64_v3 ] || fail "git should be CachyOS's v3 build"
     installed htop && fail "htop should be gone in deployment $(recall new)"
     sed -i 's|"git", "vim" }, -- packages|"git", "vim", "tree" }, -- packages|' "$config"
+    baseline "$(recall new)"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch adding tree"
+    unchanged "staging the switch adding tree" "$(recall new)"
     [ -d "/archix/deploy/$(recall old)" ] && fail "keep = 2 should have dropped deployment $(recall old)"
     # From here on CachyOS's mirror is unreachable, in every deployment, and pacman's cache is empty, as when a repo has dropped old builds.
     for hosts in /archix/deploy/*/etc/hosts; do echo "127.0.0.1 mirror.cachyos.org" >> "$hosts"; done
@@ -118,6 +127,7 @@ case $stage in
     ax rollback "$(recall old)" --noconfirm > /dev/console 2>&1 || fail "rebuilding generation $(recall old) with the mirror unreachable"
     [ "$(current)" = "$(recall old)" ] || fail "the rebuilt deployment $(recall old) should be current"
     staging_left && fail "the rebuild should clear the killed one's staging tree"
+    unchanged "the killed rebuild and the rebuild of deployment $(recall old)" "$(recall new)"
     next 4
     systemctl reboot
     ;;

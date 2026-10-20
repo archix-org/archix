@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds /work/disk.img: GPT with an ESP and an ext4 root (FS=btrfs: btrfs with an @ subvolume, as CachyOS installs it), Arch pacstrapped at the test snapshot and laid out as deployments by archix's first switch.
+# Builds /work/disk.img: GPT with an ESP and an ext4 root (FS=btrfs: btrfs with an @ subvolume, as CachyOS installs it), Arch pacstrapped at the test snapshot and laid out as deployments by archix's first switch, which the boot suite runs on its first boot instead.
 set -euo pipefail
 suite=${SUITE:-boot}
 archive=${ARCHIVE:-https://archive.archlinux.org}
@@ -102,9 +102,27 @@ mkdir -p /mnt/etc/archix
 rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs='"btrfs-progs", '
 sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
+install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
+if [ "$suite" = boot ]; then
+  # The boot suite lays the system out on its first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
+  install -Dm755 "$dir/vmtest.sh" /mnt/usr/local/bin/archix-vmtest
+  printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' > /mnt/etc/systemd/network/20-wired.network
+  printf '[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vmtest\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-vmtest.service
+  # A service that reads /usr all the time from a read-only view of its own, as ProtectSystem=strict gives it.
+  printf '[Service]\nProtectSystem=strict\nExecStart=/bin/sh -c "while cat /usr/lib/os-release > /dev/null && ls /usr/bin > /dev/null; do sleep 0.2; done; exit 1"\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-protected.service
+  arch-chroot /mnt systemctl enable archix-vmtest.service archix-protected.service systemd-networkd.service systemd-resolved.service
+  sed -n 's/.*kernel_params = { \(.*\) },$/\1/p' /mnt/etc/archix/init.lua | tr -d '",' > /mnt/etc/kernel/cmdline
+  kernel=$(basename "$(dirname "$(ls /mnt/usr/lib/modules/*/vmlinuz | head -1)")")
+  mkdir -p /mnt/efi/EFI/Linux
+  arch-chroot /mnt mkinitcpio -k "$kernel" -S autodetect -U /efi/EFI/Linux/arch-linux.efi
+  ls /mnt/efi/EFI/Linux
+  sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist
+  [ ! -f /mnt/var/lib/archix/archive-url ] || sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/var/lib/archix/archive-url
+  exit 0
+fi
 arch-chroot /mnt archix --host archix-vm switch --noconfirm
 ls /mnt/archix/deploy /mnt/efi/loader/entries /mnt/efi/EFI/archix
 # Inside the VM the host-side mirror has another address; each deployment has its own /etc.

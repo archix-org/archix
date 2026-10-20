@@ -3,12 +3,16 @@
 set -u
 state=/var/lib/archix-vmtest
 mkdir -p "$state"
-stage=$(cat "$state/stage" 2>/dev/null || echo 1)
+stage=$(cat "$state/stage" 2>/dev/null || echo plain)
 say() { echo "VMTEST: $*" > /dev/console; }
 fail() { say "FAIL: $*"; systemctl poweroff; exit 1; }
 current() { archix generations | awk '$1 == "*" { print $2 }'; }
-deployments() { ls /archix/deploy | sort -n | tr '\n' ' '; }
+deployments() { ls /archix/deploy 2>/dev/null | sort -n | tr '\n' ' '; }
 next() { echo "$1" > "$state/stage"; sync; }
+# Entries in the root's own /usr, which the deployment's bind hides.
+hidden_usr() { mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root && ls -A /run/vmtest-root/usr | wc -l; umount /run/vmtest-root; }
+# What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
+findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
 efivar=/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
 # systemd-boot names the entry it started in LoaderEntrySelected: 4 attribute bytes, then archix-N.conf in UTF-16.
 booted=$(tr -d '\000' < "$efivar" 2>/dev/null | grep -ao 'archix-[0-9]*' | head -1 | cut -d- -f2)
@@ -19,15 +23,31 @@ config=/etc/archix/init.lua
 loader=/efi/loader/loader.conf
 
 case $stage in
+  plain)
+    [ -e /archix ] && fail "the image should boot as a plain install, not laid out yet"
+    systemctl is-active -q archix-protected.service || fail "the ProtectSystem=strict service should run before the first switch"
+    pid=$(systemctl show -P MainPID archix-protected.service)
+    archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "the first switch on the booted system"
+    [ "$(current)" = 2 ] && [ "$(deployments)" = "1 2 " ] || fail "the first switch should lay out deployment 1 and build 2: $(deployments)"
+    for _ in 1 2 3 4 5; do sleep 1; done
+    systemctl is-active -q archix-protected.service && [ "$(systemctl show -P MainPID archix-protected.service)" = "$pid" ] \
+      || fail "the ProtectSystem=strict service lost its /usr during the first layout: $(journalctl -u archix-protected.service -b --no-pager | tail -5)"
+    [ "$(hidden_usr)" -gt 0 ] || fail "the first switch pruned the live /usr, which running services may still use"
+    findmnt -no SOURCE /usr | grep -q "archix/deploy/1/usr" || fail "the running system should be bound to deployment 1: $(findmnt -no SOURCE /usr)"
+    touch /boot/archix-vmtest 2> /dev/null && fail "/boot should be read-only once laid out"
+    say "PASS: the first switch on a booted system laid it out with a ProtectSystem=strict service running, and pruned nothing live"
+    next 1
+    systemctl reboot
+    ;;
   1)
-    [ "$(current)" = 2 ] || fail "the image's first switch should make deployment 2 current"
+    [ "$(current)" = 2 ] || fail "the first switch should make deployment 2 current"
     [ "$(deployments)" = "1 2 " ] || fail "the first switch should lay out deployment 1 and build 2: $(deployments)"
     findmnt -no SOURCE /usr | grep -q "archix/deploy/2/usr" || fail "/usr should be deployment 2's: $(findmnt -no SOURCE /usr)"
     touch /usr/archix-vmtest 2> /dev/null && fail "/usr should be read-only"
-    mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root || fail "binding the root"
-    [ -z "$(ls -A /run/vmtest-root/usr)" ] || fail "the layout should have emptied the root's own /usr, which deployments hide"
-    umount /run/vmtest-root
-    say "PASS: the first switch laid the system out as deployments 1 and 2, and 2 boots with a read-only /usr"
+    touch /boot/archix-vmtest 2> /dev/null && fail "/boot should be read-only"
+    [ "$(hidden_usr)" = 0 ] || fail "the first boot after the layout should have emptied the root's own /usr, which deployments hide"
+    systemctl is-active -q archix-protected.service || fail "the ProtectSystem=strict service should run on deployment 2"
+    say "PASS: the first switch laid the system out as deployments 1 and 2, 2 boots with a read-only /usr and /boot, and its boot pruned what the binds hide"
     # The first 4 bytes are the EFI attributes; bit 0 is NON_VOLATILE, which would let a later direct firmware boot read a stale entry.
     attrs=$(od -An -tu4 -N4 "$efivar" 2>/dev/null | tr -d ' ')
     [ -n "$attrs" ] && [ $((attrs & 1)) = 0 ] || fail "LoaderEntrySelected should be volatile, but its attributes are ${attrs:-missing}"
@@ -73,6 +93,24 @@ case $stage in
     [ "$booted" = 3 ] || fail "the rollback should boot deployment 3"
     command -v tree > /dev/null || fail "deployment 3 should have tree"
     say "PASS: a rollback to a kept deployment repointed it and its boot entry"
+    findings 2 > "$state/baseline-2"
+    # What a crash between a rollback to 2 writing the boot default and repointing current leaves: loader.conf names 2, current is still 3.
+    sed -i -e '/^preferred /d' -e 's/^default .*/default archix-2.conf/' "$loader"
+    grep -qx "default archix-2.conf" "$loader" || fail "loader.conf should name deployment 2: $(cat "$loader")"
+    [ "$(current)" = 3 ] || fail "current should still be 3"
+    next 4b
+    sync -f /efi
+    say "cutting the power between a rollback's boot default and its current"
+    echo 1 > /proc/sys/kernel/sysrq
+    echo b > /proc/sysrq-trigger
+    ;;
+  4b)
+    [ "$booted" = 2 ] || fail "after a crash between the rollback's two writes, deployment 2's entry should boot, not $booted"
+    [ "$(current)" = 2 ] || fail "booting deployment 2 should have made it current after the crash"
+    grep -qx "default archix-2.conf" "$loader" || fail "deployment 2 should stay the default: $(cat "$loader")"
+    findings 2 | diff "$state/baseline-2" - > "$state/diff-2" || fail "deployment 2's files changed: $(head -c 600 "$state/diff-2")"
+    systemctl is-active -q archix-marker.service || fail "deployment 2 should start the marker"
+    say "PASS: a crash between a rollback's boot default and its current left deployment 2 booting, whole, and current"
     archix secure-boot setup > /dev/console 2>&1 || fail "archix secure-boot setup"
     sed -i 's|boot = { loader = "systemd-boot" }|boot = { loader = "systemd-boot", secure_boot = true, protected_entry = true }|' "$config"
     archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch with Secure Boot"
