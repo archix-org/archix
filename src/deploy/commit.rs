@@ -13,6 +13,11 @@ use crate::testhooks::mark;
 /// Puts a committed deployment's boot entry on the ESP; every file it writes must be complete before its final name appears.
 pub trait EspStep {
     fn install(&self, number: u32, deployment: &Path) -> Result<()>;
+
+    /// Removes temporary files an interrupted `install` left on the ESP.
+    fn clean(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<F: Fn(u32, &Path) -> Result<()>> EspStep for F {
@@ -50,6 +55,30 @@ impl EspStep for SystemdBoot {
         };
         durable::write(&conf, with_default(&old, &format!("archix-{number}.conf")).as_bytes())
     }
+
+    fn clean(&self) -> Result<()> {
+        for (dir, prefix) in [
+            ("EFI/archix", ""),
+            ("loader/entries", "archix-"),
+            ("loader", "loader.conf"),
+        ] {
+            let dir = self.esp.join(dir);
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+            };
+            for entry in entries {
+                let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(prefix) && name.ends_with(".tmp") && entry.file_type()?.is_file() {
+                    fs::remove_file(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// loader.conf with `default` naming `entry`, everything else kept.
@@ -64,23 +93,24 @@ pub fn with_default(conf: &str, entry: &str) -> String {
 }
 
 impl Staged {
-    /// Commits in the order that keeps every surviving pointer naming a complete deployment: flush, rename into place, ESP, then `current`.
+    /// Commits in the order that keeps every surviving pointer naming a complete deployment: flush, rename into place, ESP, then `current`, stopping at the first failed flush.
     pub fn commit(self, store: &Store, esp: &Path, step: &dyn EspStep) -> Result<PathBuf> {
         self.check()?;
+        step.clean().context("removing temporary files from the ESP")?;
         mark("deploy-commit-sync");
-        durable::sync_filesystems(&[store.dir(), esp]);
+        durable::sync_filesystems_checked(&[store.dir(), esp])?;
         mark("deploy-commit-rename");
         let path = store.path(self.number);
         rename_noreplace(&self.dir, &path)?;
         durable::sync_dir(&path)?;
-        durable::sync_filesystems(&[store.dir()]);
+        durable::sync_filesystems_checked(&[store.dir()])?;
         mark("deploy-commit-esp");
         step.install(self.number, &path)
             .with_context(|| format!("writing deployment {}'s boot entry", self.number))?;
-        durable::sync_filesystems(&[esp]);
+        durable::sync_filesystems_checked(&[esp])?;
         mark("deploy-commit-current");
         store.point_current(self.number)?;
-        durable::sync_filesystems(&[store.dir()]);
+        durable::sync_filesystems_checked(&[store.dir()])?;
         mark("deploy-done");
         Ok(path)
     }

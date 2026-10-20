@@ -22,14 +22,26 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
-    let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-    file.write_all(contents)?;
-    if let Some(mode) = mode {
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
-    }
-    file.sync_all()?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    removing_on_error(&tmp, || {
+        let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
+        file.write_all(contents)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        if let Some(mode) = mode {
+            file.set_permissions(fs::Permissions::from_mode(mode))?;
+        }
+        file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    })?;
     sync_dir(path)
+}
+
+/// Runs `write`, deleting the temporary file it was making if it fails, so a full disk isn't left fuller.
+fn removing_on_error(tmp: &Path, write: impl FnOnce() -> Result<()>) -> Result<()> {
+    let result = write();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
 }
 
 /// Copies a file like `write` does, streaming it instead of holding it in memory.
@@ -40,9 +52,13 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
     let mut tmp_name = to.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = to.with_file_name(tmp_name);
-    fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
-    File::open(&tmp)?.sync_all()?;
-    fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))?;
+    removing_on_error(&tmp, || {
+        fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
+        File::open(&tmp)?
+            .sync_all()
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
+    })?;
     sync_dir(to)
 }
 
@@ -69,12 +85,46 @@ pub fn sync_filesystems<P: AsRef<Path>>(paths: &[P]) {
     }
 }
 
+/// Like `sync_filesystems`, for a commit: every path must open and every flush succeed, so nothing is renamed after a write the disk lost.
+pub fn sync_filesystems_checked<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
+    let mut seen = Vec::new();
+    for path in paths {
+        let path = path.as_ref();
+        let dir = File::open(path).with_context(|| format!("opening {} to flush it", path.display()))?;
+        let dev = dir
+            .metadata()
+            .with_context(|| format!("stat {}", path.display()))?
+            .dev();
+        if seen.contains(&dev) {
+            continue;
+        }
+        seen.push(dev);
+        if unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("flushing the filesystem holding {}", path.display()));
+        }
+    }
+    Ok(())
+}
+
 /// The places a package transaction on `root` writes to, for `sync_filesystems`.
 pub fn system_paths(root: &Path) -> Vec<std::path::PathBuf> {
-    ["", "usr", "boot", "efi", "boot/efi", "var", "var/lib/pacman", "var/cache/pacman/pkg", "var/lib/archix", "var/cache/archix", "etc"]
-        .iter()
-        .map(|sub| root.join(sub))
-        .collect()
+    [
+        "",
+        "usr",
+        "boot",
+        "efi",
+        "boot/efi",
+        "var",
+        "var/lib/pacman",
+        "var/cache/pacman/pkg",
+        "var/lib/archix",
+        "var/cache/archix",
+        "etc",
+    ]
+    .iter()
+    .map(|sub| root.join(sub))
+    .collect()
 }
 
 /// Writes a file in the user's config like `write`, keeping its owner and mode, or giving a new one its directory's owner and 0644, so a run under sudo leaves nothing root-owned there.
@@ -112,4 +162,30 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
             .with_context(|| format!("chmod {}", created.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_write_or_copy_leaves_no_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("inside"), "x").unwrap();
+        assert!(write(&target, b"new").is_err());
+        assert!(!dir.path().join("target.tmp").exists(), "write");
+        fs::write(dir.path().join("source"), "s").unwrap();
+        assert!(copy(&dir.path().join("source"), &target).is_err());
+        assert!(!dir.path().join("target.tmp").exists(), "copy");
+    }
+
+    #[test]
+    fn a_checked_flush_fails_on_a_path_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        sync_filesystems_checked(&[dir.path()]).unwrap();
+        let err = sync_filesystems_checked(&[dir.path(), &dir.path().join("missing")]).unwrap_err();
+        assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
 }

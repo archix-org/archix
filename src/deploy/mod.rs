@@ -11,7 +11,7 @@ pub mod xattr;
 pub use commit::{EspStep, SystemdBoot};
 pub use keep::Keep;
 pub use stage::{Staged, Staging};
-pub use store::{Backend, Store};
+pub use store::{Backend, Store, StoreLock};
 pub use view::Transaction;
 
 /// What every committed deployment holds.

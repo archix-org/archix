@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
-use archix::deploy::{Backend, OVERLAY_OPTIONS, Staging, Store, SystemdBoot, flatten, xattr};
+use archix::deploy::{Backend, Keep, OVERLAY_OPTIONS, Staging, Store, SystemdBoot, flatten, xattr};
 use tempfile::TempDir;
 
 static LOOPS: Mutex<()> = Mutex::new(());
@@ -36,9 +36,12 @@ struct LoopFs {
 
 impl LoopFs {
     fn new(fs: &str) -> LoopFs {
+        LoopFs::sized(fs, if fs == "btrfs" { "160M" } else { "64M" })
+    }
+
+    fn sized(fs: &str, size: &str) -> LoopFs {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
-        let size = if fs == "btrfs" { "160M" } else { "64M" };
         sh(Command::new("truncate").args(["-s", size]).arg(&img));
         let dev = sh(Command::new("losetup").args(["--show", "-f"]).arg(&img))
             .trim()
@@ -46,10 +49,91 @@ impl LoopFs {
         let mnt = dir.path().join("mnt");
         fs::create_dir(&mnt).unwrap();
         let loop_fs = LoopFs { _dir: dir, dev, mnt };
-        sh(Command::new(format!("mkfs.{fs}")).arg("-q").arg(&loop_fs.dev));
+        let mut mkfs = Command::new(format!("mkfs.{fs}"));
+        if fs != "vfat" {
+            mkfs.arg("-q");
+        }
+        sh(mkfs.arg(&loop_fs.dev));
         sh(Command::new("mount").arg(&loop_fs.dev).arg(&loop_fs.mnt));
         loop_fs
     }
+}
+
+/// A vfat ESP on a device-mapper target over a loop device, which `fail` turns into one where every I/O errors.
+struct FailingEsp {
+    _dir: TempDir,
+    dev: String,
+    name: String,
+    sectors: String,
+    mnt: PathBuf,
+}
+
+impl FailingEsp {
+    fn new() -> FailingEsp {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("esp.img");
+        sh(Command::new("truncate").args(["-s", "32M"]).arg(&img));
+        let dev = sh(Command::new("losetup").args(["--show", "-f"]).arg(&img))
+            .trim()
+            .to_string();
+        let sectors = sh(Command::new("blockdev").arg("--getsz").arg(&dev)).trim().to_string();
+        let name = format!("archix-test-esp-{}", std::process::id());
+        let mnt = dir.path().join("mnt");
+        fs::create_dir(&mnt).unwrap();
+        let esp = FailingEsp {
+            _dir: dir,
+            dev,
+            name,
+            sectors,
+            mnt,
+        };
+        let table = format!("0 {} linear {} 0", esp.sectors, esp.dev);
+        sh(Command::new("dmsetup").args(["create", &esp.name, "--table", &table]));
+        sh(Command::new("dmsetup").arg("mknodes").arg(&esp.name));
+        sh(Command::new("mkfs.vfat").arg(esp.mapper()));
+        sh(Command::new("mount").arg(esp.mapper()).arg(&esp.mnt));
+        esp
+    }
+
+    fn mapper(&self) -> String {
+        format!("/dev/mapper/{}", self.name)
+    }
+
+    fn fail(&self) {
+        let table = format!("0 {} error", self.sectors);
+        sh(Command::new("dmsetup").args(["suspend", "--nolockfs", &self.name]));
+        sh(Command::new("dmsetup").args(["load", &self.name, "--table", &table]));
+        sh(Command::new("dmsetup").args(["resume", &self.name]));
+    }
+}
+
+impl Drop for FailingEsp {
+    fn drop(&mut self) {
+        let _ = Command::new("umount").arg(&self.mnt).status();
+        let _ = Command::new("dmsetup").args(["remove", &self.name]).status();
+        let _ = Command::new("losetup").arg("-d").arg(&self.dev).status();
+    }
+}
+
+/// An ESP holding deployment 1's entry, as `system` makes one.
+fn esp_with_deployment_1(esp: &Path) {
+    fs::create_dir_all(esp.join("EFI/archix")).unwrap();
+    fs::create_dir_all(esp.join("loader/entries")).unwrap();
+    fs::write(esp.join("EFI/archix/1.efi"), "uki-1").unwrap();
+    fs::write(
+        esp.join("loader/entries/archix-1.conf"),
+        "title archix deployment 1\nefi /EFI/archix/1.efi\n",
+    )
+    .unwrap();
+    fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
+}
+
+/// Files under `dir` whose name ends in .tmp.
+fn tmp_files(dir: &Path) -> Vec<PathBuf> {
+    snapshot(dir)
+        .into_keys()
+        .filter(|rel| rel.to_string_lossy().ends_with(".tmp"))
+        .collect()
 }
 
 impl Drop for LoopFs {
@@ -69,7 +153,11 @@ fn install_program(usr: &Path, program: &str, name: &str) {
             continue;
         };
         let source = found.split(" (").next().unwrap().trim();
-        let target = usr.join("lib").join(Path::new(needed.trim()).file_name().unwrap());
+        let target = match Path::new(source).strip_prefix("/usr/lib") {
+            Ok(rel) if rel.components().count() > 1 => usr.join("lib").join(rel),
+            _ => usr.join("lib").join(Path::new(needed.trim()).file_name().unwrap()),
+        };
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
         if !target.exists() {
             fs::copy(source, target).unwrap();
         }
@@ -78,7 +166,10 @@ fn install_program(usr: &Path, program: &str, name: &str) {
 
 /// A system root on a fresh filesystem whose deployment 1 is a busybox userland with setcap; returns the filesystem and the store.
 fn system(fs_type: &str) -> (LoopFs, Store) {
-    let loop_fs = LoopFs::new(fs_type);
+    system_on(LoopFs::new(fs_type), fs_type)
+}
+
+fn system_on(loop_fs: LoopFs, fs_type: &str) -> (LoopFs, Store) {
     let root = loop_fs.mnt.clone();
     for (link, target) in [
         ("bin", "usr/bin"),
@@ -141,16 +232,7 @@ fn system(fs_type: &str) -> (LoopFs, Store) {
     fs::write(dep.join("pacman/base-1/desc"), "%NAME%\nbase\n").unwrap();
     fs::write(dep.join("boot/archix.efi"), "uki-1").unwrap();
     std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
-    let esp = root.join("efi");
-    fs::create_dir_all(esp.join("EFI/archix")).unwrap();
-    fs::create_dir_all(esp.join("loader/entries")).unwrap();
-    fs::write(esp.join("EFI/archix/1.efi"), "uki-1").unwrap();
-    fs::write(
-        esp.join("loader/entries/archix-1.conf"),
-        "title archix deployment 1\nefi /EFI/archix/1.efi\n",
-    )
-    .unwrap();
-    fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
+    esp_with_deployment_1(&root.join("efi"));
     let store = Store::open(&root).unwrap();
     let expected = if fs_type == "btrfs" {
         Backend::Snapshot
@@ -475,6 +557,33 @@ fn in_place_writes_and_setcap_in_staging_leave_the_previous_deployment_untouched
     }
 }
 
+/// The classic chroot escape: chroot into a subdirectory, climb out with `..`, chroot there and list /; it only stays in the view if the view was pivoted into, not chrooted.
+const ESCAPE: &str = r#"
+#include <dirent.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+    mkdir("/tmp/escape", 0700);
+    if (chroot("/tmp/escape") != 0) return 2;
+    for (int i = 0; i < 64; i++) if (chdir("..") != 0) return 3;
+    if (chroot(".") != 0) return 4;
+    DIR *dir = opendir("/");
+    if (!dir) return 5;
+    for (struct dirent *e; (e = readdir(dir));) if (e->d_name[0] != '.') puts(e->d_name);
+    return 0;
+}
+"#;
+
+fn install_escape(target: &Path) {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("escape.c"), ESCAPE).unwrap();
+    sh(Command::new("cc")
+        .args(["-static", "-O", "-o"])
+        .arg(target)
+        .arg(dir.path().join("escape.c")));
+}
+
 fn mountinfo_mentions(path: &Path) -> bool {
     fs::read_to_string("/proc/self/mountinfo")
         .unwrap()
@@ -490,8 +599,39 @@ fn the_transaction_writes_nothing_live_but_the_pacman_log_and_package_cache() {
         let root = store.root().to_path_buf();
         let host_shutdown = fs::read("/run/initramfs/mkinitcpio-shutdown.conf").ok();
         let host_null = fs::metadata("/dev/null").unwrap().mode();
+        install_escape(&store.path(1).join("usr/bin/escape"));
         let staging = Staging::new(&store, 2).unwrap();
         let tx = staging.transaction().unwrap();
+        let listing = |argv: &[&str]| {
+            let output = tx.output(argv).unwrap();
+            assert!(
+                output.status.success(),
+                "{fs_type}: {argv:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let mut names: Vec<String> = String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            names.sort();
+            names
+        };
+        let top: Vec<String> = [
+            "bin", "boot", "dev", "efi", "etc", "home", "lib", "lib64", "opt", "proc", "root", "run", "sbin", "srv",
+            "sys", "tmp", "usr", "var",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(listing(&["ls", "-A", "/"]), top, "{fs_type}: /");
+        assert_eq!(listing(&["ls", "-A", "/proc/1/root/"]), top, "{fs_type}: PID 1's root");
+        assert_eq!(
+            listing(&["escape"]),
+            top,
+            "{fs_type}: a chroot escape got out of the view"
+        );
+        for live in ["/home", "/srv", "/root", "/efi"] {
+            assert!(listing(&["ls", "-A", live]).is_empty(), "{fs_type}: {live} isn't empty");
+        }
         let script = "test ! -e /archix; test -e /proc/self/exe; test -c /dev/null; \
             mkdir -p /run/initramfs; echo staged > /run/initramfs/mkinitcpio-shutdown.conf; \
             touch /run/archix-probe /home/probe /srv/probe /root/probe /probe /tmp/probe; \
@@ -609,6 +749,12 @@ fn deploy_helper() {
     };
     let root = PathBuf::from(std::env::var("ARCHIX_DEPLOY_ROOT").unwrap());
     let store = Store::open(&root).unwrap();
+    if action == "delete" {
+        let number = std::env::var("ARCHIX_DEPLOY_NUMBER").unwrap().parse().unwrap();
+        let pins = Keep::read(1, &store, &root.join("efi")).unwrap();
+        store.delete(number, &pins).unwrap();
+        return;
+    }
     let number = store.next_number().unwrap();
     let staging = Staging::new(&store, number).unwrap();
     let tx = staging.transaction().unwrap();
@@ -751,7 +897,7 @@ fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next
 
             store.point_current(1).unwrap();
             for n in store.deployments().unwrap().into_iter().filter(|n| *n != 1) {
-                store.delete(n).unwrap();
+                store.delete(n, &Keep::default()).unwrap();
             }
             let esp = store.root().join("efi");
             for entry in fs::read_dir(esp.join("loader/entries")).unwrap().flatten() {
@@ -761,5 +907,397 @@ fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next
             }
             fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
         }
+    }
+}
+
+fn pids_with(marker: &str) -> Vec<libc::pid_t> {
+    fs::read_dir("/proc")
+        .unwrap()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|pid: &libc::pid_t| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| String::from_utf8_lossy(&cmdline).contains(marker))
+        })
+        .collect()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+#[ignore]
+fn output_returns_megabytes_written_to_both_streams() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let staging = Staging::new(&store, 2).unwrap();
+    let tx = staging.transaction().unwrap();
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if finished.recv_timeout(std::time::Duration::from_secs(60)).is_ok() {
+            return false;
+        }
+        for pid in pids_with("98763") {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        true
+    });
+    let output = tx
+        .output(&[
+            "sh",
+            "-c",
+            ": 98763; head -c 4000000 /dev/zero; head -c 4000000 /dev/zero >&2",
+        ])
+        .unwrap();
+    let _ = done.send(());
+    assert!(!watchdog.join().unwrap(), "output() deadlocked on a full pipe");
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(output.stdout.len(), 4_000_000);
+    assert_eq!(output.stderr.len(), 4_000_000);
+}
+
+#[test]
+#[ignore]
+fn the_command_is_not_pid_1_and_sigterm_reaches_it() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let staging = Staging::new(&store, 2).unwrap();
+    let tx = staging.transaction().unwrap();
+    let mut child = tx
+        .command("sh")
+        .args(["-c", "trap 'exit 7' TERM; echo $$; while :; do sleep 1; done"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut line).unwrap();
+    assert_ne!(line.trim(), "1", "the command runs as PID 1");
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(7), "the command didn't get SIGTERM: {status:?}");
+}
+
+#[test]
+#[ignore]
+fn a_second_switch_cannot_stage_while_one_is_staging() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let first = Staging::new(&store, 2).unwrap();
+    let err = Staging::new(&store, 3).unwrap_err();
+    assert!(format!("{err:#}").contains("another archix process"), "{err:#}");
+    assert!(
+        first.dir().is_dir(),
+        "the second switch swept the first one's staging tree"
+    );
+    drop(first);
+    Staging::new(&store, 3).unwrap();
+}
+
+#[test]
+#[ignore]
+fn a_delete_killed_after_the_rename_or_partway_leaves_no_torn_deployment_named() {
+    let _serial = serial();
+    let cases: [(&str, &[&str]); 2] = [
+        ("ext4", &["deploy-delete-renamed", "deploy-delete-partway"]),
+        ("btrfs", &["deploy-delete-renamed"]),
+    ];
+    for (fs_type, steps) in cases {
+        let (_fs, store) = system(fs_type);
+        let esp = store.root().join("efi");
+        for step in steps {
+            let what = format!("{fs_type}, killed at {step}");
+            let switch = helper("switch", store.root(), &[]).output().unwrap();
+            assert!(switch.status.success(), "{what}: {}", stderr(&switch));
+            let number = store.current().unwrap().unwrap();
+            store.point_current(1).unwrap();
+            fs::remove_file(esp.join(format!("loader/entries/archix-{number}.conf"))).unwrap();
+            fs::remove_file(esp.join(format!("EFI/archix/{number}.efi"))).unwrap();
+            fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
+            let delete = helper(
+                "delete",
+                store.root(),
+                &[
+                    ("ARCHIX_TEST_CRASH", step),
+                    ("ARCHIX_DEPLOY_NUMBER", &number.to_string()),
+                ],
+            )
+            .output()
+            .unwrap();
+            assert_eq!(
+                std::os::unix::process::ExitStatusExt::signal(&delete.status),
+                Some(libc::SIGKILL),
+                "{what}: {}",
+                stderr(&delete)
+            );
+            assert_eq!(store.deployments().unwrap(), vec![1], "{what}");
+            assert_consistent(&store, &what);
+            let visible: Vec<String> = fs::read_dir(store.deploy_dir())
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| !name.starts_with('.'))
+                .collect();
+            assert_eq!(visible, vec!["1"], "{what}: a torn deployment kept its name");
+            assert_eq!(
+                store.remove_leftovers().unwrap(),
+                vec![format!(".deleting-{number}")],
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn a_failed_flush_stops_the_commit_before_anything_is_renamed_or_pointed() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let esp = FailingEsp::new();
+    esp_with_deployment_1(&esp.mnt);
+    let staging = Staging::new(&store, 2).unwrap();
+    staging
+        .transaction()
+        .unwrap()
+        .run(&["sh", "-ec", "printf uki-2 > /boot/archix.efi"])
+        .unwrap();
+    let staged = staging.finish().unwrap();
+    let staged_dir = staged.dir.clone();
+    fs::write(esp.mnt.join("dirty"), vec![1u8; 1 << 20]).unwrap();
+    esp.fail();
+    let boot = SystemdBoot {
+        esp: esp.mnt.clone(),
+        uki: PathBuf::from("boot/archix.efi"),
+    };
+    let err = staged.commit(&store, &esp.mnt, &boot).unwrap_err();
+    assert!(
+        !store.path(2).exists(),
+        "deployment 2 was committed after a failed flush: {err:#}"
+    );
+    assert!(staged_dir.is_dir());
+    assert_eq!(store.current().unwrap(), Some(1));
+    assert!(format!("{err:#}").contains("flushing"), "{err:#}");
+}
+
+fn free_bytes(path: &Path) -> u64 {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) }, 0);
+    stat.f_bavail * stat.f_frsize
+}
+
+#[test]
+#[ignore]
+fn a_commit_that_fills_the_esp_leaves_no_temporary_file_and_the_next_commit_succeeds() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let esp_fs = LoopFs::sized("vfat", "4M");
+    let esp = esp_fs.mnt.clone();
+    esp_with_deployment_1(&esp);
+    let boot = SystemdBoot {
+        esp: esp.clone(),
+        uki: PathBuf::from("boot/archix.efi"),
+    };
+    let uki: u64 = 1_500_000;
+    let stage = |number: u32| {
+        let staging = Staging::new(&store, number).unwrap();
+        staging
+            .transaction()
+            .unwrap()
+            .run(&["sh", "-ec", &format!("head -c {uki} /dev/zero > /boot/archix.efi")])
+            .unwrap();
+        staging.finish().unwrap()
+    };
+    let filler = esp.join("filler");
+    fs::write(&filler, vec![0u8; (free_bytes(&esp) - uki / 2) as usize]).unwrap();
+    let err = stage(2).commit(&store, &esp, &boot).unwrap_err();
+    assert!(
+        tmp_files(&esp).is_empty(),
+        "a failed write left {:?}: {err:#}",
+        tmp_files(&esp)
+    );
+    assert_eq!(store.current().unwrap(), Some(1));
+    fs::remove_file(&filler).unwrap();
+    fs::write(
+        esp.join("EFI/archix/9.efi.tmp"),
+        vec![0u8; (free_bytes(&esp) - uki / 2) as usize],
+    )
+    .unwrap();
+    fs::write(esp.join("loader/entries/archix-9.conf.tmp"), "half").unwrap();
+    fs::write(esp.join("loader/loader.conf.tmp"), "half").unwrap();
+    stage(3).commit(&store, &esp, &boot).unwrap();
+    assert!(
+        tmp_files(&esp).is_empty(),
+        "stale temporary files survived: {:?}",
+        tmp_files(&esp)
+    );
+    assert_eq!(store.current().unwrap(), Some(3));
+    assert_eq!(esp_state(&esp), (vec![1, 3], Some(3)));
+}
+
+#[test]
+#[ignore]
+fn mounts_under_the_live_var_log_and_cache_are_bound_live_and_others_stay_behind_the_overlay() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let var = store.root().join("var");
+    for sub in ["log", "log/journal", "cache", "lib/docker"] {
+        fs::create_dir_all(var.join(sub)).unwrap();
+        sh(Command::new("mount").args(["-t", "tmpfs", "tmpfs"]).arg(var.join(sub)));
+    }
+    fs::write(var.join("log/live.log"), "old\n").unwrap();
+    fs::write(var.join("log/journal/j"), "journal\n").unwrap();
+    fs::write(var.join("lib/docker/state"), "docker\n").unwrap();
+    let staging = Staging::new(&store, 2).unwrap();
+    let script = "grep -qx old /var/log/live.log; echo new >> /var/log/live.log; grep -qx journal /var/log/journal/j; \
+        echo fc > /var/cache/fontconfig-probe; echo line >> /var/log/pacman.log; \
+        test ! -e /var/lib/docker/state; echo staged > /var/lib/docker/staged";
+    let output = staging.transaction().unwrap().output(&["sh", "-ec", script]).unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    let staged = staging.finish().unwrap().dir;
+    assert_eq!(fs::read_to_string(var.join("log/live.log")).unwrap(), "old\nnew\n");
+    assert!(var.join("cache/fontconfig-probe").exists());
+    assert_eq!(fs::read_to_string(var.join("log/pacman.log")).unwrap(), "line\n");
+    assert!(!var.join("lib/docker/staged").exists());
+    let upper = staged.join("var-upper");
+    assert_eq!(fs::read_to_string(upper.join("lib/docker/staged")).unwrap(), "staged\n");
+    for live in ["log", "cache"] {
+        assert!(upper.join(live).symlink_metadata().is_err(), "var-upper carries {live}");
+    }
+}
+
+#[test]
+#[ignore]
+fn systemctl_in_the_view_skips_live_verbs_and_enables_offline() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let usr = store.path(1).join("usr");
+    install_program(&usr, "/usr/bin/systemctl", "systemctl");
+    fs::create_dir_all(usr.join("lib/systemd/system")).unwrap();
+    fs::write(
+        usr.join("lib/systemd/system/probe.service"),
+        "[Service]\nExecStart=/usr/bin/true\n[Install]\nWantedBy=multi-user.target\n",
+    )
+    .unwrap();
+    let staging = Staging::new(&store, 2).unwrap();
+    let tx = staging.transaction().unwrap();
+    for verb in ["daemon-reload", "enable", "restart"] {
+        let mut argv = vec!["systemctl", verb];
+        if verb != "daemon-reload" {
+            argv.push("probe.service");
+        }
+        let output = tx.output(&argv).unwrap();
+        assert!(output.status.success(), "{argv:?}: {}", stderr(&output));
+    }
+    let staged = staging.finish().unwrap().dir;
+    assert_eq!(
+        fs::read_link(staged.join("etc/systemd/system/multi-user.target.wants/probe.service")).unwrap(),
+        Path::new("/usr/lib/systemd/system/probe.service")
+    );
+}
+
+/// Copies the host's files of `packages` under /usr, without docs and locales, and the libraries they load, into the deployment `dep`.
+fn install_host_packages(dep: &Path, packages: &[&str]) {
+    let script = r#"
+        for p in $PACKAGES; do pacman -Qlq "$p"; done | grep -v '/$' | grep '^/usr/' \
+          | grep -Ev '^/usr/(share/(man|doc|info|locale|i18n|help|licenses|zoneinfo|bash-completion|zsh|fish|gtk-doc|iana-etc)|include|lib/(perl5|python[^/]*|gconv|getconf|audit))/' > "$WORK/files"
+        while read -r f; do
+          if [ -f "$f" ] && [ ! -L "$f" ]; then ldd "$f" 2>/dev/null | awk '$2 == "=>" && $3 ~ /^\// {print $3}'; fi
+        done < "$WORK/files" > "$WORK/libs"
+        cat "$WORK/files" "$WORK/libs" | while read -r f; do echo "$f"; readlink -f "$f"; done | sort -u | sed 's|^/||' > "$WORK/all"
+        tar -C / --no-recursion -cf - -T "$WORK/all" | tar -C "$DEP" --unlink-first -xpf -
+    "#;
+    let work = tempfile::tempdir().unwrap();
+    sh(Command::new("bash")
+        .args(["-c", script])
+        .env("PACKAGES", packages.join(" "))
+        .env("WORK", work.path())
+        .env("DEP", dep));
+}
+
+#[test]
+#[ignore]
+fn mkinitcpio_autodetect_in_the_view_sees_the_root_filesystem() {
+    let _serial = serial();
+    let kver = sh(Command::new("ls").arg("/usr/lib/modules"))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    for fs_type in ["ext4", "btrfs"] {
+        let (_fs, store) = system_on(LoopFs::sized(fs_type, "448M"), fs_type);
+        let dep = store.path(1);
+        install_host_packages(
+            &dep,
+            &[
+                "mkinitcpio",
+                "mkinitcpio-busybox",
+                "bash",
+                "coreutils",
+                "gawk",
+                "sed",
+                "grep",
+                "findutils",
+                "util-linux",
+                "kmod",
+                "libarchive",
+                "zstd",
+                "gzip",
+                "diffutils",
+                "glibc",
+            ],
+        );
+        let modules = dep.join("usr/lib/modules").join(&kver);
+        fs::create_dir_all(&modules).unwrap();
+        for entry in fs::read_dir(Path::new("/usr/lib/modules").join(&kver))
+            .unwrap()
+            .flatten()
+        {
+            if entry.file_name().to_string_lossy().starts_with("modules.") {
+                fs::copy(entry.path(), modules.join(entry.file_name())).unwrap();
+            }
+        }
+        fs::write(
+            dep.join("etc/mkinitcpio-test.conf"),
+            "MODULES=()\nBINARIES=()\nFILES=()\nHOOKS=(autodetect archixprobe)\nCOMPRESSION=cat\n",
+        )
+        .unwrap();
+        fs::write(
+            dep.join("usr/lib/initcpio/install/archixprobe"),
+            "#!/usr/bin/env bash\nbuild() {\n    local m\n    for m in \"${!_autodetect_cache[@]}\"; do\n        add_dir \"/autodetected/$m\"\n    done\n}\n",
+        )
+        .unwrap();
+        let staging = Staging::new(&store, 2).unwrap();
+        let tx = staging.transaction().unwrap();
+        let root = tx.output(&["findmnt", "-uno", "fstype", "-T", "/"]).unwrap();
+        let build = tx
+            .output(&[
+                "mkinitcpio",
+                "-c",
+                "/etc/mkinitcpio-test.conf",
+                "-k",
+                &kver,
+                "-g",
+                "/boot/initramfs-test.img",
+            ])
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{fs_type}: {}{}",
+            String::from_utf8_lossy(&build.stdout),
+            stderr(&build)
+        );
+        let staged = staging.finish().unwrap().dir;
+        let listing = sh(Command::new("lsinitcpio").arg(staged.join("boot/initramfs-test.img")));
+        let module = format!("autodetected/{fs_type}");
+        assert!(
+            listing.lines().any(|line| line.trim_end_matches('/') == module),
+            "{fs_type}: autodetect dropped the root filesystem's module:\n{listing}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&root.stdout).trim(),
+            fs_type,
+            "{}",
+            stderr(&root)
+        );
     }
 }

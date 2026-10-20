@@ -4,9 +4,10 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
 
@@ -15,10 +16,13 @@ use super::{Backend, OVERLAID, OVERLAY_OPTIONS};
 /// Paths inside the view's /var that are bound live or from the staging tree instead of overlaid, so its upper layer never carries them.
 pub const VAR_BINDS: &[&str] = &["log/pacman.log", "cache/pacman/pkg", "lib/pacman/local", "lib/dkms"];
 
-/// Where the staging root is assembled, inside the staging tree; only the transaction's own mount namespace ever mounts anything there.
+/// Mounts at or below these directories of the live /var, such as CachyOS's @log and @cache subvolumes, are bound live into the view; others stay behind the overlay, so their changes wait for activation.
+pub const LIVE_VAR_MOUNTS: &[&str] = &["log", "cache", "tmp"];
+
+/// Where the staging root is assembled, inside the staging tree, so the view's / is on the real root filesystem; only the transaction's own mount namespace ever mounts anything there.
 pub const VIEW_DIR: &str = ".view";
 
-/// Runs commands chrooted in a staging tree, each in its own mount and PID namespaces, so no mount and no process outlives it.
+/// Runs commands in a staging tree, each under a reaper that is PID 1 of its own PID and mount namespaces, so no mount and no process outlives it.
 pub struct Transaction {
     plan: Arc<Plan>,
 }
@@ -39,13 +43,14 @@ impl Transaction {
         Ok(Transaction { plan: Arc::new(plan) })
     }
 
-    /// A command that runs `program`, found on the view's PATH, as PID 1 of a fresh PID namespace chrooted in the view; add arguments, environment and stdio as usual.
+    /// A command that runs `program`, found on the view's PATH, as the only child of the view's PID 1; add arguments, environment and stdio as usual.
     pub fn command<S: AsRef<OsStr>>(&self, program: S) -> Command {
         let mut command = Command::new(program);
         command
             .env_clear()
             .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
-            .env("HOME", "/root");
+            .env("HOME", "/root")
+            .env("SYSTEMD_OFFLINE", "1");
         for name in ["TERM", "LANG", "LC_ALL"] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
@@ -149,6 +154,8 @@ impl Plan {
     fn build(layout: &Layout) -> Result<Plan> {
         let view = layout.staging.join(VIEW_DIR);
         fs::create_dir_all(&view).with_context(|| format!("creating {}", view.display()))?;
+        fs::set_permissions(&view, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("chmod {}", view.display()))?;
         let mut plan = Plan {
             steps: Vec::new(),
             view: c(&view)?,
@@ -157,7 +164,8 @@ impl Plan {
         };
         let at = |sub: &str| view.join(sub);
         plan.push(Op::MakePrivate, "making the mount namespace private")?;
-        plan.mount("tmpfs", &view, Some("tmpfs"), libc::MS_NOSUID, Some("mode=0755"))?;
+        // A bind, not a tmpfs, so tools asking what / is, such as mkinitcpio's autodetect, see the root filesystem.
+        plan.bind(&view, &view)?;
         plan.skeleton(layout.root, &view)?;
 
         let live_var = layout.root.join("var");
@@ -170,8 +178,28 @@ impl Plan {
         plan.bind(&layout.staging.join("etc"), &at("etc"))?;
         plan.overlay(&live_var, layout.staging, "var", &at("var"))?;
 
+        let live_mounts = live_var_mounts(&live_var)?;
+        for rel in &live_mounts {
+            let inside = at("var").join(rel);
+            plan.mkdir(&inside, 0o755, None)?;
+            let op = Op::Mount {
+                source: c(live_var.join(rel))?,
+                target: c(&inside)?,
+                fstype: None,
+                flags: libc::MS_BIND | libc::MS_REC,
+                data: None,
+            };
+            plan.push(
+                op,
+                &format!("binding the live /var/{} into the staging root", rel.display()),
+            )?;
+        }
+
         prepare_live_var(&live_var)?;
         for bind in VAR_BINDS {
+            if live_mounts.iter().any(|live| Path::new(bind).starts_with(live)) {
+                continue;
+            }
             let inside = at("var").join(bind);
             let mut dir = at("var");
             let parents: Vec<&OsStr> = Path::new(bind).iter().collect();
@@ -366,7 +394,7 @@ impl Plan {
         Ok(())
     }
 
-    /// Runs after fork in the child archix spawned; it must not allocate.
+    /// Runs after fork in the child archix spawned, which builds the view and waits for the namespace's PID 1; nothing here may allocate.
     fn enter(&self) -> io::Result<()> {
         unsafe {
             // The death signal follows the spawning thread, so the caller must wait for the command on the thread that started it.
@@ -381,34 +409,33 @@ impl Plan {
                     return Err(say_failed(&step.failure));
                 }
             }
-            let child = libc::fork();
-            if child < 0 {
-                return Err(io::Error::last_os_error());
+            let this = libc::syscall(libc::SYS_pidfd_open, libc::getpid(), 0) as libc::c_int;
+            if this < 0 {
+                return Err(say_failed(b"archix: can't watch the staging root's parent\n"));
             }
-            if child == 0 {
-                return self.become_init();
+            let init = fork_forwarding()?;
+            if init == 0 {
+                return self.become_init(this);
             }
-            let mut status = 0;
-            loop {
-                let done = libc::waitpid(child, &mut status, 0);
-                if done == child {
-                    break;
-                }
-                if done < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                    libc::_exit(127);
-                }
-            }
-            if libc::WIFEXITED(status) {
-                libc::_exit(libc::WEXITSTATUS(status));
-            }
-            libc::_exit(128 + libc::WTERMSIG(status));
+            close_inherited();
+            libc::sigprocmask(libc::SIG_UNBLOCK, &forwarded_signals(), std::ptr::null_mut());
+            libc::_exit(wait_for(init));
         }
     }
 
-    /// PID 1 of the new namespace: when it exits, the kernel kills everything the command left running.
-    unsafe fn become_init(&self) -> io::Result<()> {
+    /// PID 1 of the new namespace, a reaper that forwards SIGTERM and SIGINT to the command; when it exits, the kernel kills everything the command left running.
+    unsafe fn become_init(&self, parent: libc::c_int) -> io::Result<()> {
         unsafe {
             libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            let mut watch = libc::pollfd {
+                fd: parent,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            if libc::poll(&mut watch, 1, 0) != 0 {
+                libc::_exit(127);
+            }
+            libc::close(parent);
             let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
             if libc::mount(
                 c"proc".as_ptr(),
@@ -423,20 +450,104 @@ impl Plan {
             if libc::chdir(self.view.as_ptr()) != 0 {
                 return Err(say_failed(b"archix: can't enter the staging root\n"));
             }
-            if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) == 0 {
-                if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
-                    return Err(say_failed(
-                        b"archix: can't detach the live root from the staging root\n",
-                    ));
-                }
-            } else if libc::chroot(c".".as_ptr()) != 0 {
-                return Err(say_failed(b"archix: can't chroot into the staging root\n"));
+            if libc::syscall(libc::SYS_pivot_root, c".".as_ptr(), c".".as_ptr()) != 0 {
+                return Err(say_failed(b"archix: can't pivot into the staging root\n"));
+            }
+            if libc::umount2(c".".as_ptr(), libc::MNT_DETACH) != 0 {
+                return Err(say_failed(
+                    b"archix: can't detach the live root from the staging root\n",
+                ));
             }
             if libc::chdir(c"/".as_ptr()) != 0 {
                 return Err(io::Error::last_os_error());
             }
+            let command = fork_forwarding()?;
+            if command == 0 {
+                for signal in FORWARDED {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
+                libc::sigprocmask(libc::SIG_UNBLOCK, &forwarded_signals(), std::ptr::null_mut());
+                return Ok(());
+            }
+            close_inherited();
+            libc::sigprocmask(libc::SIG_UNBLOCK, &forwarded_signals(), std::ptr::null_mut());
+            let mut status = 0;
+            loop {
+                let done = libc::waitpid(-1, &mut status, 0);
+                if done == command {
+                    libc::_exit(exit_code(status));
+                }
+                if done < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    libc::_exit(127);
+                }
+            }
         }
-        Ok(())
+    }
+}
+
+const FORWARDED: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
+
+static FORWARD_TO: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn forward(signal: libc::c_int) {
+    let pid = FORWARD_TO.load(Ordering::Relaxed);
+    if pid > 0 {
+        unsafe { libc::kill(pid, signal) };
+    }
+}
+
+fn forwarded_signals() -> libc::sigset_t {
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for signal in FORWARDED {
+            libc::sigaddset(&mut set, signal);
+        }
+        set
+    }
+}
+
+/// Forks with SIGTERM and SIGINT blocked and forwarded to the child once unblocked; both sides return with them still blocked.
+unsafe fn fork_forwarding() -> io::Result<libc::pid_t> {
+    unsafe {
+        libc::sigprocmask(libc::SIG_BLOCK, &forwarded_signals(), std::ptr::null_mut());
+        for signal in FORWARDED {
+            libc::signal(signal, forward as *const () as libc::sighandler_t);
+        }
+        let child = libc::fork();
+        if child < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if child > 0 {
+            FORWARD_TO.store(child, Ordering::Relaxed);
+        }
+        Ok(child)
+    }
+}
+
+/// Closes everything but stdio, above all the close-on-exec pipe through which spawn() learns the command started: a process that never execs would hold it open until the command ends.
+fn close_inherited() {
+    unsafe { libc::syscall(libc::SYS_close_range, 3, libc::c_uint::MAX, 0) };
+}
+
+fn wait_for(child: libc::pid_t) -> libc::c_int {
+    let mut status = 0;
+    loop {
+        let done = unsafe { libc::waitpid(child, &mut status, 0) };
+        if done == child {
+            return exit_code(status);
+        }
+        if done < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return 127;
+        }
+    }
+}
+
+fn exit_code(status: libc::c_int) -> libc::c_int {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        128 + libc::WTERMSIG(status)
     }
 }
 
@@ -450,6 +561,13 @@ impl Step {
     fn run(&self) -> io::Result<()> {
         let check = |result: libc::c_int| {
             if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        };
+        let existing_is_fine = |result: libc::c_int| {
+            if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EEXIST) {
                 Ok(())
             } else {
                 Err(io::Error::last_os_error())
@@ -479,19 +597,14 @@ impl Step {
                 )),
                 Op::Mkdir { path, mode, owner } => {
                     if libc::mkdir(path.as_ptr(), *mode) != 0 {
-                        let err = io::Error::last_os_error();
-                        return if err.raw_os_error() == Some(libc::EEXIST) {
-                            Ok(())
-                        } else {
-                            Err(err)
-                        };
+                        return existing_is_fine(-1);
                     }
                     if let Some((uid, gid)) = owner {
                         check(libc::lchown(path.as_ptr(), *uid, *gid))?;
                     }
                     check(libc::chmod(path.as_ptr(), *mode))
                 }
-                Op::Symlink { target, path } => check(libc::symlink(target.as_ptr(), path.as_ptr())),
+                Op::Symlink { target, path } => existing_is_fine(libc::symlink(target.as_ptr(), path.as_ptr())),
                 Op::Mknod { path, dev } => {
                     check(libc::mknod(path.as_ptr(), libc::S_IFCHR | 0o666, *dev))?;
                     check(libc::chmod(path.as_ptr(), 0o666))
@@ -503,13 +616,8 @@ impl Step {
                         0o644,
                     );
                     if fd < 0 {
-                        let err = io::Error::last_os_error();
                         // Opening an existing lower file for writing would copy it up whole.
-                        return if err.raw_os_error() == Some(libc::EEXIST) {
-                            Ok(())
-                        } else {
-                            Err(err)
-                        };
+                        return existing_is_fine(-1);
                     }
                     libc::close(fd);
                     Ok(())
@@ -530,4 +638,70 @@ fn prepare_live_var(var: &Path) -> Result<()> {
         fs::set_permissions(&log, fs::Permissions::from_mode(0o644))?;
     }
     Ok(())
+}
+
+/// The outermost mounts at or below `LIVE_VAR_MOUNTS` in the live /var, relative to it.
+fn live_var_mounts(var: &Path) -> Result<Vec<PathBuf>> {
+    let var = fs::canonicalize(var).with_context(|| format!("resolving {}", var.display()))?;
+    let mountinfo = fs::read("/proc/self/mountinfo").context("reading /proc/self/mountinfo")?;
+    let mut found: Vec<PathBuf> = mount_points(&mountinfo)
+        .into_iter()
+        .filter_map(|point| point.strip_prefix(&var).ok().map(Path::to_path_buf))
+        .filter(|rel| {
+            rel.iter()
+                .next()
+                .is_some_and(|top| LIVE_VAR_MOUNTS.iter().any(|live| top == OsStr::new(live)))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    let mut outermost: Vec<PathBuf> = Vec::new();
+    for rel in found {
+        if !outermost.iter().any(|outer| rel.starts_with(outer)) {
+            outermost.push(rel);
+        }
+    }
+    Ok(outermost)
+}
+
+/// The mount points in a mountinfo table, with its octal escapes undone.
+pub fn mount_points(mountinfo: &[u8]) -> Vec<PathBuf> {
+    mountinfo
+        .split(|&b| b == b'\n')
+        .filter_map(|line| line.split(|&b| b == b' ').nth(4))
+        .map(|field| {
+            let mut out = Vec::with_capacity(field.len());
+            let mut i = 0;
+            while i < field.len() {
+                let octal = field
+                    .get(i + 1..i + 4)
+                    .filter(|d| field[i] == b'\\' && d.iter().all(|b| (b'0'..=b'7').contains(b)));
+                match octal {
+                    Some(d) => {
+                        out.push((d[0] - b'0') * 64 + (d[1] - b'0') * 8 + (d[2] - b'0'));
+                        i += 4;
+                    }
+                    None => {
+                        out.push(field[i]);
+                        i += 1;
+                    }
+                }
+            }
+            PathBuf::from(OsStr::from_bytes(&out))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_points_undo_mountinfo_escapes() {
+        let table = b"22 1 0:21 / /var/log rw - btrfs /dev/x rw\n23 1 0:22 / /var/my\\040cache rw - tmpfs t rw\n";
+        assert_eq!(
+            mount_points(table),
+            vec![PathBuf::from("/var/log"), PathBuf::from("/var/my cache")]
+        );
+    }
 }

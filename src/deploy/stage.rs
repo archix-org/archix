@@ -6,8 +6,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::view::{Layout, VAR_BINDS, VIEW_DIR};
-use super::{Backend, COPIED, OVERLAID, Store, TREES, Transaction};
+use super::store::{StoreLock, incomplete};
+use super::view::{Layout, VAR_BINDS, VIEW_DIR, mount_points};
+use super::{Backend, COPIED, OVERLAID, Store, Transaction};
 use crate::testhooks::mark;
 
 /// A deployment being built in `deploy/.staging-<N>` from the current one; deleted at the next switch unless committed.
@@ -18,6 +19,7 @@ pub struct Staging {
     number: u32,
     base: PathBuf,
     dir: PathBuf,
+    lock: StoreLock,
 }
 
 /// A staging tree complete on disk, ready for `commit`.
@@ -25,12 +27,14 @@ pub struct Staging {
 pub struct Staged {
     pub number: u32,
     pub dir: PathBuf,
+    _lock: StoreLock,
 }
 
 impl Staging {
-    /// Stages deployment `number` from the current one, first deleting whatever staging a crash left behind.
+    /// Stages deployment `number` from the current one, first deleting whatever staging a crash left behind; holds the store's lock until committed or dropped.
     pub fn new(store: &Store, number: u32) -> Result<Staging> {
         mark("deploy-stage");
+        let lock = store.lock()?;
         store.remove_leftovers()?;
         let current = store
             .current()?
@@ -75,6 +79,7 @@ impl Staging {
             number,
             base,
             dir,
+            lock,
         })
     }
 
@@ -106,12 +111,14 @@ impl Staging {
     pub fn finish(self) -> Result<Staged> {
         mark("deploy-flatten");
         let view = self.dir.join(VIEW_DIR);
-        match fs::remove_dir(&view) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                return Err(e).with_context(|| format!("removing {}", view.display()));
-            }
-            _ => {}
+        let mountinfo = fs::read("/proc/self/mountinfo").context("reading /proc/self/mountinfo")?;
+        if let Some(mounted) = mount_points(&mountinfo)
+            .into_iter()
+            .find(|point| point.starts_with(&view))
+        {
+            bail!("{} is mounted; the staging root is still in use", mounted.display());
         }
+        remove_any(&view)?;
         if self.backend == Backend::Overlay {
             for tree in OVERLAID {
                 super::flatten::flatten(
@@ -133,6 +140,7 @@ impl Staging {
         let staged = Staged {
             number: self.number,
             dir: self.dir,
+            _lock: self.lock,
         };
         staged.check()?;
         Ok(staged)
@@ -142,20 +150,10 @@ impl Staging {
 impl Staged {
     /// Refuses a tree that lacks part of a deployment or still holds staging scratch.
     pub fn check(&self) -> Result<()> {
-        for tree in TREES {
-            if !self.dir.join(tree).is_dir() {
-                bail!("{} has no {tree}/; it isn't a complete deployment", self.dir.display());
-            }
+        match incomplete(&self.dir) {
+            Some(why) => bail!("{why}; it isn't a complete deployment"),
+            None => Ok(()),
         }
-        for scratch in [".upper", ".work", VIEW_DIR] {
-            if self.dir.join(scratch).symlink_metadata().is_ok() {
-                bail!(
-                    "{} still has {scratch}; it isn't a complete deployment",
-                    self.dir.display()
-                );
-            }
-        }
-        Ok(())
     }
 }
 
@@ -175,7 +173,7 @@ fn layer_dirs(dir: &Path, tree: &str, lower: &Path) -> Result<()> {
     super::flatten::set_times(&upper, &meta)
 }
 
-fn remove_any(path: &Path) -> Result<()> {
+pub(super) fn remove_any(path: &Path) -> Result<()> {
     let result = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),

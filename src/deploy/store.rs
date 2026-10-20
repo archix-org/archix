@@ -8,11 +8,17 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use super::view::VIEW_DIR;
+use super::{Keep, TREES};
+use crate::testhooks::mark;
+
 const BTRFS_MAGIC: u64 = 0x9123_683e;
 /// Every btrfs subvolume's top directory has this inode number.
 const SUBVOLUME_INODE: u64 = 256;
 const STAGING_PREFIX: &str = ".staging-";
+const DELETING_PREFIX: &str = ".deleting-";
 const CURRENT_TMP: &str = ".current.tmp";
+const LOCK: &str = ".lock";
 
 /// How a deployment is staged from the current one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,13 +88,13 @@ impl Store {
         self.deploy_dir().join(format!("{STAGING_PREFIX}{number}"))
     }
 
-    /// Committed deployments, oldest first.
+    /// Committed deployments that are complete, oldest first.
     pub fn deployments(&self) -> Result<Vec<u32>> {
         let mut numbers: Vec<u32> = self
             .names()?
             .iter()
             .filter_map(|name| committed_number(name))
-            .filter(|n| self.path(*n).is_dir())
+            .filter(|n| incomplete(&self.path(*n)).is_none())
             .collect();
         numbers.sort_unstable();
         Ok(numbers)
@@ -114,11 +120,33 @@ impl Store {
         Ok(next_number(self.names()?.iter().map(String::as_str)))
     }
 
-    /// Deletes staging trees and a half-made `current` link a crash left behind, none of which was ever committed; returns their names.
+    /// Takes the store's lock, which staging holds until its commit, so two switches never share or sweep each other's staging trees.
+    pub fn lock(&self) -> Result<StoreLock> {
+        let path = self.dir.join(LOCK);
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EWOULDBLOCK) {
+                bail!(
+                    "another archix process is staging a deployment in {}",
+                    self.dir.display()
+                );
+            }
+            return Err(err).with_context(|| format!("locking {}", path.display()));
+        }
+        Ok(StoreLock { _file: file })
+    }
+
+    /// Deletes staging trees, deletions and a half-made `current` link a crash left behind, none of which is a committed deployment; returns their names.
     pub fn remove_leftovers(&self) -> Result<Vec<String>> {
         let mut removed = Vec::new();
         for name in self.names()? {
-            if name.starts_with(STAGING_PREFIX) {
+            if name.starts_with(STAGING_PREFIX) || name.starts_with(DELETING_PREFIX) {
                 self.remove_tree(&self.deploy_dir().join(&name))?;
                 removed.push(name);
             }
@@ -131,22 +159,49 @@ impl Store {
         Ok(removed)
     }
 
-    /// Deletes a committed deployment; never the current one.
-    pub fn delete(&self, number: u32) -> Result<()> {
-        if self.current()? == Some(number) {
+    /// Deletes a committed deployment, never the current, booted or boot-default one; it's renamed out of sight first, so a crash leaves a leftover, not a torn deployment.
+    pub fn delete(&self, number: u32, pins: &Keep) -> Result<()> {
+        if self.current()? == Some(number) || pins.current == Some(number) {
             bail!("deployment {number} is current; it can't be deleted");
+        }
+        if pins.booted == Some(number) {
+            bail!("deployment {number} is the one running; it can't be deleted");
+        }
+        if pins.boot_default == Some(number) {
+            bail!("deployment {number} is the boot default; it can't be deleted");
         }
         let path = self.path(number);
         if path.symlink_metadata().is_err() {
             return Ok(());
         }
-        self.remove_tree(&path)
+        let hidden = self.deploy_dir().join(format!("{DELETING_PREFIX}{number}"));
+        if hidden.symlink_metadata().is_ok() {
+            self.remove_tree(&hidden)?;
+        }
+        fs::rename(&path, &hidden).with_context(|| format!("renaming {} to {}", path.display(), hidden.display()))?;
+        crate::durable::sync_dir(&hidden)?;
+        mark("deploy-delete-renamed");
+        if self.is_subvolume(&hidden) {
+            return self.remove_tree(&hidden);
+        }
+        let mut entries: Vec<PathBuf> = fs::read_dir(&hidden)
+            .with_context(|| format!("reading {}", hidden.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<_>>()?;
+        entries.sort();
+        for (i, entry) in entries.iter().enumerate() {
+            super::stage::remove_any(entry)?;
+            if i == 0 {
+                mark("deploy-delete-partway");
+            }
+        }
+        fs::remove_dir(&hidden).with_context(|| format!("removing {}", hidden.display()))
     }
 
-    /// Points `current` at a committed deployment with an atomic rename, flushed to disk.
+    /// Points `current` at a complete committed deployment with an atomic rename, flushed to disk.
     pub fn point_current(&self, number: u32) -> Result<()> {
-        if !self.deployments()?.contains(&number) {
-            bail!("deployment {number} isn't committed");
+        if let Some(why) = incomplete(&self.path(number)) {
+            bail!("deployment {number} can't be current: {why}");
         }
         let tmp = self.dir.join(CURRENT_TMP);
         let _ = fs::remove_file(&tmp);
@@ -170,10 +225,13 @@ impl Store {
             .collect())
     }
 
+    fn is_subvolume(&self, path: &Path) -> bool {
+        self.backend == Backend::Snapshot
+            && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.ino() == SUBVOLUME_INODE)
+    }
+
     fn remove_tree(&self, path: &Path) -> Result<()> {
-        let subvolume = self.backend == Backend::Snapshot
-            && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.ino() == SUBVOLUME_INODE);
-        if subvolume {
+        if self.is_subvolume(path) {
             let output = Command::new("btrfs")
                 .args(["subvolume", "delete"])
                 .arg(path)
@@ -192,6 +250,27 @@ impl Store {
     }
 }
 
+/// Held while a deployment is staged and committed; released when dropped or when the process dies.
+#[derive(Debug)]
+pub struct StoreLock {
+    _file: fs::File,
+}
+
+/// Why `dir` isn't a complete deployment: a tree missing or staging scratch left in it.
+pub fn incomplete(dir: &Path) -> Option<String> {
+    for tree in TREES {
+        if !dir.join(tree).is_dir() {
+            return Some(format!("{} has no {tree}/", dir.display()));
+        }
+    }
+    for scratch in [".upper", ".work", VIEW_DIR] {
+        if dir.join(scratch).symlink_metadata().is_ok() {
+            return Some(format!("{} still has {scratch}", dir.display()));
+        }
+    }
+    None
+}
+
 fn committed_number(name: &str) -> Option<u32> {
     if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) || name.starts_with('0') {
         return None;
@@ -205,10 +284,16 @@ pub fn parse_current(target: &Path) -> Option<u32> {
     committed_number(name)
 }
 
-/// One past the highest committed or staged number among `names`, so a leftover staging tree's number isn't handed out while it's still there.
+/// One past the highest committed, staged or deleted number among `names`, so a leftover's number isn't handed out while it's still there.
 pub fn next_number<'a>(names: impl Iterator<Item = &'a str>) -> u32 {
     names
-        .filter_map(|name| committed_number(name.strip_prefix(STAGING_PREFIX).unwrap_or(name)))
+        .filter_map(|name| {
+            let bare = [STAGING_PREFIX, DELETING_PREFIX]
+                .iter()
+                .find_map(|prefix| name.strip_prefix(prefix))
+                .unwrap_or(name);
+            committed_number(bare)
+        })
         .max()
         .unwrap_or(0)
         + 1
@@ -226,12 +311,74 @@ mod tests {
         }
     }
 
+    fn deployment(store: &Store, name: &str) {
+        for tree in TREES {
+            fs::create_dir_all(store.deploy_dir().join(name).join(tree)).unwrap();
+        }
+    }
+
     #[test]
-    fn next_number_counts_committed_and_staged_trees_and_ignores_the_rest() {
+    fn next_number_counts_committed_staged_and_deleted_trees_and_ignores_the_rest() {
         assert_eq!(next_number([].into_iter()), 1);
         assert_eq!(next_number(["1", "2", "7", "notes", "07x", ""].into_iter()), 8);
         assert_eq!(next_number(["3", ".staging-9"].into_iter()), 10);
+        assert_eq!(next_number(["3", ".deleting-6"].into_iter()), 7);
         assert_eq!(next_number(["3", ".staging-x", "010"].into_iter()), 4);
+    }
+
+    #[test]
+    fn only_complete_deployments_count_or_become_current_and_a_half_deleted_one_is_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for name in ["1", "2", "3", "4", ".deleting-5"] {
+            deployment(&store, name);
+        }
+        fs::remove_dir(store.path(2).join("etc")).unwrap();
+        fs::create_dir(store.path(3).join(".upper")).unwrap();
+        fs::remove_dir_all(store.deploy_dir().join(".deleting-5/usr")).unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![1, 4]);
+        assert!(store.point_current(2).is_err());
+        assert!(store.point_current(3).is_err());
+        assert!(store.point_current(5).is_err());
+        store.point_current(4).unwrap();
+        assert_eq!(store.remove_leftovers().unwrap(), vec![".deleting-5"]);
+        assert_eq!(store.next_number().unwrap(), 5);
+    }
+
+    #[test]
+    fn a_deletion_renames_the_deployment_out_of_sight_and_spares_current_booted_and_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        for name in ["1", "2", "3", "4", "5"] {
+            deployment(&store, name);
+        }
+        store.point_current(5).unwrap();
+        let pins = Keep {
+            keep: 1,
+            booted: Some(3),
+            current: Some(5),
+            boot_default: Some(4),
+        };
+        for pinned in [3, 4, 5] {
+            assert!(store.delete(pinned, &pins).is_err(), "{pinned}");
+        }
+        store.delete(2, &pins).unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![1, 3, 4, 5]);
+        let mut names: Vec<String> = store.names().unwrap();
+        names.sort();
+        assert_eq!(names, vec!["1", "3", "4", "5"]);
+        store.delete(2, &pins).unwrap();
+    }
+
+    #[test]
+    fn a_second_lock_on_the_store_is_refused_until_the_first_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        fs::create_dir_all(store.dir()).unwrap();
+        let held = store.lock().unwrap();
+        assert!(store.lock().is_err());
+        drop(held);
+        store.lock().unwrap();
     }
 
     #[test]
@@ -247,6 +394,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         for name in ["1", "2", ".staging-3", ".staging-4"] {
+            deployment(&store, name);
             fs::create_dir_all(store.deploy_dir().join(name).join("usr/lib")).unwrap();
         }
         fs::write(store.deploy_dir().join(".staging-3/usr/lib/file"), "x").unwrap();
@@ -266,7 +414,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store(dir.path());
         for name in ["1", "2", ".staging-3"] {
-            fs::create_dir_all(store.deploy_dir().join(name)).unwrap();
+            deployment(&store, name);
         }
         assert_eq!(store.current().unwrap(), None);
         store.point_current(2).unwrap();
@@ -275,9 +423,9 @@ mod tests {
             Path::new("deploy/2")
         );
         assert!(store.point_current(3).is_err());
-        assert!(store.delete(2).is_err());
-        store.delete(1).unwrap();
+        assert!(store.delete(2, &Keep::default()).is_err());
+        store.delete(1, &Keep::default()).unwrap();
         assert_eq!(store.deployments().unwrap(), vec![2]);
-        store.delete(1).unwrap();
+        store.delete(1, &Keep::default()).unwrap();
     }
 }
