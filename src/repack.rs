@@ -188,7 +188,7 @@ fn original(caches: &[PathBuf], name: &str, version: &str, path: &str, sha256: O
 }
 
 /// The entries of a package's mtree, without the package's own metadata files such as `.PKGINFO`.
-fn parse_mtree(text: &str) -> Vec<Entry> {
+pub(crate) fn parse_mtree(text: &str) -> Vec<Entry> {
     let mut defaults: HashMap<String, String> = HashMap::new();
     let mut entries = Vec::new();
     for line in text.lines() {

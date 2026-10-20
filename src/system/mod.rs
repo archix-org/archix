@@ -1,8 +1,10 @@
+pub mod activate;
 pub mod apply;
 pub mod authenticode;
 pub mod blobs;
 pub mod boot;
 pub mod btrfs;
+pub mod deploy_boot;
 pub mod dkms;
 pub mod firewall;
 pub mod hooks;

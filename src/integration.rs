@@ -53,8 +53,8 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
 /// The statically linked archix the rescue initramfs hook copies; the package installs it.
 pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
 
-/// Files for managed booting: the early-boot generation check, and the rescue hook when the static binary exists.
-pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
+/// Files for managed booting: the early-boot generation check, the deployment activation and hook, and the rescue hook when the static binary exists.
+pub fn boot_files(paths: &Paths, archix: &Path) -> Result<Vec<(PathBuf, String)>> {
     let root = paths
         .pacman_conf
         .parent()
@@ -75,7 +75,9 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
     ];
-    if root.join(STATIC_BINARY.trim_start_matches('/')).exists() {
+    let with_static = root.join(STATIC_BINARY.trim_start_matches('/')).exists();
+    files.extend(crate::system::deploy_boot::files(root, archix, with_static)?);
+    if with_static {
         files.push((
             root.join("etc/initcpio/install/archix-rescue"),
             format!(
@@ -105,7 +107,7 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
             "HOOKS+=(archix-rescue)\n".to_string(),
         ));
     }
-    files
+    Ok(files)
 }
 
 /// Where this archix was started from, also after a switch had pacman replace it, when Linux appends " (deleted)".
@@ -127,7 +129,7 @@ fn root(paths: &Paths) -> PathBuf {
         .to_path_buf()
 }
 
-/// The rescue hook's files, which put it into every initramfs mkinitcpio builds.
+/// The rescue and deployment hooks' files, which put them into every initramfs mkinitcpio builds, and the activation unit.
 pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
     let root = root(paths);
     [
@@ -138,12 +140,14 @@ pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
     ]
     .iter()
     .map(|path| root.join(path))
+    .chain(crate::system::deploy_boot::all_files(&root))
     .collect()
 }
 
 /// Takes every integration file off, for `archix eject`.
 pub fn remove(paths: &Paths) -> Result<()> {
     let root = root(paths);
+    crate::system::deploy_boot::refuse_without_hook(&root, "taking archix's boot integration off")?;
     let mut gone = vec![
         root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service"),
         root.join("etc/systemd/system/archix-boot.service"),
@@ -172,7 +176,10 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
         .and_then(Path::parent)
         .unwrap_or(Path::new("/"))
         .to_path_buf();
-    let wants = [
+    if !boot {
+        crate::system::deploy_boot::refuse_without_hook(&root, "turning off archix's boot management")?;
+    }
+    let mut wants: Vec<(PathBuf, String)> = [
         ("sysinit.target.wants", "archix-boot.service"),
         ("multi-user.target.wants", "archix-boot-complete.service"),
     ]
@@ -181,7 +188,9 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
             root.join("etc/systemd/system").join(dir).join(unit),
             format!("/etc/systemd/system/{unit}"),
         )
-    });
+    })
+    .into();
+    wants.push(crate::system::deploy_boot::activate_wants(&root));
     if boot {
         for (link, unit) in &wants {
             if let Some(dir) = link.parent() {
@@ -195,11 +204,11 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
         for (link, _) in &wants {
             let _ = fs::remove_file(link);
         }
-        for (path, _) in boot_files(paths, &archix) {
+        for (path, _) in boot_files(paths, &archix)? {
             let _ = fs::remove_file(path);
         }
     }
-    let boot_files = if boot { boot_files(paths, &archix) } else { Vec::new() };
+    let boot_files = if boot { boot_files(paths, &archix)? } else { Vec::new() };
     for (path, content) in files(paths, &archix).into_iter().chain(boot_files) {
         if fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
             continue;
@@ -390,6 +399,34 @@ mod tests {
         let taken = with_custom_repos(handwritten, &repos);
         assert_eq!(taken.matches("[cachyos]").count(), 1, "{taken}");
         assert!(!taken.contains("https://old"), "{taken}");
+    }
+
+    #[test]
+    fn a_root_using_deployments_keeps_the_initramfs_hook() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let archix = Path::new("/usr/bin/archix");
+        let hook = dir.path().join("etc/initcpio/hooks/archix-deploy");
+        let has_hook = |files: &[(PathBuf, String)]| files.iter().any(|(path, _)| *path == hook);
+        assert!(!has_hook(&boot_files(&paths, archix).unwrap()), "no deployments, no hook");
+
+        fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
+        let err = boot_files(&paths, archix).unwrap_err().to_string();
+        assert!(err.contains(STATIC_BINARY), "{err}");
+        let static_binary = dir.path().join(STATIC_BINARY.trim_start_matches('/'));
+        fs::create_dir_all(static_binary.parent().unwrap()).unwrap();
+        fs::write(&static_binary, "").unwrap();
+        let files = boot_files(&paths, archix).unwrap();
+        assert!(has_hook(&files));
+        for (path, content) in &files {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+
+        assert!(ensure(&paths, false).is_err(), "boot management can't go off");
+        assert!(remove(&paths).is_err(), "eject can't take the hook off");
+        assert!(hook.exists());
+        assert!(dir.path().join("etc/mkinitcpio.conf.d/archix-deploy.conf").exists());
     }
 
     #[test]

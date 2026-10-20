@@ -16,6 +16,7 @@ use super::{check_pacman_free, confirm, refuse_if_unfinished, require_root};
 pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()> {
     require_root("eject")?;
     let paths = Paths::system();
+    archix::system::deploy_boot::refuse_without_hook(&paths.root(), "ejecting")?;
     refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
     let store = Store::new(&paths);

@@ -199,6 +199,21 @@ enum Command {
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+    /// Run by the initramfs: mount the deployment this boot belongs to over the root
+    #[command(hide = true)]
+    DeployMount {
+        root: PathBuf,
+        #[arg(long, default_value = archix::system::boot::SELECTED_ENTRY_VAR)]
+        efivar: PathBuf,
+        #[arg(long, default_value = "/run/archix")]
+        run_dir: PathBuf,
+    },
+    /// Run early in every boot by archix-deploy-activate.service: apply a deployment's /var changes on its first boot
+    #[command(hide = true)]
+    DeployActivate {
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
@@ -449,6 +464,18 @@ fn run() -> Result<ExitCode> {
     // A switch by 0.1.0-dogfood that replaced archix itself left units saying `ExecStart=/usr/bin/archix (deleted) boot-check`.
     let cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
+    // Both run before the root is fully up, so they skip archix's locks and pending-state checks.
+    let command = match command {
+        Command::DeployMount { root, efivar, run_dir } => {
+            archix::system::deploy_boot::mount(&root, &efivar, &run_dir)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::DeployActivate { root } => {
+            archix::system::activate::activate(&root)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        command => command,
+    };
     if let Some(name) = needs_root(&command)
         && !is_root()
     {
@@ -688,6 +715,8 @@ fn run() -> Result<ExitCode> {
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::BootComplete
+        | Command::DeployMount { .. }
+        | Command::DeployActivate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
         | Command::Sync { .. } => {
