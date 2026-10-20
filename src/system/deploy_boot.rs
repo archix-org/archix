@@ -153,6 +153,9 @@ fn mount_flags(path: &Path) -> Result<libc::c_ulong> {
     Ok(stat.f_flag)
 }
 
+/// The kernel's statvfs flag for relatime, which the libc crate defines only for glibc and the static binary is musl.
+const ST_RELATIME: libc::c_ulong = 0x1000;
+
 fn bind(from: &Path, to: &Path, read_only: bool) -> Result<()> {
     sys_mount(Some(from), to, libc::MS_BIND)?;
     let flags = mount_flags(to)?;
@@ -164,7 +167,7 @@ fn bind(from: &Path, to: &Path, read_only: bool) -> Result<()> {
             (libc::ST_NOEXEC, libc::MS_NOEXEC),
             (libc::ST_NOATIME, libc::MS_NOATIME),
             (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-            (libc::ST_RELATIME, libc::MS_RELATIME),
+            (ST_RELATIME, libc::MS_RELATIME),
         ]
         .iter()
         .filter(|(st, _)| flags & st != 0)

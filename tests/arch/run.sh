@@ -16,4 +16,6 @@ cid=$(docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgrou
   archix-arch-test /usr/lib/systemd/systemd)
 trap 'docker rm -f "$cid" >/dev/null' EXIT
 until state=$(docker exec "$cid" systemctl is-system-running 2>/dev/null); [[ $state == running || $state == degraded ]]; do sleep 1; done
+# The initramfs runs the static musl build, which can lack libc items the glibc build has.
+docker exec -e USER=root "$cid" cargo build --locked --release --target x86_64-unknown-linux-musl
 docker exec -e USER=root "$cid" cargo test --locked --no-fail-fast "$@" -- --include-ignored
