@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fails when a lock (archix.lock by default) has a dkms the NVIDIA VM suite hasn't passed with; archix's DKMS fix depends on how dkms handles original_module/.
+# Fails when a lock (archix.lock by default) has a dkms the NVIDIA VM suite hasn't passed with; DKMS builds run inside each deployment's staging view, which depends on how dkms behaves there.
 set -euo pipefail
 lock=${1:-/etc/archix/archix.lock}
 tested=$(dirname "$0")/nvidia/dkms-tested

@@ -13,7 +13,7 @@ return {
     cachyos("cachyos", "$arch"),
   },
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot", esp = "/boot", kernel = "linux-cachyos", entries = 20 },
+  boot = { loader = "systemd-boot", kernel = "linux-cachyos" },
   files = {
     ["/usr/local/bin/archix-vmtest"] = { source = "vmtest.sh", mode = "0755" },
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },

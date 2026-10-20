@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Boots archix-managed generations in QEMU with OVMF; `run.sh` tests boot entries, Secure Boot and rescue, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across rollbacks (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh upgrade` archix upgrading from the previous release (ARCHIX_OLD, a tag), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh atomic` measures in-place upgrades and rollbacks against A/B /usr ones.
+# Boots archix deployments in QEMU with OVMF; `run.sh` tests the first layout, deployments, boot entries, boot counting and Secure Boot, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos.
 set -euo pipefail
 suite=${1:-boot}
+case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; it waits for a second release with deployments" >&2; exit 2 ;; esac
 root=$(cd "$(dirname "$0")/../.." && pwd)
 # One build volume per checkout, as in tests/arch/run.sh.
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)

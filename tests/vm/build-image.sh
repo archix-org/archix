@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds /work/disk.img: GPT with an ESP and an ext4 root (FS=btrfs: btrfs with an @ subvolume, as CachyOS installs it), Arch pacstrapped at the test snapshot, archix generation 1.
+# Builds /work/disk.img: GPT with an ESP and an ext4 root (FS=btrfs: btrfs with an @ subvolume, as CachyOS installs it), Arch pacstrapped at the test snapshot and laid out as deployments by archix's first switch.
 set -euo pipefail
 suite=${SUITE:-boot}
 archive=${ARCHIVE:-https://archive.archlinux.org}
@@ -42,8 +42,8 @@ else
   mkfs.ext4 -q -L archixroot "$root"
   mount "$root" /mnt
 fi
-mkdir -p /mnt/boot
-mount "$esp" /mnt/boot
+mkdir -p /mnt/efi
+mount "$esp" /mnt/efi
 
 grep -v '^NoExtract' /etc/pacman.conf > /tmp/pacman.conf
 if [ "$suite" = cachyos ]; then
@@ -93,10 +93,10 @@ else
   install -Dm755 "$archix" /mnt/usr/bin/archix
   install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
 fi
-bootctl --esp-path=/mnt/boot --no-variables install >/dev/null
+bootctl --esp-path=/mnt/efi --no-variables install >/dev/null
 # The ESP in fstab, as on any real install: early boot units must not wait on it in a cycle.
-echo "UUID=$(blkid -s UUID -o value "$esp") /boot vfat defaults 0 2" >> /mnt/etc/fstab
-printf 'timeout 2\nconsole-mode keep\n' > /mnt/boot/loader/loader.conf
+echo "UUID=$(blkid -s UUID -o value "$esp") /efi vfat defaults 0 2" >> /mnt/etc/fstab
+printf 'timeout 2\nconsole-mode keep\n' > /mnt/efi/loader/loader.conf
 
 mkdir -p /mnt/etc/archix
 rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs='"btrfs-progs", '
@@ -106,6 +106,6 @@ install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
 arch-chroot /mnt archix --host archix-vm switch --noconfirm
-ls /mnt/boot/loader/entries /mnt/boot/EFI/archix
-# Inside the VM the host-side mirror has another address.
-sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist /mnt/var/lib/archix/archive-url
+ls /mnt/archix/deploy /mnt/efi/loader/entries /mnt/efi/EFI/archix
+# Inside the VM the host-side mirror has another address; each deployment has its own /etc.
+sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/archix/deploy/*/etc/archix/init.lua /mnt/archix/deploy/*/etc/pacman.d/mirrorlist /mnt/var/lib/archix/archive-url

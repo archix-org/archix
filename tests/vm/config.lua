@@ -3,7 +3,7 @@ return {
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot", esp = "/boot" },
+  boot = { loader = "systemd-boot" },
   files = {
     ["/usr/local/bin/archix-vmtest"] = { source = "vmtest.sh", mode = "0755" },
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
@@ -16,7 +16,7 @@ return {
     ["archix-vmtest.service"] = true,
     ["systemd-networkd.service"] = true,
     ["systemd-resolved.service"] = true,
-    -- Stage 1 drops the marker, so booting generation 1's entry has to start it again during the boot-time rollback.
+    -- Stage 1 drops the marker, so booting an older deployment's entry must bring it back with that deployment's /etc.
     ["archix-marker.service"] = true, -- marker
   },
 }

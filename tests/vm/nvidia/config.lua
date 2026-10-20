@@ -3,7 +3,8 @@ return {
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot", esp = "/boot", entries = 8 },
+  boot = { loader = "systemd-boot" },
+  deployments = { keep = 3 },
   files = {
     ["/usr/local/bin/archix-vmtest"] = { source = "vmtest.sh", mode = "0755" },
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
