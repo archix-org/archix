@@ -78,7 +78,8 @@ two=$(usage)
 report "switch, 2 deployments kept" "$before" "$two"
 echo "STORAGE: deployment 2's /var changes: $(du -sb /mnt/archix/deploy/2/var-upper | cut -f1) bytes"
 drop() {
-  if [ "$fs" = btrfs ]; then btrfs subvolume delete --commit-after /mnt/archix/deploy/1; else rm -rf /mnt/archix/deploy/1; fi
+  # The cleaner frees a deleted subvolume's extents in the background; sync waits for it, or the space looks still taken.
+  if [ "$fs" = btrfs ]; then btrfs subvolume delete --commit-after /mnt/archix/deploy/1 && btrfs subvolume sync /mnt; else rm -rf /mnt/archix/deploy/1; fi
   rm /mnt/efi/loader/entries/archix-1.conf /mnt/efi/EFI/archix/1.efi
 }
 timed drop

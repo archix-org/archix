@@ -8,7 +8,7 @@ docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat
 rm -f "$build_log"
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 packages="base-devel devtools firefox rust git"
-for fs in ext4 btrfs btrfs:compress=zstd; do
+for fs in ${STORAGE_FS:-ext4 btrfs btrfs:compress=zstd}; do
   for range in 2026-06-01:2026-10-10 2026-10-03:2026-10-10; do
     env=(-e FS="${fs%%:*}" -e BTRFS_OPTS="$([ "$fs" = "${fs#*:}" ] || echo "${fs#*:}")" -e DATE="${range%:*}" -e TO_DATE="${range#*:}")
     docker run --rm --privileged --network host -v "$work":/work -v "$root/tests/vm":/vm:ro "${env[@]}" -e ARCHIVE="$archive" \
