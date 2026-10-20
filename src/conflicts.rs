@@ -153,8 +153,8 @@ fn kept_files(local_db: &Path, replaced: &BTreeSet<String>, incoming: &BTreeSet<
     owners
 }
 
-/// Two packages a switch would install, or one it installs and one it keeps, that ship the same file; pacman would refuse the whole transaction.
-pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result<()> {
+/// Two packages a switch would install, or one it installs and one it keeps, that ship the same file, or a file no package owns in the way under `root`, which holds the trees the changes are staged from; pacman would refuse the whole transaction.
+pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path, root: &Path) -> Result<()> {
     let mut incoming = Vec::new();
     for path in install {
         incoming.push(contents(path)?);
@@ -177,7 +177,6 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
             }
         }
     }
-    let root = local_db.ancestors().nth(4).unwrap_or(Path::new("/"));
     let owned = owned_files(local_db);
     for Contents {
         name, files, backups, ..
@@ -194,14 +193,11 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path) -> Result
             shown.join("\n  ")
         );
     }
-    // Packages the switch drops are removed after the install, so only the versions the install replaces free space in time.
-    let mut freed: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
-    freed.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
-    check_mounts(root, local_db, &incoming, &freed)
+    check_mounts(root, &incoming)
 }
 
-/// Like pacman's disk space check: what each mount gains from the incoming files, less what the replaced versions' files free there (nothing on btrfs, whose snapshot keeps them).
-fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTreeSet<String>) -> Result<()> {
+/// Like pacman's disk space check: what each mount gains from the incoming files; the replaced versions free nothing, as the deployment staged from keeps them.
+fn check_mounts(root: &Path, incoming: &[Contents]) -> Result<()> {
     let mounts = mount_points();
     let mount_of = |file: &str| {
         let path = root.join(file);
@@ -221,40 +217,9 @@ fn check_mounts(root: &Path, local_db: &Path, incoming: &[Contents], freed: &BTr
             *adds.entry(mount.clone()).or_default() += on_disk(&mount, *size);
         }
     }
-    let mut frees: BTreeMap<PathBuf, u64> = BTreeMap::new();
-    for entry in fs::read_dir(local_db).into_iter().flatten().flatten() {
-        let desc = parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default());
-        if !desc
-            .get("NAME")
-            .and_then(|n| n.first())
-            .is_some_and(|name| freed.contains(name))
-        {
-            continue;
-        }
-        let mut mtree = String::new();
-        let read = File::open(entry.path().join("mtree"))
-            .is_ok_and(|file| GzDecoder::new(file).read_to_string(&mut mtree).is_ok());
-        if read {
-            for (file, size) in mtree_entries(&mtree) {
-                let mount = mount_of(&file);
-                *frees.entry(mount.clone()).or_default() += on_disk(&mount, size);
-            }
-        } else if let Some(size) = desc
-            .get("SIZE")
-            .and_then(|s| s.first())
-            .and_then(|s| s.parse::<u64>().ok())
-        {
-            *frees.entry(mount_of("usr")).or_default() += size;
-        }
-    }
     for (mount, add) in adds {
         crate::system::btrfs::ensure_metadata_room(&mount)?;
-        let frees = if crate::capture::is_btrfs(&mount) {
-            0
-        } else {
-            frees.get(&mount).copied().unwrap_or(0)
-        };
-        check_space(&mount, add, frees)?;
+        check_space(&mount, add, 0)?;
     }
     Ok(())
 }

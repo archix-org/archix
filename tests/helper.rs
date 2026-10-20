@@ -124,60 +124,40 @@ fn a_crash_before_the_switch_leaves_the_config_and_lock_untouched() {
 
 #[test]
 #[ignore]
-fn a_crash_inside_the_switch_writes_the_config_only_when_recover_continues() {
+fn a_crash_inside_the_switch_writes_the_config_only_once_its_deployment_is_committed() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
     let before = setup.read("archix.lock").unwrap();
+    let deployments = setup.machine.deployments();
 
     let crashed = setup.run_env(
-        &[("ARCHIX_TEST_CRASH", "after-install")],
+        &[("ARCHIX_TEST_CRASH", "deploy-transact")],
         &["install", "tree", "--noconfirm"],
     );
-    assert_eq!(
-        crashed.status.signal(),
-        Some(9),
-        "archix should die right after the install step"
-    );
+    assert_eq!(crashed.status.signal(), Some(9), "archix should die while staging");
     let after = setup.read("archix.lock").unwrap();
-    println!(
-        "archix.lock after a kill inside the switch:\n{}",
-        line_diff(&before, &after)
-    );
     assert!(
         after == before,
-        "the switch wasn't committed, yet archix.lock changed:\n{}",
+        "the deployment wasn't committed, yet archix.lock changed:\n{}",
         line_diff(&before, &after)
     );
     assert!(
         installed_lua(&setup).is_none(),
-        "the switch wasn't committed, yet installed.lua was written"
+        "the deployment wasn't committed, yet installed.lua was written"
     );
-    println!("recover --rollback:\n{}", setup.ok(&["recover", "--rollback"]));
-    assert!(
-        setup.read("archix.lock").unwrap() == before,
-        "recover --rollback changed archix.lock"
-    );
-    assert!(installed_lua(&setup).is_none() && installed("tree").is_none());
+    assert_eq!(setup.machine.deployments(), deployments);
+    assert!(installed("tree").is_none());
 
-    let crashed = setup.run_env(
-        &[("ARCHIX_TEST_CRASH", "after-install")],
-        &["install", "tree", "--noconfirm"],
-    );
-    assert_eq!(crashed.status.signal(), Some(9));
-    println!("recover --continue:\n{}", setup.ok(&["recover", "--continue"]));
+    setup.ok(&["install", "tree", "--noconfirm"]);
     let lock = setup.read("archix.lock").unwrap();
-    println!("archix.lock after recover --continue:\n{}", line_diff(&before, &lock));
-    assert!(
-        lock.contains("tree = {"),
-        "recover --continue should write the switch's lock"
-    );
+    assert!(lock.contains("tree = {"), "a committed switch writes its lock");
     assert!(
         installed_lua(&setup).is_some_and(|text| text.contains("\"tree\"")),
-        "recover --continue should write installed.lua"
+        "a committed switch writes installed.lua"
     );
     assert!(installed("tree").is_some());
-    setup.ok(&["remove", "tree", "--noconfirm"]);
+    assert!(setup.machine.leftovers().is_empty(), "{:?}", setup.machine.leftovers());
 }
 
 #[test]

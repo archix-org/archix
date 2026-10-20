@@ -64,7 +64,7 @@ impl Step {
             Step::Packages => "What's installed, and what happens to what isn't declared.",
             Step::System => "Settings, accounts and services taken over as they are.",
             Step::Files => "Edited and hand-written files under /etc that archix can manage.",
-            Step::Boot => "Boot entries per generation, and snapshots before each switch.",
+            Step::Boot => "A boot entry per deployment; every generation boots as its own deployment.",
             Step::Generations => "How many old generations gc keeps around.",
             Step::Dotfiles => "Optional: bring dotfiles into the config as live links.",
             Step::Review => "Everything init will write. Nothing has changed yet.",
@@ -83,7 +83,6 @@ enum Control {
     AurReview,
     MissingVersions,
     Files,
-    Snapshots,
     Boot,
     Keep,
     KeepDays,
@@ -373,9 +372,6 @@ impl<'a> App<'a> {
             }
             Step::Files if !facts.files.is_empty() => controls.push(Control::Files),
             Step::Boot => {
-                if facts.btrfs {
-                    controls.push(Control::Snapshots);
-                }
                 if matches!(facts.boot, BootFacts::Ready { .. }) {
                     controls.push(Control::Boot);
                 }
@@ -422,9 +418,7 @@ impl<'a> App<'a> {
         for control in self.controls() {
             match control {
                 Control::Location | Control::Keep | Control::KeepDays => rows.push(Row::Edit(control)),
-                Control::Git | Control::ReadOnly | Control::AurReview | Control::Snapshots | Control::Boot => {
-                    rows.push(Row::Flip(control))
-                }
+                Control::Git | Control::ReadOnly | Control::AurReview | Control::Boot => rows.push(Row::Flip(control)),
                 c if Self::is_list(c) => rows.extend((0..self.items(c).len()).map(|i| Row::Item(control, i))),
                 _ => rows.extend((0..self.options(control).len()).map(|i| Row::Pick(control, i))),
             }
@@ -552,7 +546,6 @@ impl<'a> App<'a> {
                 Control::Git => answers.git = !answers.git,
                 Control::ReadOnly => answers.read_only = !answers.read_only,
                 Control::AurReview => answers.aur_review = !answers.aur_review,
-                Control::Snapshots => answers.snapshots = !answers.snapshots,
                 Control::Boot => answers.boot = !answers.boot,
                 _ => {}
             },
@@ -963,29 +956,13 @@ impl<'a> App<'a> {
                 }
             }
             Step::Boot => {
-                if facts.btrfs {
-                    self.control(Control::Snapshots, lines, cursor_line);
-                } else {
-                    lines.push(note(
-                        "/ isn't btrfs, so no snapshots; packages, config and boot entries still roll back".into(),
-                    ));
-                    lines.push(Line::default());
+                for (good, text) in super::boot_lines(facts) {
+                    lines.push(if good { done(text) } else { warn(text) });
                 }
-                match &facts.boot {
-                    BootFacts::NoLoader => {
-                        lines.push(note("no systemd-boot found, so archix leaves booting alone".into()));
-                    }
-                    BootFacts::NoRoot { esp } => lines.push(warn(format!(
-                        "systemd-boot is on {esp}, but the kernel command line has no root=, so archix leaves booting alone"
-                    ))),
-                    BootFacts::Ready {
-                        esp, kernel, params, ..
-                    } => {
-                        lines.push(done(format!("systemd-boot on {esp}, kernel {kernel}")));
-                        lines.push(note(format!("kernel command line: {}", params.join(" "))));
-                        lines.push(Line::default());
-                        self.control(Control::Boot, lines, cursor_line);
-                    }
+                if let BootFacts::Ready { params, .. } = &facts.boot {
+                    lines.push(note(format!("kernel command line: {}", params.join(" "))));
+                    lines.push(Line::default());
+                    self.control(Control::Boot, lines, cursor_line);
                 }
             }
             Step::Generations => {
@@ -1083,21 +1060,10 @@ impl<'a> App<'a> {
         ));
         lines.push(row("Config files", count(answers.files.len(), "file", "files")));
         let boot = match (&facts.boot, answers.boot) {
-            (BootFacts::Ready { esp, .. }, true) => format!("an entry per generation on {esp}"),
-            _ => "left alone".into(),
+            (BootFacts::Ready { esp, .. }, true) => format!("an entry per deployment on {esp}"),
+            _ => "not managed, so `archix switch` refuses".into(),
         };
         lines.push(row("Boot", boot));
-        if facts.btrfs {
-            lines.push(row(
-                "Snapshots",
-                if answers.snapshots {
-                    "before every switch"
-                } else {
-                    "off"
-                }
-                .into(),
-            ));
-        }
         lines.push(row(
             "Generations",
             format!(
@@ -1183,7 +1149,7 @@ impl<'a> App<'a> {
                     lines.push(Line::default());
                 }
             }
-            Control::Git | Control::ReadOnly | Control::AurReview | Control::Snapshots | Control::Boot => {
+            Control::Git | Control::ReadOnly | Control::AurReview | Control::Boot => {
                 let (title, on) = match control {
                     Control::Git => ("Make it a git repository", answers.git),
                     Control::ReadOnly => (
@@ -1194,11 +1160,10 @@ impl<'a> App<'a> {
                         "Show each AUR build recipe and ask before trusting it",
                         answers.aur_review,
                     ),
-                    Control::Snapshots => (
-                        "Snapshot / before every switch, as an extra recovery point",
-                        answers.snapshots,
+                    _ => (
+                        "Boot every generation as its own deployment, from a systemd-boot entry",
+                        answers.boot,
                     ),
-                    _ => ("Write a boot entry for each generation", answers.boot),
                 };
                 let row = Row::Flip(control);
                 let mark = if on { "[x] " } else { "[ ] " };

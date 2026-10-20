@@ -107,26 +107,6 @@ pub fn sync_filesystems_checked<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
     Ok(())
 }
 
-/// The places a package transaction on `root` writes to, for `sync_filesystems`.
-pub fn system_paths(root: &Path) -> Vec<std::path::PathBuf> {
-    [
-        "",
-        "usr",
-        "boot",
-        "efi",
-        "boot/efi",
-        "var",
-        "var/lib/pacman",
-        "var/cache/pacman/pkg",
-        "var/lib/archix",
-        "var/cache/archix",
-        "etc",
-    ]
-    .iter()
-    .map(|sub| root.join(sub))
-    .collect()
-}
-
 /// Writes a file in the user's config like `write`, keeping its owner and mode, or giving a new one its directory's owner and 0644, so a run under sudo leaves nothing root-owned there.
 pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
     let before = fs::metadata(path)

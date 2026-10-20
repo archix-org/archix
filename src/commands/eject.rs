@@ -2,22 +2,21 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use archix::generations::Store;
 use archix::integration;
 use archix::paths::Paths;
-use archix::system::apply::SystemChange;
-use archix::system::{SystemState, boot, snapshot};
+use archix::system::apply::{Accounts, SystemChange};
+use archix::system::{SystemState, boot};
 
-use super::{check_pacman_free, confirm, refuse_if_unfinished, require_root};
+use super::{check_pacman_free, confirm, require_root};
 
 /// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off.
 pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()> {
     require_root("eject")?;
     let paths = Paths::system();
-    archix::system::deploy_boot::refuse_without_hook(&paths.root(), "ejecting")?;
-    refuse_if_unfinished(&paths)?;
+    archix::system::deploy_boot::refuse_without_hook(&paths.root, "ejecting")?;
     check_pacman_free(&paths)?;
     let store = Store::new(&paths);
     let current = match store.current()? {
@@ -27,14 +26,12 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
     let esp = fs::read_to_string(paths.state.join("boot/esp"))
         .ok()
         .map(|esp| esp.trim().to_string())
-        .filter(|esp| !boot::entries(esp).is_empty());
+        .filter(|esp| !boot::entries(std::path::Path::new(esp)).is_empty());
     let kernels = boot::installed_kernels();
     let default = current
         .as_ref()
-        .and_then(|generation| generation.settings.boot.as_deref())
-        .and_then(|settings| settings.split_whitespace().next())
-        .unwrap_or("linux")
-        .to_string();
+        .and_then(|generation| generation.settings.boot.as_ref())
+        .map_or_else(|| "linux".to_string(), |boot| boot.kernel.clone());
     let sign = esp.is_some() && boot::sbctl_has_keys();
 
     println!("archix eject: archix stops managing this machine");
@@ -53,11 +50,11 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
             } else {
                 ""
             },
-            boot::entries(esp).len()
+            boot::entries(std::path::Path::new(esp)).len()
         );
     }
     println!(
-        "  removes   archix-boot.service and archix-boot-complete.service, the rescue initramfs hook, the pacman hook and the login notices"
+        "  removes   archix-boot.service and archix-boot-complete.service, the deployment units and initramfs hook, the pacman hook and the login notices"
     );
     if restore_originals {
         println!(
@@ -68,7 +65,7 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
     }
     println!("  keeps     packages, users, groups, services and pacman.conf");
     if purge {
-        println!("  deletes   /var/lib/archix, /var/cache/archix and archix's btrfs snapshots");
+        println!("  deletes   /var/lib/archix and /var/cache/archix");
     } else {
         println!("  keeps     /var/lib/archix and /var/cache/archix (--purge deletes them)");
     }
@@ -76,11 +73,6 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
         bail!("aborted; nothing was changed");
     }
 
-    for path in integration::rescue_files(&paths) {
-        if path.exists() {
-            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        }
-    }
     if let Some(esp) = &esp {
         for line in boot::hand_over(esp, &kernels, &default, sign)? {
             println!("boot: {line}");
@@ -100,7 +92,9 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
                 },
                 to: SystemState::default(),
             };
-            archix::system::apply::files(&paths, &change)?;
+            let root = paths.root.clone();
+            let live = move |path: &str| Some(root.join(path.trim_start_matches('/')));
+            archix::system::apply::files(&paths, &change, &live, &Accounts::read(&paths.root.join("etc")))?;
         } else {
             for (path, file) in &files {
                 let writable = file.mode | 0o200;
@@ -111,13 +105,6 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
         }
     }
     if purge {
-        for generation in store.list()? {
-            if let Some(path) = &generation.snapshot
-                && let Err(e) = snapshot::delete(path)
-            {
-                eprintln!("warning: couldn't delete the snapshot {path}: {e:#}");
-            }
-        }
         for dir in [&paths.cache, &paths.state] {
             match fs::remove_dir_all(dir) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {

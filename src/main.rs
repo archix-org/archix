@@ -59,7 +59,7 @@ enum Command {
     },
     /// Show what a switch would change to make this machine match the lock
     Diff,
-    /// Make this machine's packages match the lock
+    /// Build the next deployment from the lock and the config; it boots at the next restart
     Switch {
         /// Don't ask for confirmation
         #[arg(long)]
@@ -71,25 +71,15 @@ enum Command {
         #[arg(long, value_enum)]
         accept_nearest: Option<commands::Nearest>,
     },
-    /// Deal with a switch that was interrupted: continue it, roll it back or abandon it
-    #[command(group = clap::ArgGroup::new("mode"))]
+    /// Gone: a switch commits a whole new deployment or nothing, so there's nothing to recover
+    #[command(hide = true)]
     Recover {
-        /// Finish the interrupted switch
-        #[arg(long = "continue", group = "mode")]
-        cont: bool,
-        /// Return to the packages from before the interrupted switch
-        #[arg(long, group = "mode")]
-        rollback: bool,
-        /// Close the journal without changing anything, after showing what state the system is in
-        #[arg(long, group = "mode")]
-        abandon: bool,
-        /// With --rollback, go back across versions that may not read newer data without asking
-        #[arg(long)]
-        allow_unsafe_downgrade: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
     },
-    /// Show the lock, pending changes and any unfinished switch
+    /// Show the lock, the current and booted generations and pending changes
     Status,
-    /// Put back the packages of an earlier generation (the previous one by default)
+    /// Make an earlier generation current (the previous one by default): its deployment if kept, else rebuilt from the package cache; it boots at the next restart
     Rollback {
         /// Generation number; `archix generations` lists them
         generation: Option<u32>,
@@ -100,9 +90,9 @@ enum Command {
         #[arg(long)]
         allow_unsafe_downgrade: bool,
     },
-    /// List generations; the current one is marked with *
+    /// List generations; the current one is marked with *, and those with a deployment say so
     Generations,
-    /// Delete old generations and cached files no kept generation needs
+    /// Delete the deployments deployments.keep leaves out, old generation records and cached files no kept generation needs
     Gc,
     /// Stop managing this machine: systemd-boot starts the distro's kernels without archix, and archix's hooks and boot service come off
     Eject {
@@ -112,7 +102,7 @@ enum Command {
         /// Put back the files archix replaced and delete the ones it created
         #[arg(long)]
         restore_originals: bool,
-        /// Also delete /var/lib/archix, /var/cache/archix and archix's btrfs snapshots
+        /// Also delete /var/lib/archix and /var/cache/archix
         #[arg(long)]
         purge: bool,
     },
@@ -123,7 +113,7 @@ enum Command {
         /// Directory under the config's lua/ whose installed.lua to edit, instead of lua/hosts/<host>/
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Install without declaring anything; the next switch removes it again unless it gets declared
+        /// Install without declaring anything, in a new deployment; the next switch removes it again unless it gets declared
         #[arg(long)]
         temp: bool,
         /// Don't ask for confirmation
@@ -149,7 +139,7 @@ enum Command {
         #[arg(required = true)]
         terms: Vec<String>,
     },
-    /// pacman -Syu, adopt the result, move AUR packages to their newest recipes and switch (also: archix, archix -Syu)
+    /// Move archix.lock to the newest snapshot and AUR packages to their newest recipes, then switch (also: archix, archix -Syu)
     Upgrade {
         /// Don't ask for confirmation
         #[arg(long)]
@@ -172,22 +162,13 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Restore a generation's core packages under another root without pacman (rescue mode, or from a live USB)
+    /// Gone: every kept deployment boots from its own entry without pacman, so pick an older one in the boot menu
+    #[command(hide = true)]
     Rescue {
-        /// The mounted system to repair, such as /mnt or the initramfs's /sysroot
-        #[arg(long, default_value = "/")]
-        root: PathBuf,
-        /// Generation whose packages to restore; the current one by default
-        #[arg(long)]
-        generation: Option<u32>,
-        /// Also restore these packages, beyond the core set
-        #[arg(long = "package")]
-        packages: Vec<String>,
-        /// Run by every boot's initramfs: without archix.rescue on the command line, only repair a switch a crash cut off inside pacman
-        #[arg(long, hide = true)]
-        initrd: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        rest: Vec<String>,
     },
-    /// Run at boot by archix-boot.service: switch to the generation whose boot entry was chosen
+    /// Run at boot by archix-boot.service: make the deployment whose boot entry was chosen current
     #[command(hide = true)]
     BootCheck {
         #[arg(long)]
@@ -214,6 +195,9 @@ enum Command {
         #[arg(long, default_value = "/")]
         root: PathBuf,
     },
+    /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
+    #[command(hide = true)]
+    PruneHidden { root: PathBuf },
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
@@ -360,36 +344,12 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Switch { .. } => Some("switch"),
         Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
-        Command::Recover { .. } => Some("recover"),
         Command::Gc => Some("gc"),
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
         Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
         _ => None,
-    }
-}
-
-/// Puts back config files a killed switch had rewritten, under the exclusive lock; a run that doesn't hold it takes it only if it's free.
-fn settle_pending(holding: bool) {
-    let paths = archix::paths::Paths::system();
-    if !is_root() || !archix::pending::exists(&paths) {
-        return;
-    }
-    let _lock = match holding {
-        true => None,
-        false => match running_file().ok().filter(try_lock) {
-            Some(file) => Some(file),
-            None => return,
-        },
-    };
-    match archix::pending::settle(&paths) {
-        Ok(restored) => {
-            if let Some(note) = archix::pending::describe(&restored, "an unfinished switch") {
-                eprintln!("{note}");
-            }
-        }
-        Err(e) => eprintln!("warning: couldn't put back the config an unfinished switch changed: {e:#}"),
     }
 }
 
@@ -474,6 +434,16 @@ fn run() -> Result<ExitCode> {
             archix::system::activate::activate(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::PruneHidden { root } => {
+            commands::prune_hidden(&root)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Recover { .. } => anyhow::bail!(
+            "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
+        ),
+        Command::Rescue { .. } => anyhow::bail!(
+            "`archix rescue` is gone: every kept deployment boots from its own entry without pacman, so pick an older one in the boot menu, or run `archix rollback`"
+        ),
         command => command,
     };
     if let Some(name) = needs_root(&command)
@@ -492,7 +462,6 @@ fn run() -> Result<ExitCode> {
     if changes_things {
         hold_exclusive()?;
     }
-    settle_pending(changes_things);
     match command {
         Command::HookRecord => {
             commands::hook_record();
@@ -503,7 +472,7 @@ fn run() -> Result<ExitCode> {
             noconfirm,
             allow_unsafe_downgrade,
         } => {
-            commands::rollback(generation, noconfirm, allow_unsafe_downgrade)?;
+            commands::rollback(&cli.config, generation, noconfirm, allow_unsafe_downgrade)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Generations => {
@@ -530,15 +499,6 @@ fn run() -> Result<ExitCode> {
             commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Rescue {
-            root,
-            generation,
-            packages,
-            initrd,
-        } => {
-            commands::rescue(&root, generation, &packages, initrd)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::BootCheck { cmdline } => {
             commands::boot_check(cmdline)?;
             return Ok(ExitCode::SUCCESS);
@@ -563,23 +523,6 @@ fn run() -> Result<ExitCode> {
             });
         }
         _ => {}
-    }
-    if let Command::Recover {
-        cont,
-        rollback,
-        abandon,
-        allow_unsafe_downgrade,
-    } = command
-    {
-        let mode = match (cont, rollback, abandon) {
-            (true, _, _) => Some(commands::RecoverMode::Continue),
-            (_, true, _) => Some(commands::RecoverMode::Rollback),
-            (_, _, true) => Some(commands::RecoverMode::Abandon),
-            _ => None,
-        };
-        commands::recover(mode, allow_unsafe_downgrade)?;
-        settle_pending(true);
-        return Ok(ExitCode::SUCCESS);
     }
     let hostname = match cli.host {
         Some(host) => host,
@@ -611,7 +554,7 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
-    // Nothing these commands change in the config is written until the switch commits; its journal writes it then.
+    // Nothing these commands change in the config is written until the switch commits its deployment.
     if matches!(
         command,
         Command::Install { temp: false, .. }
@@ -717,6 +660,7 @@ fn run() -> Result<ExitCode> {
         | Command::BootComplete
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
+        | Command::PruneHidden { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
         | Command::Sync { .. } => {

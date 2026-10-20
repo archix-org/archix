@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 
 use crate::conflicts::unescape;
@@ -165,7 +165,7 @@ fn original(caches: &[PathBuf], name: &str, version: &str, path: &str, sha256: O
                 .is_some_and(|(arch, _)| !arch.contains('-'))
         });
     for file in candidates {
-        let Ok(decoder) = crate::system::rescue::decoder(&file) else {
+        let Ok(decoder) = decoder(&file) else {
             continue;
         };
         let mut archive = tar::Archive::new(decoder);
@@ -345,6 +345,20 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, sources: &Path) ->
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// A reader for a package file, which is zstd- or gzip-compressed.
+fn decoder(path: &Path) -> Result<Box<dyn Read>> {
+    let mut magic = [0u8; 4];
+    fs::File::open(path)?.read_exact(&mut magic)?;
+    let file = fs::File::open(path)?;
+    Ok(if magic == [0x28, 0xb5, 0x2f, 0xfd] {
+        Box::new(zstd::Decoder::new(file)?)
+    } else if magic[..2] == [0x1f, 0x8b] {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        bail!("{} is neither zstd- nor gzip-compressed", path.display())
+    })
 }
 
 #[cfg(test)]

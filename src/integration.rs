@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::apply::TRANSACTION_ENV;
+use crate::packages::TRANSACTION_ENV;
 use crate::paths::Paths;
 use crate::repos::{Repo, is_official};
 
@@ -21,10 +21,8 @@ pub struct OutsideChange {
     pub packages: Vec<String>,
 }
 
-/// The files archix installs so the rest of the system tells it (and you) about things.
+/// The files archix installs so the rest of the system tells it (and you) about things, at their absolute paths.
 pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
-    let journal = paths.journal();
-    let journal = journal.display();
     let notes = paths.notes();
     let notes = notes.display();
     let hook = format!(
@@ -33,33 +31,25 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
          Exec = {} hook-record\nNeedsTargets\n",
         archix.display()
     );
-    let profile = format!(
-        "if [ -e {journal} ]; then\n  echo \"archix: a switch was interrupted; run 'sudo archix recover'\" >&2\nfi\n\
-         if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n"
-    );
+    let profile = format!("if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n");
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
          Exec=sh -c 'command -v notify-send >/dev/null || exit 0; \
-         [ -e {journal} ] && notify-send -u critical archix \"A switch was interrupted. Run: sudo archix recover\"; \
          [ -s {notes} ] && notify-send -u critical archix \"$(cat {notes})\"; exit 0'\n"
     );
+    let system = Paths::system();
     vec![
-        (paths.pacman_hooks.join("archix.hook"), hook),
-        (paths.profile_d.join("archix.sh"), profile),
-        (paths.autostart.join("archix-status.desktop"), autostart),
+        (system.pacman_hooks.join("archix.hook"), hook),
+        (system.profile_d.join("archix.sh"), profile),
+        (system.autostart.join("archix-status.desktop"), autostart),
     ]
 }
 
-/// The statically linked archix the rescue initramfs hook copies; the package installs it.
+/// The statically linked archix the initramfs hook copies; the package installs it.
 pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
 
-/// Files for managed booting: the early-boot generation check, the deployment activation and hook, and the rescue hook when the static binary exists.
-pub fn boot_files(paths: &Paths, archix: &Path) -> Result<Vec<(PathBuf, String)>> {
-    let root = paths
-        .pacman_conf
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or(Path::new("/"));
+/// Files for managed booting at their absolute paths: the early-boot generation check, the boot-complete promotion, and the deployment activation unit and initramfs hook.
+pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     let unit = format!(
         "[Unit]\nDescription=archix: match the booted generation\nDefaultDependencies=no\nAfter=local-fs.target\n\
          Before=sysinit.target\n\n\
@@ -71,47 +61,35 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Result<Vec<(PathBuf, String)>
          [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
         archix.display()
     );
+    let root = Path::new("/");
     let mut files = vec![
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
     ];
-    let with_static = root.join(STATIC_BINARY.trim_start_matches('/')).exists();
-    files.extend(crate::system::deploy_boot::files(root, archix, with_static)?);
-    if with_static {
-        files.push((
-            root.join("etc/initcpio/install/archix-rescue"),
-            format!(
-                "#!/bin/bash\n\nbuild() {{\n    add_binary {STATIC_BINARY} /usr/bin/archix\n    add_runscript\n    \
-                 add_file /usr/lib/archix/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n    \
-                 add_symlink /usr/lib/systemd/system/initrd.target.wants/archix-rescue.service /usr/lib/systemd/system/archix-rescue.service\n}}\n\n\
-                 help() {{\n    echo \"archix rescue: restores core packages from the cache when archix.rescue is on the kernel command line, or when a switch was cut off inside pacman\"\n}}\n"
-            ),
-        ));
-        files.push((
-            root.join("etc/initcpio/hooks/archix-rescue"),
-            "#!/usr/bin/ash\n\nrun_latehook() {\n    if grep -qw archix.rescue /proc/cmdline || [ -e /new_root/var/lib/archix/journal.json ] || [ ! -e /new_root/usr/lib/modules/$(uname -r)/modules.dep ]; then\n        \
-             mount -o remount,rw /new_root\n        /usr/bin/archix rescue --root /new_root --initrd\n    fi\n}\n"
-                .to_string(),
-        ));
-        files.push((
-            root.join("usr/lib/archix/archix-rescue.service"),
-            "[Unit]\nDescription=archix rescue: restore core packages\nDefaultDependencies=no\n\
-             ConditionKernelCommandLine=|archix.rescue\nConditionPathExists=|/sysroot/var/lib/archix/journal.json\nConditionPathExists=|!/sysroot/usr/lib/modules/%v/modules.dep\n\
-             After=initrd-root-fs.target\nBefore=initrd-parse-etc.service initrd-switch-root.target\n\n\
-             [Service]\nType=oneshot\nExecStartPre=/usr/bin/mount -o remount,rw /sysroot\nExecStart=/usr/bin/archix rescue --root /sysroot --initrd\n\
-             StandardOutput=journal+console\n"
-                .to_string(),
-        ));
-        files.push((
-            root.join("etc/mkinitcpio.conf.d/archix-rescue.conf"),
-            "HOOKS+=(archix-rescue)\n".to_string(),
-        ));
-    }
-    Ok(files)
+    files.push(crate::system::deploy_boot::activate_file(root, archix));
+    files.extend(crate::system::deploy_boot::hook_files(root));
+    files
+}
+
+/// The links that start archix's boot units, and the units they name.
+pub fn boot_wants() -> Vec<(PathBuf, String)> {
+    let mut wants: Vec<(PathBuf, String)> = [
+        ("sysinit.target.wants", "archix-boot.service"),
+        ("multi-user.target.wants", "archix-boot-complete.service"),
+    ]
+    .map(|(dir, unit)| {
+        (
+            Path::new("/etc/systemd/system").join(dir).join(unit),
+            format!("/etc/systemd/system/{unit}"),
+        )
+    })
+    .into();
+    wants.push(crate::system::deploy_boot::activate_wants(Path::new("/")));
+    wants
 }
 
 /// Where this archix was started from, also after a switch had pacman replace it, when Linux appends " (deleted)".
-fn own_path() -> Result<PathBuf> {
+pub fn own_path() -> Result<PathBuf> {
     let exe = std::env::current_exe().context("finding the archix binary")?;
     let text = exe.to_string_lossy();
     Ok(match text.strip_suffix(" (deleted)") {
@@ -120,42 +98,45 @@ fn own_path() -> Result<PathBuf> {
     })
 }
 
-fn root(paths: &Paths) -> PathBuf {
-    paths
-        .pacman_conf
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or(Path::new("/"))
-        .to_path_buf()
+/// Writes every integration file and boot link that's missing or out of date where `place` puts each absolute path: into a staging root, or onto the live root before its first layout.
+pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<PathBuf>) -> Result<()> {
+    for (path, content) in files(paths, archix).into_iter().chain(boot_files(archix)) {
+        let target = place(&path)?;
+        if fs::read_to_string(&target).ok().as_deref() == Some(content.as_str()) {
+            continue;
+        }
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let mode = if content.starts_with("#!") { 0o755 } else { 0o644 };
+        fs::write(&target, &content).with_context(|| format!("writing {}", target.display()))?;
+        fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+    }
+    for (link, unit) in boot_wants() {
+        let target = place(&link)?;
+        if let Some(dir) = target.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        if fs::symlink_metadata(&target).is_err() {
+            std::os::unix::fs::symlink(unit, &target).with_context(|| format!("linking {}", target.display()))?;
+        }
+    }
+    Ok(())
 }
 
-/// The rescue and deployment hooks' files, which put them into every initramfs mkinitcpio builds, and the activation unit.
-pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
-    let root = root(paths);
-    [
-        "etc/mkinitcpio.conf.d/archix-rescue.conf",
-        "etc/initcpio/install/archix-rescue",
-        "etc/initcpio/hooks/archix-rescue",
-        "usr/lib/archix/archix-rescue.service",
-    ]
-    .iter()
-    .map(|path| root.join(path))
-    .chain(crate::system::deploy_boot::all_files(&root))
-    .collect()
-}
-
-/// Takes every integration file off, for `archix eject`.
+/// Takes every integration file off a system without deployments, for `archix eject`.
 pub fn remove(paths: &Paths) -> Result<()> {
-    let root = root(paths);
-    crate::system::deploy_boot::refuse_without_hook(&root, "taking archix's boot integration off")?;
-    let mut gone = vec![
-        root.join("etc/systemd/system/sysinit.target.wants/archix-boot.service"),
-        root.join("etc/systemd/system/archix-boot.service"),
-        root.join("etc/systemd/system/multi-user.target.wants/archix-boot-complete.service"),
-        root.join("etc/systemd/system/archix-boot-complete.service"),
-    ];
-    gone.extend(files(paths, Path::new("archix")).into_iter().map(|(path, _)| path));
-    gone.extend(rescue_files(paths));
+    let root = &paths.root;
+    crate::system::deploy_boot::refuse_without_hook(root, "taking archix's boot integration off")?;
+    let inside = |path: &Path| root.join(path.strip_prefix("/").unwrap_or(path));
+    let archix = Path::new("archix");
+    let gone: Vec<PathBuf> = files(paths, archix)
+        .into_iter()
+        .chain(boot_files(archix))
+        .map(|(path, _)| path)
+        .chain(boot_wants().into_iter().map(|(link, _)| link))
+        .map(|path| inside(&path))
+        .collect();
     for path in gone {
         match fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -163,60 +144,6 @@ pub fn remove(paths: &Paths) -> Result<()> {
             }
             _ => {}
         }
-    }
-    Ok(())
-}
-
-/// Writes the integration files that are missing or out of date, and boot ones only while archix manages booting.
-pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
-    let archix = own_path()?;
-    let root = paths
-        .pacman_conf
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or(Path::new("/"))
-        .to_path_buf();
-    if !boot {
-        crate::system::deploy_boot::refuse_without_hook(&root, "turning off archix's boot management")?;
-    }
-    let mut wants: Vec<(PathBuf, String)> = [
-        ("sysinit.target.wants", "archix-boot.service"),
-        ("multi-user.target.wants", "archix-boot-complete.service"),
-    ]
-    .map(|(dir, unit)| {
-        (
-            root.join("etc/systemd/system").join(dir).join(unit),
-            format!("/etc/systemd/system/{unit}"),
-        )
-    })
-    .into();
-    wants.push(crate::system::deploy_boot::activate_wants(&root));
-    if boot {
-        for (link, unit) in &wants {
-            if let Some(dir) = link.parent() {
-                fs::create_dir_all(dir)?;
-            }
-            if fs::symlink_metadata(link).is_err() {
-                std::os::unix::fs::symlink(unit, link)?;
-            }
-        }
-    } else {
-        for (link, _) in &wants {
-            let _ = fs::remove_file(link);
-        }
-        for (path, _) in boot_files(paths, &archix)? {
-            let _ = fs::remove_file(path);
-        }
-    }
-    let boot_files = if boot { boot_files(paths, &archix)? } else { Vec::new() };
-    for (path, content) in files(paths, &archix).into_iter().chain(boot_files) {
-        if fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
-            continue;
-        }
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        }
-        fs::write(&path, content).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
 }
@@ -287,18 +214,17 @@ pub fn with_custom_repos(conf: &str, repos: &[Repo]) -> String {
     text
 }
 
-/// Keeps /etc/pacman.conf's archix-managed repo sections in step with the config.
-pub fn sync_pacman_conf(paths: &Paths, repos: &[Repo]) -> Result<()> {
-    if !paths.pacman_conf.exists() && repos.iter().all(|repo| repo.custom.is_none()) {
+/// Keeps a pacman.conf's archix-managed repo sections in step with the config.
+pub fn sync_pacman_conf(conf: &Path, repos: &[Repo]) -> Result<()> {
+    if !conf.exists() && repos.iter().all(|repo| repo.custom.is_none()) {
         return Ok(());
     }
-    let current =
-        fs::read_to_string(&paths.pacman_conf).with_context(|| format!("reading {}", paths.pacman_conf.display()))?;
+    let current = fs::read_to_string(conf).with_context(|| format!("reading {}", conf.display()))?;
     let wanted = with_custom_repos(&current, repos);
     if wanted != current {
-        let tmp = paths.pacman_conf.with_extension("conf.archix");
+        let tmp = conf.with_extension("conf.archix");
         fs::write(&tmp, &wanted)?;
-        fs::rename(&tmp, &paths.pacman_conf).with_context(|| format!("writing {}", paths.pacman_conf.display()))?;
+        fs::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
     }
     Ok(())
 }
@@ -402,34 +328,22 @@ mod tests {
     }
 
     #[test]
-    fn a_root_using_deployments_keeps_the_initramfs_hook() {
+    fn a_root_using_deployments_keeps_its_boot_integration() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::under(dir.path());
-        let archix = Path::new("/usr/bin/archix");
-        let hook = dir.path().join("etc/initcpio/hooks/archix-deploy");
-        let has_hook = |files: &[(PathBuf, String)]| files.iter().any(|(path, _)| *path == hook);
-        assert!(
-            !has_hook(&boot_files(&paths, archix).unwrap()),
-            "no deployments, no hook"
-        );
-
         fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
-        let err = boot_files(&paths, archix).unwrap_err().to_string();
-        assert!(err.contains(STATIC_BINARY), "{err}");
-        let static_binary = dir.path().join(STATIC_BINARY.trim_start_matches('/'));
-        fs::create_dir_all(static_binary.parent().unwrap()).unwrap();
-        fs::write(&static_binary, "").unwrap();
-        let files = boot_files(&paths, archix).unwrap();
-        assert!(has_hook(&files));
-        for (path, content) in &files {
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, content).unwrap();
-        }
-
-        assert!(ensure(&paths, false).is_err(), "boot management can't go off");
-        assert!(remove(&paths).is_err(), "eject can't take the hook off");
+        let place = |path: &Path| Ok(dir.path().join(path.strip_prefix("/").unwrap()));
+        write_all(&paths, Path::new("/usr/bin/archix"), &place).unwrap();
+        let hook = dir.path().join("etc/initcpio/hooks/archix-deploy");
         assert!(hook.exists());
         assert!(dir.path().join("etc/mkinitcpio.conf.d/archix-deploy.conf").exists());
+        assert!(
+            dir.path()
+                .join("etc/systemd/system/sysinit.target.wants/archix-deploy-activate.service")
+                .is_symlink()
+        );
+        assert!(remove(&paths).is_err(), "eject can't take the hook off");
+        assert!(hook.exists());
     }
 
     #[test]
@@ -442,6 +356,6 @@ mod tests {
                 .1
                 .contains("Exec = /opt/archix/bin/archix hook-record\nNeedsTargets")
         );
-        assert!(files[1].1.contains("state/journal.json"));
+        assert!(files[1].1.contains("state/notes"));
     }
 }

@@ -1,4 +1,4 @@
-//! Manages /etc files, users and services; run only inside the systemd-booted Arch container via `tests/arch/run.sh`.
+//! Manages /etc files, users and services in deployments; run only inside the systemd-booted Arch container via `tests/arch/run.sh`.
 
 mod common;
 
@@ -21,22 +21,48 @@ fn body(conf: &str) -> String {
     )
 }
 
-fn systemctl(args: &[&str]) -> String {
-    let output = Command::new("systemctl").args(args).output().unwrap();
+/// What `systemctl is-enabled` says about `unit` in the deployment that boots next.
+fn enabled(unit: &str) -> String {
+    let root = system_path("/etc").parent().unwrap().to_path_buf();
+    let output = Command::new("systemctl")
+        .arg(format!("--root={}", root.display()))
+        .args(["is-enabled", unit])
+        .output()
+        .unwrap();
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+/// A file of the system that boots next.
 fn read(path: &str) -> String {
-    fs::read_to_string(path).unwrap_or_default()
+    fs::read_to_string(system_path(path)).unwrap_or_default()
+}
+
+/// The groups a user is in, by the account files of the system that boots next.
+fn groups_of(user: &str) -> Vec<String> {
+    read("/etc/group")
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            (fields.len() == 4 && fields[3].split(',').any(|member| member == user)).then(|| fields[0].to_string())
+        })
+        .collect()
+}
+
+/// A user's uid in the system that boots next.
+fn uid(user: &str) -> Option<String> {
+    read("/etc/passwd").lines().find_map(|line| {
+        let fields: Vec<&str> = line.split(':').collect();
+        (fields.first() == Some(&user)).then(|| fields[2].to_string())
+    })
 }
 
 #[test]
 #[ignore]
 fn files_users_and_services_follow_the_config() {
     let _system = lock_system();
-    let original_issue = read("/etc/issue");
     let setup = Setup::new(&[], &body("one"));
-    let out = setup.ok(&["switch", "--noconfirm"]);
+    let original_issue = read("/etc/issue");
+    let out = setup.lay_out();
     assert!(
         out.contains("create     /etc/archix-test.conf") && out.contains("replace    /etc/issue"),
         "{out}"
@@ -44,17 +70,22 @@ fn files_users_and_services_follow_the_config() {
     assert_eq!(read("/etc/archix-test.conf"), "one\n");
     assert_eq!(read("/etc/issue"), "archix test issue\n");
     assert_eq!(
-        read("/var/lib/archix/backups/etc/issue"),
+        fs::read_to_string("/var/lib/archix/backups/etc/issue").unwrap_or_default(),
         original_issue,
         "the replaced original is kept"
     );
-    assert_eq!(systemctl(&["is-enabled", "archix-test.service"]), "enabled");
-    assert_eq!(systemctl(&["is-active", "archix-test.service"]), "active");
-    let groups = Command::new("id").args(["-nG", "archixtest"]).output().unwrap();
-    let groups = String::from_utf8_lossy(&groups.stdout);
-    assert!(groups.contains("wheel") && groups.contains("archixgroup"), "{groups}");
+    assert_eq!(enabled("archix-test.service"), "enabled");
+    let groups = groups_of("archixtest");
+    assert!(
+        groups.contains(&"wheel".to_string()) && groups.contains(&"archixgroup".to_string()),
+        "{groups:?}"
+    );
+    assert!(
+        setup.machine.root.join("home/archixtest").is_dir(),
+        "the new user's home is made on the live system"
+    );
     assert_eq!(
-        fs::read_link("/etc/localtime").unwrap().to_string_lossy(),
+        fs::read_link(system_path("/etc/localtime")).unwrap().to_string_lossy(),
         "/usr/share/zoneinfo/Europe/Istanbul"
     );
     assert_eq!(
@@ -63,7 +94,7 @@ fn files_users_and_services_follow_the_config() {
     );
     assert!(setup.ok(&["diff"]).contains("matches the lock and the config"));
 
-    fs::write("/etc/archix-test.conf", "edited by hand\n").unwrap();
+    fs::write(system_path("/etc/archix-test.conf"), "edited by hand\n").unwrap();
     assert!(
         setup
             .ok(&["diff"])
@@ -83,60 +114,55 @@ fn files_users_and_services_follow_the_config() {
     setup.ok(&["rollback", "--noconfirm"]);
     assert_eq!(
         read("/etc/archix-test.conf"),
-        "one\n",
-        "rollback restores managed files too"
+        "edited by hand\n",
+        "a rollback boots the deployment as it was left"
     );
 
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-    assert!(!std::path::Path::new("/etc/archix-test.conf").exists());
+    assert_eq!(
+        read("/etc/archix-test.conf"),
+        "edited by hand\n",
+        "unmanaging leaves a file someone edited"
+    );
     assert_eq!(
         read("/etc/issue"),
         original_issue,
         "the original comes back when the file leaves the config"
     );
-    assert!(!std::path::Path::new("/etc/systemd/system/archix-test.service").exists());
-    assert_ne!(systemctl(&["is-active", "archix-test.service"]), "active");
-    assert!(
-        !Command::new("id").arg("archixtest").output().unwrap().status.success(),
-        "the user is removed"
-    );
+    assert!(!system_path("/etc/systemd/system/archix-test.service").exists());
+    assert_eq!(uid("archixtest"), None, "the user is removed");
 }
 
 #[test]
 #[ignore]
-fn a_failing_service_does_not_undo_the_switch() {
+fn a_unit_that_cant_be_enabled_does_not_undo_the_switch() {
     let _system = lock_system();
-    let broken = UNIT.replace("/usr/bin/true", "/usr/bin/false");
     let setup = Setup::new(
         &[],
-        &format!(
-            r#"files = {{ ["/etc/archix-soft.conf"] = {{ text = "kept" }} }}, units = {{ ["archix-broken.service"] = {broken:?} }}, services = {{ ["archix-broken.service"] = true }}"#
-        ),
+        r#"files = { ["/etc/archix-soft.conf"] = { text = "kept" } }, services = { ["archix-missing.service"] = true }"#,
     );
     let output = setup.run(&["switch", "--noconfirm"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "the command reports the failure");
     assert!(
-        stderr.contains("archix-broken.service") && stderr.contains("the new generation is current"),
+        stderr.contains("archix-missing.service") && stderr.contains("is committed and boots at the next restart"),
         "{stderr}"
     );
-    assert_eq!(read("/etc/archix-soft.conf"), "kept\n", "everything else was applied");
-    assert!(
-        !std::path::Path::new("/var/lib/archix/journal.json").exists(),
-        "the switch finished"
+    assert_eq!(
+        read("/etc/archix-soft.conf"),
+        "kept\n",
+        "everything else is in the new deployment"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    assert!(setup.machine.leftovers().is_empty());
 }
 
 fn hooks_body(conf: &str, extra_hook: &str) -> String {
     format!(
         r#"files = {{ ["/etc/archix-hook.conf"] = {{ text = {conf:?}, on_change = "echo changed >> /var/tmp/archix-on-change" }} }},
-        users = {{ archixhook = {{}} }},
         hooks = {{
           z = {{ run = "echo z $USER >> /var/tmp/archix-hooks" }},
-          a = {{ run = "echo a $USER $HOME >> /var/tmp/archix-hooks", user = "archixhook", after = {{ "z" }} }},
+          a = {{ run = "echo a $USER $HOME >> /var/tmp/archix-hooks", user = "nobody", after = {{ "z" }} }},
           {extra_hook}
         }}"#
     )
@@ -146,55 +172,71 @@ fn hooks_body(conf: &str, extra_hook: &str) -> String {
 #[ignore]
 fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
     let _system = lock_system();
-    for log in ["/var/tmp/archix-hooks", "/var/tmp/archix-on-change"] {
-        let _ = fs::remove_file(log);
+    let log = |path: &str| fs::read_to_string(path).unwrap_or_default();
+    for path in ["/var/tmp/archix-hooks", "/var/tmp/archix-on-change"] {
+        let _ = fs::remove_file(path);
     }
     let setup = Setup::new(&[], &hooks_body("one", ""));
-    let out = setup.ok(&["switch", "--noconfirm"]);
+    let out = setup.lay_out();
     assert!(out.contains("run hooks  z, a"), "{out}");
     assert_eq!(
-        read("/var/tmp/archix-hooks"),
-        "z root\na archixhook /home/archixhook\n",
+        log("/var/tmp/archix-hooks"),
+        "z root\na nobody /\n",
         "after orders hooks, and user hooks run as that user"
     );
-    assert_eq!(read("/var/tmp/archix-on-change"), "changed\n");
+    assert_eq!(log("/var/tmp/archix-on-change"), "changed\n");
 
     assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
     assert_eq!(
-        read("/var/tmp/archix-hooks").lines().count(),
+        log("/var/tmp/archix-hooks").lines().count(),
         4,
-        "hooks run on every switch, like NixOS activation"
+        "hooks run on every switch"
     );
-    assert_eq!(read("/var/tmp/archix-on-change"), "changed\n", "the file didn't change");
+    assert_eq!(log("/var/tmp/archix-on-change"), "changed\n", "the file didn't change");
 
-    fs::write("/etc/archix-hook.conf", "edited by hand\n").unwrap();
+    fs::write(system_path("/etc/archix-hook.conf"), "edited by hand\n").unwrap();
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
-        read("/var/tmp/archix-on-change"),
+        log("/var/tmp/archix-on-change"),
         "changed\nchanged\n",
-        "restoring a hand-edited file changes it on disk"
+        "restoring a hand-edited file changes it"
     );
 
     setup.set_body(&[], &hooks_body("two", ""));
     setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(read("/var/tmp/archix-on-change").lines().count(), 3);
+    assert_eq!(log("/var/tmp/archix-on-change").lines().count(), 3);
 
     setup.set_body(&[], &hooks_body("three", r#"broken = { run = "false" },"#));
     let output = setup.run(&["switch", "--noconfirm"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "a failing hook is reported");
     assert!(stderr.contains("hook broken"), "{stderr}");
-    assert_eq!(read("/etc/archix-hook.conf"), "three\n", "the switch still finished");
-    assert!(!std::path::Path::new("/var/lib/archix/journal.json").exists());
+    assert_eq!(read("/etc/archix-hook.conf"), "three\n", "the switch still committed");
 
     setup.ok(&["rollback", "--noconfirm"]);
     assert_eq!(
-        read("/var/tmp/archix-on-change").lines().count(),
+        log("/var/tmp/archix-on-change").lines().count(),
         5,
         "a rollback runs the target generation's on_change too"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn a_hook_for_a_user_the_switch_declares_waits_for_the_boot_that_makes_them() {
+    let _system = lock_system();
+    let setup = Setup::new(
+        &[],
+        r#"users = { archixhook = {} }, hooks = { a = { run = "true", user = "archixhook" } }"#,
+    );
+    let output = setup.run(&["switch", "--noconfirm"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("user archixhook doesn't exist on the running system"),
+        "{stderr}"
+    );
+    assert!(uid("archixhook").is_some(), "the user is in the new deployment");
 }
 
 #[test]
@@ -202,14 +244,20 @@ fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
 fn files_taken_over_unchanged_survive_being_unmanaged() {
     let _system = lock_system();
     let path = "/etc/archix-taken-over.conf";
-    fs::write(path, "already here\n").unwrap();
-    fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
-    let setup = Setup::new(
+    let setup = Setup::new(&[], "");
+    let file = system_path(path);
+    fs::write(&file, "already here\n").unwrap();
+    fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+    setup.set_body(
         &[],
         &format!("files = {{ [\"{path}\"] = {{ text = \"already here\" }} }}"),
     );
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("no package changes were needed"), "{out}");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        setup.machine.deployments(),
+        [1],
+        "a file already as wanted changes nothing"
+    );
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
@@ -217,18 +265,6 @@ fn files_taken_over_unchanged_survive_being_unmanaged() {
         "already here\n",
         "unmanaging puts the original back instead of deleting it"
     );
-    fs::remove_file(path).unwrap();
-}
-
-fn nft_table() -> Option<String> {
-    let output = Command::new("nft")
-        .args(["list", "table", "inet", "archix"])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[test]
@@ -242,12 +278,12 @@ fn the_firewall_and_environment_come_from_the_config() {
         )
     };
     let setup = Setup::new(&[], &body(2222));
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(systemctl(&["is-active", "archix-firewall.service"]), "active");
-    let table = nft_table().expect("the archix table is loaded");
+    setup.lay_out();
+    assert_eq!(enabled("archix-firewall.service"), "enabled");
+    let rules = read(archix::system::firewall::RULES);
     assert!(
-        table.contains("tcp dport 2222 accept") && table.contains("\"wg0\""),
-        "{table}"
+        rules.contains("tcp dport { 2222 } accept") && rules.contains("\"wg0\""),
+        "{rules}"
     );
     assert_eq!(
         read("/etc/profile.d/archix-environment.sh"),
@@ -258,235 +294,49 @@ fn the_firewall_and_environment_come_from_the_config() {
 
     setup.set_body(&[], &body(2223));
     setup.ok(&["switch", "--noconfirm"]);
-    let table = nft_table().unwrap();
+    let rules = read(archix::system::firewall::RULES);
     assert!(
-        table.contains("tcp dport 2223 accept") && !table.contains("2222"),
-        "changed rules are reloaded:\n{table}"
+        rules.contains("tcp dport { 2223 } accept") && !rules.contains("2222"),
+        "{rules}"
     );
 
     setup.set_body(
         &[],
         r#"firewall = { enable = true, allowed_tcp_ports = { 2223 }, extra_input_rules = "tcp dportt 9 accept" }"#,
     );
+    let deployments = setup.machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("the firewall rules don't load"), "{err}");
-    assert!(
-        nft_table().unwrap().contains("tcp dport 2223 accept"),
-        "a bad rule changes nothing"
-    );
+    assert_eq!(setup.machine.deployments(), deployments, "a bad rule builds nothing");
 
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-    assert!(
-        nft_table().is_none(),
-        "turning the firewall off removes only archix's table"
-    );
-    assert!(!std::path::Path::new("/etc/profile.d/archix-environment.sh").exists());
-}
-
-/// Seconds since the epoch, for `journalctl --since @…`.
-fn now() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    format!("@{}", secs - 1)
-}
-
-/// What pid 1 logged since `since`.
-fn pid1_log(since: &str) -> String {
-    let output = Command::new("journalctl")
-        .args(["--since", since, "-o", "cat", "_PID=1"])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&output.stdout).into_owned()
+    assert!(!system_path(archix::system::firewall::RULES).exists());
+    assert!(!system_path("/etc/profile.d/archix-environment.sh").exists());
 }
 
 #[test]
 #[ignore]
-fn tmpfiles_sysusers_and_modules_load_apply_on_the_switch_that_changes_them() {
+fn a_removed_system_user_comes_back_with_its_old_uid() {
     let _system = lock_system();
-    let _ = fs::remove_dir("/run/archix-tmpfiles-test");
-    let modules_load = || systemctl(&["show", "-P", "InvocationID", "systemd-modules-load.service"]);
-    let before = modules_load();
-    let body = r##"files = {
-        ["/etc/tmpfiles.d/archix-test.conf"] = { text = "d /run/archix-tmpfiles-test 0755 root root -\n" },
-        ["/etc/sysusers.d/archix-test.conf"] = { text = "u archix-sysuser - \"archix test\"\n" },
-        ["/etc/modules-load.d/archix-test.conf"] = { text = "# no modules, so loading them can't fail in a container\n" },
-    }"##;
-    let setup = Setup::new(&[], body);
-    setup.ok(&["switch", "--noconfirm"]);
-    let user = Command::new("getent")
-        .args(["passwd", "archix-sysuser"])
-        .output()
-        .unwrap();
-    let after = modules_load();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let _ = Command::new("userdel").arg("archix-sysuser").status();
-    assert!(
-        fs::metadata("/run/archix-tmpfiles-test").is_ok_and(|meta| meta.is_dir()),
-        "systemd-tmpfiles --create should run when tmpfiles.d changes"
-    );
-    assert!(
-        user.status.success(),
-        "systemd-sysusers should run when sysusers.d changes"
-    );
-    assert!(
-        !after.is_empty() && after != before,
-        "systemd-modules-load should run again when modules-load.d changes ({before:?} -> {after:?})"
-    );
-}
-
-#[test]
-#[ignore]
-fn dbus_and_logind_config_reloads_them_without_a_restart() {
-    let _system = lock_system();
-    let pids = || {
-        (
-            systemctl(&["show", "-P", "MainPID", "dbus.service"]),
-            systemctl(&["show", "-P", "MainPID", "systemd-logind.service"]),
-        )
-    };
-    let before = pids();
-    assert!(
-        before.0 != "0" && before.1 != "0",
-        "dbus and logind should be running: {before:?}"
-    );
-    let since = now();
-    let body = r#"files = {
-        ["/etc/dbus-1/system.d/archix-test.conf"] = { text = "<busconfig></busconfig>\n" },
-        ["/etc/systemd/logind.conf.d/archix-test.conf"] = { text = "[Login]\n" },
-    }"#;
-    let setup = Setup::new(&[], body);
-    setup.ok(&["switch", "--noconfirm"]);
-    let log = pid1_log(&since);
-    let after = pids();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(
-        after, before,
-        "dbus and logind keep their processes, since a restart ends every session"
-    );
-    for unit in ["D-Bus System Message Bus", "User Login Management"] {
-        assert!(
-            log.lines()
-                .any(|line| line.starts_with("Reloaded") && line.contains(unit)),
-            "{unit} should be reloaded:\n{log}"
-        );
-    }
-}
-
-#[test]
-#[ignore]
-fn changed_user_units_reload_the_running_user_managers() {
-    let _system = lock_system();
-    let unit = |text: &str| {
-        format!(
-            r#"files = {{ ["/etc/systemd/user/archix-test-user.service"] = {{ text = "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/echo {text}\n" }} }}"#
-        )
-    };
-    assert!(
-        Command::new("systemctl")
-            .args(["start", "user@0.service"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let user = |args: &[&str]| {
-        let output = Command::new("systemctl")
-            .args(["--user", "-M", "root@"])
-            .args(args)
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&output.stdout).trim().to_string()
-    };
-    let setup = Setup::new(&[], &unit("one"));
-    setup.ok(&["switch", "--noconfirm"]);
-    // Started, so the manager keeps it loaded and only a daemon-reload reads the changed file.
-    user(&["start", "archix-test-user.service"]);
-    assert_eq!(user(&["is-active", "archix-test-user.service"]), "active");
-    assert!(user(&["show", "-P", "ExecStart", "archix-test-user.service"]).contains("echo one"));
-    setup.set_body(&[], &unit("two"));
-    setup.ok(&["switch", "--noconfirm"]);
-    let stale = user(&["show", "-P", "NeedDaemonReload", "archix-test-user.service"]);
-    let exec = user(&["show", "-P", "ExecStart", "archix-test-user.service"]);
-    user(&["stop", "archix-test-user.service"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(stale, "no", "root's user manager should have reloaded the changed unit");
-    assert!(
-        exec.contains("echo two"),
-        "root's user manager should run the new unit: {exec}"
-    );
-}
-
-#[test]
-#[ignore]
-fn changing_a_drop_in_restarts_its_service() {
-    let _system = lock_system();
-    let unit = "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -c 'echo $X > /run/archix-test-dropin'\n[Install]\nWantedBy=multi-user.target";
-    let body = |x: &str| {
-        format!(
-            r#"units = {{ ["archix-test-dropin.service"] = {unit:?} }},
-            services = {{ ["archix-test-dropin.service"] = true }},
-            files = {{ ["/etc/systemd/system/archix-test-dropin.service.d/10-x.conf"] = {{ text = "[Service]\nEnvironment=X={x}\n" }} }}"#
-        )
-    };
-    let setup = Setup::new(&[], &body("1"));
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(read("/run/archix-test-dropin").trim(), "1");
-    setup.set_body(&[], &body("2"));
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(
-        read("/run/archix-test-dropin").trim(),
-        "2",
-        "the service runs with its new drop-in"
-    );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
-fn a_service_account_goes_away_after_its_service_stops() {
-    let _system = lock_system();
-    let unit = "[Service]\nUser=archixsvc\nExecStart=/usr/bin/sleep infinity\n[Install]\nWantedBy=multi-user.target";
     let setup = Setup::new(
         &[],
-        &format!(
-            r#"units = {{ ["archix-test-user.service"] = {unit:?} }},
-            services = {{ ["archix-test-user.service"] = true }},
-            users = {{ archixsvc = {{ system = true }} }}"#
-        ),
+        "users = { archixa = { system = true }, archixsvc = { system = true } }",
     );
-    setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(systemctl(&["is-active", "archix-test-user.service"]), "active");
-    let uid = |name: &str| {
-        String::from_utf8_lossy(&Command::new("id").args(["-u", name]).output().unwrap().stdout)
-            .trim()
-            .to_string()
-    };
-    let first = uid("archixsvc");
+    setup.lay_out();
+    let first = uid("archixsvc").expect("the system user is in the deployment");
+    // useradd hands out system uids from the top, so without archix's map archixsvc would get archixa's old one.
+    assert!(uid("archixa").unwrap() > first);
     setup.set_body(&[], "");
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(
-        !out.contains("userdel"),
-        "userdel ran while the service still held the account:\n{out}"
-    );
-    assert!(
-        !Command::new("id").arg("archixsvc").output().unwrap().status.success(),
-        "the account is gone"
-    );
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(uid("archixsvc"), None, "the account is gone");
     setup.set_body(&[], "users = { archixsvc = { system = true } }");
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
         uid("archixsvc"),
-        first,
+        Some(first),
         "a user created again gets its old uid, so its leftover files are still its own"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -494,7 +344,10 @@ fn a_service_account_goes_away_after_its_service_stops() {
 fn files_on_fat_are_not_edited_just_because_fat_has_no_modes() {
     let _system = lock_system();
     let dir = tempfile::tempdir().unwrap();
-    let (image, esp) = (dir.path().join("esp.img"), "/mnt/archix-test-esp");
+    let setup = Setup::new(&[], "");
+    let image = dir.path().join("esp.img");
+    let esp = "/mnt/archix-test-esp";
+    let mount = setup.machine.root.join(esp.trim_start_matches('/'));
     let run = |cmd: &str, args: &[&str]| {
         assert!(
             Command::new(cmd).args(args).status().unwrap().success(),
@@ -503,43 +356,32 @@ fn files_on_fat_are_not_edited_just_because_fat_has_no_modes() {
     };
     run("truncate", &["-s", "64M", image.to_str().unwrap()]);
     run("mkfs.fat", &["-F", "32", image.to_str().unwrap()]);
-    fs::create_dir_all(esp).unwrap();
-    run("mount", &["-o", "loop,fmask=0022", image.to_str().unwrap(), esp]);
-    let setup = Setup::new(
+    fs::create_dir_all(&mount).unwrap();
+    run(
+        "mount",
+        &[
+            "-o",
+            "loop,fmask=0022",
+            image.to_str().unwrap(),
+            mount.to_str().unwrap(),
+        ],
+    );
+    setup.set_body(
         &[],
         &format!("files = {{ [\"{esp}/loader/entries/extra.conf\"] = {{ text = \"title extra\" }} }}"),
     );
     setup.ok(&["switch", "--noconfirm"]);
     let again = setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    run("umount", &[esp]);
+    let written = fs::read_to_string(mount.join("loader/entries/extra.conf")).unwrap_or_default();
+    run("umount", &[mount.to_str().unwrap()]);
+    assert_eq!(
+        written, "title extra\n",
+        "a file outside the deployment trees is written on the live system"
+    );
     assert!(
         again.contains("nothing to do") && !again.contains("edited outside archix"),
         "FAT reports 0755 root for every file, which isn't an edit:\n{again}"
     );
-}
-
-#[test]
-#[ignore]
-fn a_symlink_over_a_mounted_file_is_left_for_later() {
-    let _system = lock_system();
-    let before = read("/etc/resolv.conf");
-    let setup = Setup::new(
-        &[],
-        r#"files = { ["/etc/resolv.conf"] = { link = "/run/systemd/resolve/stub-resolv.conf" } }"#,
-    );
-    let output = setup.run(&["switch", "--noconfirm"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stderr}");
-    assert!(stderr.contains("/etc/resolv.conf is mounted over here"), "{stderr}");
-    assert_eq!(
-        read("/etc/resolv.conf"),
-        before,
-        "Docker's mounted resolv.conf is untouched"
-    );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]

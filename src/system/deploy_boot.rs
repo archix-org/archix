@@ -212,6 +212,18 @@ fn separate_mounts(etc: &Path) -> Vec<(String, &'static str)> {
         .collect()
 }
 
+/// Binds a deployment's trees over `root`'s usr, etc, opt, boot, pacman database and DKMS state, usr and opt read-only.
+pub fn bind_trees(root: &Path, deployment: &Path) -> Result<()> {
+    for (tree, at) in TREES {
+        let target = root.join(at);
+        if !is_dir(&target) {
+            make_mountpoint(root, &target)?;
+        }
+        bind(&deployment.join(tree), &target, READ_ONLY.contains(tree)).with_context(|| format!("binding {tree}"))?;
+    }
+    Ok(())
+}
+
 /// In the initramfs: binds the chosen deployment's trees over `root` and records its generation in `run_dir`/deployment.
 pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     let archix = root.join("archix");
@@ -233,14 +245,7 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     for (at, what) in separate_mounts(&deployment.join("etc")) {
         eprintln!("archix: warning: fstab mounts {at} separately, which hides this deployment's {what}");
     }
-    for (tree, at) in TREES {
-        let target = root.join(at);
-        if !is_dir(&target) {
-            make_mountpoint(root, &target)?;
-        }
-        bind(&deployment.join(tree), &target, READ_ONLY.contains(tree))
-            .with_context(|| format!("binding deployment {}'s {tree}", chosen.generation))?;
-    }
+    bind_trees(root, &deployment).with_context(|| format!("mounting deployment {}", chosen.generation))?;
     fs::create_dir_all(run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
     fs::write(run_dir.join("deployment"), format!("{}\n", chosen.generation))
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;
@@ -255,23 +260,12 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     Ok(chosen.generation)
 }
 
-/// The activation unit, and on a root that uses deployments the initramfs hook, which needs the static binary (`with_static`).
-pub fn files(root: &Path, archix: &Path, with_static: bool) -> Result<Vec<(PathBuf, String)>> {
-    let mut files = vec![(
+/// The activation unit.
+pub fn activate_file(root: &Path, archix: &Path) -> (PathBuf, String) {
+    (
         root.join("etc/systemd/system/archix-deploy-activate.service"),
         activate_unit(archix),
-    )];
-    if uses_deployments(root) {
-        if !with_static {
-            bail!(
-                "{} holds deployments, but {} is missing, and the initramfs needs it to mount them; reinstall archix",
-                root.join("archix/deploy").display(),
-                crate::integration::STATIC_BINARY
-            );
-        }
-        files.extend(hook_files(root));
-    }
-    Ok(files)
+    )
 }
 
 /// The mkinitcpio hook for both initramfs types, the initrd unit and the conf.d line.
@@ -316,14 +310,6 @@ pub fn activate_wants(root: &Path) -> (PathBuf, String) {
     )
 }
 
-/// Every file `files` may write plus the activation unit's link, for taking them off.
-pub fn all_files(root: &Path) -> Vec<PathBuf> {
-    let mut all = vec![root.join("etc/systemd/system/archix-deploy-activate.service")];
-    all.extend(hook_files(root).into_iter().map(|(path, _)| path));
-    all.push(activate_wants(root).0);
-    all
-}
-
 const MOUNT_UNIT: &str = "[Unit]\nDescription=archix: mount the deployment this boot belongs to\nDefaultDependencies=no\n\
      Requires=sysroot.mount\nAfter=sysroot.mount\nBefore=initrd-root-fs.target initrd-parse-etc.service\n\n\
      [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/archix deploy-mount /sysroot\nStandardOutput=journal+console\n";
@@ -349,9 +335,8 @@ mod tests {
         assert_eq!(generation_of_entry("archix-7.conf"), Some(7));
         assert_eq!(generation_of_entry("archix-7+2.conf"), Some(7));
         assert_eq!(generation_of_entry("archix-7+0-3.conf"), Some(7));
-        assert_eq!(generation_of_entry("archix-12-rescue.conf"), Some(12));
         assert_eq!(generation_of_entry("archix-12-protected.conf"), Some(12));
-        assert_eq!(generation_of_entry("archix-3.efi"), Some(3));
+        assert_eq!(generation_of_entry("archix-3.efi"), None);
         assert_eq!(generation_of_entry("arch-linux.efi"), None);
         assert_eq!(generation_of_entry("archix-.conf"), None);
         assert_eq!(generation_of_entry("archix-x.conf"), None);
@@ -381,7 +366,7 @@ mod tests {
         std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
         for entry in [
             "archix-1.conf",
-            "archix-1-rescue.conf",
+            "archix-1-protected.conf",
             "archix-2.conf",
             "archix-3.conf",
             "archix-4.conf",
@@ -401,7 +386,7 @@ mod tests {
         let root = dir.path();
         assert_eq!(choose(root, Some("archix-2.conf")).unwrap(), chosen(2, true));
         assert_eq!(choose(root, Some("archix-2+1-2.conf")).unwrap(), chosen(2, true));
-        assert_eq!(choose(root, Some("archix-1-rescue.conf")).unwrap(), chosen(1, true));
+        assert_eq!(choose(root, Some("archix-1-protected.conf")).unwrap(), chosen(1, true));
         assert_eq!(
             choose(root, Some("archix-3.conf")).unwrap(),
             chosen(1, false),
@@ -433,7 +418,7 @@ mod tests {
         fs::remove_file(boot::entry_records(&Paths::under(root)).join("archix-2.conf")).unwrap();
         assert_eq!(choose(root, Some("archix-2.conf")).unwrap(), chosen(1, false));
         assert_eq!(
-            choose(root, Some("archix-1-rescue.conf")).unwrap(),
+            choose(root, Some("archix-1-protected.conf")).unwrap(),
             chosen(1, true),
             "each variant has its own record"
         );

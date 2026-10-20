@@ -47,7 +47,7 @@ fn local_recipes_are_locked_by_content_and_built_in_the_chroot() {
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("archix-test-local").as_deref(), Some("2.0-1"));
     assert_eq!(
-        fs::read_to_string("/usr/share/archix-test-local/version").unwrap(),
+        fs::read_to_string(system_path("/usr/share/archix-test-local/version")).unwrap(),
         "2.0\n"
     );
 
@@ -55,7 +55,7 @@ fn local_recipes_are_locked_by_content_and_built_in_the_chroot() {
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(out.contains("reinstall  archix-test-local 2.0-1"), "{out}");
     assert_eq!(
-        fs::read_to_string("/usr/share/archix-test-local/version").unwrap(),
+        fs::read_to_string(system_path("/usr/share/archix-test-local/version")).unwrap(),
         "rebuilt\n",
         "a recipe change without a version bump still reaches the system"
     );
@@ -115,15 +115,13 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
         "",
         &[("pkgbuilds/archix-test-vcs/PKGBUILD", recipe)],
     );
-    setup.ok(&["switch", "--noconfirm"]);
-    let installed_content = || fs::read_to_string("/opt/archix-test-vcs/content").unwrap_or_default();
+    setup.lay_out();
+    let installed_content = || fs::read_to_string(system_path("/opt/archix-test-vcs/content")).unwrap_or_default();
     assert_eq!(installed_content(), "first");
     // As on a machine that never built it: no package, no build record, no built file.
     let forget_the_build = || {
-        Command::new("pacman")
-            .args(["-Rdd", "--noconfirm", "archix-test-vcs"])
-            .status()
-            .unwrap();
+        setup.machine.reboot(None);
+        setup.machine.pacman(&["-Rdd", "archix-test-vcs"]);
         let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-vcs");
         for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {
             if file.file_name().to_string_lossy().contains("archix-test-vcs-") {
@@ -166,14 +164,12 @@ fn a_build_that_differs_from_the_locked_one_is_said_and_can_be_refused() {
         "",
         &[("pkgbuilds/archix-test-local/PKGBUILD", &pkgbuild("1.0"))],
     );
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     let locked = setup.lock().packages["archix-test-local"].sha256.clone();
     // As on a machine that never built it: no package, no build record, no built file.
     let forget_the_build = || {
-        Command::new("pacman")
-            .args(["-Rdd", "--noconfirm", "archix-test-local"])
-            .status()
-            .unwrap();
+        setup.machine.reboot(None);
+        setup.machine.pacman(&["-Rdd", "archix-test-local"]);
         let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-local");
         for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {
             if file.file_name().to_string_lossy().contains("archix-test-local-") {
@@ -223,7 +219,13 @@ fn patched_packages_rebuild_archs_recipe_with_the_patches() {
 
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("tree").as_deref(), Some(locked.version.as_str()));
-    assert!(Command::new("tree").arg("--version").status().unwrap().success());
+    assert!(
+        Command::new(system_path("/usr/bin/tree"))
+            .arg("--version")
+            .status()
+            .unwrap()
+            .success()
+    );
 
     fs::write(
         setup.dir.path().join("patches/tree.patch"),
@@ -255,67 +257,6 @@ fn patched_packages_rebuild_archs_recipe_with_the_patches() {
 
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-}
-
-/// A stand-in kernel package: its modules directory for `release`, with a pkgbase file like pacman's kernels.
-fn kernel_recipe(release: &str, version: &str) -> String {
-    format!(
-        "pkgname=archix-test-kernel\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
-         package() {{\n  mkdir -p \"$pkgdir/usr/lib/modules/{release}\"\n  \
-         echo archix-test-kernel > \"$pkgdir/usr/lib/modules/{release}/pkgbase\"\n  \
-         echo {version} > \"$pkgdir/usr/lib/modules/{release}/modules.order\"\n}}\n"
-    )
-}
-
-#[test]
-#[ignore]
-fn the_running_kernels_modules_survive_a_switch_that_replaces_it() {
-    let _system = lock_system();
-    let running = fs::read_to_string("/proc/sys/kernel/osrelease")
-        .unwrap()
-        .trim()
-        .to_string();
-    let modules = std::path::Path::new("/usr/lib/modules").join(&running);
-    assert!(!modules.exists(), "the container has no modules for the host's kernel");
-    let setup = Setup::with_files(
-        &["archix-test-kernel"],
-        "",
-        &[("pkgbuilds/archix-test-kernel/PKGBUILD", &kernel_recipe(&running, "1"))],
-    );
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(!out.contains("reboot to finish"), "{out}");
-    assert!(modules.join("pkgbase").is_file());
-
-    fs::write(
-        setup.dir.path().join("pkgbuilds/archix-test-kernel/PKGBUILD"),
-        kernel_recipe(&format!("{running}-next"), "2"),
-    )
-    .unwrap();
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("reboot to finish"), "{out}");
-    assert_eq!(
-        fs::read_to_string(modules.join("modules.order")).unwrap(),
-        "1\n",
-        "the running kernel's modules are still there after pacman replaced its package"
-    );
-    assert!(
-        std::path::Path::new("/usr/lib/modules")
-            .join(format!("{running}-next"))
-            .is_dir()
-    );
-    assert!(
-        fs::read_to_string("/var/lib/archix/kept-modules")
-            .unwrap()
-            .contains(&running),
-        "they're recorded for cleanup after the reboot"
-    );
-
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    assert!(installed("archix-test-kernel").is_none());
-    fs::remove_dir_all(&modules).unwrap();
-    let _ = fs::remove_file("/var/lib/archix/kept-modules");
-    let _ = fs::remove_dir_all(format!("/var/lib/archix/kernels/{running}"));
 }
 
 #[test]
@@ -432,99 +373,6 @@ fn recipe(name: &str, version: &str, depends: &str, package: &str) -> String {
     )
 }
 
-fn sleeper(version: &str) -> String {
-    recipe(
-        "archix-test-sleeper",
-        version,
-        "",
-        "  install -Dm755 /usr/bin/sleep \"$pkgdir/usr/bin/archix-test-sleep\"",
-    )
-}
-
-fn perl_lib(version: &str) -> String {
-    recipe(
-        "archix-test-perllib",
-        version,
-        "perl",
-        &format!(
-            "  mkdir -p \"$pkgdir/usr/share/perl5/vendor_perl\"\n  echo 'package ArchixTest; our $V = \"{version}\"; 1;' > \"$pkgdir/usr/share/perl5/vendor_perl/ArchixTest.pm\""
-        ),
-    )
-}
-
-const PERL_APP: &str = "  mkdir -p \"$pkgdir/usr/lib/archix-test-perlapp\"\n  echo 'use ArchixTest; sleep;' > \"$pkgdir/usr/lib/archix-test-perlapp/app.pl\"";
-
-fn service(exec: &str) -> String {
-    format!("[Service]\nExecStart={exec}\n[Install]\nWantedBy=multi-user.target")
-}
-
-fn main_pid(unit: &str) -> String {
-    let output = Command::new("systemctl")
-        .args(["show", "-P", "MainPID", unit])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-#[test]
-#[ignore]
-fn services_using_replaced_files_or_changed_interpreted_code_restart() {
-    let _system = lock_system();
-    let body = format!(
-        r#"units = {{ ["archix-test-native.service"] = {native:?}, ["archix-test-perl.service"] = {perl:?}, ["archix-test-kept.service"] = {kept:?} }},
-        services = {{ ["archix-test-native.service"] = true, ["archix-test-perl.service"] = true, ["archix-test-kept.service"] = true }},
-        restart_if_changed = {{ ["archix-test-kept.service"] = false }}"#,
-        native = service("/usr/bin/archix-test-sleep infinity"),
-        perl = service("/usr/bin/perl /usr/lib/archix-test-perlapp/app.pl"),
-        kept = service("/usr/bin/archix-test-sleep infinity"),
-    );
-    let packages = ["archix-test-sleeper", "archix-test-perllib", "archix-test-perlapp"];
-    let setup = Setup::with_files(
-        &packages,
-        &body,
-        &[
-            ("pkgbuilds/sleeper/PKGBUILD", &sleeper("1")),
-            ("pkgbuilds/perllib/PKGBUILD", &perl_lib("1")),
-            (
-                "pkgbuilds/perlapp/PKGBUILD",
-                &recipe("archix-test-perlapp", "1", "archix-test-perllib", PERL_APP),
-            ),
-        ],
-    );
-    setup.ok(&["switch", "--noconfirm"]);
-    let before: Vec<String> = ["archix-test-native", "archix-test-perl", "archix-test-kept"]
-        .iter()
-        .map(|unit| main_pid(&format!("{unit}.service")))
-        .collect();
-    assert!(before.iter().all(|pid| pid != "0"), "{before:?}");
-
-    fs::write(setup.dir.path().join("pkgbuilds/sleeper/PKGBUILD"), sleeper("2")).unwrap();
-    fs::write(setup.dir.path().join("pkgbuilds/perllib/PKGBUILD"), perl_lib("2")).unwrap();
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert_ne!(
-        main_pid("archix-test-native.service"),
-        before[0],
-        "a daemon whose binary was replaced restarts:\n{out}"
-    );
-    assert_ne!(
-        main_pid("archix-test-perl.service"),
-        before[1],
-        "a Perl daemon restarts when a library it depends on changes:\n{out}"
-    );
-    assert_eq!(
-        main_pid("archix-test-kept.service"),
-        before[2],
-        "restart_if_changed = false is respected"
-    );
-    assert!(
-        out.contains("still using replaced files") && out.contains("archix-test-kept.service"),
-        "{out}"
-    );
-
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
 #[test]
 #[ignore]
 fn packages_shipping_the_same_file_are_refused_before_anything_changes() {
@@ -545,7 +393,7 @@ fn packages_shipping_the_same_file_are_refused_before_anything_changes() {
         "{err}"
     );
     assert!(installed("archix-test-one").is_none() && installed("archix-test-two").is_none());
-    assert!(!std::path::Path::new("/var/lib/archix/journal.json").exists());
+    assert!(setup.machine.current().is_none(), "nothing was laid out or staged");
 
     let conflicting =
         recipe("archix-test-two", "1", "", ships).replace("depends=()", "depends=()\nconflicts=(archix-test-one)");

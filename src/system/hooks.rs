@@ -149,7 +149,7 @@ fn run_one(hook: &Hook) -> Result<()> {
 /// The script as `user` with a clean environment: their home, and their session bus when they're logged in.
 fn user_command(user: &str, script: &[&str]) -> Result<Command> {
     let Some((uid, gid, home)) = account(user) else {
-        bail!("user {user} doesn't exist");
+        bail!("user {user} doesn't exist on the running system; a user the switch declares exists from the next boot");
     };
     // setpriv, not runuser: runuser opens a PAM session, which starts a systemd user manager that outlives the hook.
     let mut cmd = Command::new("setpriv");

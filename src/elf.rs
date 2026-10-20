@@ -45,7 +45,7 @@ pub fn needed(path: &Path) -> Option<Vec<String>> {
     file.seek(SeekFrom::Start(str_offset)).ok()?;
     file.read_exact(&mut strings).ok()?;
     let mut libraries = Vec::new();
-    for entry in entries.chunks_exact(16) {
+    for entry in entries.as_chunks::<16>().0 {
         let (tag, value) = (u64_at(entry, 0), u64_at(entry, 8) as usize);
         if tag == DT_NULL {
             break;

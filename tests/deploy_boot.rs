@@ -53,7 +53,7 @@ fn efivar_bytes(entry: &str) -> Vec<u8> {
 
 /// The activation unit and the whole initramfs hook, under `root`.
 fn all_boot_files(root: &Path) -> Vec<(PathBuf, String)> {
-    let mut files = deploy_boot::files(root, Path::new("/usr/bin/archix"), true).unwrap();
+    let mut files = vec![deploy_boot::activate_file(root, Path::new("/usr/bin/archix"))];
     files.extend(deploy_boot::hook_files(root));
     files
 }

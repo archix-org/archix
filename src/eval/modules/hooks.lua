@@ -13,7 +13,7 @@ return {
         after = archix.option { type = t.list_of(t.str), default = {}, description = "Hooks that must run before this one." },
       }),
       default = {},
-      description = "Scripts run at the end of every switch and rollback, after files are written and services started, like NixOS activation scripts. They run every time, so make them idempotent; a failing hook is reported without undoing the switch.",
+      description = "Scripts run at the end of every switch and rollback, once its deployment is committed, like Home Manager's activation; the system they see is still the running one, as the new deployment boots at the next restart. They run every time, so make them idempotent; a failing hook is reported without undoing the switch.",
     },
   },
 }

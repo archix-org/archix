@@ -104,9 +104,10 @@ impl LocalRepo {
     }
 }
 
-/// Uninstalls a package and deletes every cached copy, so the next switch has to find it somewhere.
-fn forget(name: &str) {
-    pacman(&["-R", name]);
+/// Uninstalls a package from the current deployment and deletes every cached copy, so the next switch has to find it somewhere.
+fn forget(setup: &Setup, name: &str) {
+    setup.machine.reboot(None);
+    setup.machine.pacman(&["-R", name]);
     for dir in [Path::new("/var/cache/archix/pkg"), Path::new("/var/cache/pacman/pkg")] {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
             if entry.file_name().to_string_lossy().starts_with(&format!("{name}-")) {
@@ -193,11 +194,22 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
     );
     let _ = fs::remove_file("/var/lib/pacman/sync/archix-third.db");
     let setup = Setup::new(&[], &body);
-    setup.ok(&["switch", "--noconfirm"]);
-    let query = Command::new("pacman").args(["-Q", "pacman"]).output().unwrap();
+    setup.lay_out();
+    let query = Command::new("pacman")
+        .arg("--config")
+        .arg(system_path("/etc/pacman.conf"))
+        .arg("--dbpath")
+        .arg(setup.machine.root.join("var/lib/pacman"))
+        .args(["-Q", "pacman"])
+        .output()
+        .unwrap();
     let warnings = String::from_utf8_lossy(&query.stderr).into_owned();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        fs::read_to_string(system_path("/etc/pacman.conf"))
+            .unwrap()
+            .contains("[archix-third]"),
+        "the deployment's pacman.conf has the repo"
+    );
     assert!(
         !warnings.contains("database file for 'archix-third' does not exist"),
         "{warnings}"
@@ -206,21 +218,23 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
 
 #[test]
 #[ignore]
-fn a_rollback_never_takes_a_keyring_back() {
+fn a_rollback_that_rebuilds_never_takes_a_keyring_back() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
     let keyring = "install -Dm644 /dev/null \"$pkgdir/usr/share/pacman/keyrings/archix-test.gpg\"";
     repo.publish_with("archix-test-keyring", "1.0", keyring);
     let body = format!(
-        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}, deployments = {{ keep = 1 }}",
         repo.server()
     );
     let setup = Setup::new(&["archix-test-keyring"], &body);
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     repo.publish_with("archix-test-keyring", "2.0", keyring);
     setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
+    setup.machine.reboot(None);
+    setup.ok(&["gc"]);
 
     let out = setup.ok(&["rollback", "--noconfirm"]);
     assert!(
@@ -228,8 +242,6 @@ fn a_rollback_never_takes_a_keyring_back() {
         "{out}"
     );
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -243,9 +255,9 @@ fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it
         repo.server()
     );
     let setup = Setup::new(&[], &body);
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     // Installed with plain pacman, the way `archix init` finds packages on a machine.
-    pacman(&["-Sy", "--noconfirm", "archix-test-adopted"]);
+    setup.machine.pacman(&["-Sy", "archix-test-adopted"]);
     setup.set_body(&["archix-test-adopted"], &body);
     setup.ok(&["switch", "--noconfirm"]);
     setup.set_body(&[], &body);
@@ -293,7 +305,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("archix-test-third").as_deref(), Some("1.0-1"));
     assert_eq!(installed("tree").as_deref(), Some("9.9-1"));
-    let conf = fs::read_to_string("/etc/pacman.conf").unwrap();
+    let conf = fs::read_to_string(system_path("/etc/pacman.conf")).unwrap();
     assert!(
         conf.find("[archix-third]").unwrap() < conf.find("[core]").unwrap(),
         "{conf}"
@@ -301,7 +313,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
 
     repo.withdraw("archix-test-third");
     repo.publish("archix-test-third", "1.1");
-    forget("archix-test-third");
+    forget(&setup, "archix-test-third");
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
         out.contains("archix-test-third 1.0-1 is gone from archix-third"),
@@ -315,7 +327,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
 
     repo.withdraw("archix-test-third");
     aur.publish(TestPkg::new("archix-test-third", "2.0"));
-    forget("archix-test-third");
+    forget(&setup, "archix-test-third");
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
         installed("archix-test-third").as_deref(),
@@ -325,7 +337,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
     assert_eq!(setup.lock().packages["archix-test-third"].repo, AUR_REPO);
 
     repo.withdraw("tree");
-    forget("tree");
+    forget(&setup, "tree");
     setup.ok(&["switch", "--noconfirm"]);
     let tree = installed("tree").unwrap();
     assert_ne!(tree, "9.9-1", "last: the official repos");
@@ -359,7 +371,7 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
     setup.ok(&["switch", "--noconfirm"]);
     assert!(installed("archix-test-third").is_none());
     assert!(
-        !fs::read_to_string("/etc/pacman.conf")
+        !fs::read_to_string(system_path("/etc/pacman.conf"))
             .unwrap()
             .contains("[archix-third]"),
         "the repo's block goes too"

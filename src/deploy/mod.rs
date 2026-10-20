@@ -1,8 +1,10 @@
 //! Deployments: each generation's usr, etc, opt, boot, pacman database and DKMS state as one tree under /archix/deploy, staged beside the running one and committed atomically.
 
+pub mod build;
 pub mod commit;
 pub mod flatten;
 pub mod keep;
+pub mod layout;
 pub mod stage;
 pub mod store;
 pub mod view;

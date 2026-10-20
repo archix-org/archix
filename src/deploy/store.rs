@@ -15,7 +15,7 @@ use crate::testhooks::mark;
 const BTRFS_MAGIC: u64 = 0x9123_683e;
 /// Every btrfs subvolume's top directory has this inode number.
 const SUBVOLUME_INODE: u64 = 256;
-const STAGING_PREFIX: &str = ".staging-";
+pub(super) const STAGING_PREFIX: &str = ".staging-";
 const DELETING_PREFIX: &str = ".deleting-";
 const CURRENT_TMP: &str = ".current.tmp";
 const LOCK: &str = ".lock";
@@ -230,7 +230,7 @@ impl Store {
             && fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.ino() == SUBVOLUME_INODE)
     }
 
-    fn remove_tree(&self, path: &Path) -> Result<()> {
+    pub(crate) fn remove_tree(&self, path: &Path) -> Result<()> {
         if self.is_subvolume(path) {
             let output = Command::new("btrfs")
                 .args(["subvolume", "delete"])

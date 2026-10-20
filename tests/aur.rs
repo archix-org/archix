@@ -10,8 +10,12 @@ use archix::lock::AUR_REPO;
 use common::*;
 use tempfile::TempDir;
 
+/// A file of the system that boots next.
 fn read(path: &str) -> String {
-    fs::read_to_string(path).unwrap_or_default().trim().to_string()
+    fs::read_to_string(system_path(path))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 #[test]

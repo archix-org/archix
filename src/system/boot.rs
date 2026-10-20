@@ -8,17 +8,17 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::deploy::{EspStep, Staging, Transaction};
 use crate::paths::Paths;
+use crate::testhooks::mark;
 
-/// What the boot step of a transaction writes: one UKI for a generation, plus its rescue twin.
+/// How a generation's boot entry is built: kept with the generation, so a rollback that rebuilds its deployment builds the same entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BootPlan {
-    pub generation: u32,
     pub esp: String,
     pub kernel: String,
     pub microcode: Vec<String>,
     pub cmdline: String,
-    pub keep: u32,
     pub secure_boot: Option<bool>,
     /// Also write a protected entry with the command line Easy Anti-Cheat Linux v2 asks for.
     #[serde(default)]
@@ -28,39 +28,20 @@ pub struct BootPlan {
     pub tries: u32,
 }
 
-/// The entries one generation gets: the normal one, a rescue twin and a protected twin.
-#[derive(Clone, Copy, PartialEq)]
+/// The entries one generation gets: the normal one and a protected twin.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Variant {
     Normal,
-    Rescue,
     Protected,
 }
 
 pub const MODULES: &str = "/usr/lib/modules";
 const MARGIN: u64 = 16 * 1024 * 1024;
+/// Where a deployment keeps the UKIs its switch built, which the ESP step copies.
+const BUILT: &str = "/boot/archix";
 
-/// The installed version of a kernel package, from the pkgbase file pacman's kernels leave in their modules dir.
-pub fn kernel_version(kernel: &str) -> Result<String> {
-    if let Some(version) = owned_version(Path::new("/var/lib/pacman/local"), kernel)
-        && Path::new(MODULES).join(&version).join("vmlinuz").is_file()
-    {
-        return Ok(version);
-    }
-    for entry in fs::read_dir(MODULES)
-        .with_context(|| format!("reading {MODULES}"))?
-        .flatten()
-    {
-        if fs::read_to_string(entry.path().join("pkgbase")).is_ok_and(|base| base.trim() == kernel)
-            && entry.path().join("vmlinuz").is_file()
-        {
-            return Ok(entry.file_name().to_string_lossy().into_owned());
-        }
-    }
-    bail!("the {kernel} kernel isn't installed (no {MODULES}/*/pkgbase names it)")
-}
-
-/// The modules dir the installed kernel package owns; the running kernel's modules that archix keeps until reboot carry the same pkgbase.
-fn owned_version(local_db: &Path, kernel: &str) -> Option<String> {
+/// The modules dir the kernel package `kernel` owns in pacman database `local_db`.
+pub fn owned_version(local_db: &Path, kernel: &str) -> Option<String> {
     let entry = fs::read_dir(local_db)
         .ok()?
         .flatten()
@@ -72,152 +53,24 @@ fn owned_version(local_db: &Path, kernel: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn kernels(paths: &Paths) -> PathBuf {
-    paths.state.join("kernels")
-}
-
-/// Keeps a hardlinked copy of a kernel's modules, so older boot entries still find them after pacman removes them.
-pub fn preserve_modules(paths: &Paths, version: &str) -> Result<()> {
-    preserve_from(Path::new(MODULES), paths, version)
-}
-
-/// Refreshes the copy each time, so it carries the DKMS modules built since the kernel was first kept.
-pub(crate) fn preserve_from(modules: &Path, paths: &Paths, version: &str) -> Result<()> {
-    let dest = kernels(paths).join(version);
-    if !modules.join(version).is_dir() && dest.exists() {
-        return Ok(());
-    }
-    fs::create_dir_all(kernels(paths))?;
-    let tmp = kernels(paths).join(format!(".{version}.{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    let status = Command::new("cp")
-        .arg("-al")
-        .arg(modules.join(version))
-        .arg(&tmp)
-        .status()?;
-    if !status.success() {
-        let _ = fs::remove_dir_all(&tmp);
-        bail!("could not keep a copy of {version}'s modules");
-    }
-    if dest.exists() {
-        exchange(&tmp, &dest).with_context(|| format!("refreshing the copy of {version}'s modules"))?;
-        fs::remove_dir_all(&tmp)?;
-    } else {
-        fs::rename(&tmp, &dest)?;
-    }
-    Ok(())
-}
-
-/// Swaps two paths atomically, so a crash never leaves a kernel without its kept modules.
-fn exchange(a: &Path, b: &Path) -> Result<()> {
-    let (a, b) = (
-        CString::new(a.as_os_str().as_encoded_bytes())?,
-        CString::new(b.as_os_str().as_encoded_bytes())?,
-    );
-    let flags = libc::RENAME_EXCHANGE;
-    if unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), flags) } != 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    Ok(())
-}
-
-/// Puts a preserved kernel's modules back when the running kernel's are gone; true if it had to.
-pub fn restore_modules(paths: &Paths, version: &str) -> Result<bool> {
-    restore_into(Path::new(MODULES), paths, version)
-}
-
-/// A modules directory without `modules.dep` is what pacman leaves when unowned files, such as DKMS's directories, keep it from deleting it; nothing loads from it.
-pub fn restore_into(modules: &Path, paths: &Paths, version: &str) -> Result<bool> {
-    let target = modules.join(version);
-    let source = kernels(paths).join(version);
-    if target.join("modules.dep").exists() || !source.exists() {
-        return Ok(false);
-    }
-    let tmp = modules.join(format!(".{version}.restoring"));
-    if tmp.exists() {
-        fs::remove_dir_all(&tmp)?;
-    }
-    link_tree(&source, &tmp).with_context(|| format!("restoring {version}'s modules"))?;
-    if fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir()) {
-        move_missing(&target, &tmp)?;
-        exchange(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
-        fs::remove_dir_all(&tmp)?;
-    } else {
-        fs::rename(&tmp, &target).with_context(|| format!("restoring {version}'s modules"))?;
-    }
-    Ok(true)
-}
-
-/// Moves what `from` has and `to` lacks into `to`, so files left in an incomplete modules directory survive its restore.
-fn move_missing(from: &Path, to: &Path) -> Result<()> {
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        match fs::symlink_metadata(&target) {
-            Err(_) => fs::rename(&source, &target)?,
-            Ok(meta) if meta.is_dir() && entry.file_type()?.is_dir() => move_missing(&source, &target)?,
-            Ok(_) => {}
-        }
-    }
-    Ok(())
-}
-
-/// Recreates `from` at `to` with hard links (the preserved modules share the root filesystem), copying where linking fails; the initramfs has no cp.
-fn link_tree(from: &Path, to: &Path) -> Result<()> {
-    fs::create_dir_all(to)?;
-    fs::set_permissions(to, fs::metadata(from)?.permissions())?;
-    for entry in fs::read_dir(from)? {
-        let entry = entry?;
-        let (source, target) = (entry.path(), to.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            link_tree(&source, &target)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&source)?, &target)?;
-        } else if fs::hard_link(&source, &target).is_err() {
-            fs::copy(&source, &target)?;
-        }
-    }
-    Ok(())
-}
-
-/// The kernel version each generation's boot entry was built with.
-pub fn kernel_of(paths: &Paths, generation: u32) -> Option<String> {
-    fs::read_to_string(paths.state.join("boot").join(format!("{generation}.kernel"))).ok()
-}
-
-/// Deletes preserved kernels no remaining boot entry uses.
-pub fn prune_kernels(paths: &Paths, keep: &BTreeSet<String>) -> Result<usize> {
-    let mut removed = 0;
-    for entry in fs::read_dir(kernels(paths)).into_iter().flatten().flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !keep.contains(&name) {
-            fs::remove_dir_all(entry.path())?;
-            removed += 1;
-        }
-    }
-    Ok(removed)
-}
-
-/// Where archix put one UKI per generation before UKIs were shared; systemd-boot lists every UKI here on its own.
+/// Where systemd-boot finds the UKIs mkinitcpio's presets write, which `hand_over` uses.
 fn linux_dir(esp: &str) -> PathBuf {
     Path::new(esp).join("EFI/Linux")
 }
 
 /// The shared UKIs, outside EFI/Linux so systemd-boot shows them only through the entries that name them.
-fn uki_dir(esp: &str) -> PathBuf {
-    Path::new(esp).join("EFI/archix")
+fn uki_dir(esp: &Path) -> PathBuf {
+    esp.join("EFI/archix")
 }
 
-fn entries_dir(esp: &str) -> PathBuf {
-    Path::new(esp).join("loader/entries")
+fn entries_dir(esp: &Path) -> PathBuf {
+    esp.join("loader/entries")
 }
 
 /// The boot menu entry of a generation, which names the UKI it boots.
 fn entry_name(generation: u32, variant: Variant) -> String {
     match variant {
         Variant::Normal => format!("archix-{generation}.conf"),
-        Variant::Rescue => format!("archix-{generation}-rescue.conf"),
         Variant::Protected => format!("archix-{generation}-protected.conf"),
     }
 }
@@ -235,7 +88,7 @@ pub fn failed_to_boot(paths: &Paths, generation: u32) -> bool {
     let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
         return false;
     };
-    entries(esp.trim()).iter().any(|(number, extra, path)| {
+    entries(Path::new(esp.trim())).iter().any(|(number, extra, path)| {
         *number == generation && !extra && is_bad(&path.file_name().unwrap_or_default().to_string_lossy())
     })
 }
@@ -247,37 +100,34 @@ pub fn is_bad(name: &str) -> bool {
         .is_some_and(|left| left == "0")
 }
 
-/// The generation an entry file (archix-N.conf, archix-N-rescue.conf, or a pre-sharing archix-N.efi) belongs to, and whether it's an extra one.
+/// The generation an entry file (archix-N.conf, archix-N-protected.conf, with or without boot counters) belongs to, and whether it's the protected twin.
 pub(crate) fn parse_entry(name: &str) -> Option<(u32, bool)> {
-    let stem = name.strip_prefix("archix-")?;
-    let stem = stem.strip_suffix(".conf").or_else(|| stem.strip_suffix(".efi"))?;
+    let stem = name.strip_prefix("archix-")?.strip_suffix(".conf")?;
     let stem = stem.split('+').next().unwrap_or(stem);
-    let (number, extra) = match stem.strip_suffix("-rescue").or_else(|| stem.strip_suffix("-protected")) {
+    let (number, extra) = match stem.strip_suffix("-protected") {
         Some(number) => (number, true),
         None => (stem, false),
     };
+    if number.is_empty() || number.starts_with('0') || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
     Some((number.parse().ok()?, extra))
 }
 
-/// The generations that have a boot entry on the ESP, with whether it's an extra (rescue or protected) entry.
-pub fn entries(esp: &str) -> Vec<(u32, bool, PathBuf)> {
+/// The generations that have a boot entry on the ESP, with whether it's the protected twin.
+pub fn entries(esp: &Path) -> Vec<(u32, bool, PathBuf)> {
     let mut found = Vec::new();
-    for dir in [entries_dir(esp), linux_dir(esp)] {
-        for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
-            if let Some((number, extra)) = parse_entry(&entry.file_name().to_string_lossy()) {
-                found.push((number, extra, entry.path()));
-            }
+    for entry in fs::read_dir(entries_dir(esp)).into_iter().flatten().flatten() {
+        if let Some((number, extra)) = parse_entry(&entry.file_name().to_string_lossy()) {
+            found.push((number, extra, entry.path()));
         }
     }
     found.sort();
     found
 }
 
-/// The UKI an entry boots: the file a .conf names, or a pre-sharing entry itself.
-fn uki_of(esp: &str, entry: &Path) -> Option<PathBuf> {
-    if entry.extension().is_some_and(|ext| ext == "efi") {
-        return Some(entry.to_path_buf());
-    }
+/// The UKI an entry boots.
+fn uki_of(esp: &Path, entry: &Path) -> Option<PathBuf> {
     let text = fs::read_to_string(entry).ok()?;
     let path = text
         .lines()
@@ -285,25 +135,36 @@ fn uki_of(esp: &str, entry: &Path) -> Option<PathBuf> {
             Some(("efi" | "uki", path)) => Some(path.trim()),
             _ => None,
         })?;
-    Some(Path::new(esp).join(path.trim_start_matches('/')))
+    Some(esp.join(path.trim_start_matches('/')))
 }
 
-/// Deletes shared UKIs no entry names any more.
-fn remove_unused_ukis(esp: &str) -> Result<()> {
-    remove_unused_ukis_but(esp, &[])
-}
-
-/// Deletes boot entries for generations that are no longer kept, and the UKIs only they used.
-pub fn prune_entries(esp: &str, keep: &BTreeSet<u32>) -> Result<usize> {
-    let mut removed = 0;
-    for (number, _, path) in entries(esp) {
-        if !keep.contains(&number) {
-            fs::remove_file(&path)?;
-            removed += 1;
+/// Takes a generation's entries and their records off the ESP, then the UKIs no entry uses any more; a deployment's entries go before the deployment does.
+pub fn drop_entries(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
+    for (number, extra, path) in entries(esp) {
+        if number == generation {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            let variant = if extra { Variant::Protected } else { Variant::Normal };
+            let _ = fs::remove_file(entry_records(paths).join(entry_name(number, variant)));
         }
     }
-    remove_unused_ukis(esp)?;
-    Ok(removed)
+    remove_unused_ukis_but(esp, &[])?;
+    crate::durable::sync_filesystems_checked(&[esp])
+}
+
+/// Deletes shared UKIs no entry names, except `keep`, which entries are about to name.
+fn remove_unused_ukis_but(esp: &Path, keep: &[PathBuf]) -> Result<()> {
+    let used: BTreeSet<PathBuf> = entries(esp)
+        .iter()
+        .filter_map(|(_, _, entry)| uki_of(esp, entry))
+        .chain(keep.iter().cloned())
+        .collect();
+    for file in fs::read_dir(uki_dir(esp)).into_iter().flatten().flatten() {
+        let name = file.file_name();
+        if !used.contains(&file.path()) && !name.to_string_lossy().ends_with(".tmp") {
+            fs::remove_file(file.path()).with_context(|| format!("removing {}", file.path().display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn free_bytes(dir: &Path) -> Result<u64> {
@@ -342,27 +203,55 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Builds the generation's UKI (and its rescue twin when the rescue hook is set up), signs it, and installs it on the ESP.
-pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
-    let version = kernel_version(&plan.kernel)?;
-    preserve_modules(paths, &version)?;
-    let work = paths.state.join("boot-work");
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work)?;
-    let records = paths.state.join("boot");
-    fs::create_dir_all(&records)?;
-    fs::write(records.join(format!("{}.kernel", plan.generation)), &version)?;
-    crate::durable::write(&records.join("esp"), plan.esp.as_bytes())?;
+/// One UKI a deployment's entries boot: built by this switch into the deployment's /boot/archix, or reused from the ESP.
+#[derive(Debug, Clone)]
+struct Uki {
+    variant: Variant,
+    title: String,
+    name: String,
+    built: bool,
+}
 
-    let initramfs = work.join("initramfs.img");
-    run(
-        Command::new("mkinitcpio")
-            .args(["-k", &version, "-g"])
-            .arg(&initramfs)
-            .args(["-S", "autodetect"]),
+/// The UKIs a staged deployment's entries boot.
+#[derive(Debug, Clone)]
+pub struct Built {
+    pub version: String,
+    ukis: Vec<Uki>,
+}
+
+/// Builds a staged deployment's initramfs and UKIs inside its staging root, from its own kernel and /etc, signing them when Secure Boot signing is on; UKIs the ESP already has are reused.
+pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx: &Transaction) -> Result<Built> {
+    let version = owned_version(&staging.tree("pacman"), &plan.kernel).with_context(|| {
+        format!(
+            "the {} kernel package isn't installed in the new deployment; boot.kernel names it",
+            plan.kernel
+        )
+    })?;
+    let vmlinuz = Path::new(MODULES).join(&version).join("vmlinuz");
+    if !staging.read_path(&vmlinuz)?.is_file() {
+        bail!("{} is missing from the new deployment", vmlinuz.display());
+    }
+    let in_view = |argv: &[&str], what: &str| -> Result<String> {
+        let output = tx.output(argv)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tail: Vec<&str> = stdout.lines().chain(stderr.lines()).rev().take(12).collect();
+            bail!(
+                "{what} failed in the new deployment:\n{}",
+                tail.into_iter().rev().collect::<Vec<_>>().join("\n")
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    };
+    in_view(&["rm", "-rf", BUILT], "clearing /boot/archix")?;
+    in_view(&["mkdir", "-p", BUILT], "creating /boot/archix")?;
+    let initramfs = format!("{BUILT}/initramfs.img");
+    in_view(
+        &["mkinitcpio", "-k", &version, "-g", &initramfs, "-S", "autodetect"],
         "mkinitcpio",
     )?;
-    let os_release = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let os_release = in_view(&["cat", "/etc/os-release"], "reading /etc/os-release")?;
     let release: Vec<String> = os_release
         .lines()
         .filter(|line| {
@@ -371,23 +260,25 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         .map(str::to_string)
         .collect();
     let secure_boot = plan.secure_boot.unwrap_or_else(sbctl_has_keys);
-    let pcr_key = Path::new(PCR_PRIVATE_KEY)
+    let pcr_key = staging
+        .read_path(Path::new(PCR_PRIVATE_KEY))?
         .is_file()
-        .then(|| fs::read(PCR_PUBLIC_KEY).unwrap_or_default());
-    let rescue_hook = Path::new("/etc/initcpio/install/archix-rescue").exists();
-    let vmlinuz = Path::new(MODULES).join(&version).join("vmlinuz");
-    let microcode: Vec<PathBuf> = plan.microcode.iter().map(|m| Path::new(&plan.esp).join(m)).collect();
-    let shared = uki_dir(&plan.esp);
-    // The UKI each variant boots, and the ones this switch has to build because no earlier generation's matches.
+        .then(|| fs::read(staging.read_path(Path::new(PCR_PUBLIC_KEY)).ok()?).ok())
+        .map(Option::unwrap_or_default);
+    let microcode: Vec<String> = plan.microcode.iter().map(|m| format!("/boot/{m}")).collect();
+    let mut microcode_files = Vec::new();
+    for file in &microcode {
+        microcode_files.push(staging.read_path(Path::new(file))?);
+    }
+    let initramfs_file = staging.read_path(Path::new(&initramfs))?;
+    let esp = Path::new(&plan.esp);
     let mut ukis = Vec::new();
-    let mut built = Vec::new();
-    for variant in [Variant::Normal, Variant::Rescue, Variant::Protected] {
-        if (variant == Variant::Rescue && !rescue_hook) || (variant == Variant::Protected && !plan.anticheat) {
+    for variant in [Variant::Normal, Variant::Protected] {
+        if variant == Variant::Protected && !plan.anticheat {
             continue;
         }
         let (title, suffix) = match variant {
             Variant::Normal => ("archix", ""),
-            Variant::Rescue => ("archix rescue", "-rescue"),
             Variant::Protected => ("archix protected", "-protected"),
         };
         let mut text = release.clone();
@@ -395,72 +286,72 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
         text.push("IMAGE_ID=archix".to_string());
         let release_text = text.join("\n") + "\n";
         let mut cmdline = plan.cmdline.trim().to_string();
-        match variant {
-            Variant::Rescue => cmdline.push_str(" archix.rescue"),
-            Variant::Protected => {
-                cmdline.push(' ');
-                cmdline.push_str(super::secureboot::ANTICHEAT_CMDLINE);
-            }
-            Variant::Normal => {}
+        if variant == Variant::Protected {
+            cmdline.push(' ');
+            cmdline.push_str(super::secureboot::ANTICHEAT_CMDLINE);
         }
         let key = payload_key(
-            &vmlinuz,
-            &microcode,
-            &initramfs,
+            &staging.read_path(&vmlinuz)?,
+            &microcode_files,
+            &initramfs_file,
             &cmdline,
             &release_text,
             secure_boot,
             pcr_key.as_deref(),
         )?;
-        let dest = shared.join(format!("{version}{suffix}-{key}.efi"));
-        if !dest.exists() {
-            let release_file = work.join(format!("os-release{suffix}"));
-            fs::write(&release_file, &release_text)?;
-            let output = work.join(dest.file_name().unwrap_or_default());
-            let mut ukify = Command::new("ukify");
-            ukify.arg("build").arg("--linux").arg(&vmlinuz);
+        let name = format!("{version}{suffix}-{key}.efi");
+        let built = !uki_dir(esp).join(&name).exists();
+        if built {
+            let output = format!("{BUILT}/{name}");
+            let mut ukify: Vec<String> = ["ukify", "build", "--linux"].map(str::to_string).to_vec();
+            ukify.push(vmlinuz.display().to_string());
             for file in &microcode {
-                ukify.arg("--initrd").arg(file);
+                ukify.extend(["--initrd".to_string(), file.clone()]);
             }
-            ukify.arg("--initrd").arg(&initramfs);
-            ukify.args(["--cmdline", &cmdline, "--uname", &version]);
-            ukify.arg("--os-release").arg(format!("@{}", release_file.display()));
-            ukify.arg("--output").arg(&output);
+            ukify.extend(["--initrd".to_string(), initramfs.clone()]);
+            ukify.extend([
+                "--cmdline".to_string(),
+                cmdline.clone(),
+                "--uname".to_string(),
+                version.clone(),
+            ]);
+            ukify.extend(["--os-release".to_string(), release_text.clone()]);
+            ukify.extend(["--output".to_string(), output.clone()]);
             if super::revoke::any_revoked(paths) {
-                ukify.arg(format!("--section=.archix:{}", unique_id()));
+                ukify.push(format!("--section=.archix:{}", unique_id()));
             }
             if pcr_key.is_some() {
-                ukify.arg(format!("--pcr-private-key={PCR_PRIVATE_KEY}"));
-                if Path::new(PCR_PUBLIC_KEY).is_file() {
-                    ukify.arg(format!("--pcr-public-key={PCR_PUBLIC_KEY}"));
+                ukify.push(format!("--pcr-private-key={PCR_PRIVATE_KEY}"));
+                if staging.read_path(Path::new(PCR_PUBLIC_KEY))?.is_file() {
+                    ukify.push(format!("--pcr-public-key={PCR_PUBLIC_KEY}"));
                 }
             }
-            run(&mut ukify, "ukify build")?;
+            let argv: Vec<&str> = ukify.iter().map(String::as_str).collect();
+            in_view(&argv, "ukify build")?;
             if secure_boot {
+                let file = staging.read_path(Path::new(&output))?;
                 run(
-                    Command::new("sbctl")
-                        .env("ESP_PATH", &plan.esp)
-                        .arg("sign")
-                        .arg(&output),
+                    Command::new("sbctl").env("ESP_PATH", esp).arg("sign").arg(&file),
                     "sbctl sign",
                 )?;
-                super::revoke::record_signed(paths, &output, &dest.file_name().unwrap_or_default().to_string_lossy())?;
+                super::revoke::record_signed(paths, &file, &name)?;
             }
-            built.push((dest.clone(), output));
         }
-        ukis.push((
+        ukis.push(Uki {
             variant,
-            format!("Arch Linux ({title}, generation {})", plan.generation),
-            dest,
-        ));
+            title: format!("Arch Linux ({title}, generation {number})"),
+            name,
+            built,
+        });
     }
+    in_view(&["rm", "-f", &initramfs], "removing the initramfs")?;
     if secure_boot {
         for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
-            let path = Path::new(&plan.esp).join(loader);
+            let path = esp.join(loader);
             if path.exists() {
                 run(
                     Command::new("sbctl")
-                        .env("ESP_PATH", &plan.esp)
+                        .env("ESP_PATH", esp)
                         .args(["sign", "-s"])
                         .arg(&path),
                     "sbctl sign",
@@ -468,118 +359,94 @@ pub fn write_entry(paths: &Paths, plan: &BootPlan) -> Result<String> {
             }
         }
     }
-
-    let to_check: Vec<PathBuf> = ukis
-        .iter()
-        .map(|(_, _, dest)| {
-            built
-                .iter()
-                .find(|(target, _)| target == dest)
-                .map_or_else(|| dest.clone(), |(_, output)| output.clone())
-        })
-        .collect();
+    let mut to_check = Vec::new();
+    for uki in &ukis {
+        to_check.push(match uki.built {
+            true => staging.read_path(&Path::new(BUILT).join(&uki.name))?,
+            false => uki_dir(esp).join(&uki.name),
+        });
+    }
     refuse_unsigned(plan, &to_check)?;
-    for dir in [&shared, &entries_dir(&plan.esp)] {
-        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let mut keep: Vec<u32> = entries(&plan.esp)
-        .into_iter()
-        .filter(|(_, rescue, _)| !rescue)
-        .map(|(n, _, _)| n)
-        .collect();
-    keep.retain(|n| *n != plan.generation);
-    keep.sort_unstable();
-    let slots = plan.keep.saturating_sub(1) as usize;
-    let mut kept: BTreeSet<u32> = keep.iter().rev().take(slots).copied().collect();
-    kept.insert(plan.generation);
-    let protected = protected_generations(paths);
-    kept.extend(&protected);
-    let rescue_kept: BTreeSet<u32> = kept.iter().rev().take(2).copied().collect();
-    for (number, rescue, path) in entries(&plan.esp) {
-        if !kept.contains(&number) || (rescue && !rescue_kept.contains(&number)) {
-            fs::remove_file(path)?;
-        }
-    }
-    let reused: Vec<PathBuf> = ukis.iter().map(|(_, _, dest)| dest.clone()).collect();
-    remove_unused_ukis_but(&plan.esp, &reused)?;
-    let needed: u64 = built
-        .iter()
-        .map(|(_, output)| fs::metadata(output).map_or(0, |m| m.len()))
-        .sum::<u64>()
-        + MARGIN;
-    while free_bytes(&shared)? < needed {
-        let oldest = entries(&plan.esp)
-            .into_iter()
-            .find(|(number, _, _)| *number != plan.generation && !protected.contains(number));
-        match oldest {
-            Some((_, _, path)) => {
-                fs::remove_file(path)?;
-                remove_unused_ukis_but(&plan.esp, &reused)?;
-            }
-            None => bail!("the ESP at {} has no room for a boot entry", plan.esp),
-        }
-    }
-    for (dest, output) in &built {
-        let tmp = shared.join(format!(
-            ".{}.tmp",
-            dest.file_name().unwrap_or_default().to_string_lossy()
-        ));
-        fs::copy(output, &tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::File::open(&tmp)?.sync_all()?;
-        fs::rename(&tmp, dest)?;
-    }
-    crate::durable::sync_dir(&shared.join("x"))?;
-    let counted = plan.tries > 0 && loader_counts_boots(crate::testhooks::loader_features());
-    if plan.tries > 0
-        && let Some(why) = counting_off()
-    {
-        eprintln!("warning: {why}");
-    }
-    // systemd-boot counts tries only for entries that start their UKI with `uki`.
-    let key = if counted { "uki" } else { "efi" };
-    for (variant, title, dest) in &ukis {
-        let relative = dest.strip_prefix(&plan.esp).unwrap_or(dest);
-        let text = format!(
-            "title {title}\nversion {}\nsort-key archix\n{key} /{}\n",
-            plan.generation,
-            relative.display()
-        );
-        let name = match variant {
-            Variant::Normal => {
-                // A rerun of this step, as after a power cut, starts the generation's tries over.
-                for (number, extra, path) in entries(&plan.esp) {
-                    if number == plan.generation && !extra && path.extension().is_some_and(|ext| ext == "conf") {
-                        fs::remove_file(path)?;
-                    }
-                }
-                counted_entry_name(plan.generation, if counted { plan.tries } else { 0 })
-            }
-            _ => entry_name(plan.generation, *variant),
-        };
-        crate::durable::write(&entries_dir(&plan.esp).join(name), text.as_bytes())?;
-        crate::durable::write(
-            &entry_records(paths).join(entry_name(plan.generation, *variant)),
-            text.as_bytes(),
-        )?;
-    }
-    record_entries(paths, &plan.esp)?;
-    let _ = fs::remove_dir_all(&work);
-    Ok(version)
+    Ok(Built { version, ukis })
 }
 
-/// Deletes shared UKIs no entry names, except `keep`, which entries are about to name.
-fn remove_unused_ukis_but(esp: &str, keep: &[PathBuf]) -> Result<()> {
-    let used: BTreeSet<PathBuf> = entries(esp)
-        .iter()
-        .filter_map(|(_, _, entry)| uki_of(esp, entry))
-        .chain(keep.iter().cloned())
-        .collect();
-    for file in fs::read_dir(uki_dir(esp)).into_iter().flatten().flatten() {
-        if !used.contains(&file.path()) {
-            fs::remove_file(file.path())?;
+/// The ESP step of a commit: copies the UKIs a deployment built, writes its entries and their records, and makes it systemd-boot's default; entries of `droppable` deployments go first when the ESP is short of room.
+pub struct Entries<'a> {
+    pub paths: &'a Paths,
+    pub plan: &'a BootPlan,
+    pub built: &'a Built,
+    pub droppable: Vec<u32>,
+}
+
+impl EspStep for Entries<'_> {
+    fn install(&self, number: u32, deployment: &Path) -> Result<()> {
+        let esp = Path::new(&self.plan.esp);
+        for dir in [uki_dir(esp), entries_dir(esp)] {
+            fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
+        crate::durable::write(&self.paths.state.join("boot").join("esp"), self.plan.esp.as_bytes())?;
+        let made: Vec<&Uki> = self.built.ukis.iter().filter(|uki| uki.built).collect();
+        let needed: u64 = made
+            .iter()
+            .map(|uki| fs::metadata(deployment.join("boot/archix").join(&uki.name)).map_or(0, |m| m.len()))
+            .sum::<u64>()
+            + MARGIN;
+        let reused: Vec<PathBuf> = self.built.ukis.iter().map(|uki| uki_dir(esp).join(&uki.name)).collect();
+        for gone in &self.droppable {
+            if free_bytes(&uki_dir(esp))? >= needed {
+                break;
+            }
+            for (n, _, path) in entries(esp) {
+                if n == *gone {
+                    fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+                }
+            }
+            remove_unused_ukis_but(esp, &reused)?;
+        }
+        mark("deploy-esp-uki");
+        for uki in made {
+            crate::durable::copy(
+                &deployment.join("boot/archix").join(&uki.name),
+                &uki_dir(esp).join(&uki.name),
+            )?;
+        }
+        mark("deploy-esp-entry");
+        let counted = self.plan.tries > 0 && loader_counts_boots(crate::testhooks::loader_features());
+        if self.plan.tries > 0
+            && let Some(why) = counting_off()
+        {
+            eprintln!("warning: {why}");
+        }
+        // systemd-boot counts tries only for entries that start their UKI with `uki`.
+        let key = if counted { "uki" } else { "efi" };
+        for (n, extra, path) in entries(esp) {
+            if n == number && !extra {
+                fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            }
+        }
+        for uki in &self.built.ukis {
+            let text = format!(
+                "title {}\nversion {number}\nsort-key archix\n{key} /EFI/archix/{}\n",
+                uki.title, uki.name
+            );
+            let name = match uki.variant {
+                Variant::Normal => counted_entry_name(number, if counted { self.plan.tries } else { 0 }),
+                Variant::Protected => entry_name(number, Variant::Protected),
+            };
+            // The record comes first: the initramfs boots an entry only once archix has recorded it.
+            crate::durable::write(
+                &entry_records(self.paths).join(entry_name(number, uki.variant)),
+                text.as_bytes(),
+            )?;
+            crate::durable::write(&entries_dir(esp).join(name), text.as_bytes())?;
+        }
+        mark("deploy-esp-loader");
+        set_default_entry(esp, number)
     }
-    Ok(())
+
+    fn clean(&self) -> Result<()> {
+        crate::deploy::commit::clean_esp(Path::new(&self.plan.esp))
+    }
 }
 
 /// Random hex that makes a UKI's hash its own: once archix has revoked images, a rebuild must never come out identical to one of them.
@@ -619,26 +486,22 @@ fn payload_key(
     Ok(crate::fetch::sha256_bytes(parts.join("\n").as_bytes())[..12].to_string())
 }
 
-/// Makes systemd-boot start `generation` by default, so a rollback survives the next reboot instead of booting the newest entry. An entry still counting its tries is only `preferred`, which systemd-boot passes over once it's bad for `default`: the newest default that has booted.
-pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
-    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
-        return Ok(());
-    };
-    let esp = esp.trim();
+/// Makes systemd-boot start `generation` by default. An entry still counting its tries is only `preferred`, which systemd-boot passes over once it's bad for `default`: the newest default that has booted.
+pub fn set_default_entry(esp: &Path, generation: u32) -> Result<()> {
     let entry_of = |generation: u32| {
         entries(esp)
             .into_iter()
             .filter(|(number, extra, _)| *number == generation && !extra)
             .map(|(_, _, path)| path.file_name().unwrap_or_default().to_string_lossy().into_owned())
-            .min_by_key(|name| !name.ends_with(".conf"))
+            .next()
     };
     let Some(entry) = entry_of(generation) else {
-        return Ok(());
+        bail!("deployment {generation} has no boot entry on {}", esp.display());
     };
     if !entry.contains('+') {
         return write_loader(esp, Some(&entry_id(&entry)), None);
     }
-    let conf = fs::read_to_string(Path::new(esp).join("loader/loader.conf")).unwrap_or_default();
+    let conf = fs::read_to_string(esp.join("loader/loader.conf")).unwrap_or_default();
     let setting = |key: &str| {
         conf.lines()
             .find_map(|line| match line.split_once(char::is_whitespace) {
@@ -656,8 +519,8 @@ pub fn set_default_entry(paths: &Paths, generation: u32) -> Result<()> {
 }
 
 /// Names systemd-boot's `default` and `preferred` entries in loader.conf, dropping either when it's None.
-fn write_loader(esp: &str, default: Option<&str>, preferred: Option<&str>) -> Result<()> {
-    let conf = Path::new(esp).join("loader/loader.conf");
+fn write_loader(esp: &Path, default: Option<&str>, preferred: Option<&str>) -> Result<()> {
+    let conf = esp.join("loader/loader.conf");
     let mut lines: Vec<String> = fs::read_to_string(&conf)
         .unwrap_or_default()
         .lines()
@@ -667,6 +530,10 @@ fn write_loader(esp: &str, default: Option<&str>, preferred: Option<&str>) -> Re
     lines.extend(default.map(|id| format!("default {id}")));
     lines.extend(preferred.map(|id| format!("preferred {id}")));
     crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())?;
+    // In a chroot, such as an image build, or on a test root, the EFI variables are the host's.
+    if super::secureboot::in_chroot() || crate::testhooks::root() != Path::new("/") {
+        return Ok(());
+    }
     // EFI variables set by `bootctl set-default` or `set-preferred` would override loader.conf.
     for verb in ["set-default", "set-preferred"] {
         let _ = Command::new("bootctl")
@@ -733,7 +600,7 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
                     continue;
                 }
                 let name = format!("arch-{base}{suffix}.conf");
-                let path = entries_dir(esp).join(&name);
+                let path = entries_dir(Path::new(esp)).join(&name);
                 if !path.exists() {
                     let text = format!(
                         "title Arch Linux ({base}{suffix})\nlinux /vmlinuz-{base}\n{microcode}initrd /{initramfs}\noptions {cmdline}\n"
@@ -788,41 +655,16 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
     let Some(default_id) = default_id else {
         bail!("no installed kernel package owns a directory in {MODULES}; nothing was changed");
     };
-    write_loader(esp, Some(&default_id), None)?;
-    for (_, _, path) in entries(esp) {
+    write_loader(Path::new(esp), Some(&default_id), None)?;
+    for (_, _, path) in entries(Path::new(esp)) {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
-    match fs::remove_dir_all(uki_dir(esp)) {
+    match fs::remove_dir_all(uki_dir(Path::new(esp))) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing archix's UKIs"),
         _ => {}
     }
     written.insert(0, format!("default {default_id}"));
     Ok(written)
-}
-
-/// The generation loader.conf's `default` names, which systemd-boot falls back to when a preferred entry runs out of tries.
-fn default_generation(esp: &str) -> Option<u32> {
-    let conf = fs::read_to_string(Path::new(esp).join("loader/loader.conf")).ok()?;
-    let id = conf
-        .lines()
-        .find_map(|line| match line.split_once(char::is_whitespace) {
-            Some(("default", id)) => Some(id.trim()),
-            _ => None,
-        })?;
-    parse_entry(&entry_id(id)).map(|(number, _)| number)
-}
-
-/// Generations whose entries pruning never takes: the one this boot came from, the current one, which a failed switch falls back to, and the one `default` names, which a generation that doesn't boot falls back to.
-pub fn protected_generations(paths: &Paths) -> BTreeSet<u32> {
-    let esp = fs::read_to_string(paths.state.join("boot").join("esp")).unwrap_or_default();
-    [
-        crate::generations::Store::new(paths).current().ok().flatten(),
-        booted(),
-        default_generation(esp.trim()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
 /// After a boot systemd-boot has counted as good, makes its generation the default, if it's the current one, so `default` doesn't lag until the next switch.
@@ -833,7 +675,8 @@ pub fn promote_booted(paths: &Paths) -> Result<()> {
     let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
         return Ok(());
     };
-    let still_counting = entries(esp.trim()).iter().any(|(number, extra, path)| {
+    let esp = Path::new(esp.trim());
+    let still_counting = entries(esp).iter().any(|(number, extra, path)| {
         *number == booted
             && !extra
             && path
@@ -843,7 +686,7 @@ pub fn promote_booted(paths: &Paths) -> Result<()> {
     if booted != current || still_counting {
         return Ok(());
     }
-    set_default_entry(paths, booted)
+    set_default_entry(esp, booted)
 }
 
 /// Why a new generation's entry won't be counted, when the systemd-boot that started this boot can't do it.
@@ -854,18 +697,13 @@ pub fn counting_off() -> Option<String> {
     })
 }
 
-/// Checked before a switch changes anything: the new entries must fit in what's free plus what removing every older archix entry would free.
-pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
+/// Checked before a switch changes anything: the new entries must fit in what's free plus what dropping the entries of deployments outside `pinned` would free; `kernel` stands in for a UKI when the ESP has none yet.
+pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, protected: bool) -> Result<()> {
     let existing: Vec<(u32, bool, PathBuf)> = entries(esp)
         .into_iter()
         .filter_map(|(number, extra, entry)| Some((number, extra, uki_of(esp, &entry)?)))
         .collect();
-    // Without an entry to go by, the kernel image plus room for an initramfs stands in for one.
-    let estimate = || {
-        let version = kernel_version(kernel).ok()?;
-        let image = fs::metadata(Path::new(MODULES).join(version).join("vmlinuz")).ok()?;
-        Some(image.len() + 64 * 1024 * 1024)
-    };
+    let estimate = || Some(fs::metadata(kernel?).ok()?.len() + 64 * 1024 * 1024);
     let Some(newest) = existing
         .iter()
         .filter(|(_, extra, _)| !extra)
@@ -875,30 +713,31 @@ pub fn check_space(esp: &str, kernel: &str, protected: bool) -> Result<()> {
     else {
         return Ok(());
     };
-    let rescue = Path::new("/etc/initcpio/install/archix-rescue").exists();
-    let copies = 1 + u64::from(rescue) + u64::from(protected);
-    let needed = newest * copies + MARGIN;
-    let dir = linux_dir(esp);
-    let protected = protected_generations(&Paths::system());
-    let pinned: BTreeSet<&PathBuf> = existing
+    let needed = newest * (1 + u64::from(protected)) + MARGIN;
+    let pinned_ukis: BTreeSet<&PathBuf> = existing
         .iter()
-        .filter(|(number, _, _)| protected.contains(number))
+        .filter(|(number, _, _)| pinned.contains(number))
         .map(|(_, _, uki)| uki)
         .collect();
     let reclaimable: u64 = existing
         .iter()
         .map(|(_, _, uki)| uki)
-        .filter(|uki| !pinned.contains(uki))
+        .filter(|uki| !pinned_ukis.contains(uki))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .filter_map(|path| fs::metadata(path).ok().map(|m| m.len()))
         .sum();
-    let measured = dir.ancestors().find(|path| path.exists()).unwrap_or(Path::new("/"));
-    let free = free_bytes(measured)?;
+    let measured = uki_dir(esp)
+        .ancestors()
+        .find(|path| path.exists())
+        .unwrap_or(Path::new("/"))
+        .to_path_buf();
+    let free = free_bytes(&measured)?;
     if free + reclaimable < needed {
         let mib = |bytes: u64| bytes / (1024 * 1024);
         bail!(
-            "the ESP at {esp} has {} MiB free ({} MiB more after removing the older archix entries it may), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set boot.entries lower",
+            "the ESP at {} has {} MiB free ({} MiB more after dropping the deployments it may), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set deployments.keep lower",
+            esp.display(),
             mib(free),
             mib(reclaimable),
             mib(needed)
@@ -929,7 +768,7 @@ pub fn check_signing(secure_boot: Option<bool>) -> Result<()> {
     Ok(())
 }
 
-/// With Secure Boot enforcing, an unsigned entry or loader would leave the new default unbootable, so it fails the switch before anything moves.
+/// With Secure Boot enforcing, an unsigned entry or loader would leave the new default unbootable, so it fails the switch before anything is committed.
 fn refuse_unsigned(plan: &BootPlan, ukis: &[PathBuf]) -> Result<()> {
     let Some(state) = super::secureboot::Machine::new().state() else {
         return Ok(());
@@ -950,7 +789,7 @@ fn refuse_unsigned(plan: &BootPlan, ukis: &[PathBuf]) -> Result<()> {
     for path in ukis.iter().cloned().chain(loaders) {
         if !super::secureboot::is_signed(&path)? {
             bail!(
-                "Secure Boot is on, but {} isn't signed, so the firmware would refuse it; nothing was moved. Run `sudo archix secure-boot setup` (or set boot.secure_boot = true if sbctl already has keys)",
+                "Secure Boot is on, but {} isn't signed, so the firmware would refuse it; nothing was committed. Run `sudo archix secure-boot setup` (or set boot.secure_boot = true if sbctl already has keys)",
                 path.file_name().unwrap_or_default().to_string_lossy()
             );
         }
@@ -958,7 +797,7 @@ fn refuse_unsigned(plan: &BootPlan, ukis: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// The value of `archix.generation=` on a kernel command line, which UKIs carried before generations shared them.
+/// The value of `archix.generation=` on a kernel command line, which tests use to fake the booted generation.
 pub fn booted_generation(cmdline: &str) -> Option<u32> {
     cmdline
         .split_whitespace()
@@ -970,7 +809,7 @@ pub fn booted() -> Option<u32> {
     let cmdline = crate::testhooks::kernel_cmdline();
     booted_generation(&cmdline).or_else(|| {
         let entry = crate::testhooks::selected_entry()?;
-        let (number, _) = parse_entry(&entry)?;
+        let (number, _) = parse_entry(&entry_id(&entry))?;
         entry_unchanged(&Paths::system(), &entry).then_some(number)
     })
 }
@@ -981,7 +820,7 @@ pub fn tampered_selected_entry() -> Option<String> {
         return None;
     }
     let entry = crate::testhooks::selected_entry()?;
-    parse_entry(&entry)?;
+    parse_entry(&entry_id(&entry))?;
     (!entry_unchanged(&Paths::system(), &entry)).then_some(entry)
 }
 
@@ -998,33 +837,21 @@ pub(crate) fn entry_id(name: &str) -> String {
     }
 }
 
-/// Whether the entry systemd-boot reports by `id` is still what archix wrote; entries from before archix kept copies pass.
+/// Whether the entry systemd-boot reports by `id` is still what archix recorded writing.
 fn entry_unchanged(paths: &Paths, id: &str) -> bool {
-    let Ok(record) = fs::read(entry_records(paths).join(id)) else {
-        return true;
+    let Ok(record) = fs::read(entry_records(paths).join(entry_id(id))) else {
+        return false;
     };
     let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
         return false;
     };
-    let dir = entries_dir(esp.trim());
+    let dir = entries_dir(Path::new(esp.trim()));
     fs::read_dir(&dir)
         .into_iter()
         .flatten()
         .flatten()
-        .find(|file| entry_id(&file.file_name().to_string_lossy()) == id)
+        .find(|file| entry_id(&file.file_name().to_string_lossy()) == entry_id(id))
         .is_some_and(|file| fs::read(file.path()).is_ok_and(|text| text == record))
-}
-
-/// Keeps copies of every archix entry on the ESP that has none, such as ones written before archix kept them.
-fn record_entries(paths: &Paths, esp: &str) -> Result<()> {
-    for (_, _, path) in entries(esp) {
-        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let record = entry_records(paths).join(entry_id(&name));
-        if path.extension().is_some_and(|ext| ext == "conf") && !record.exists() {
-            crate::durable::write(&record, &fs::read(&path)?)?;
-        }
-    }
-    Ok(())
 }
 
 /// systemd-boot's LoaderEntrySelected: 4 bytes of attributes, then the entry's id in UTF-16LE.
@@ -1057,8 +884,10 @@ fn efivar_u64(bytes: &[u8]) -> Option<u64> {
 pub(crate) fn efivar_string(bytes: &[u8]) -> Option<String> {
     let units: Vec<u16> = bytes
         .get(4..)?
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
         .take_while(|unit| *unit != 0)
         .collect();
     String::from_utf16(&units).ok()
@@ -1087,58 +916,57 @@ pub fn mount_efivars() {
 mod tests {
     use super::*;
 
+    fn esp_with(entries: &[&str], loader: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(entries_dir(dir.path())).unwrap();
+        for name in entries {
+            fs::write(entries_dir(dir.path()).join(name), "title t\n").unwrap();
+        }
+        fs::write(dir.path().join("loader/loader.conf"), loader).unwrap();
+        dir
+    }
+
     #[test]
     fn a_rollback_becomes_the_default_entry() {
-        let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().join("esp");
-        fs::create_dir_all(esp.join("EFI/Linux")).unwrap();
-        fs::create_dir_all(esp.join("loader")).unwrap();
-        for name in ["archix-2.efi", "archix-3.efi"] {
-            fs::write(esp.join("EFI/Linux").join(name), "uki").unwrap();
-        }
-        fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-3.efi\n").unwrap();
-        let paths = Paths::under(&dir.path().join("root"));
-        fs::create_dir_all(paths.state.join("boot")).unwrap();
-        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
-        set_default_entry(&paths, 2).unwrap();
-        assert_eq!(
-            fs::read_to_string(esp.join("loader/loader.conf")).unwrap(),
-            "timeout 2\ndefault archix-2.efi\n"
+        let esp = esp_with(
+            &["archix-2.conf", "archix-3.conf"],
+            "timeout 2\ndefault archix-3.conf\n",
         );
-        set_default_entry(&paths, 7).unwrap();
+        set_default_entry(esp.path(), 2).unwrap();
+        assert_eq!(
+            fs::read_to_string(esp.path().join("loader/loader.conf")).unwrap(),
+            "timeout 2\ndefault archix-2.conf\n"
+        );
         assert!(
-            fs::read_to_string(esp.join("loader/loader.conf"))
+            set_default_entry(esp.path(), 7).is_err(),
+            "a deployment without an entry can't become the default"
+        );
+        assert!(
+            fs::read_to_string(esp.path().join("loader/loader.conf"))
                 .unwrap()
-                .contains("archix-2.efi"),
-            "a generation without an entry leaves the default alone"
+                .contains("archix-2.conf")
         );
     }
 
     #[test]
     fn a_counted_entry_is_preferred_and_the_last_proven_one_stays_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().join("esp");
-        let entries = esp.join("loader/entries");
-        fs::create_dir_all(&entries).unwrap();
-        for name in ["archix-3.conf", "archix-5+3.conf"] {
-            fs::write(entries.join(name), "title t\n").unwrap();
-        }
-        fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-3.conf\n").unwrap();
-        let paths = Paths::under(&dir.path().join("root"));
-        fs::create_dir_all(paths.state.join("boot")).unwrap();
-        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
-        let loader = || fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
-        set_default_entry(&paths, 5).unwrap();
+        let esp = esp_with(
+            &["archix-3.conf", "archix-5+3.conf"],
+            "timeout 2\ndefault archix-3.conf\n",
+        );
+        let entries = entries_dir(esp.path());
+        let loader = || fs::read_to_string(esp.path().join("loader/loader.conf")).unwrap();
+        set_default_entry(esp.path(), 5).unwrap();
         assert_eq!(loader(), "timeout 2\ndefault archix-3.conf\npreferred archix-5.conf\n");
         fs::rename(entries.join("archix-5+3.conf"), entries.join("archix-5.conf")).unwrap();
         fs::write(entries.join("archix-6+3.conf"), "title t\n").unwrap();
-        set_default_entry(&paths, 6).unwrap();
+        set_default_entry(esp.path(), 6).unwrap();
         assert_eq!(
             loader(),
             "timeout 2\ndefault archix-5.conf\npreferred archix-6.conf\n",
             "a preferred entry that booted becomes the fallback"
         );
-        set_default_entry(&paths, 3).unwrap();
+        set_default_entry(esp.path(), 3).unwrap();
         assert_eq!(loader(), "timeout 2\ndefault archix-3.conf\n");
     }
 
@@ -1157,72 +985,66 @@ mod tests {
     #[test]
     fn an_entry_names_its_uki_with_an_efi_or_uki_line() {
         let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().to_str().unwrap();
         for key in ["efi", "uki"] {
             let entry = dir.path().join(format!("{key}.conf"));
             fs::write(&entry, format!("title t\n{key} /EFI/archix/a.efi\n")).unwrap();
-            assert_eq!(uki_of(esp, &entry), Some(dir.path().join("EFI/archix/a.efi")), "{key}");
+            assert_eq!(
+                uki_of(dir.path(), &entry),
+                Some(dir.path().join("EFI/archix/a.efi")),
+                "{key}"
+            );
         }
     }
 
     #[test]
-    fn generations_share_a_uki_and_pruning_keeps_it_while_one_still_boots_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().to_str().unwrap();
-        fs::create_dir_all(uki_dir(esp)).unwrap();
-        fs::create_dir_all(entries_dir(esp)).unwrap();
-        fs::create_dir_all(linux_dir(esp)).unwrap();
-        fs::write(uki_dir(esp).join("7.2.9-arch1-1-aaaa.efi"), "uki").unwrap();
-        fs::write(uki_dir(esp).join("7.2.9-arch1-1-bbbb.efi"), "uki").unwrap();
-        for (number, uki) in [(4, "aaaa"), (5, "aaaa"), (6, "bbbb")] {
-            let text = format!("title t\nversion {number}\nsort-key archix\nefi /EFI/archix/7.2.9-arch1-1-{uki}.efi\n");
-            fs::write(entries_dir(esp).join(entry_name(number, Variant::Normal)), text).unwrap();
+    fn dropping_a_deployments_entries_keeps_a_uki_another_entry_still_boots() {
+        let esp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        fs::create_dir_all(uki_dir(esp.path())).unwrap();
+        fs::create_dir_all(entries_dir(esp.path())).unwrap();
+        fs::create_dir_all(entry_records(&paths)).unwrap();
+        fs::write(uki_dir(esp.path()).join("7.2.9-arch1-1-aaaa.efi"), "uki").unwrap();
+        fs::write(uki_dir(esp.path()).join("7.2.9-arch1-1-bbbb.efi"), "uki").unwrap();
+        for (name, uki) in [
+            ("archix-4.conf", "aaaa"),
+            ("archix-5+2-1.conf", "aaaa"),
+            ("archix-5-protected.conf", "bbbb"),
+            ("archix-6.conf", "bbbb"),
+        ] {
+            let text = format!("title t\nsort-key archix\nefi /EFI/archix/7.2.9-arch1-1-{uki}.efi\n");
+            fs::write(entries_dir(esp.path()).join(name), &text).unwrap();
+            fs::write(entry_records(&paths).join(entry_id(name)), &text).unwrap();
         }
-        fs::write(linux_dir(esp).join("archix-3.efi"), "old layout").unwrap();
-        let numbers: Vec<u32> = entries(esp).iter().map(|(n, _, _)| *n).collect();
-        assert_eq!(numbers, [3, 4, 5, 6]);
-        prune_entries(esp, &BTreeSet::from([5])).unwrap();
-        let left: Vec<String> = fs::read_dir(uki_dir(esp))
+        drop_entries(&paths, esp.path(), 5).unwrap();
+        drop_entries(&paths, esp.path(), 4).unwrap();
+        let numbers: Vec<u32> = entries(esp.path()).iter().map(|(n, _, _)| *n).collect();
+        assert_eq!(numbers, [6]);
+        let left: Vec<String> = fs::read_dir(uki_dir(esp.path()))
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(
-            left,
-            ["7.2.9-arch1-1-aaaa.efi"],
-            "generation 5 still boots the UKI it shares with 4"
-        );
-        assert_eq!(entries(esp).iter().map(|(n, _, _)| *n).collect::<Vec<_>>(), [5]);
-    }
-
-    #[test]
-    fn pruning_never_takes_the_generation_default_falls_back_to() {
-        let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().join("esp");
-        fs::create_dir_all(esp.join("loader")).unwrap();
-        fs::write(
-            esp.join("loader/loader.conf"),
-            "timeout 2\ndefault archix-3.conf\npreferred archix-5.conf\n",
-        )
-        .unwrap();
-        let paths = Paths::under(&dir.path().join("root"));
-        fs::create_dir_all(paths.state.join("boot")).unwrap();
-        fs::write(paths.state.join("boot/esp"), esp.to_str().unwrap()).unwrap();
-        assert_eq!(default_generation(esp.to_str().unwrap()), Some(3));
-        assert!(protected_generations(&paths).contains(&3));
-        fs::write(esp.join("loader/loader.conf"), "default arch-linux.conf\n").unwrap();
-        assert_eq!(default_generation(esp.to_str().unwrap()), None);
+        assert_eq!(left, ["7.2.9-arch1-1-bbbb.efi"]);
+        let records: Vec<String> = fs::read_dir(entry_records(&paths))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(records, ["archix-6.conf"]);
     }
 
     #[test]
     fn the_booted_entry_names_its_generation() {
         let mut bytes = vec![6, 0, 0, 0];
-        bytes.extend("archix-12-rescue.conf".encode_utf16().flat_map(u16::to_le_bytes));
+        bytes.extend("archix-12-protected.conf".encode_utf16().flat_map(u16::to_le_bytes));
         bytes.extend([0, 0]);
         let entry = efivar_string(&bytes).unwrap();
-        assert_eq!(entry, "archix-12-rescue.conf");
+        assert_eq!(entry, "archix-12-protected.conf");
         assert_eq!(parse_entry(&entry), Some((12, true)));
-        assert_eq!(parse_entry("archix-7.efi"), Some((7, false)));
+        assert_eq!(parse_entry("archix-7.conf"), Some((7, false)));
+        assert_eq!(parse_entry("archix-07.conf"), None);
+        assert_eq!(parse_entry("archix-7.efi"), None);
         assert_eq!(parse_entry("arch.conf"), None);
     }
 
@@ -1236,63 +1058,14 @@ mod tests {
         ] {
             assert_eq!(parse_entry(name), Some((9, false)), "{name}");
         }
-        assert_eq!(parse_entry("archix-9-rescue.conf"), Some((9, true)));
+        assert_eq!(parse_entry("archix-9-protected.conf"), Some((9, true)));
         assert!(is_bad("archix-9+0-3.conf") && !is_bad("archix-9+1-2.conf") && !is_bad("archix-9.conf"));
         assert_eq!(counted_entry_name(9, 3), "archix-9+3.conf");
         assert_eq!(counted_entry_name(9, 0), "archix-9.conf");
     }
 
     #[test]
-    fn the_kept_modules_follow_dkms_builds() {
-        let dir = tempfile::tempdir().unwrap();
-        let modules = dir.path().join("modules");
-        let paths = Paths::under(&dir.path().join("root"));
-        fs::create_dir_all(modules.join("7.0.10-arch1-1/kernel")).unwrap();
-        fs::write(modules.join("7.0.10-arch1-1/kernel/dummy.ko"), "in-tree").unwrap();
-        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
-        fs::create_dir_all(modules.join("7.0.10-arch1-1/updates/dkms")).unwrap();
-        fs::write(modules.join("7.0.10-arch1-1/updates/dkms/v4l2loopback.ko"), "dkms").unwrap();
-        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
-        fs::remove_dir_all(modules.join("7.0.10-arch1-1")).unwrap();
-        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
-        assert!(restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap());
-        assert!(modules.join("7.0.10-arch1-1/kernel/dummy.ko").exists());
-        assert!(modules.join("7.0.10-arch1-1/updates/dkms/v4l2loopback.ko").exists());
-        assert_eq!(fs::read_dir(paths.state.join("kernels")).unwrap().count(), 1);
-    }
-
-    #[test]
-    fn a_modules_directory_dkms_kept_from_deletion_is_restored_too() {
-        let dir = tempfile::tempdir().unwrap();
-        let modules = dir.path().join("modules");
-        let paths = Paths::under(&dir.path().join("root"));
-        let release = modules.join("7.0.10-arch1-1");
-        fs::create_dir_all(release.join("kernel/fs")).unwrap();
-        fs::write(release.join("kernel/fs/vfat.ko"), "in-tree").unwrap();
-        fs::write(release.join("modules.dep"), "kernel/fs/vfat.ko:\n").unwrap();
-        preserve_from(&modules, &paths, "7.0.10-arch1-1").unwrap();
-        assert!(
-            !restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap(),
-            "a complete directory stays"
-        );
-        fs::remove_dir_all(&release).unwrap();
-        fs::create_dir_all(release.join("updates/dkms")).unwrap();
-        fs::write(release.join("updates/dkms/extra.ko"), "left behind").unwrap();
-        assert!(restore_into(&modules, &paths, "7.0.10-arch1-1").unwrap());
-        assert!(release.join("modules.dep").exists() && release.join("kernel/fs/vfat.ko").exists());
-        assert_eq!(
-            fs::read_to_string(release.join("updates/dkms/extra.ko")).unwrap(),
-            "left behind"
-        );
-        assert_eq!(
-            fs::read_dir(&modules).unwrap().count(),
-            1,
-            "no temporary directory is left"
-        );
-    }
-
-    #[test]
-    fn the_kernel_version_is_the_one_pacman_owns_not_a_kept_one() {
+    fn the_kernel_version_is_the_one_pacman_owns() {
         let db = tempfile::tempdir().unwrap();
         let entry = db.path().join("linux-7.2.9.arch1-1");
         fs::create_dir_all(&entry).unwrap();
@@ -1312,20 +1085,20 @@ mod tests {
             booted_generation("root=/dev/vda2 rw archix.generation=12 quiet"),
             Some(12)
         );
-        assert_eq!(booted_generation("root=/dev/vda2 archix.rescue"), None);
+        assert_eq!(booted_generation("root=/dev/vda2"), None);
     }
 
     #[test]
-    fn lists_entries_with_their_generation() {
-        let dir = tempfile::tempdir().unwrap();
-        let esp = dir.path().to_str().unwrap();
-        fs::create_dir_all(linux_dir(esp)).unwrap();
-        for name in ["archix-3.efi", "archix-10.efi", "archix-10-rescue.efi", "other.efi"] {
-            fs::write(linux_dir(esp).join(name), "").unwrap();
-        }
-        let found: Vec<(u32, bool)> = entries(esp).into_iter().map(|(n, r, _)| (n, r)).collect();
-        assert_eq!(found, [(3, false), (10, false), (10, true)]);
-        prune_entries(esp, &BTreeSet::from([10])).unwrap();
-        assert_eq!(entries(esp).len(), 2);
+    fn an_entry_is_trusted_only_while_it_matches_its_record() {
+        let esp = esp_with(&["archix-3+1-2.conf"], "default archix-3.conf\n");
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        fs::create_dir_all(entry_records(&paths)).unwrap();
+        fs::write(paths.state.join("boot/esp"), esp.path().to_str().unwrap()).unwrap();
+        assert!(!entry_unchanged(&paths, "archix-3.conf"), "no record");
+        fs::write(entry_records(&paths).join("archix-3.conf"), "title t\n").unwrap();
+        assert!(entry_unchanged(&paths, "archix-3.conf"));
+        fs::write(entries_dir(esp.path()).join("archix-3+1-2.conf"), "title evil\n").unwrap();
+        assert!(!entry_unchanged(&paths, "archix-3.conf"), "changed on the ESP");
     }
 }

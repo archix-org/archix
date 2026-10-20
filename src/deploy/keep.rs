@@ -35,7 +35,7 @@ pub struct Keep {
 }
 
 impl Keep {
-    /// The pins as they stand: the deployment systemd-boot started, `current`, and loader.conf's default on `esp`.
+    /// The pins as they stand: the deployment this boot came from, `current`, and loader.conf's default on `esp`.
     pub fn read(keep: usize, store: &Store, esp: &Path) -> Result<Keep> {
         let conf = esp.join("loader/loader.conf");
         let conf = match fs::read_to_string(&conf) {
@@ -45,7 +45,7 @@ impl Keep {
         };
         Ok(Keep {
             keep,
-            booted: crate::testhooks::selected_entry().as_deref().and_then(entry_number),
+            booted: crate::system::boot::booted(),
             current: store.current()?,
             boot_default: boot_default(&conf),
         })

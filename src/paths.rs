@@ -3,6 +3,8 @@ use std::path::PathBuf;
 /// Where archix and pacman keep their state on a system.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// The real root, which holds archix/ with the deployments.
+    pub root: PathBuf,
     pub pacman_db: PathBuf,
     pub pacman_cache: PathBuf,
     pub state: PathBuf,
@@ -16,6 +18,7 @@ pub struct Paths {
 impl Paths {
     pub fn system() -> Paths {
         Paths {
+            root: crate::testhooks::root(),
             pacman_db: PathBuf::from("/var/lib/pacman"),
             pacman_cache: PathBuf::from("/var/cache/pacman/pkg"),
             state: PathBuf::from("/var/lib/archix"),
@@ -27,11 +30,12 @@ impl Paths {
         }
     }
 
-    /// The same layout inside another root, such as a mounted system being repaired from a live USB.
+    /// The same layout inside another root, such as a mounted system.
     pub fn under(root: &std::path::Path) -> Paths {
         let inside = |path: PathBuf| root.join(path.strip_prefix("/").unwrap_or(&path));
         let system = Paths::system();
         Paths {
+            root: root.to_path_buf(),
             pacman_db: inside(system.pacman_db),
             pacman_cache: inside(system.pacman_cache),
             state: inside(system.state),
@@ -43,13 +47,6 @@ impl Paths {
         }
     }
 
-    pub fn root(&self) -> PathBuf {
-        self.pacman_conf
-            .parent()
-            .and_then(std::path::Path::parent)
-            .map_or_else(|| PathBuf::from("/"), PathBuf::from)
-    }
-
     pub fn local_db(&self) -> PathBuf {
         self.pacman_db.join("local")
     }
@@ -58,16 +55,12 @@ impl Paths {
         self.pacman_db.join("db.lck")
     }
 
-    pub fn journal(&self) -> PathBuf {
-        self.state.join("journal.json")
-    }
-
-    /// What a boot-time rollback wants you to know, shown at login until the next switch or rollback.
+    /// What a boot fallback wants you to know, shown at login until the next switch or rollback.
     pub fn notes(&self) -> PathBuf {
         self.state.join("notes")
     }
 
-    /// Files whose on_change scripts a boot-time rollback skipped, run by the next switch or rollback.
+    /// on_change scripts a committed switch hasn't run yet, so a crash right after the commit doesn't lose them.
     pub fn pending_on_change(&self) -> PathBuf {
         self.state.join("pending-on-change")
     }

@@ -1,98 +1,492 @@
-//! Changes the installed packages; run only inside the throwaway Arch container via `tests/arch/run.sh`.
+//! Switches test machines through deployments; run only inside the throwaway Arch container via `tests/arch/run.sh`.
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use archix::journal::{Journal, Kind, Transaction};
-use archix::pacman::read_local_db;
 use archix::paths::Paths;
 use common::*;
 
-/// Writes the journal a crash during "install tree" would leave behind, as if pacman had died mid-transaction.
-fn fake_interrupted_switch(paths: &Paths) {
-    let before = read_local_db(&paths.local_db()).unwrap();
-    let tree = cached_file(&paths.packages(), "tree");
-    let version = tree
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .trim_start_matches("tree-")
-        .to_string();
-    let version = version.trim_end_matches("-x86_64.pkg.tar.zst").to_string();
-    let mut versions: std::collections::BTreeMap<String, String> = before
-        .iter()
-        .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
-        .collect();
-    versions.insert("tree".into(), version);
-    let mut reasons: std::collections::BTreeMap<String, bool> =
-        before.iter().map(|(name, pkg)| (name.clone(), pkg.explicit)).collect();
-    reasons.insert("tree".into(), true);
-    let transaction = Transaction {
-        config: Vec::new(),
-        system: None,
-        boot: None,
-        reinstall: false,
-        at_boot: false,
-        install: vec![tree],
-        remove: vec![],
-        versions,
-        reasons,
+/// Every entry under `dir` with what an in-place change would alter: inode, mode, size and modification time.
+fn identity(dir: &Path) -> BTreeMap<PathBuf, (u64, u32, u64, i64, i64)> {
+    fn walk(root: &Path, rel: &Path, out: &mut BTreeMap<PathBuf, (u64, u32, u64, i64, i64)>) {
+        let path = root.join(rel);
+        let meta = fs::symlink_metadata(&path).unwrap();
+        out.insert(
+            rel.to_path_buf(),
+            (meta.ino(), meta.mode(), meta.size(), meta.mtime(), meta.mtime_nsec()),
+        );
+        if meta.is_dir() {
+            for entry in fs::read_dir(&path).unwrap() {
+                walk(root, &rel.join(entry.unwrap().file_name()), out);
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(dir, Path::new(""), &mut out);
+    out
+}
+
+/// What must hold after any crash: `current` names a complete deployment, every entry on the ESP names one and starts a UKI that's there, and loader.conf's default is one of the entries.
+fn assert_bootable(machine: &Machine, what: &str) {
+    let complete = |n: u32| {
+        archix::deploy::TREES
+            .iter()
+            .all(|tree| machine.deployment(n).join(tree).is_dir())
     };
-    Journal::new(Kind::Switch, "box", "snapshot 2026-10-10".into(), before, transaction)
-        .save(&paths.journal())
-        .unwrap();
-}
-
-/// The lock file a pacman killed mid-transaction leaves behind.
-fn stale_pacman_lock(paths: &Paths) {
-    fs::write(paths.pacman_lock(), "").unwrap();
-}
-
-#[test]
-#[ignore]
-fn switch_installs_then_removes_and_is_idempotent() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    assert!(installed("tree").is_some());
-    assert!(!setup.paths.journal().exists(), "a finished switch leaves no journal");
-    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
-    assert!(setup.ok(&["status"]).contains("the system matches the lock"));
-
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    let current = machine
+        .current()
+        .unwrap_or_else(|| panic!("{what}: no current deployment"));
     assert!(
-        installed("tree").is_none(),
-        "undeclared packages are removed by default"
+        complete(current),
+        "{what}: current names deployment {current}, which isn't complete"
+    );
+    let mut ids = Vec::new();
+    for name in machine.entries() {
+        let number: u32 = name
+            .trim_start_matches("archix-")
+            .split(['+', '-', '.'])
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            complete(number),
+            "{what}: {name} names deployment {number}, which isn't complete"
+        );
+        let text = fs::read_to_string(machine.esp().join("loader/entries").join(&name)).unwrap();
+        let uki = text
+            .lines()
+            .find_map(|line| line.strip_prefix("efi ").or_else(|| line.strip_prefix("uki ")))
+            .unwrap();
+        assert!(
+            machine.esp().join(uki.trim_start_matches('/')).is_file(),
+            "{what}: {name} starts {uki}, which isn't there"
+        );
+        ids.push(match name.split_once('+') {
+            Some((stem, _)) => format!("{stem}.conf"),
+            None => name,
+        });
+    }
+    let loader = machine.loader_conf();
+    let default = loader
+        .lines()
+        .find_map(|line| line.strip_prefix("default "))
+        .unwrap_or_else(|| panic!("{what}: loader.conf has no default:\n{loader}"));
+    assert!(
+        ids.iter().any(|id| id == default.trim()),
+        "{what}: the default {default} has no entry"
     );
 }
 
 #[test]
 #[ignore]
-fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_removed() {
+fn the_first_switch_lays_out_deployment_1_and_each_switch_builds_the_next_leaving_it_untouched() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("laid the system out as deployment 1"), "{out}");
+    assert_eq!(
+        machine.deployments(),
+        [1],
+        "a first switch that changes nothing builds no second deployment:\n{out}"
+    );
+    assert_eq!(machine.current(), Some(1));
+    assert_eq!(machine.entries(), ["archix-1.conf"]);
+    assert!(machine.loader_conf().contains("default archix-1.conf"));
+    assert!(
+        machine.root.join("usr/bin/pacman").exists(),
+        "the live root runs on deployment 1"
+    );
+    machine.reboot(Some("archix-1.conf"));
+    assert!(machine.root.join("usr/bin/pacman").exists(), "deployment 1 boots");
+    let one = identity(&machine.deployment(1));
+    let db_before = fs::read_dir(machine.deployment(1).join("pacman")).unwrap().count();
+
+    setup.set_body(&["tree"], "");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("boots at the next restart"), "{out}");
+    assert_eq!(machine.deployments(), [1, 2]);
+    assert_eq!(machine.current(), Some(2));
+    assert!(machine.installed_in(2, "tree").is_some());
+    assert!(machine.deployment(2).join("usr/bin/tree").is_file());
+    assert_eq!(machine.installed_in(1, "tree"), None);
+    assert!(
+        !machine.root.join("usr/bin/tree").exists(),
+        "the running system changes only at the next boot"
+    );
+    assert_eq!(identity(&machine.deployment(1)), one, "deployment 1 was changed");
+    assert_eq!(
+        fs::read_dir(machine.deployment(1).join("pacman")).unwrap().count(),
+        db_before
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+    assert_bootable(machine, "after the switch");
+    machine.reboot(Some("archix-2.conf"));
+    assert!(
+        machine.root.join("usr/bin/tree").is_file(),
+        "deployment 2 boots with tree"
+    );
+
+    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
+    assert_eq!(machine.deployments(), [1, 2]);
+    assert!(setup.ok(&["status"]).contains("the system matches the lock"));
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("tree"), None, "undeclared packages are removed by default");
+    assert_eq!(machine.current(), Some(3));
+}
+
+#[test]
+#[ignore]
+fn rollback_to_a_kept_deployment_repoints_current_and_the_boot_default_without_reinstalling() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let with_tree = machine.current().unwrap();
+    setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
+    let without_tree = machine.current().unwrap();
+    assert!(without_tree > with_tree);
+    assert_eq!(installed("tree"), None);
+    let listing = setup.ok(&["generations"]);
+    assert!(listing.contains(&format!("* {without_tree:>4}")), "{listing}");
+    assert!(
+        setup
+            .ok(&["status"])
+            .contains(&format!("current generation: {without_tree}")),
+        "status names the current generation"
+    );
+    let log = fs::read_to_string(machine.root.join("var/log/pacman.log")).unwrap();
+    let deployments = machine.deployments();
+    let one = identity(&machine.deployment(with_tree));
+
+    let out = setup.ok(&["rollback", "--noconfirm"]);
+    assert!(out.contains("nothing is reinstalled"), "{out}");
+    assert_eq!(
+        machine.current(),
+        Some(with_tree),
+        "rollback goes to the previous generation"
+    );
+    assert!(
+        machine
+            .loader_conf()
+            .contains(&format!("default archix-{with_tree}.conf")),
+        "{}",
+        machine.loader_conf()
+    );
+    assert_eq!(machine.deployments(), deployments, "no deployment is built");
+    assert_eq!(
+        fs::read_to_string(machine.root.join("var/log/pacman.log")).unwrap(),
+        log,
+        "pacman doesn't run"
+    );
+    assert_eq!(identity(&machine.deployment(with_tree)), one);
+    assert!(installed("tree").is_some());
+    assert_bootable(machine, "after the rollback");
+    machine.reboot(None);
+    assert!(
+        machine.root.join("usr/bin/tree").is_file(),
+        "the rolled-back deployment boots"
+    );
+
+    setup.ok(&["rollback", &without_tree.to_string(), "--noconfirm"]);
+    assert_eq!(machine.current(), Some(without_tree));
+    assert_eq!(installed("tree"), None);
+    assert!(
+        setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"),
+        "the system already matches the config"
+    );
+}
+
+#[test]
+#[ignore]
+fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_package_cache() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 1 }";
+    let setup = Setup::new(&["tree"], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let with_tree = machine.current().unwrap();
+    setup.set_body(&["lemon"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    let with_lemon = machine.current().unwrap();
+    machine.reboot(Some(&format!("archix-{with_lemon}.conf")));
+    setup.set_body(&[], keep);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let newest = machine.current().unwrap();
+    assert!(
+        !machine.deployments().contains(&with_tree),
+        "keep = 1 drops what isn't booted, current or the default:\n{out}"
+    );
+    assert!(
+        machine.deployments().contains(&with_lemon),
+        "the booted deployment stays"
+    );
+    assert!(
+        setup.ok(&["generations"]).contains(&format!("{with_tree:>4}")),
+        "the dropped generation stays as a record"
+    );
+    assert!(
+        machine
+            .entries()
+            .iter()
+            .all(|e| !e.starts_with(&format!("archix-{with_tree}")))
+    );
+
+    let out = setup.ok(&["rollback", &with_tree.to_string(), "--noconfirm"]);
+    assert!(out.contains("rebuilding it from deployment"), "{out}");
+    assert_eq!(
+        machine.current(),
+        Some(with_tree),
+        "the rebuilt deployment keeps its generation's number"
+    );
+    assert!(machine.installed_in(with_tree, "tree").is_some());
+    assert_eq!(machine.installed_in(with_tree, "lemon"), None);
+    assert!(
+        machine.entries().contains(&format!("archix-{with_tree}.conf")),
+        "{:?}",
+        machine.entries()
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+    assert!(machine.deployments().contains(&newest) || machine.deployments().contains(&with_lemon));
+    assert_bootable(machine, "after the rebuild");
+    machine.reboot(None);
+    assert!(machine.root.join("usr/bin/tree").is_file());
+}
+
+#[test]
+#[ignore]
+fn gc_drops_deployments_past_keep_but_never_the_booted_current_or_default_one() {
+    let _system = lock_system();
+    let body = |n: u32| {
+        format!(
+            r#"deployments = {{ keep = 2 }}, generations = {{ keep = 1, keep_days = 0 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#
+        )
+    };
+    let setup = Setup::new(&["tree"], &body(0));
+    setup.lay_out();
+    let machine = &setup.machine;
+    let booted = machine.current().unwrap();
+    for n in 1..=4 {
+        setup.set_body(&[], &body(n));
+        setup.ok(&["switch", "--noconfirm"]);
+    }
+    let current = machine.current().unwrap();
+    let kept = machine.deployments();
+    assert_eq!(kept, [booted, current], "keep = 2 counts the booted and current ones");
+    let records: Vec<u32> = archix::generations::Store::new(&Paths::system())
+        .list()
+        .unwrap()
+        .iter()
+        .map(|g| g.number)
+        .collect();
+    for n in &kept {
+        assert!(
+            records.contains(n),
+            "deployment {n} lost its generation record: {records:?}"
+        );
+    }
+    assert_eq!(machine.entries().len(), kept.len(), "{:?}", machine.entries());
+    assert!(
+        machine.installed_in(booted, "tree").is_some()
+            && fs::read_dir(setup.paths.packages())
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("tree-")),
+        "the booted generation's packages stay cached"
+    );
+    assert!(setup.ok(&["gc"]).contains("freed"));
+
+    machine.reboot(Some(&format!("archix-{current}.conf")));
+    setup.ok(&["gc"]);
+    assert_eq!(
+        machine.deployments().len(),
+        2,
+        "once the newest has booted, keep = 2 keeps two: {:?}",
+        machine.deployments()
+    );
+    let one = "deployments = { keep = 1 }";
+    setup.set_body(&[], one);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        machine.deployments().len(),
+        2,
+        "keep = 1 keeps the booted one until the new one has booted: {:?}",
+        machine.deployments()
+    );
+    machine.reboot(Some(&format!("archix-{}.conf", machine.current().unwrap())));
+    setup.ok(&["gc"]);
+    assert_eq!(machine.deployments(), [machine.current().unwrap()]);
+    assert_bootable(machine, "after gc");
+}
+
+#[test]
+#[ignore]
+fn deployments_keep_below_one_is_refused() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let init = setup.read("init.lua").unwrap();
+    setup.write(
+        "init.lua",
+        &init.replacen("return { ", "return { deployments = { keep = 0 }, ", 1),
+    );
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("deployments.keep"), "{err}");
+    assert!(setup.machine.current().is_none());
+}
+
+#[test]
+#[ignore]
+fn a_kill_at_any_step_of_a_switch_leaves_a_bootable_machine_and_the_next_switch_needs_no_repair() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
+    let steps = [
+        "deploy-stage",
+        "deploy-transact",
+        "deploy-flatten",
+        "deploy-commit-sync",
+        "deploy-commit-rename",
+        "deploy-commit-esp",
+        "deploy-esp-uki",
+        "deploy-esp-entry",
+        "deploy-esp-loader",
+        "deploy-commit-current",
+        "deploy-done",
+    ];
+    for (i, step) in steps.iter().enumerate() {
+        let what = format!("killed at {step}");
+        let (verb, package) = if i % 2 == 0 {
+            ("install", "tree")
+        } else {
+            ("remove", "tree")
+        };
+        let before = machine.current().unwrap();
+        let killed = setup.run_env(&[("ARCHIX_TEST_CRASH", step)], &[verb, package, "--noconfirm"]);
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&killed.status),
+            Some(libc::SIGKILL),
+            "{what}: {}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+        assert_bootable(machine, &what);
+        let after = machine.current().unwrap();
+        assert!(after >= before, "{what}: current went back to {after}");
+        if after == before {
+            let declared = archix::installed::read(&installed_lua).unwrap_or_default();
+            assert_eq!(
+                declared.contains(&"tree".to_string()),
+                verb == "remove",
+                "{what}: installed.lua changed though nothing was committed"
+            );
+        }
+        machine.reboot(None);
+        assert!(
+            machine.root.join("usr/bin/pacman").is_file(),
+            "{what}: the machine doesn't boot"
+        );
+        let out = setup.ok(&[verb, package, "--noconfirm"]);
+        assert!(
+            machine.leftovers().is_empty(),
+            "{what}: {:?}\n{out}",
+            machine.leftovers()
+        );
+        assert_eq!(installed("tree").is_some(), verb == "install", "{what}");
+        assert_bootable(machine, &format!("{what}, then a switch"));
+    }
+}
+
+#[test]
+#[ignore]
+fn a_deployment_that_fails_its_tries_falls_back_and_the_one_that_booted_becomes_current() {
+    let _system = lock_system();
+    let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let machine = &setup.machine;
+    let entries_dir = machine.esp().join("loader/entries");
+    // What systemd-bless-boot does once a boot reaches boot-complete.target.
+    let bless = |n: u32| {
+        fs::rename(
+            entries_dir.join(format!("archix-{n}+3.conf")),
+            entries_dir.join(format!("archix-{n}.conf")),
+        )
+        .unwrap()
+    };
+    bless(1);
+    machine.reboot(Some("archix-1.conf"));
+    setup.ok_env(&[counting], &["boot-complete"]);
+    setup.set_body(&["tree"], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    let entries = machine.entries();
+    assert!(entries.contains(&format!("archix-{new}+3.conf")), "{entries:?}");
+    let loader = machine.loader_conf();
+    assert!(
+        loader.contains("default archix-1.conf") && loader.contains(&format!("preferred archix-{new}.conf")),
+        "the new deployment is preferred, the proven one the default:\n{loader}"
+    );
+
+    fs::rename(
+        entries_dir.join(format!("archix-{new}+3.conf")),
+        entries_dir.join(format!("archix-{new}+0-3.conf")),
+    )
+    .unwrap();
+    machine.reboot(Some("archix-1.conf"));
+    let out = setup.ok_env(&[counting], &["boot-check"]);
+    assert!(out.contains("didn't finish booting"), "{out}");
+    assert_eq!(machine.current(), Some(1), "the deployment that booted is current");
+    assert!(machine.loader_conf().contains("default archix-1.conf"));
+    assert!(installed("tree").is_none());
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(notes.contains("didn't finish booting"), "{notes}");
+
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let again = machine.current().unwrap();
+    machine.reboot(Some(&format!("archix-{again}.conf")));
+    bless(again);
+    setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(
+        machine.loader_conf().contains(&format!("default archix-{again}.conf")),
+        "a deployment that booted fine becomes the default:\n{}",
+        machine.loader_conf()
+    );
+}
+
+#[test]
+#[ignore]
+fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_staged() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.lay_out();
+    let machine = &setup.machine;
     setup.set_body(&["lemon"], "");
     setup.ok(&["switch", "--noconfirm"]);
     let sig = format!("{}.sig", cached_file(&setup.paths.packages(), "tree").display());
     fs::write(&sig, "not a signature").unwrap();
     setup.set_body(&["tree"], "");
+    let deployments = machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
-    assert!(err.contains("nothing was changed"), "{err}");
-    assert!(
-        installed("lemon").is_some(),
-        "the Remove step must not run when pacman would refuse the install"
-    );
-    assert!(!setup.paths.journal().exists(), "a refused switch leaves no journal");
     fs::remove_file(&sig).unwrap();
+    assert!(err.contains("nothing was changed"), "{err}");
+    assert_eq!(
+        machine.deployments(),
+        deployments,
+        "no deployment was staged or committed"
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+    assert!(installed("lemon").is_some());
     setup.ok(&["switch", "--noconfirm"]);
     assert!(installed("tree").is_some() && installed("lemon").is_none());
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -100,24 +494,53 @@ fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_removed() {
 fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
     let _system = lock_system();
     let setup = Setup::new(&["lemon"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    fs::write("/usr/bin/tree", "mine").unwrap();
+    setup.lay_out();
+    let stray = system_path("/usr/bin/tree");
+    fs::write(&stray, "mine").unwrap();
     setup.set_body(&["tree"], "");
+    let deployments = setup.machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
-    assert!(
-        err.contains("/usr/bin/tree from tree exists on disk") || err.contains("usr/bin/tree from tree exists on disk"),
-        "{err}"
-    );
+    assert!(err.contains("usr/bin/tree from tree exists on disk"), "{err}");
+    assert_eq!(setup.machine.deployments(), deployments);
     assert!(installed("lemon").is_some(), "nothing was removed");
     assert_eq!(
-        fs::read_to_string("/usr/bin/tree").unwrap(),
+        fs::read_to_string(&stray).unwrap(),
         "mine",
         "the user's file is untouched"
     );
-    fs::remove_file("/usr/bin/tree").unwrap();
+    fs::remove_file(&stray).unwrap();
     setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("tree").is_some());
+}
+
+#[test]
+#[ignore]
+fn a_switch_without_systemd_boot_or_with_the_esp_in_boot_is_refused_before_anything_changes() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], r#"boot = { esp = "/efi" }"#);
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("boot.loader = \"systemd-boot\""), "{err}");
+    let esp_in_boot = format!(
+        r#"boot = {{ loader = "systemd-boot", esp = "{}" }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
+        setup.machine.root.join("boot/efi").display()
+    );
+    fs::create_dir_all(setup.machine.root.join("boot/efi")).unwrap();
+    setup.set_body(&[], &esp_in_boot);
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("in /boot") && err.contains("nothing was changed"), "{err}");
+    assert!(!setup.machine.root.join("archix").exists());
+    for removed in ["boot.snapshots", "boot.entries"] {
+        let (group, key) = removed.split_once('.').unwrap();
+        setup.write(
+            "init.lua",
+            &format!("return {{ packages = {{ \"base\" }}, {group} = {{ {key} = false }} }}"),
+        );
+        let err = setup.fails(&["eval"]);
+        assert!(
+            err.contains(&format!("`{removed}`: option was removed")) && err.contains("deployments.keep"),
+            "{err}"
+        );
+    }
 }
 
 #[test]
@@ -125,7 +548,7 @@ fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
 fn archive_mirrors_stand_in_when_the_archive_is_down() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     let body = r#"archive_url = "http://127.0.0.1:9", archive_mirrors = { "https://archive.archlinux.org" }"#;
     setup.set_body(&[], body);
     setup.ok(&["switch", "--noconfirm"]);
@@ -133,12 +556,10 @@ fn archive_mirrors_stand_in_when_the_archive_is_down() {
     // A snapshot no other test fetches, which only the mirror can serve.
     let updated = setup.run(&["update", "--to", "2026-09-08", "--noconfirm"]);
     let date = setup.lock().date.to_string();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
         mirrors,
         ["https://archive.archlinux.org"],
-        "switch records the mirrors for rollback and recover"
+        "switch records the mirrors for rollback"
     );
     assert!(updated.status.success(), "{}", String::from_utf8_lossy(&updated.stderr));
     assert_eq!(date, "2026-09-08");
@@ -149,13 +570,13 @@ fn archive_mirrors_stand_in_when_the_archive_is_down() {
 fn archive_url_points_locking_at_a_mirror() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     setup.set_body(&["tree"], r#"archive_url = "http://127.0.0.1:9/""#);
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(
         archix::archive::configured(&setup.paths.state),
         "http://127.0.0.1:9",
-        "switch records the archive for rollback and recover, which don't evaluate the config"
+        "switch records the archive for rollback, which doesn't evaluate the config"
     );
     let err = setup.fails(&["update", "--to", "2026-09-09", "--noconfirm"]);
     assert!(err.contains("127.0.0.1:9/repos/2026/09/09/"), "{err}");
@@ -169,67 +590,10 @@ fn archive_url_points_locking_at_a_mirror() {
 
 #[test]
 #[ignore]
-fn the_initramfs_repair_restores_what_a_cut_off_switch_was_changing() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let paths = &setup.paths;
-    let before = read_local_db(&paths.local_db()).unwrap();
-    let mut versions: std::collections::BTreeMap<String, String> = before
-        .iter()
-        .map(|(name, pkg)| (name.clone(), pkg.version.clone()))
-        .collect();
-    versions.remove("tree");
-    let transaction = Transaction {
-        config: Vec::new(),
-        remove: vec!["tree".into()],
-        versions,
-        ..Transaction::default()
-    };
-    Journal::new(Kind::Switch, "box", "snapshot 2026-10-10".into(), before, transaction)
-        .save(&paths.journal())
-        .unwrap();
-    fs::remove_file("/usr/bin/tree").unwrap();
-    // As if a newer tree had been half-installed: its entry lists a file the restored version doesn't ship.
-    let entry = fs::read_dir(paths.local_db())
-        .unwrap()
-        .flatten()
-        .find(|e| archix::pacman::name_from_entry(&e.file_name().to_string_lossy()) == "tree")
-        .unwrap()
-        .path();
-    let files = fs::read_to_string(entry.join("files")).unwrap();
-    fs::write(
-        entry.join("files"),
-        files.replacen("%FILES%\n", "%FILES%\nusr/share/archix-test-dropped\n", 1),
-    )
-    .unwrap();
-    fs::write("/usr/share/archix-test-dropped", "from the newer version").unwrap();
-
-    let out = setup.ok(&["rescue", "--initrd"]);
-    assert!(out.contains("restored tree"), "{out}");
-    assert!(
-        fs::exists("/usr/bin/tree").unwrap(),
-        "the half-removed package is whole again"
-    );
-    assert!(
-        !fs::exists("/usr/share/archix-test-dropped").unwrap(),
-        "files only the replaced version had are removed, or pacman later trips over them"
-    );
-    assert!(
-        !setup.ok(&["rescue", "--initrd"]).contains("restored"),
-        "the repair runs once per interrupted switch, not on every boot"
-    );
-    Journal::delete(&paths.journal()).unwrap();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
 fn warn_mode_keeps_undeclared_packages() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     setup.set_body(&[], "undeclared_packages = \"warn\"");
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
@@ -237,105 +601,27 @@ fn warn_mode_keeps_undeclared_packages() {
         "{out}"
     );
     assert!(installed("tree").is_some());
-
+    let before = setup.machine.current().unwrap();
     setup.set_body(&[], "ignored_packages = { \"tree\" }");
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(
-        out.contains("no package changes"),
+        setup.machine.current().unwrap() > before,
         "a settings change is a new generation:\n{out}"
     );
     assert!(installed("tree").is_some());
-    pacman(&["-R", "tree"]);
-}
-
-#[test]
-#[ignore]
-fn interrupted_switch_blocks_until_recovered() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let paths = &setup.paths;
-
-    fake_interrupted_switch(paths);
-    stale_pacman_lock(paths);
-    assert!(
-        setup
-            .fails(&["switch", "--noconfirm"])
-            .contains("was interrupted while installing packages")
-    );
-    assert!(setup.fails(&["lock"]).contains("run `archix recover`"));
-    assert!(setup.ok(&["status"]).contains("run `archix recover`"));
-    setup.ok(&["recover", "--continue"]);
-    assert!(installed("tree").is_some(), "continue finishes the install");
-    assert!(!paths.journal().exists() && !paths.pacman_lock().exists());
-
-    pacman(&["-R", "tree"]);
-    fake_interrupted_switch(paths);
-    pacman(&["-U", cached_file(&paths.packages(), "tree").to_str().unwrap()]);
-    stale_pacman_lock(paths);
-    setup.ok(&["recover", "--rollback"]);
-    assert!(
-        installed("tree").is_none(),
-        "rollback removes what the interrupted switch added"
-    );
-    assert!(!paths.journal().exists());
-
-    fake_interrupted_switch(paths);
-    let out = setup.ok(&["recover", "--abandon"]);
-    assert!(out.contains("tree") && out.contains("is not installed"), "{out}");
-    assert!(installed("tree").is_none(), "abandon changes nothing");
-    assert!(!paths.journal().exists());
-
-    // A killed pacman leaves files of a package whose database entry it never wrote.
-    fake_interrupted_switch(paths);
-    fs::write("/usr/bin/tree", "half-written").unwrap();
-    let out = setup.ok(&["recover", "--continue"]);
-    assert!(out.contains("left behind by the interrupted pacman run"), "{out}");
-    assert!(installed("tree").is_some(), "the leftover no longer blocks the install");
-    pacman(&["-R", "tree"]);
-
-    // A power cut mid-pacman leaves the half-written entry's desc empty, as a VM test saw.
-    for rollback in [false, true] {
-        fake_interrupted_switch(paths);
-        pacman(&["-U", cached_file(&paths.packages(), "tree").to_str().unwrap()]);
-        let entry = fs::read_dir(paths.local_db())
-            .unwrap()
-            .flatten()
-            .find(|e| archix::pacman::name_from_entry(&e.file_name().to_string_lossy()) == "tree")
-            .unwrap();
-        fs::write(entry.path().join("desc"), "").unwrap();
-        assert!(setup.fails(&["status"]).contains("archix recover"));
-        let mode = if rollback { "--rollback" } else { "--continue" };
-        let out = setup.ok(&["recover", mode]);
-        assert!(out.contains("was torn by the crash; rewrote it"), "{out}");
-        assert!(!paths.journal().exists());
-        assert_eq!(installed("tree").is_some(), !rollback, "{mode} after a torn entry");
-        assert_eq!(
-            fs::exists("/usr/bin/tree").unwrap(),
-            !rollback,
-            "{mode} leaves no unowned files behind"
-        );
-        assert!(
-            read_local_db(&paths.local_db()).is_ok(),
-            "{mode} leaves pacman's database readable"
-        );
-        if !rollback {
-            pacman(&["-R", "tree"]);
-        }
-    }
 }
 
 const STALL_HOOK: &str = "/etc/pacman.d/hooks/zz-archix-test-stall.hook";
-const STALLED: &str = "/run/archix-test-stalled";
+/// Under /var/cache, which the staging root shares with the machine, unlike /run.
+const STALLED: &str = "/var/cache/archix/test-stalled";
 
 /// Holds the next transaction that installs tree in a pacman hook for a few seconds, and marks when it starts.
 fn stall_on_tree() {
     let _ = fs::remove_file(STALLED);
-    fs::create_dir_all("/etc/pacman.d/hooks").unwrap();
+    let hook = system_path(STALL_HOOK);
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
     fs::write(
-        STALL_HOOK,
+        hook,
         format!("[Trigger]\nOperation = Install\nType = Package\nTarget = tree\n\n[Action]\nWhen = PostTransaction\nExec = /bin/sh -c 'touch {STALLED}; sleep 5'\n"),
     )
     .unwrap();
@@ -351,53 +637,13 @@ fn wait_for(what: &str, done: impl Fn() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
-fn archix_running() -> bool {
-    Command::new("pgrep").args(["-x", "archix"]).status().unwrap().success()
-}
-
-#[test]
-#[ignore]
-fn a_terminal_hanging_up_mid_switch_doesnt_stop_it() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    stall_on_tree();
-    let command = format!(
-        "{} --config {} --host box switch --noconfirm",
-        env!("CARGO_BIN_EXE_archix"),
-        setup.dir.path().display()
-    );
-    // The terminal of an ssh session: closing script's pty hangs it up, as a dropped connection does.
-    let mut terminal = Command::new("script")
-        .args(["-qfec", &command, "/dev/null"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    wait_for("pacman to install tree", || Path::new(STALLED).exists());
-    terminal.kill().unwrap();
-    terminal.wait().unwrap();
-    wait_for("archix to finish", || !archix_running());
-    fs::remove_file(STALL_HOOK).unwrap();
-    let journal_left = setup.paths.journal().exists();
-    let log = fs::read_to_string("/var/lib/archix/after-hangup.log").unwrap_or_default();
-    if journal_left {
-        setup.ok(&["recover", "--rollback"]);
-    }
-    assert!(!journal_left, "the switch should finish after its terminal hung up");
-    assert!(installed("tree").is_some());
-    assert!(
-        log.contains("switched to generation"),
-        "output after the hang-up goes to the log:\n{log}"
-    );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
 #[test]
 #[ignore]
 fn a_switch_started_in_a_login_session_runs_outside_it() {
     let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    setup.set_body(&["tree"], "");
     stall_on_tree();
     // Named like logind's session scopes, which logind may kill when the session ends.
     let mut session = Command::new("systemd-run")
@@ -406,6 +652,7 @@ fn a_switch_started_in_a_login_session_runs_outside_it() {
         .arg("--config")
         .arg(setup.dir.path())
         .args(["--host", "box", "switch", "--noconfirm"])
+        .envs(setup.machine.env())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -416,39 +663,12 @@ fn a_switch_started_in_a_login_session_runs_outside_it() {
         .to_string();
     let cgroup = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
     assert!(session.wait().unwrap().success());
-    fs::remove_file(STALL_HOOK).unwrap();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    let _ = fs::remove_file(STALLED);
     assert!(
         cgroup.contains("/archix-") && !cgroup.contains("session-archixtest"),
         "the switch should run in a scope of its own: {cgroup}"
     );
-}
-
-#[test]
-#[ignore]
-fn recover_rebuilds_a_keyring_a_crash_tore() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let paths = &setup.paths;
-    fake_interrupted_switch(paths);
-    // What a power cut left in the VM test: the file's size, but zeros where the keys were.
-    let pubring = "/etc/pacman.d/gnupg/pubring.gpg";
-    let size = fs::metadata(pubring).unwrap().len();
-    fs::write(pubring, vec![0u8; size as usize]).unwrap();
-    let out = setup.ok(&["recover", "--continue"]);
-    assert!(
-        out.contains("pacman's keyring was torn by the crash; rebuilt it"),
-        "{out}"
-    );
-    assert!(
-        installed("tree").is_some(),
-        "with the keyring rebuilt, pacman takes the signed package"
-    );
-    pacman(&["-R", "tree"]);
+    assert!(installed("tree").is_some());
 }
 
 #[test]
@@ -461,56 +681,22 @@ fn ignored_packages_that_arent_installed_are_named() {
     assert!(out.contains(message), "{out}");
     let status = setup.ok(&["status"]);
     assert!(status.contains(message), "{status}");
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
-#[test]
-#[ignore]
-fn a_journal_from_a_newer_archix_is_handed_to_the_archix_that_wrote_it() {
-    let _system = lock_system();
-    let setup = Setup::new(&[], "");
-    let paths = &setup.paths;
-    let journal = Journal::new(
-        Kind::Switch,
-        "box",
-        "snapshot 2026-10-10".into(),
-        Default::default(),
-        Transaction::default(),
-    );
-    let mut newer = serde_json::to_value(&journal).unwrap();
-    newer["version"] = 99.into();
-    fs::create_dir_all(&paths.state).unwrap();
-    fs::write(paths.journal(), newer.to_string()).unwrap();
-    let writer = paths.state.join("journal-archix");
-    fs::write(&writer, "#!/bin/sh\necho \"handed over: $* ($ARCHIX_HANDED_OVER)\"\n").unwrap();
-    fs::set_permissions(&writer, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+const LEMON_URL: &str =
+    "https://archive.archlinux.org/repos/2026/10/14/core/os/x86_64/lemon-3.54.0-1-x86_64.pkg.tar.zst";
 
-    let out = setup.ok(&["recover", "--continue"]);
-    assert!(
-        out.contains("handed over:") && out.contains("recover --continue (1)"),
-        "{out}"
-    );
-    assert!(setup.ok(&["status"]).contains("status (1)"));
-
-    fs::remove_file(&writer).unwrap();
-    let out = setup.fails(&["recover", "--continue"]);
-    assert!(out.contains("version 99"), "{out}");
-    fs::remove_file(paths.journal()).unwrap();
-}
-
-/// Installs lemon 3.54.0 from a later snapshot with plain pacman, the way `pacman -Syu` or yay would.
-fn upgrade_lemon_behind_archix() {
+/// Installs lemon 3.54.0 from a later snapshot with plain pacman into the running deployment, the way `pacman -U` or yay would.
+fn upgrade_lemon_behind_archix(machine: &Machine) {
     let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");
     if !file.exists() {
-        let url = "https://archive.archlinux.org/repos/2026/10/14/core/os/x86_64/lemon-3.54.0-1-x86_64.pkg.tar.zst";
         assert!(
             archix::archive::Archive::new(archix::archive::ARCHIVE_URL)
-                .fetch(url, &file)
+                .fetch(LEMON_URL, &file)
                 .unwrap()
         );
     }
-    pacman(&["-U", file.to_str().unwrap()]);
+    machine.pacman(&["-U", file.to_str().unwrap()]);
 }
 
 #[test]
@@ -518,14 +704,13 @@ fn upgrade_lemon_behind_archix() {
 fn manual_upgrades_are_recorded_and_adopted_as_pins() {
     let _system = lock_system();
     let setup = Setup::new(&["lemon"], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
     assert!(
-        setup.paths.pacman_hooks.join("archix.hook").is_file(),
-        "switch installs the pacman hook"
+        system_path("/etc/pacman.d/hooks/archix.hook").is_file(),
+        "the deployment has the pacman hook"
     );
-
-    upgrade_lemon_behind_archix();
+    upgrade_lemon_behind_archix(&setup.machine);
     assert!(setup.ok(&["status"]).contains("changed outside archix"));
     assert!(setup.ok(&["diff"]).contains("newer than the lock"));
 
@@ -551,15 +736,12 @@ fn manual_upgrades_are_recorded_and_adopted_as_pins() {
         !setup.ok(&["status"]).contains("changed outside archix"),
         "a switch clears the record"
     );
-
     setup.ok(&["lock"]);
     assert_eq!(
         setup.lock().pinned,
         ["lemon"],
         "pins survive re-locking at the same date"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -567,14 +749,12 @@ fn manual_upgrades_are_recorded_and_adopted_as_pins() {
 fn declining_adoption_reverts_to_the_lock() {
     let _system = lock_system();
     let setup = Setup::new(&["lemon"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    upgrade_lemon_behind_archix();
+    setup.lay_out();
+    upgrade_lemon_behind_archix(&setup.machine);
     let out = setup.answering("n\ny\n", &["switch"]);
     assert!(out.contains("downgrade  lemon 3.54.0-1 -> 3.53.4-1"), "{out}");
     assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
     assert!(setup.lock().pinned.is_empty());
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -582,10 +762,9 @@ fn declining_adoption_reverts_to_the_lock() {
 fn packages_installed_with_pacman_are_offered_for_declaring() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
-
-    upgrade_lemon_behind_archix();
+    upgrade_lemon_behind_archix(&setup.machine);
     let out = setup.answering("n\ny\n", &["switch"]);
     assert!(
         out.contains("installed with pacman or an AUR helper but not declared: lemon"),
@@ -594,7 +773,8 @@ fn packages_installed_with_pacman_are_offered_for_declaring() {
     assert!(installed("lemon").is_none(), "declining removes it");
     assert!(!installed_lua.exists());
 
-    upgrade_lemon_behind_archix();
+    setup.machine.reboot(None);
+    upgrade_lemon_behind_archix(&setup.machine);
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(out.contains("not declared: lemon"), "{out}");
     assert_eq!(archix::installed::read(&installed_lua).unwrap(), ["lemon"]);
@@ -604,130 +784,16 @@ fn packages_installed_with_pacman_are_offered_for_declaring() {
         "declaring keeps the installed version"
     );
     assert_eq!(setup.lock().pinned, ["lemon"]);
-
-    fs::remove_file(&installed_lua).unwrap();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    assert!(installed("lemon").is_none());
-}
-
-fn current_generation() -> Option<u32> {
-    archix::generations::Store::new(&Paths::system()).current().unwrap()
-}
-
-#[test]
-#[ignore]
-fn every_switch_is_a_generation_and_rollback_returns_to_one() {
-    let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let with_tree = current_generation().unwrap();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let without_tree = current_generation().unwrap();
-    assert!(without_tree > with_tree);
-    assert!(installed("tree").is_none());
-
-    let listing = setup.ok(&["generations"]);
-    assert!(listing.contains(&format!("* {without_tree:>4}")), "{listing}");
-    assert!(
-        setup
-            .ok(&["status"])
-            .contains(&format!("current generation: {without_tree}"))
-    );
-
-    setup.ok(&["rollback", "--noconfirm"]);
-    assert_eq!(
-        current_generation(),
-        Some(with_tree),
-        "rollback goes to the previous generation"
-    );
-    assert!(installed("tree").is_some());
-    setup.ok(&["rollback", &without_tree.to_string(), "--noconfirm"]);
-    assert_eq!(current_generation(), Some(without_tree));
-    assert!(installed("tree").is_none());
-    assert!(
-        setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"),
-        "the system already matches the config"
-    );
-}
-
-#[test]
-#[ignore]
-fn gc_keeps_only_what_the_limits_allow() {
-    let _system = lock_system();
-    let limits = "generations = { keep = 1, keep_days = 0 }";
-    let setup = Setup::new(&["tree"], limits);
-    setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], limits);
-    setup.ok(&["switch", "--noconfirm"]);
-    let store = archix::generations::Store::new(&setup.paths);
-    let numbers: Vec<u32> = store.list().unwrap().iter().map(|g| g.number).collect();
-    assert_eq!(
-        numbers,
-        [current_generation().unwrap()],
-        "the switch's automatic gc keeps only the current one"
-    );
-    let tree_cached = fs::read_dir(setup.paths.packages())
-        .unwrap()
-        .flatten()
-        .any(|entry| entry.file_name().to_string_lossy().starts_with("tree-"));
-    assert!(
-        !tree_cached,
-        "no kept generation uses tree, so its cached package is gone"
-    );
-    assert!(setup.ok(&["gc"]).contains("freed 0.0 MiB"));
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
-fn gc_keeps_the_generation_that_booted_through_15_switches() {
-    let _system = lock_system();
-    let body = |n: u32| {
-        format!(
-            r#"generations = {{ keep = 3, keep_days = 0 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#
-        )
-    };
-    let setup = Setup::new(&[], &body(0));
-    setup.ok(&["switch", "--noconfirm"]);
-    let booted = current_generation().unwrap();
-    let cmdline = format!("root=/dev/vda2 rw archix.generation={booted}");
-    let env = [("ARCHIX_TEST_CMDLINE", cmdline.as_str())];
-    for n in 1..=15 {
-        let init = setup.read("init.lua").unwrap();
-        fs::write(setup.dir.path().join("init.lua"), init.replace(&body(n - 1), &body(n))).unwrap();
-        setup.ok_env(&env, &["switch", "--noconfirm"]);
-    }
-    println!(
-        "archix gc, booted into generation {booted}:\n{}",
-        setup.ok_env(&env, &["gc"])
-    );
-    println!("archix generations:\n{}", setup.ok_env(&env, &["generations"]));
-    let numbers: Vec<u32> = archix::generations::Store::new(&setup.paths)
-        .list()
-        .unwrap()
-        .iter()
-        .map(|g| g.number)
-        .collect();
-    assert!(
-        numbers.contains(&booted),
-        "the booted generation {booted} was collected: {numbers:?}"
-    );
-    assert_eq!(numbers.len(), 4, "the newest 3 plus the booted one: {numbers:?}");
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
 #[ignore]
 fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     let _system = lock_system();
-    let body = r#"unsafe_downgrades = { lemon = { "3.54" } }"#;
+    let body = r#"unsafe_downgrades = { lemon = { "3.54" } }, deployments = { keep = 1 }"#;
     let setup = Setup::new(&["lemon"], body);
-    setup.ok(&["switch", "--noconfirm"]);
-    upgrade_lemon_behind_archix();
+    setup.lay_out();
+    upgrade_lemon_behind_archix(&setup.machine);
 
     let output = setup.answering_raw("n\n\n", &["switch"]);
     let text = format!(
@@ -750,17 +816,27 @@ fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     setup.answering("n\ny\n", &["switch", "--allow-unsafe-downgrade"]);
     assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
 
-    upgrade_lemon_behind_archix();
+    setup.machine.reboot(None);
+    upgrade_lemon_behind_archix(&setup.machine);
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"), "--noconfirm adopts");
+    let newest = setup.machine.current().unwrap();
+    setup.machine.reboot(Some(&format!("archix-{newest}.conf")));
+    setup.ok(&["gc"]);
+    assert_eq!(
+        setup.machine.deployments(),
+        [newest],
+        "the older deployments are dropped"
+    );
     let err = setup.fails(&["rollback", "--noconfirm"]);
     assert!(err.contains("--allow-unsafe-downgrade"), "{err}");
     assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"));
     setup.ok(&["rollback", "--noconfirm", "--allow-unsafe-downgrade"]);
-    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
-
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        installed("lemon").as_deref(),
+        Some("3.53.4-1"),
+        "the rebuilt generation has its own lemon"
+    );
 }
 
 #[test]
@@ -768,16 +844,14 @@ fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
 fn bare_terms_search_and_install_the_picks_like_yay() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    setup.lay_out();
     let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
-
     let out = setup.answering("\n", &["tree"]);
     assert!(
         out.contains("==> Install which? Numbers (1 3), ranges (2-5), ^ to leave one out:"),
         "{out}"
     );
     assert!(installed("tree").is_none(), "an empty answer installs nothing");
-
     let out = setup.answering("1\n", &["tree", "--noconfirm"]);
     let last_result = out.lines().rfind(|line| line.starts_with("1 ")).unwrap_or_default();
     assert!(
@@ -790,14 +864,10 @@ fn bare_terms_search_and_install_the_picks_like_yay() {
         ["tree"],
         "picks are declared"
     );
-
     assert!(
         setup.ok(&["status"]).contains("current generation"),
         "subcommands still win over search terms"
     );
-    fs::remove_file(&installed_lua).unwrap();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }
 
 #[test]
@@ -813,6 +883,7 @@ fn a_second_archix_waits_its_turn() {
             "box",
             "switch",
         ])
+        .envs(setup.machine.env())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -830,8 +901,7 @@ fn a_second_archix_waits_its_turn() {
         !first.wait_with_output().unwrap().status.success(),
         "the first one was declined"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
+    assert!(setup.machine.current().is_none(), "nothing was laid out");
 }
 
 #[test]
@@ -844,7 +914,6 @@ fn a_lock_made_for_a_newer_cpu_is_refused_not_rewritten() {
     let foreign = text.replace("x86_64.pkg.tar.zst", "x86_64_v9.pkg.tar.zst");
     assert_ne!(text, foreign);
     fs::write(&path, &foreign).unwrap();
-
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("newer CPU level") && err.contains("archix lock"), "{err}");
     assert_eq!(
@@ -852,62 +921,38 @@ fn a_lock_made_for_a_newer_cpu_is_refused_not_rewritten() {
         foreign,
         "switch doesn't rewrite the lock it applies"
     );
-
     setup.ok(&["lock"]);
     assert!(
         !fs::read_to_string(&path).unwrap().contains("x86_64_v9"),
         "archix lock re-resolves it for this CPU"
     );
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
-fn a_full_mount_other_than_root_stops_the_switch() {
-    let _system = lock_system();
-    let recipe = "pkgname=archix-test-big\npkgver=1\npkgrel=1\narch=(any)\nlicense=(MIT)\n\
-                  package() {\n  install -d \"$pkgdir/opt/archix-test-mount\"\n  head -c 4194304 /dev/zero > \"$pkgdir/opt/archix-test-mount/blob\"\n}\n";
-    let setup = Setup::with_files(
-        &["archix-test-big"],
-        "",
-        &[("pkgbuilds/archix-test-big/PKGBUILD", recipe)],
-    );
-    let mount = "/opt/archix-test-mount";
-    fs::create_dir_all(mount).unwrap();
-    let mounted = std::process::Command::new("mount")
-        .args(["-t", "tmpfs", "-o", "size=1m", "tmpfs", mount])
-        .status()
-        .unwrap();
-    assert!(mounted.success());
-    let err = setup.fails(&["switch", "--noconfirm"]);
-    std::process::Command::new("umount").arg(mount).status().unwrap();
-    assert!(err.contains(mount) && err.contains("nothing was changed"), "{err}");
-    assert!(installed("archix-test-big").is_none());
-    setup.ok(&["switch", "--noconfirm"]);
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    fs::remove_dir(mount).ok();
 }
 
 #[test]
 #[ignore]
 fn downloads_the_package_store_cant_hold_are_refused_before_any_starts() {
     let _system = lock_system();
-    let setup = Setup::new(&["tree"], "");
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    setup.set_body(&["tree"], "");
     for cached in fs::read_dir("/var/cache/pacman/pkg").unwrap().flatten() {
         if cached.file_name().to_string_lossy().starts_with("tree-") {
             fs::remove_file(cached.path()).unwrap();
         }
     }
     let store = setup.paths.packages();
-    fs::create_dir_all(&store).unwrap();
+    for cached in fs::read_dir(&store).into_iter().flatten().flatten() {
+        if cached.file_name().to_string_lossy().starts_with("tree-") {
+            fs::remove_file(cached.path()).unwrap();
+        }
+    }
     let mounted = std::process::Command::new("mount")
         .args(["-t", "tmpfs", "-o", "size=16k", "tmpfs"])
         .arg(&store)
         .status()
         .unwrap();
     assert!(mounted.success());
+    let deployments = setup.machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
     std::process::Command::new("umount").arg(&store).status().unwrap();
     assert!(
@@ -916,7 +961,7 @@ fn downloads_the_package_store_cant_hold_are_refused_before_any_starts() {
             && !err.contains("downloading tree"),
         "{err}"
     );
-    assert!(installed("tree").is_none());
+    assert_eq!(setup.machine.deployments(), deployments);
 }
 
 #[test]
@@ -929,8 +974,6 @@ fn a_switch_copies_its_packages_to_package_cache_push() {
     let setup = Setup::new(&["tree"], &body);
     let out = setup.ok(&["switch", "--noconfirm"]);
     let pushed = dir.join(&setup.lock().packages["tree"].file).is_file();
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
     fs::remove_dir_all(dir).ok();
     assert!(pushed, "{out}");
 }
@@ -950,4 +993,83 @@ fn an_old_lock_is_called_out() {
         !setup.ok(&["status"]).contains("days old"),
         "the default allows a month"
     );
+}
+
+#[test]
+#[ignore]
+fn recover_and_rescue_are_gone_with_a_note_on_what_replaced_them() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let err = setup.fails(&["recover", "--continue"]);
+    assert!(
+        err.contains("archix recover` is gone") && err.contains("nothing to recover"),
+        "{err}"
+    );
+    let err = setup.fails(&["rescue", "--root", "/mnt"]);
+    assert!(
+        err.contains("archix rescue` is gone") && err.contains("boot menu"),
+        "{err}"
+    );
+}
+
+#[test]
+#[ignore]
+fn a_config_kept_in_etc_comes_along_into_every_deployment_a_switch_or_rollback_makes_current() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    // Where archix keeps the config by default, in /etc, which each deployment has its own copy of.
+    let config = machine.root.join("etc/archix");
+    let copied = Command::new("cp")
+        .args(["-a", "--no-target-directory"])
+        .arg(setup.dir.path())
+        .arg(&config)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let archix = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .arg("--config")
+            .arg(&config)
+            .args(["--host", "box"])
+            .args(args)
+            .envs(machine.env())
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "archix {args:?}:\n{text}");
+    };
+    archix(&["switch", "--noconfirm"]);
+    machine.reboot(Some("archix-1.conf"));
+    let lock_in = |n: u32| fs::read_to_string(machine.deployment(n).join("etc/archix/archix.lock")).unwrap();
+    assert!(!lock_in(1).contains("\ntree = {"));
+
+    archix(&["install", "tree", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    assert!(
+        lock_in(new).contains("\ntree = {"),
+        "the new deployment boots with the lock its switch wrote"
+    );
+    assert!(
+        fs::read_to_string(machine.deployment(new).join("etc/archix/lua/hosts/box/installed.lua"))
+            .unwrap()
+            .contains("\"tree\"")
+    );
+    machine.reboot(None);
+    assert!(
+        fs::read_to_string(config.join("archix.lock"))
+            .unwrap()
+            .contains("\ntree = {")
+    );
+
+    archix(&["rollback", "1", "--noconfirm"]);
+    assert_eq!(machine.current(), Some(1));
+    assert!(
+        lock_in(1).contains("\ntree = {"),
+        "a rollback leaves archix.lock as it is, also in the deployment it boots"
+    );
+    machine.reboot(None);
+    assert!(installed("tree").is_none());
+    archix(&["switch", "--noconfirm"]);
+    assert!(installed("tree").is_some(), "the next switch returns to the config");
 }

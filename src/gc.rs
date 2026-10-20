@@ -1,25 +1,24 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
+use crate::deploy::Keep;
 use crate::generations::{Store, kept, now};
 use crate::paths::Paths;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
+    pub deployments: Vec<u32>,
     pub generations: Vec<u32>,
     pub files: usize,
     pub bytes: u64,
     pub snapshots: usize,
 }
 
-/// Deletes generations outside the current generation's limits, then cached files no kept generation needs.
+/// Drops the deployments `deployments.keep` leaves out (never the booted, current or boot-default one) with their boot entries, then generation records outside the generation limits that have no deployment, then cached files no kept generation needs.
 pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
-    if paths.journal().exists() {
-        bail!("a switch is unfinished; run `archix recover` before collecting garbage");
-    }
     let store = Store::new(paths);
     let generations = store.list()?;
     let current = store.current()?;
@@ -29,28 +28,40 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     else {
         return Ok(Report::default());
     };
+    let mut report = Report::default();
+    let mut deployed = BTreeSet::new();
+    if crate::deploy::layout::laid_out(&paths.root) {
+        let deployments = crate::deploy::Store::open(&paths.root)?;
+        let _lock = deployments.lock()?;
+        let esp = settings.boot.as_ref().map(|boot| PathBuf::from(&boot.esp));
+        let keep = settings.deployments_keep.max(1) as usize;
+        let pins = match &esp {
+            Some(esp) => Keep::read(keep, &deployments, esp)?,
+            None => Keep {
+                keep,
+                current: deployments.current()?,
+                ..Keep::default()
+            },
+        };
+        for number in pins.to_delete(&deployments.deployments()?) {
+            // The entries go first, so no entry is ever left naming a deployment that's gone.
+            if let Some(esp) = &esp {
+                crate::system::boot::drop_entries(paths, esp, number)?;
+            }
+            deployments.delete(number, &pins)?;
+            report.deployments.push(number);
+        }
+        deployed.extend(deployments.deployments()?);
+    }
     let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
-    // The running system came from the booted generation; its entry, kernel and files are what a broken switch falls back to.
+    // The running system came from the booted generation; it's what a broken switch falls back to.
     let booted = crate::system::boot::booted();
     keep.extend(booted.filter(|number| generations.iter().any(|g| g.number == *number)));
-    let mut report = Report::default();
+    keep.extend(deployed);
     for generation in &generations {
         if !keep.contains(&generation.number) {
-            if let Some(snapshot) = &generation.snapshot {
-                crate::system::snapshot::delete(snapshot)?;
-            }
             store.delete(generation.number)?;
             report.generations.push(generation.number);
-        }
-    }
-    if let Some(esp) = &settings.esp {
-        crate::system::boot::prune_entries(esp, &keep)?;
-        let kernels: BTreeSet<String> = keep
-            .iter()
-            .filter_map(|number| crate::system::boot::kernel_of(paths, *number))
-            .collect();
-        if !kernels.is_empty() {
-            crate::system::boot::prune_kernels(paths, &kernels)?;
         }
     }
 
@@ -60,7 +71,8 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         .flat_map(|g| g.packages.values())
         .map(|pkg| pkg.file.as_str())
         .collect();
-    if let Ok(entries) = fs::read_dir(paths.packages()) {
+    for dir in [paths.packages(), paths.cache.join("verified")] {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let package = name.strip_suffix(".sig").unwrap_or(&name);

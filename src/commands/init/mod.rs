@@ -83,9 +83,7 @@ struct Machine {
 /// How archix could manage booting on this machine.
 enum BootFacts {
     NoLoader,
-    NoRoot {
-        esp: String,
-    },
+    NoRoot,
     Ready {
         esp: String,
         kernel: String,
@@ -149,7 +147,6 @@ struct Answers {
     aur_review: bool,
     missing_versions: usize,
     files: BTreeSet<usize>,
-    snapshots: bool,
     boot: bool,
     /// Empty means the default; the wizard shows it as a placeholder.
     keep: String,
@@ -193,7 +190,6 @@ impl Answers {
             aur_review: true,
             missing_versions: 0,
             files: (0..facts.files.len()).filter(|i| facts.files[*i].recommended).collect(),
-            snapshots: true,
             boot: matches!(facts.boot, BootFacts::Ready { .. }),
             keep: String::new(),
             keep_days: String::new(),
@@ -535,7 +531,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     let exe = std::env::current_exe()?;
     let mut skip: BTreeSet<String> = integration::files(paths, &exe)
         .into_iter()
-        .chain(integration::boot_files(paths, &exe)?)
+        .chain(integration::boot_files(&exe))
         .map(|(path, _)| path.to_string_lossy().into_owned())
         .collect();
     let (settings, settings_summary) = host_settings(&mut skip);
@@ -574,7 +570,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
                 let kernel = boot_kernel(&machine.local, running.as_deref(), &installed);
                 let microcode = ["amd-ucode.img", "intel-ucode.img"]
                     .into_iter()
-                    .filter(|image| Path::new(&esp).join(image).is_file())
+                    .filter(|image| Path::new("/boot").join(image).is_file())
                     .map(str::to_string)
                     .collect();
                 BootFacts::Ready {
@@ -584,7 +580,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
                     params,
                 }
             } else {
-                BootFacts::NoRoot { esp }
+                BootFacts::NoRoot
             }
         }
     };
@@ -939,7 +935,7 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         && answers.boot
     {
         boot.push(("loader".to_string(), Lua::str("systemd-boot")));
-        if esp != "/boot" {
+        if esp != "/efi" {
             boot.push(("esp".into(), Lua::str(esp)));
         }
         if kernel != "linux" {
@@ -949,9 +945,6 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
             boot.push(("microcode".into(), Lua::strings(microcode)));
         }
         config.set("kernel_params", Lua::strings(params));
-    }
-    if facts.btrfs && !answers.snapshots {
-        boot.push(("snapshots".to_string(), Lua::Bool(false)));
     }
     if !boot.is_empty() {
         config.set("boot", Lua::Table(boot));
@@ -1091,20 +1084,49 @@ fn report(facts: &Facts, answers: &Answers) {
         ));
     }
     section("Boot");
-    match &facts.boot {
-        BootFacts::NoLoader => note("no systemd-boot found, so archix leaves booting alone"),
-        BootFacts::NoRoot { .. } => warn("the kernel command line has no root=, so archix leaves booting alone"),
-        BootFacts::Ready { esp, kernel, .. } => done(format!("boot entries on {esp}, kernel {kernel}")),
-    }
-    if facts.btrfs {
-        done("a snapshot of / before every switch");
+    for line in boot_lines(facts) {
+        match line {
+            (true, text) => done(text),
+            (false, text) => warn(text),
+        }
     }
     section("Generations");
     done(format!(
-        "gc keeps the newest {} generations and any younger than {} days",
+        "gc keeps 2 deployments to boot or roll back to, and the records of the newest {} generations and any younger than {} days",
         answers.keep(),
         answers.keep_days()
     ));
+}
+
+/// What the first switch will do about booting, each line good news or a warning.
+fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
+    let mut lines = match &facts.boot {
+        BootFacts::NoLoader => vec![(
+            false,
+            "no systemd-boot found; archix boots every generation as a deployment from its own systemd-boot entry, so `archix switch` needs systemd-boot installed (bootctl install) first".to_string(),
+        )],
+        BootFacts::NoRoot => vec![(
+            false,
+            "the kernel command line has no root=, which deployment entries need; `archix switch` refuses until kernel_params has it".to_string(),
+        )],
+        BootFacts::Ready { esp, kernel, .. } => {
+            let mut lines = vec![(true, format!("boot entries on {esp}, kernel {kernel}"))];
+            if let Some(why) = archix::deploy::layout::unsupported(Path::new("/"), Path::new(esp)) {
+                lines.push((false, format!("the first switch can't lay this system out as deployments: {why}")));
+            }
+            lines
+        }
+    };
+    let staging = if facts.btrfs {
+        "a btrfs snapshot"
+    } else {
+        "copies and overlays"
+    };
+    lines.push((
+        true,
+        format!("the first switch lays the system out as deployment 1; each switch then builds the next deployment from {staging} beside the running one, and it boots at the next restart"),
+    ));
+    lines
 }
 
 fn summary(dir: &Path, host: &str, config: &Host, git: bool) {

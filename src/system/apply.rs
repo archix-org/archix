@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -13,7 +13,7 @@ use crate::fetch::sha256;
 use crate::generations::now;
 use crate::paths::Paths;
 
-/// The system part of a transaction: what the current generation applied and what the target applies.
+/// The system part of a switch: what the current generation applied and what the target applies.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SystemChange {
     pub from: SystemState,
@@ -21,13 +21,6 @@ pub struct SystemChange {
 }
 
 impl SystemChange {
-    pub fn reversed(&self) -> SystemChange {
-        SystemChange {
-            from: self.to.clone(),
-            to: self.from.clone(),
-        }
-    }
-
     /// Paths whose managed entry differs between the two states, including ones only in one of them.
     pub(crate) fn changed_paths(&self) -> BTreeSet<&str> {
         let mut changed = BTreeSet::new();
@@ -42,6 +35,123 @@ impl SystemChange {
             }
         }
         changed
+    }
+}
+
+/// Where a managed path is on disk for one pass over the files, or None when the pass leaves it to another.
+pub type Locate<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
+
+/// The deployment tree a managed path belongs to, if any; everything else is written on the live system.
+pub fn deployment_tree(path: &str) -> Option<&'static str> {
+    ["usr", "etc", "opt", "boot"].into_iter().find(|tree| {
+        path.strip_prefix('/')
+            .and_then(|rest| rest.strip_prefix(tree))
+            .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// The users and groups in one root's account files, read directly instead of through NSS, so they can be a deployment's.
+#[derive(Debug, Default)]
+pub struct Accounts {
+    users: BTreeMap<String, Account>,
+    groups: BTreeMap<String, (u32, Vec<String>)>,
+}
+
+#[derive(Debug)]
+struct Account {
+    uid: u32,
+    gid: u32,
+    gecos: String,
+    home: String,
+    shell: String,
+}
+
+impl Accounts {
+    /// The accounts in `etc`'s passwd and group.
+    pub fn read(etc: &Path) -> Accounts {
+        let read = |name: &str| fs::read_to_string(etc.join(name)).unwrap_or_default();
+        let mut accounts = Accounts::default();
+        for line in read("passwd").lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if let [name, _, uid, gid, gecos, home, shell] = fields[..]
+                && let (Ok(uid), Ok(gid)) = (uid.parse(), gid.parse())
+            {
+                let account = Account {
+                    uid,
+                    gid,
+                    gecos: gecos.to_string(),
+                    home: home.to_string(),
+                    shell: shell.to_string(),
+                };
+                accounts.users.insert(name.to_string(), account);
+            }
+        }
+        for line in read("group").lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if let [name, _, gid, members] = fields[..]
+                && let Ok(gid) = gid.parse()
+            {
+                let members = members
+                    .split(',')
+                    .filter(|m| !m.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                accounts.groups.insert(name.to_string(), (gid, members));
+            }
+        }
+        accounts
+    }
+
+    pub fn uid(&self, name: &str) -> Option<u32> {
+        self.users.get(name).map(|account| account.uid)
+    }
+
+    pub fn gid(&self, name: &str) -> Option<u32> {
+        self.groups.get(name).map(|(gid, _)| *gid)
+    }
+
+    /// The home directory and primary group id of a user.
+    pub fn home(&self, name: &str) -> Option<(PathBuf, u32)> {
+        self.users
+            .get(name)
+            .map(|account| (PathBuf::from(&account.home), account.gid))
+    }
+
+    fn uid_taken(&self, id: u32) -> bool {
+        self.users.values().any(|account| account.uid == id)
+    }
+
+    fn gid_taken(&self, id: u32) -> bool {
+        self.groups.values().any(|(gid, _)| *gid == id)
+    }
+
+    /// Whether the existing account `name` differs from `want` in anything usermod would change.
+    fn differs(&self, name: &str, want: &User) -> bool {
+        let Some(account) = self.users.get(name) else {
+            return true;
+        };
+        let group = self
+            .groups
+            .iter()
+            .find(|(_, (gid, _))| *gid == account.gid)
+            .map(|(name, _)| name.as_str())
+            .unwrap_or_default();
+        let mut groups: Vec<&str> = self
+            .groups
+            .iter()
+            .filter(|(_, (_, members))| members.iter().any(|member| member == name))
+            .map(|(group, _)| group.as_str())
+            .collect();
+        groups.sort();
+        let mut wanted_groups: Vec<&str> = want.groups.iter().map(String::as_str).collect();
+        wanted_groups.sort();
+        wanted_groups.dedup();
+        want.uid.is_some_and(|id| id != account.uid)
+            || group != want.group.as_deref().unwrap_or(name)
+            || want.home.as_ref().is_some_and(|dir| *dir != account.home)
+            || account.shell != want.shell
+            || account.gecos != want.description
+            || groups != wanted_groups
     }
 }
 
@@ -78,19 +188,7 @@ fn on_disk(path: &Path) -> Result<OnDisk> {
     })
 }
 
-fn uid(name: &str) -> Option<u32> {
-    let name = CString::new(name).ok()?;
-    let entry = unsafe { libc::getpwnam(name.as_ptr()) };
-    (!entry.is_null()).then(|| unsafe { (*entry).pw_uid })
-}
-
-fn gid(name: &str) -> Option<u32> {
-    let name = CString::new(name).ok()?;
-    let entry = unsafe { libc::getgrnam(name.as_ptr()) };
-    (!entry.is_null()).then(|| unsafe { (*entry).gr_gid })
-}
-
-fn matches(path: &Path, disk: &OnDisk, want: &ManagedFile) -> bool {
+fn matches(path: &Path, disk: &OnDisk, want: &ManagedFile, accounts: &Accounts) -> bool {
     if let Some(merge) = &want.merge {
         return matches!(disk, OnDisk::File { .. })
             && fs::read_to_string(path).is_ok_and(|text| merge.satisfied(&text));
@@ -108,7 +206,9 @@ fn matches(path: &Path, disk: &OnDisk, want: &ManagedFile) -> bool {
         ) => {
             *sha256 == want.sha256
                 && (!keeps_modes(path)
-                    || (*mode == want.mode && Some(*u) == uid(&want.owner) && Some(*g) == gid(&want.group)))
+                    || (*mode == want.mode
+                        && Some(*u) == accounts.uid(&want.owner)
+                        && Some(*g) == accounts.gid(&want.group)))
         }
         _ => false,
     }
@@ -124,55 +224,6 @@ fn keeps_modes(path: &Path) -> bool {
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
     let found = unsafe { libc::statfs(c_path.as_ptr(), &mut stat) == 0 };
     !found || ![MSDOS_SUPER_MAGIC, EXFAT_SUPER_MAGIC].contains(&(stat.f_type as i64))
-}
-
-fn c_text(ptr: *const libc::c_char) -> String {
-    if ptr.is_null() {
-        return String::new();
-    }
-    unsafe { std::ffi::CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
-}
-
-/// Whether the existing account `name` differs from `want` in anything usermod would change.
-fn account_differs(name: &str, want: &User) -> bool {
-    let Ok(c_name) = CString::new(name) else { return true };
-    let entry = unsafe { libc::getpwnam(c_name.as_ptr()) };
-    if entry.is_null() {
-        return true;
-    }
-    let (uid, gid, home, shell, gecos) = unsafe {
-        (
-            (*entry).pw_uid,
-            (*entry).pw_gid,
-            c_text((*entry).pw_dir),
-            c_text((*entry).pw_shell),
-            c_text((*entry).pw_gecos),
-        )
-    };
-    let group = unsafe { libc::getgrgid(gid) };
-    let group = if group.is_null() {
-        String::new()
-    } else {
-        c_text(unsafe { (*group).gr_name })
-    };
-    let mut groups: Vec<String> = fs::read_to_string("/etc/group")
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(':').collect();
-            (fields.len() == 4 && fields[3].split(',').any(|member| member == name)).then(|| fields[0].to_string())
-        })
-        .collect();
-    groups.sort();
-    let mut wanted_groups = want.groups.clone();
-    wanted_groups.sort();
-    wanted_groups.dedup();
-    want.uid.is_some_and(|id| id != uid)
-        || group != want.group.as_deref().unwrap_or(name)
-        || want.home.as_ref().is_some_and(|dir| *dir != home)
-        || shell != want.shell
-        || gecos != want.description
-        || groups != wanted_groups
 }
 
 fn under(root: &Path, path: &str) -> PathBuf {
@@ -191,26 +242,42 @@ fn mount_point(path: &Path) -> bool {
 }
 
 /// Target files that are missing or differ on disk, so applying `change` rewrites them.
-pub fn out_of_date(change: &SystemChange) -> Result<BTreeSet<String>> {
+pub fn out_of_date(change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<BTreeSet<String>> {
     let mut paths = BTreeSet::new();
     for (path, want) in &change.to.files {
-        if !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
+        let Some(target) = locate(path) else { continue };
+        if !matches(&target, &on_disk(&target)?, want, accounts) {
             paths.insert(path.clone());
         }
     }
     Ok(paths)
 }
 
-/// One line per change applying `change` would make, flagging managed files someone edited by hand.
-pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
+/// Whether `unit` is enabled under `root`, the live system or a deployment directory, which holds etc/ and usr/ like a root.
+pub fn is_enabled(root: &Path, unit: &str, user: bool) -> bool {
+    let mut cmd = Command::new("systemctl");
+    if root != Path::new("/") {
+        cmd.arg(format!("--root={}", root.display()));
+    }
+    if user {
+        cmd.arg("--global");
+    }
+    cmd.args(["is-enabled", unit])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
+}
+
+/// One line per change applying `change` would make to what `locate` finds and the accounts and services of `root`, flagging managed files someone edited by hand.
+pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root: &Path) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     for (path, want) in &change.to.files {
-        let disk = on_disk(Path::new(path))?;
-        if matches(Path::new(path), &disk, want) {
+        let Some(target) = locate(path) else { continue };
+        let disk = on_disk(&target)?;
+        if matches(&target, &disk, want, accounts) {
             continue;
         }
         let edited = change.from.files.get(path).is_some_and(|prev| {
-            prev.merge.is_none() && disk != OnDisk::Missing && !matches(Path::new(path), &disk, prev)
+            prev.merge.is_none() && disk != OnDisk::Missing && !matches(&target, &disk, prev, accounts)
         });
         let verb = match (&disk, change.from.files.contains_key(path)) {
             (OnDisk::Missing, _) => "create",
@@ -233,9 +300,9 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
         lines.push(format!("unmanage   {path}"));
     }
     for (name, user) in &change.to.users {
-        if uid(name).is_none() {
+        if accounts.uid(name).is_none() {
             lines.push(format!("add user   {name}"));
-        } else if account_differs(name, user) {
+        } else if accounts.differs(name, user) {
             lines.push(format!("modify     user {name}"));
         }
     }
@@ -248,7 +315,7 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
         lines.push(format!("remove     user {name} (home kept)"));
     }
     for (name, group) in &change.to.groups {
-        if gid(name).is_none() || group.gid.is_some_and(|id| Some(id) != gid(name)) {
+        if accounts.gid(name).is_none() || group.gid.is_some_and(|id| Some(id) != accounts.gid(name)) {
             lines.push(format!("group      {name}"));
         }
     }
@@ -261,12 +328,12 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
         lines.push(format!("remove     group {name}"));
     }
     for (unit, enabled) in &change.to.services {
-        if is_enabled(unit, false) != *enabled {
+        if is_enabled(root, unit, false) != *enabled {
             lines.push(format!("{:<10} {unit}", if *enabled { "enable" } else { "disable" }));
         }
     }
     for (unit, enabled) in &change.to.user_services {
-        if is_enabled(unit, true) != *enabled {
+        if is_enabled(root, unit, true) != *enabled {
             lines.push(format!(
                 "{:<10} {unit} (user)",
                 if *enabled { "enable" } else { "disable" }
@@ -286,66 +353,116 @@ pub fn describe(change: &SystemChange) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-pub fn is_enabled(unit: &str, user: bool) -> bool {
-    let mut cmd = Command::new("systemctl");
-    if user {
-        cmd.arg("--global");
-    }
-    cmd.args(["is-enabled", unit])
-        .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
-}
-
-fn run(cmd: &mut Command, what: &str) -> Result<()> {
-    let output = cmd.output().with_context(|| format!("running {what}"))?;
-    if !output.status.success() {
-        bail!("{what}: {}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
-}
-
-/// Creates and updates the users and groups archix manages; never touches passwords. Removal waits for `remove_users`.
-pub fn users(change: &SystemChange, state: &Path) -> Result<()> {
+/// Creates and updates the users and groups archix manages in a staging root through `run`, which runs a command in it, reading its accounts from `etc`; never touches passwords. Returns the regular users it created, whose homes `create_homes` makes once the deployment is committed.
+pub fn users(
+    change: &SystemChange,
+    etc: &Path,
+    run: &dyn Fn(&[String]) -> Result<()>,
+    state: &Path,
+) -> Result<Vec<String>> {
     let mut ids = IdMap::load(state);
+    let accounts = Accounts::read(etc);
+    let text = |items: &[&str]| -> Vec<String> { items.iter().map(|s| s.to_string()).collect() };
     for (name, group) in &change.to.groups {
-        match gid(name) {
+        match accounts.gid(name) {
             None => {
-                let mut cmd = Command::new("groupadd");
+                let mut cmd = text(&["groupadd"]);
                 // A group created again gets its old gid back, so files it owned still belong to it.
-                if let Some(id) = group.gid.or_else(|| ids.free_gid(name)) {
-                    cmd.args(["-g", &id.to_string()]);
+                if let Some(id) = group.gid.or_else(|| ids.free_gid(name, &accounts)) {
+                    cmd.extend(text(&["-g", &id.to_string()]));
                 }
                 if group.system {
-                    cmd.arg("-r");
+                    cmd.push("-r".to_string());
                 }
-                run(cmd.arg(name), &format!("groupadd {name}"))?;
+                cmd.push(name.clone());
+                run(&cmd)?;
             }
             Some(current) if group.gid.is_some_and(|id| id != current) => {
-                run(
-                    Command::new("groupmod").args(["-g", &group.gid.unwrap().to_string(), name]),
-                    "groupmod",
-                )?;
+                run(&text(&["groupmod", "-g", &group.gid.unwrap().to_string(), name]))?;
             }
             Some(_) => {}
         }
     }
+    let accounts = Accounts::read(etc);
+    let mut created = Vec::new();
     for (name, user) in &change.to.users {
-        if uid(name).is_none() {
+        if accounts.uid(name).is_none() {
             let mut revived = user.clone();
-            revived.uid = user.uid.or_else(|| ids.free_uid(name));
-            run(&mut useradd(name, &revived), &format!("useradd {name}"))?;
-            eprintln!("created user {name}; set a password with `passwd {name}`");
-        } else if change.from.users.get(name) != Some(user) && account_differs(name, user) {
-            run(&mut usermod(name, user), &format!("usermod {name}"))?;
+            revived.uid = user.uid.or_else(|| ids.free_uid(name, &accounts));
+            run(&useradd(name, &revived))?;
+            if !user.system {
+                created.push(name.clone());
+            }
+        } else if change.from.users.get(name) != Some(user) && accounts.differs(name, user) {
+            run(&usermod(name, user))?;
         }
     }
+    for name in change
+        .from
+        .users
+        .keys()
+        .filter(|name| !change.to.users.contains_key(*name))
+    {
+        if accounts.uid(name).is_some() {
+            run(&text(&["userdel", name]))?;
+        }
+    }
+    let accounts = Accounts::read(etc);
+    for name in change
+        .from
+        .groups
+        .keys()
+        .filter(|name| !change.to.groups.contains_key(*name))
+    {
+        if accounts.gid(name).is_some() {
+            run(&text(&["groupdel", name]))?;
+        }
+    }
+    let accounts = Accounts::read(etc);
     for name in change.to.groups.keys() {
-        ids.record_gid(name, gid(name));
+        ids.record_gid(name, accounts.gid(name));
     }
     for name in change.to.users.keys() {
-        ids.record_uid(name, uid(name));
+        ids.record_uid(name, accounts.uid(name));
     }
-    ids.save(state)
+    ids.save(state)?;
+    Ok(created)
+}
+
+/// Makes the homes of users a committed deployment created, from its /etc/skel, owned by them.
+pub fn create_homes(created: &[String], accounts: &Accounts, skel: &Path, root: &Path) -> Result<()> {
+    for name in created {
+        let Some((home, gid)) = accounts.home(name) else {
+            continue;
+        };
+        let Some(uid) = accounts.uid(name) else { continue };
+        let home = under(root, &home.to_string_lossy());
+        if home.symlink_metadata().is_ok() {
+            continue;
+        }
+        if let Some(parent) = home.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        if skel.is_dir() {
+            copy_preserving(skel, &home)?;
+        } else {
+            fs::create_dir_all(&home)?;
+        }
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+        chown_tree(&home, uid, gid)?;
+        eprintln!("created user {name}; set a password with `passwd {name}` after the reboot");
+    }
+    Ok(())
+}
+
+fn chown_tree(path: &Path, uid: u32, gid: u32) -> Result<()> {
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
+    if fs::symlink_metadata(path)?.is_dir() {
+        for entry in fs::read_dir(path)? {
+            chown_tree(&entry?.path(), uid, gid)?;
+        }
+    }
+    Ok(())
 }
 
 /// Every uid and gid archix has given a name, kept after the account is removed, like NixOS's uid-map.
@@ -371,18 +488,12 @@ impl IdMap {
         crate::durable::write(&Self::path(state), serde_json::to_string_pretty(self)?.as_bytes())
     }
 
-    fn free_uid(&self, name: &str) -> Option<u32> {
-        self.uids
-            .get(name)
-            .copied()
-            .filter(|id| unsafe { libc::getpwuid(*id) }.is_null())
+    fn free_uid(&self, name: &str, accounts: &Accounts) -> Option<u32> {
+        self.uids.get(name).copied().filter(|id| !accounts.uid_taken(*id))
     }
 
-    fn free_gid(&self, name: &str) -> Option<u32> {
-        self.gids
-            .get(name)
-            .copied()
-            .filter(|id| unsafe { libc::getgrgid(*id) }.is_null())
+    fn free_gid(&self, name: &str, accounts: &Accounts) -> Option<u32> {
+        self.gids.get(name).copied().filter(|id| !accounts.gid_taken(*id))
     }
 
     fn record_uid(&mut self, name: &str, id: Option<u32>) {
@@ -398,89 +509,115 @@ impl IdMap {
     }
 }
 
-/// Deletes the users and groups the config dropped, once their services have stopped: userdel refuses an account a process still runs as.
-pub fn remove_users(change: &SystemChange) -> Vec<String> {
+fn useradd(name: &str, user: &User) -> Vec<String> {
+    let mut cmd = vec!["useradd".to_string()];
+    // The home is made on the live system once the deployment is committed, as the staging root's /home isn't it.
+    cmd.push(if user.system { "-r" } else { "-M" }.to_string());
+    if let Some(id) = user.uid {
+        cmd.extend(["-u".to_string(), id.to_string()]);
+    }
+    match &user.group {
+        Some(group) => cmd.extend(["-g".to_string(), group.clone()]),
+        None => cmd.push("-U".to_string()),
+    }
+    if !user.groups.is_empty() {
+        cmd.extend(["-G".to_string(), user.groups.join(",")]);
+    }
+    if let Some(home) = &user.home {
+        cmd.extend(["-d".to_string(), home.clone()]);
+    }
+    cmd.extend([
+        "-s".to_string(),
+        user.shell.clone(),
+        "-c".to_string(),
+        user.description.clone(),
+        name.to_string(),
+    ]);
+    cmd
+}
+
+fn usermod(name: &str, user: &User) -> Vec<String> {
+    let mut cmd = vec!["usermod".to_string()];
+    if let Some(id) = user.uid {
+        cmd.extend(["-u".to_string(), id.to_string()]);
+    }
+    if let Some(group) = &user.group {
+        cmd.extend(["-g".to_string(), group.clone()]);
+    }
+    if let Some(home) = &user.home {
+        cmd.extend(["-d".to_string(), home.clone()]);
+    }
+    cmd.extend([
+        "-G".to_string(),
+        user.groups.join(","),
+        "-s".to_string(),
+        user.shell.clone(),
+        "-c".to_string(),
+        user.description.clone(),
+        name.to_string(),
+    ]);
+    cmd
+}
+
+fn systemctl(args: &[&str], run: &dyn Fn(&[String]) -> Result<()>, failures: &mut Vec<String>) {
+    let argv: Vec<String> = std::iter::once("systemctl")
+        .chain(args.iter().copied())
+        .map(str::to_string)
+        .collect();
+    if let Err(e) = run(&argv) {
+        failures.push(format!("{e:#}"));
+    }
+}
+
+/// Disables the units turned off or leaving the config in a staging root through `run`, while their unit files are still there; failures are returned.
+pub fn disable_services(change: &SystemChange, run: &dyn Fn(&[String]) -> Result<()>) -> Vec<String> {
     let mut failures = Vec::new();
-    for name in change
-        .from
-        .users
-        .keys()
-        .filter(|name| !change.to.users.contains_key(*name))
-    {
-        if uid(name).is_some()
-            && let Err(e) = run(Command::new("userdel").arg(name), &format!("userdel {name}"))
-        {
-            failures.push(format!("{e:#}"));
+    for (unit, enabled) in &change.to.services {
+        if !*enabled {
+            systemctl(&["disable", unit], run, &mut failures);
         }
     }
-    for name in change
-        .from
-        .groups
-        .keys()
-        .filter(|name| !change.to.groups.contains_key(*name))
-    {
-        if gid(name).is_some()
-            && let Err(e) = run(Command::new("groupdel").arg(name), &format!("groupdel {name}"))
-        {
-            failures.push(format!("{e:#}"));
+    for (unit, enabled) in &change.from.services {
+        if !change.to.services.contains_key(unit) && *enabled {
+            systemctl(&["disable", unit], run, &mut failures);
+        }
+    }
+    for (unit, enabled) in &change.to.user_services {
+        if !*enabled {
+            systemctl(&["--global", "disable", unit], run, &mut failures);
+        }
+    }
+    for (unit, enabled) in &change.from.user_services {
+        if !change.to.user_services.contains_key(unit) && *enabled {
+            systemctl(&["--global", "disable", unit], run, &mut failures);
         }
     }
     failures
 }
 
-fn useradd(name: &str, user: &User) -> Command {
-    let mut cmd = Command::new("useradd");
-    if user.system {
-        cmd.arg("-r");
-    } else {
-        cmd.arg("-m");
+/// Enables units in a staging root through `run`, once the managed unit files are written; a unit that can't be is a soft failure, returned.
+pub fn enable_services(change: &SystemChange, run: &dyn Fn(&[String]) -> Result<()>) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (unit, enabled) in &change.to.services {
+        if *enabled {
+            systemctl(&["enable", unit], run, &mut failures);
+        }
     }
-    if let Some(id) = user.uid {
-        cmd.args(["-u", &id.to_string()]);
+    for (unit, enabled) in &change.to.user_services {
+        if *enabled {
+            systemctl(&["--global", "enable", unit], run, &mut failures);
+        }
     }
-    match &user.group {
-        Some(group) => cmd.args(["-g", group]),
-        None => cmd.arg("-U"),
-    };
-    if !user.groups.is_empty() {
-        cmd.args(["-G", &user.groups.join(",")]);
-    }
-    if let Some(home) = &user.home {
-        cmd.args(["-d", home]);
-    }
-    cmd.args(["-s", &user.shell, "-c", &user.description, name]);
-    cmd
+    failures
 }
 
-fn usermod(name: &str, user: &User) -> Command {
-    let mut cmd = Command::new("usermod");
-    if let Some(id) = user.uid {
-        cmd.args(["-u", &id.to_string()]);
-    }
-    if let Some(group) = &user.group {
-        cmd.args(["-g", group]);
-    }
-    if let Some(home) = &user.home {
-        cmd.args(["-d", home, "-m"]);
-    }
-    cmd.args([
-        "-G",
-        &user.groups.join(","),
-        "-s",
-        &user.shell,
-        "-c",
-        &user.description,
-        name,
-    ]);
-    cmd
-}
-
-/// Refuses, before anything changes, managed files that would replace something archix can't safely back up.
-pub fn check(paths: &Paths, change: &SystemChange) -> Result<()> {
+/// Refuses, before anything is staged, managed files that would replace something archix can't safely back up.
+pub fn check(paths: &Paths, change: &SystemChange, locate: Locate) -> Result<()> {
     let backups = paths.state.join("backups");
     for (path, want) in &change.to.files {
+        let Some(target) = locate(path) else { continue };
         if let Some(merge) = &want.merge
-            && let Ok(text) = fs::read_to_string(path)
+            && let Ok(text) = fs::read_to_string(&target)
         {
             merge
                 .apply(&text)
@@ -488,11 +625,11 @@ pub fn check(paths: &Paths, change: &SystemChange) -> Result<()> {
         }
     }
     for path in change.to.files.keys() {
-        let target = Path::new(path);
-        if on_disk(target)? != OnDisk::Other {
+        let Some(target) = locate(path) else { continue };
+        if on_disk(&target)? != OnDisk::Other {
             continue;
         }
-        let directory = fs::symlink_metadata(target).is_ok_and(|meta| meta.is_dir());
+        let directory = fs::symlink_metadata(&target).is_ok_and(|meta| meta.is_dir());
         if !directory || change.from.files.contains_key(path) {
             bail!("{path} exists and is not a file or symlink; archix won't replace it");
         }
@@ -546,26 +683,27 @@ fn copy_preserving(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes, replaces and unmanages files, backing up originals and hand edits instead of losing them.
-pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
+/// Writes, replaces and unmanages the files `locate` places, backing up originals and hand edits instead of losing them; owners come from `accounts`.
+pub fn files(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
     let backups = paths.state.join("backups");
     let edited = paths.state.join("edited").join(now().to_string());
     for (path, want) in &change.to.files {
-        let target = Path::new(path);
+        let Some(target) = locate(path) else { continue };
+        let target = target.as_path();
         let disk = on_disk(target)?;
-        if want.link.is_some() && mount_point(target) && !matches(target, &disk, want) {
+        if want.link.is_some() && mount_point(target) && !matches(target, &disk, want, accounts) {
             eprintln!(
                 "warning: {path} is mounted over here (a container or arch-chroot does that), so it's left alone; the next switch outside replaces it"
             );
             continue;
         }
         if let Some(merge) = &want.merge {
-            if !matches(target, &disk, want) {
-                write_merged(target, want, merge).with_context(|| format!("setting keys in {path}"))?;
+            if !matches(target, &disk, want, accounts) {
+                write_merged(target, want, merge, accounts).with_context(|| format!("setting keys in {path}"))?;
             }
             continue;
         }
-        if matches(Path::new(path), &disk, want) {
+        if matches(target, &disk, want, accounts) {
             if disk != OnDisk::Missing && !change.from.files.contains_key(path) {
                 keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
             }
@@ -580,7 +718,7 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                         move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
                     }
                 }
-                Some(previous) if !matches(target, &disk, previous) => {
+                Some(previous) if !matches(target, &disk, previous, accounts) => {
                     let copy = under(&edited, path);
                     fs::create_dir_all(copy.parent().expect("absolute path"))?;
                     fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
@@ -592,7 +730,7 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                 Some(_) => {}
             }
         }
-        write(paths, target, want).with_context(|| format!("writing {path}"))?;
+        write(paths, target, want, accounts).with_context(|| format!("writing {path}"))?;
     }
     for (path, previous) in change
         .from
@@ -600,11 +738,12 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
         .iter()
         .filter(|(path, previous)| !change.to.files.contains_key(*path) && previous.merge.is_none())
     {
-        let target = Path::new(path);
+        let Some(target) = locate(path) else { continue };
+        let target = target.as_path();
         let backup = under(&backups, path);
         let disk = on_disk(target)?;
         if fs::symlink_metadata(&backup).is_ok() {
-            if disk != OnDisk::Missing && !matches(target, &disk, previous) {
+            if disk != OnDisk::Missing && !matches(target, &disk, previous, accounts) {
                 eprintln!(
                     "warning: {path} was edited outside archix; restoring the original anyway, see {}",
                     backup.display()
@@ -616,25 +755,25 @@ pub fn files(paths: &Paths, change: &SystemChange) -> Result<()> {
                 fs::remove_file(target).with_context(|| format!("removing {path}"))?;
             }
             move_path(&backup, target).with_context(|| format!("restoring {path}"))?;
-        } else if matches(target, &disk, previous) {
+        } else if matches(target, &disk, previous, accounts) {
             fs::remove_file(target).with_context(|| format!("removing {path}"))?;
         }
     }
     Ok(())
 }
 
-/// Backs up every file the target manages that's already on disk exactly as wanted, for when no file step runs.
-pub fn keep_originals(paths: &Paths, change: &SystemChange) -> Result<()> {
+/// Backs up every file the target manages that's already on disk exactly as wanted, for a switch that writes no files.
+pub fn keep_originals(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
     let backups = paths.state.join("backups");
     for (path, want) in &change.to.files {
-        let target = Path::new(path);
-        let disk = on_disk(target)?;
+        let Some(target) = locate(path) else { continue };
+        let disk = on_disk(&target)?;
         if want.merge.is_none()
             && disk != OnDisk::Missing
-            && matches(target, &disk, want)
+            && matches(&target, &disk, want, accounts)
             && !change.from.files.contains_key(path)
         {
-            keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
+            keep_original(&target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
         }
     }
     Ok(())
@@ -656,8 +795,15 @@ fn keep_original(target: &Path, backup: &Path) -> Result<()> {
     Ok(())
 }
 
+fn owner(want: &ManagedFile, accounts: &Accounts) -> Result<(u32, u32)> {
+    match (accounts.uid(&want.owner), accounts.gid(&want.group)) {
+        (Some(u), Some(g)) => Ok((u, g)),
+        _ => bail!("owner {}:{} doesn't exist", want.owner, want.group),
+    }
+}
+
 /// Sets a merged file's keys in place, keeping the app's other keys, mode and owner; a new file gets the managed mode and owner.
-fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge) -> Result<()> {
+fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge, accounts: &Accounts) -> Result<()> {
     let existing = fs::metadata(target).ok();
     let text = match &existing {
         Some(_) => fs::read_to_string(target)?,
@@ -665,19 +811,19 @@ fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge) 
     };
     let merged = merge.apply(&text)?;
     let dir = target.parent().context("file has no parent directory")?;
-    create_parents(dir, want)?;
+    create_parents(dir, want, accounts)?;
     let name = target.file_name().context("file has no name")?.to_string_lossy();
     let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
     fs::write(&tmp, merged)?;
     let (mode, owner) = match &existing {
         Some(meta) => (meta.mode() & 0o7777, (meta.uid(), meta.gid())),
-        None => {
-            let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
+        None => match owner(want, accounts) {
+            Ok(owner) => (want.mode, owner),
+            Err(e) => {
                 let _ = fs::remove_file(&tmp);
-                bail!("owner {}:{} doesn't exist", want.owner, want.group);
-            };
-            (want.mode, (u, g))
-        }
+                return Err(e);
+            }
+        },
     };
     fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
     std::os::unix::fs::chown(&tmp, Some(owner.0), Some(owner.1))?;
@@ -688,7 +834,7 @@ fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge) 
 }
 
 /// Creates missing parent directories; ones archix creates for a user's file belong to that user.
-fn create_parents(dir: &Path, want: &ManagedFile) -> Result<()> {
+fn create_parents(dir: &Path, want: &ManagedFile, accounts: &Accounts) -> Result<()> {
     let mut missing = Vec::new();
     let mut current = Some(dir);
     while let Some(path) = current {
@@ -700,9 +846,7 @@ fn create_parents(dir: &Path, want: &ManagedFile) -> Result<()> {
     }
     fs::create_dir_all(dir)?;
     if want.owner != "root" {
-        let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
-            bail!("owner {}:{} doesn't exist", want.owner, want.group);
-        };
+        let (u, g) = owner(want, accounts)?;
         for path in missing {
             std::os::unix::fs::chown(&path, Some(u), Some(g))?;
         }
@@ -710,9 +854,9 @@ fn create_parents(dir: &Path, want: &ManagedFile) -> Result<()> {
     Ok(())
 }
 
-fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
+fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts) -> Result<()> {
     let dir = target.parent().context("file has no parent directory")?;
-    create_parents(dir, want)?;
+    create_parents(dir, want, accounts)?;
     let name = target.file_name().context("file has no name")?.to_string_lossy();
     let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
     let _ = fs::remove_file(&tmp);
@@ -720,7 +864,7 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
         Some(link) => {
             symlink(link, &tmp)?;
             if want.owner != "root"
-                && let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group))
+                && let Ok((u, g)) = owner(want, accounts)
             {
                 std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
             }
@@ -729,9 +873,12 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
             let blob = blobs::path(paths, &want.sha256);
             fs::copy(&blob, &tmp).with_context(|| format!("copying {}", blob.display()))?;
             fs::set_permissions(&tmp, fs::Permissions::from_mode(want.mode))?;
-            let (Some(u), Some(g)) = (uid(&want.owner), gid(&want.group)) else {
-                let _ = fs::remove_file(&tmp);
-                bail!("owner {}:{} doesn't exist", want.owner, want.group);
+            let (u, g) = match owner(want, accounts) {
+                Ok(owner) => owner,
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
             };
             std::os::unix::fs::chown(&tmp, Some(u), Some(g))?;
         }
@@ -751,182 +898,53 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile) -> Result<()> {
     }
 }
 
-/// Reloads what changed files feed (systemd, sysctl, udev, locales); returns what failed without failing.
-pub fn reload(change: &SystemChange) -> Vec<String> {
-    let changed = change.changed_paths();
-    let touched = |prefix: &str| changed.iter().any(|path| path.starts_with(prefix));
-    let mut failures = Vec::new();
-    let mut attempt = |cmd: &mut Command, what: &str| {
-        if let Err(e) = run(cmd, what) {
-            failures.push(format!("{e:#}"));
-        }
-    };
-    if touched("/etc/systemd/") {
-        attempt(
-            Command::new("systemctl").arg("daemon-reload"),
-            "systemctl daemon-reload",
-        );
-    }
-    if touched("/etc/sysctl.d/") {
-        attempt(Command::new("sysctl").arg("--system"), "sysctl --system");
-    }
-    if touched("/etc/udev/rules.d/") {
-        attempt(
-            Command::new("udevadm").args(["control", "--reload"]),
-            "udevadm control --reload",
-        );
-    }
-    if touched("/etc/locale.gen") {
-        attempt(&mut Command::new("locale-gen"), "locale-gen");
-    }
-    if touched("/etc/tmpfiles.d/") {
-        attempt(
-            Command::new("systemd-tmpfiles").arg("--create"),
-            "systemd-tmpfiles --create",
-        );
-    }
-    if touched("/etc/sysusers.d/") {
-        attempt(&mut Command::new("systemd-sysusers"), "systemd-sysusers");
-    }
-    if touched("/etc/modules-load.d/") {
-        attempt(
-            Command::new("systemctl").args(["restart", "systemd-modules-load.service"]),
-            "restarting systemd-modules-load",
-        );
-    }
-    // Reloaded, never restarted: restarting dbus or logind tears down every session.
-    let reloads = [
-        ("/etc/dbus-1/", "dbus.service"),
-        ("/etc/systemd/logind.conf", "systemd-logind.service"),
-    ];
-    for (prefix, unit) in reloads {
-        if touched(prefix) && unit_active(unit) {
-            attempt(
-                Command::new("systemctl").args(["reload", unit]),
-                &format!("reloading {unit}"),
-            );
-        }
-    }
-    if touched("/etc/systemd/user/") {
-        for user in logged_in_users() {
-            attempt(
-                Command::new("systemctl").args(["--user", "-M", &format!("{user}@"), "daemon-reload"]),
-                &format!("reloading {user}'s user units"),
-            );
-        }
-    }
-    failures
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn unit_active(unit: &str) -> bool {
-    Command::new("systemctl")
-        .args(["is-active", "--quiet", unit])
-        .status()
-        .is_ok_and(|status| status.success())
-}
+    #[test]
+    fn managed_paths_split_into_deployment_trees_and_the_live_system() {
+        assert_eq!(deployment_tree("/etc/x"), Some("etc"));
+        assert_eq!(deployment_tree("/usr/local/bin/x"), Some("usr"));
+        assert_eq!(deployment_tree("/opt/x/y"), Some("opt"));
+        assert_eq!(deployment_tree("/etcetera/x"), None);
+        assert_eq!(deployment_tree("/home/u/.x"), None);
+        assert_eq!(deployment_tree("/efi/loader/entries/m.conf"), None);
+        assert_eq!(deployment_tree("/var/lib/x"), None);
+    }
 
-/// Users with a running user manager, from /run/user/<uid>.
-fn logged_in_users() -> Vec<String> {
-    fs::read_dir("/run/user")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-        .filter_map(|id| {
-            let entry = unsafe { libc::getpwuid(id) };
-            (!entry.is_null()).then(|| c_text(unsafe { (*entry).pw_name }))
-        })
-        .collect()
-}
-
-/// systemctl calls whose failures are collected; at boot, before sysinit.target, jobs are only queued, since waiting for a unit that waits for sysinit would deadlock.
-fn systemctl_attempts(at_boot: bool) -> (Vec<String>, impl FnMut(&[&str], &mut Vec<String>)) {
-    let attempt = move |args: &[&str], failures: &mut Vec<String>| {
-        let mut cmd = Command::new("systemctl");
-        if at_boot {
-            cmd.arg("--no-block");
-        }
-        if let Err(e) = run(cmd.args(args), &format!("systemctl {}", args.join(" "))) {
-            failures.push(format!("{e:#}"));
-        }
-    };
-    (Vec::new(), attempt)
-}
-
-/// Stops and disables units turned off or leaving the config, while their unit files still exist.
-pub fn stop_services(change: &SystemChange, at_boot: bool) -> Vec<String> {
-    let (mut failures, mut attempt) = systemctl_attempts(at_boot);
-    for (unit, enabled) in &change.to.services {
-        if !*enabled && is_enabled(unit, false) {
-            attempt(&["disable", "--now", unit], &mut failures);
-        }
+    #[test]
+    fn accounts_come_from_the_roots_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("passwd"),
+            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000:Alice:/home/alice:/bin/zsh\nbroken line\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("group"),
+            "root:x:0:\nalice:x:1000:\nwheel:x:998:alice\nvideo:x:985:bob,alice\n",
+        )
+        .unwrap();
+        let accounts = Accounts::read(dir.path());
+        assert_eq!((accounts.uid("alice"), accounts.gid("wheel")), (Some(1000), Some(998)));
+        assert_eq!(accounts.uid("bob"), None);
+        assert!(accounts.uid_taken(1000) && !accounts.uid_taken(1001));
+        let alice = User {
+            uid: None,
+            group: None,
+            groups: vec!["video".into(), "wheel".into()],
+            shell: "/bin/zsh".into(),
+            home: None,
+            description: "Alice".into(),
+            system: false,
+        };
+        assert!(!accounts.differs("alice", &alice));
+        let more = User {
+            groups: vec!["wheel".into()],
+            ..alice.clone()
+        };
+        assert!(accounts.differs("alice", &more));
+        assert!(accounts.differs("carol", &alice));
     }
-    for (unit, enabled) in &change.from.services {
-        if !change.to.services.contains_key(unit) && *enabled && is_enabled(unit, false) {
-            attempt(&["disable", "--now", unit], &mut failures);
-        }
-    }
-    let user_off = change
-        .to
-        .user_services
-        .iter()
-        .filter(|(_, enabled)| !**enabled)
-        .map(|(unit, _)| unit);
-    let user_gone = change
-        .from
-        .user_services
-        .keys()
-        .filter(|unit| !change.to.user_services.contains_key(*unit));
-    for unit in user_off.chain(user_gone) {
-        if is_enabled(unit, true) {
-            attempt(&["--global", "disable", unit], &mut failures);
-        }
-    }
-    failures
-}
-
-/// Enables and starts units, restarting changed ones; failures are reported, not fatal, so a broken unit can't undo a switch.
-pub fn start_services(change: &SystemChange, at_boot: bool) -> Vec<String> {
-    let changed = change.changed_paths();
-    let (mut failures, mut attempt) = systemctl_attempts(at_boot);
-    for (unit, enabled) in &change.to.services {
-        if *enabled && !is_enabled(unit, false) {
-            attempt(&["enable", "--now", unit], &mut failures);
-        } else if *enabled
-            && changed.iter().any(|path| {
-                *path == format!("/etc/systemd/system/{unit}")
-                    || path.starts_with(&format!("/etc/systemd/system/{unit}.d/"))
-            })
-        {
-            attempt(&["try-restart", unit], &mut failures);
-        }
-    }
-    for (unit, enabled) in &change.to.user_services {
-        if *enabled && !is_enabled(unit, true) {
-            attempt(&["--global", "enable", unit], &mut failures);
-        }
-    }
-    failures
-}
-
-/// Every way the managed files and users differ from the target.
-pub fn mismatches(change: &SystemChange) -> Result<Vec<String>> {
-    let mut problems = Vec::new();
-    for (path, want) in &change.to.files {
-        let unreplaceable = want.link.is_some() && mount_point(Path::new(path));
-        if !unreplaceable && !matches(Path::new(path), &on_disk(Path::new(path))?, want) {
-            problems.push(format!("{path} doesn't have its managed contents"));
-        }
-    }
-    for name in change.to.users.keys() {
-        if uid(name).is_none() {
-            problems.push(format!("user {name} doesn't exist"));
-        }
-    }
-    for name in change.to.groups.keys() {
-        if gid(name).is_none() {
-            problems.push(format!("group {name} doesn't exist"));
-        }
-    }
-    Ok(problems)
 }

@@ -2,7 +2,6 @@ mod eject;
 mod helper;
 mod init;
 mod lock;
-mod recover;
 mod switch;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -12,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use archix::apply::{self, PacmanLock};
 use archix::archive::Archive;
 use archix::aur;
 use archix::aur::git::AurGit;
@@ -20,8 +18,8 @@ use archix::aur::index::Index;
 use archix::date::Date;
 use archix::fetch::{Wanted, fetch_all};
 use archix::flatpak;
-use archix::journal::{Journal, Kind, Transaction};
 use archix::lock::{ARCHIVE_REPO, HostLock, Locked};
+use archix::packages::{self, Packages, PacmanLock};
 use archix::pacman::LocalPkg;
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
@@ -33,7 +31,6 @@ use archix::value::Value;
 pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, upgrade};
 pub use init::init;
 pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
-pub use recover::recover;
 
 /// `archix secure-boot setup`.
 pub fn secure_boot_revoke(dry_run: bool, noconfirm: bool) -> Result<()> {
@@ -76,7 +73,9 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     missing == 0
 }
 pub use eject::eject;
-pub use switch::{boot_check, cache_push, declare_and_switch, gc, generations, hook_record, rescue, rollback, switch};
+pub use switch::{
+    boot_check, cache_push, declare_and_switch, gc, generations, hook_record, prune_hidden, rollback, switch,
+};
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
@@ -93,13 +92,6 @@ pub enum Snapshot {
     On(Date),
 }
 
-#[derive(Clone, Copy)]
-pub enum RecoverMode {
-    Continue,
-    Rollback,
-    Abandon,
-}
-
 /// The package-related settings from the evaluated config.
 struct Declared {
     packages: Vec<String>,
@@ -110,6 +102,7 @@ struct Declared {
     ignored: BTreeSet<String>,
     keep: u32,
     keep_days: u32,
+    deployments_keep: u32,
     aur_url: String,
     aur_review: bool,
     archive_url: String,
@@ -122,7 +115,6 @@ struct Declared {
     require_locked_build: bool,
     missing_versions: Option<Nearest>,
     boot: Option<BootSettings>,
-    snapshots: bool,
     /// (remote, app id) pairs.
     flatpak_apps: Vec<(String, String)>,
     flatpak_remotes: BTreeMap<String, flatpak::Remote>,
@@ -135,7 +127,6 @@ struct BootSettings {
     esp: String,
     kernel: String,
     microcode: Vec<String>,
-    entries: u32,
     secure_boot: Option<bool>,
     cmdline: String,
     protected_entry: bool,
@@ -150,7 +141,31 @@ enum ThirdPartyFallback {
     Fail,
 }
 
+impl BootSettings {
+    fn plan(&self) -> archix::system::boot::BootPlan {
+        archix::system::boot::BootPlan {
+            esp: self.esp.clone(),
+            kernel: self.kernel.clone(),
+            microcode: self.microcode.clone(),
+            cmdline: self.cmdline.clone(),
+            secure_boot: self.secure_boot,
+            anticheat: self.protected_entry,
+            tries: self.tries,
+        }
+    }
+}
+
 impl Declared {
+    /// How deployments boot, which every switch needs.
+    fn boot_plan(&self) -> Result<archix::system::boot::BootPlan> {
+        match &self.boot {
+            Some(boot) => Ok(boot.plan()),
+            None => bail!(
+                "archix boots every generation as its own deployment from a systemd-boot entry, so it needs boot.loader = \"systemd-boot\" (with boot.esp and kernel_params); nothing was changed"
+            ),
+        }
+    }
+
     fn repo_names(&self) -> Vec<String> {
         self.repos.iter().map(|repo| repo.name.clone()).collect()
     }
@@ -250,6 +265,16 @@ fn declared(config: &Value) -> Result<Declared> {
         ignored: strings("ignored_packages").into_iter().collect(),
         keep: generation_limit("keep", 10),
         keep_days: generation_limit("keep_days", 30),
+        deployments_keep: match map.get("deployments") {
+            Some(Value::Map(deployments)) => match deployments.get("keep") {
+                Some(Value::Int(n)) if *n >= 1 => u32::try_from(*n).unwrap_or(2),
+                Some(Value::Int(n)) => {
+                    bail!("deployments.keep is {n}, but archix always keeps at least 1 deployment, the one that boots")
+                }
+                _ => 2,
+            },
+            _ => 2,
+        },
         aur_url: match map.get("aur") {
             Some(Value::Map(aur)) => match aur.get("url") {
                 Some(Value::Str(url)) => url.clone(),
@@ -312,7 +337,7 @@ fn declared(config: &Value) -> Result<Declared> {
                     );
                 }
                 Some(BootSettings {
-                    esp: text("esp", "/boot"),
+                    esp: text("esp", "/efi"),
                     kernel: text("kernel", "linux"),
                     microcode: match boot.get("microcode") {
                         Some(Value::List(items)) => items
@@ -323,10 +348,6 @@ fn declared(config: &Value) -> Result<Declared> {
                             })
                             .collect(),
                         _ => Vec::new(),
-                    },
-                    entries: match boot.get("entries") {
-                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(5).max(1),
-                        _ => 5,
                     },
                     secure_boot: match boot.get("secure_boot") {
                         Some(Value::Bool(b)) => Some(*b),
@@ -343,7 +364,6 @@ fn declared(config: &Value) -> Result<Declared> {
             }
             _ => None,
         },
-        snapshots: !matches!(map.get("boot"), Some(Value::Map(boot)) if boot.get("snapshots") == Some(&Value::Bool(false))),
         missing_versions: match map.get("missing_versions") {
             Some(Value::Str(policy)) if policy == "newer" => Some(Nearest::Newer),
             Some(Value::Str(policy)) if policy == "older" => Some(Nearest::Older),
@@ -426,7 +446,7 @@ fn declared(config: &Value) -> Result<Declared> {
         if boot.revoke_unused {
             needed.push("efitools".to_string());
         }
-        // A boot-time rollback reinstalls the kernel, and DKMS can only rebuild its modules for it with that kernel's headers.
+        // DKMS builds its modules for a new kernel in the staging root, which needs that kernel's headers.
         if declared
             .packages
             .iter()
@@ -443,14 +463,15 @@ fn declared(config: &Value) -> Result<Declared> {
     Ok(declared)
 }
 
-/// Changes that turn `installed` into `packages`; removals skip ignored packages and are only warned about in warn mode, and keyrings never go back, which the third list names.
+/// Changes that turn `installed`, read from pacman database `db`, into `packages`; removals skip ignored packages and are only warned about in warn mode, and keyrings never go back, which the third list names.
 fn select_changes(
     packages: &BTreeMap<String, Locked>,
     installed: &BTreeMap<String, LocalPkg>,
+    db: &Path,
     remove_undeclared: bool,
     ignored: &BTreeSet<String>,
 ) -> (Vec<Change>, Vec<String>, Vec<String>) {
-    let keyrings = archix::pacman::keyring_packages(&Paths::system().local_db());
+    let keyrings = archix::pacman::keyring_packages(db);
     let mut warned = Vec::new();
     let mut kept = Vec::new();
     let changes = plan(packages, installed)
@@ -564,9 +585,10 @@ fn keep_third_party_copies(
     }
 }
 
-/// The third-party repos in pacman.conf, which archix keeps in step with the config, for rollbacks that don't evaluate it.
+/// The third-party repos in the current deployment's pacman.conf, which archix keeps in step with the config, for rollbacks that don't evaluate it.
 fn third_party_repos(paths: &Paths) -> Vec<Repo> {
-    let text = std::fs::read_to_string(&paths.pacman_conf).unwrap_or_default();
+    let conf = switch::current_root(paths).join("etc/pacman.conf");
+    let text = std::fs::read_to_string(conf).unwrap_or_default();
     let (_, custom) = archix::capture::parse_pacman_conf(&text, |path| std::fs::read_to_string(path).ok());
     custom
         .into_iter()
@@ -617,7 +639,7 @@ fn add_download_sizes(
     }
 }
 
-/// Downloads everything `changes` installs and builds the transaction that ends at exactly `packages`.
+/// Downloads everything `changes` installs and prepares the package changes that end at exactly `packages`.
 fn transaction_for(
     archive: &Archive,
     paths: &Paths,
@@ -626,7 +648,7 @@ fn transaction_for(
     changes: &[Change],
     built: &BTreeMap<String, PathBuf>,
     repos: &[Repo],
-) -> Result<Transaction> {
+) -> Result<Packages> {
     let mut wanted = Vec::new();
     let mut remove = Vec::new();
     let mut install = Vec::new();
@@ -654,14 +676,10 @@ fn transaction_for(
         std::slice::from_ref(&paths.pacman_cache),
         &wanted,
     )?);
-    Ok(Transaction {
-        config: Vec::new(),
+    Ok(Packages {
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
-        at_boot: false,
         install,
         remove,
-        system: None,
-        boot: None,
         versions: packages
             .iter()
             .filter(|(_, pkg)| !pkg.build_only)
@@ -673,33 +691,6 @@ fn transaction_for(
             .map(|(name, pkg)| (name.clone(), pkg.explicit))
             .collect(),
     })
-}
-
-fn describe_unfinished(journal: &Journal) -> String {
-    let step = journal.next_step().map_or("cleanup", |step| step.describe());
-    format!(
-        "the {} to {} (started at unix time {}) was interrupted while {step}",
-        kind_name(journal.kind),
-        journal.target,
-        journal.started
-    )
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Switch => "switch",
-        Kind::Rollback => "rollback",
-    }
-}
-
-fn refuse_if_unfinished(paths: &Paths) -> Result<()> {
-    if let Some(journal) = Journal::load(&paths.journal())? {
-        bail!(
-            "{}.\nrun `archix recover` to continue it, roll it back or abandon it",
-            describe_unfinished(&journal)
-        );
-    }
-    Ok(())
 }
 
 /// A warning when the lock's snapshot is older than the config allows: fixes released since aren't installed.
@@ -714,7 +705,7 @@ fn lock_age_warning(lock: &HostLock, warn_after_days: u32) -> Option<String> {
 }
 
 fn check_pacman_free(paths: &Paths) -> Result<()> {
-    match apply::pacman_lock(paths) {
+    match packages::pacman_lock(paths) {
         PacmanLock::Free => Ok(()),
         PacmanLock::Running => bail!("pacman is running; wait for it to finish"),
         PacmanLock::Stale => bail!(

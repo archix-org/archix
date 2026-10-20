@@ -5,16 +5,11 @@ pub mod blobs;
 pub mod boot;
 pub mod btrfs;
 pub mod deploy_boot;
-pub mod dkms;
 pub mod firewall;
 pub mod hooks;
 pub mod merge;
-pub mod rescue;
-pub mod restart;
 pub mod revoke;
-pub mod running;
 pub mod secureboot;
-pub mod snapshot;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,9 +42,6 @@ pub struct SystemState {
     /// Extra versions per package that a downgrade mustn't cross without asking.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unsafe_downgrades: BTreeMap<String, Vec<String>>,
-    /// Units to always (true) or never (false) restart when a switch replaces files they use.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub restart_if_changed: BTreeMap<String, bool>,
 }
 
 /// A script run after a switch; `user` None means root.
@@ -390,12 +382,6 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         b.text(firewall::RULES, &rules);
         b.text(&format!("/etc/systemd/system/{}", firewall::UNIT), &firewall::unit());
         b.state.services.insert(firewall::UNIT.to_string(), true);
-        let reload = Hook {
-            run: format!("systemctl try-reload-or-restart {}", firewall::UNIT),
-            user: None,
-            after: Vec::new(),
-        };
-        b.state.on_change.insert(firewall::RULES.to_string(), reload);
     }
 
     render_home(&mut b, config, config_dir)?;
@@ -439,11 +425,6 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     }
     for (name, versions) in map(config, "unsafe_downgrades").into_iter().flatten() {
         b.state.unsafe_downgrades.insert(name.clone(), strings(Some(versions)));
-    }
-    for (unit, restart) in map(config, "restart_if_changed").into_iter().flatten() {
-        b.state
-            .restart_if_changed
-            .insert(unit_name(unit)?.to_string(), *restart == Value::Bool(true));
     }
     for (name, spec) in map(config, "hooks").into_iter().flatten() {
         let hook = Hook {

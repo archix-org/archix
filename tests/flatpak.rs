@@ -1,4 +1,4 @@
-//! Installs Flatpak apps from a local repository; run only inside the systemd-booted Arch container via `tests/arch/run.sh`.
+//! Installs Flatpak apps from a local repository on the live system, the container's own; run only inside the systemd-booted Arch container via `tests/arch/run.sh`.
 
 mod common;
 
@@ -61,6 +61,8 @@ fn installed_commit() -> Option<String> {
 #[ignore]
 fn flatpak_apps_are_locked_to_commits_and_roll_back() {
     let _system = lock_system();
+    // Flatpak apps live outside deployments, so flatpak runs from the live system, here the container's.
+    pacman(&["-S", "--needed", "flatpak"]);
     let setup = Setup::new(&["flatpak"], "");
     setup.ok(&["switch", "--noconfirm"]);
     let first = publish_hello(1);
@@ -151,6 +153,4 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
          flatpak remote-delete --system --force build || true
          rm -rf {REPO}"
     ));
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
 }

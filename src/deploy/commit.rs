@@ -57,28 +57,33 @@ impl EspStep for SystemdBoot {
     }
 
     fn clean(&self) -> Result<()> {
-        for (dir, prefix) in [
-            ("EFI/archix", ""),
-            ("loader/entries", "archix-"),
-            ("loader", "loader.conf"),
-        ] {
-            let dir = self.esp.join(dir);
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
-            };
-            for entry in entries {
-                let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with(prefix) && name.ends_with(".tmp") && entry.file_type()?.is_file() {
-                    fs::remove_file(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
-                }
+        clean_esp(&self.esp)
+    }
+}
+
+/// Removes the temporary files an interrupted write left in archix's ESP directories.
+pub fn clean_esp(esp: &Path) -> Result<()> {
+    for (dir, prefix) in [
+        ("EFI/archix", ""),
+        ("loader/entries", "archix-"),
+        ("loader", "loader.conf"),
+    ] {
+        let dir = esp.join(dir);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix) && name.ends_with(".tmp") && entry.file_type()?.is_file() {
+                fs::remove_file(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
             }
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// loader.conf with `default` naming `entry`, everything else kept.
@@ -116,7 +121,7 @@ impl Staged {
     }
 }
 
-fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
+pub(super) fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
     let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).context("path has a NUL byte");
     let (c_from, c_to) = (c(from)?, c(to)?);
     let done = unsafe {

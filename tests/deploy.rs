@@ -748,6 +748,10 @@ fn deploy_helper() {
         return;
     };
     let root = PathBuf::from(std::env::var("ARCHIX_DEPLOY_ROOT").unwrap());
+    if action == "layout" {
+        archix::deploy::layout::lay_out(&root).unwrap();
+        return;
+    }
     let store = Store::open(&root).unwrap();
     if action == "delete" {
         let number = std::env::var("ARCHIX_DEPLOY_NUMBER").unwrap().parse().unwrap();
@@ -1300,4 +1304,209 @@ fn mkinitcpio_autodetect_in_the_view_sees_the_root_filesystem() {
             stderr(&root)
         );
     }
+}
+
+/// A plain Arch-like root on a fresh filesystem, as the first switch finds one: usr with a hardlinked pair and a file capability, etc, opt, boot, pacman's database, the static binary and an ESP directory.
+fn plain_root(fs_type: &str) -> LoopFs {
+    let loop_fs = LoopFs::new(fs_type);
+    let root = &loop_fs.mnt;
+    for dir in [
+        "usr/bin",
+        "usr/lib/archix",
+        "etc",
+        "opt/app",
+        "boot",
+        "var/lib/pacman/local/base-1",
+        "var/log",
+        "efi",
+        "home",
+        "proc",
+        "sys",
+        "dev",
+        "run",
+        "tmp",
+    ] {
+        fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    for (link, target) in [("bin", "usr/bin"), ("lib", "usr/lib")] {
+        std::os::unix::fs::symlink(target, root.join(link)).unwrap();
+    }
+    fs::write(root.join("usr/bin/tool"), "tool\n").unwrap();
+    fs::set_permissions(root.join("usr/bin/tool"), fs::Permissions::from_mode(0o755)).unwrap();
+    xattr::set(&root.join("usr/bin/tool"), c"security.capability", &capability()).unwrap();
+    fs::write(root.join("usr/bin/a"), "same file\n").unwrap();
+    fs::hard_link(root.join("usr/bin/a"), root.join("usr/bin/b")).unwrap();
+    fs::write(root.join("usr/lib/archix/archix-static"), "static\n").unwrap();
+    fs::write(root.join("etc/hostname"), "plain\n").unwrap();
+    fs::write(root.join("etc/shadow"), "root:!:1::::::\n").unwrap();
+    fs::set_permissions(root.join("etc/shadow"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(root.join("opt/app/data"), "data\n").unwrap();
+    fs::write(root.join("boot/vmlinuz-linux"), "kernel\n").unwrap();
+    fs::write(root.join("var/lib/pacman/local/base-1/desc"), "%NAME%\nbase\n").unwrap();
+    loop_fs
+}
+
+/// The trees a layout moves, keyed by tree name, as `snapshot` sees them.
+fn live_trees(root: &Path) -> BTreeMap<String, BTreeMap<PathBuf, Entry>> {
+    [
+        ("usr", "usr"),
+        ("etc", "etc"),
+        ("opt", "opt"),
+        ("boot", "boot"),
+        ("pacman", "var/lib/pacman/local"),
+    ]
+    .into_iter()
+    .map(|(tree, at)| (tree.to_string(), snapshot(&root.join(at))))
+    .collect()
+}
+
+fn mounted(path: &Path) -> bool {
+    archix::deploy::view::mount_points(&fs::read("/proc/self/mountinfo").unwrap()).contains(&path.to_path_buf())
+}
+
+#[test]
+#[ignore]
+fn the_first_layout_copies_the_live_trees_into_deployment_1_binds_them_back_and_prunes_what_they_hide() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let loop_fs = plain_root(fs_type);
+        let root = loop_fs.mnt.clone();
+        let before = live_trees(&root);
+        assert_eq!(archix::deploy::layout::unsupported(&root, &root.join("efi")), None);
+        let store = archix::deploy::layout::lay_out(&root).unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![1], "{fs_type}");
+        assert_eq!(store.current().unwrap(), Some(1), "{fs_type}");
+        let one = store.path(1);
+        for (tree, entries) in &before {
+            assert_eq!(&snapshot(&one.join(tree)), entries, "{fs_type}: deployment 1's {tree}");
+        }
+        assert!(one.join("dkms").is_dir() && one.join("var-upper").is_dir());
+        assert_eq!(
+            live_trees(&root),
+            before,
+            "{fs_type}: the live trees stay whole until bound"
+        );
+        if fs_type == "btrfs" {
+            assert_eq!(ino(&one), 256, "deployment 1 is a subvolume");
+        } else {
+            assert_eq!(
+                ino(&one.join("usr/bin/tool")),
+                ino(&root.join("usr/bin/tool")),
+                "usr is hardlinked"
+            );
+            assert_ne!(
+                ino(&one.join("etc/hostname")),
+                ino(&root.join("etc/hostname")),
+                "etc is a real copy"
+            );
+        }
+
+        archix::deploy::layout::bind_live(&root, &store, 1).unwrap();
+        for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
+            assert!(mounted(&root.join(at)), "{fs_type}: {at} isn't bound");
+        }
+        let err = fs::write(root.join("usr/bin/new"), "x").unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{fs_type}: /usr is read-only");
+        fs::write(root.join("etc/new"), "x").unwrap();
+        assert!(
+            one.join("etc/new").exists(),
+            "{fs_type}: the live /etc is deployment 1's"
+        );
+        fs::remove_file(one.join("etc/new")).unwrap();
+
+        archix::deploy::layout::prune_hidden(&root, Path::new(env!("CARGO_BIN_EXE_archix"))).unwrap();
+        for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
+            sh(Command::new("umount").arg(root.join(at)));
+        }
+        for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local"] {
+            assert_eq!(
+                fs::read_dir(root.join(at)).unwrap().count(),
+                0,
+                "{fs_type}: the hidden {at} wasn't pruned"
+            );
+        }
+        for (tree, entries) in &before {
+            let now = snapshot(&one.join(tree));
+            // Writing etc/new above changed only the etc directory's own times.
+            let kept = |(rel, _): &(&PathBuf, &Entry)| tree != "etc" || !rel.as_os_str().is_empty();
+            assert!(
+                now.iter().filter(kept).eq(entries.iter().filter(kept)),
+                "{fs_type}: pruning touched deployment 1's {tree}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn pruning_refuses_a_root_whose_trees_arent_bound_from_a_deployment() {
+    let _serial = serial();
+    let loop_fs = plain_root("ext4");
+    let root = loop_fs.mnt.clone();
+    let before = live_trees(&root);
+    archix::deploy::layout::lay_out(&root).unwrap();
+    let err = archix::deploy::layout::prune_hidden(&root, Path::new(env!("CARGO_BIN_EXE_archix"))).unwrap_err();
+    assert!(format!("{err:#}").contains("isn't bound from a deployment"), "{err:#}");
+    assert_eq!(live_trees(&root), before, "nothing was pruned");
+}
+
+#[test]
+#[ignore]
+fn a_layout_killed_partway_leaves_the_old_system_whole_and_starts_over_cleanly() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let loop_fs = plain_root(fs_type);
+        let root = loop_fs.mnt.clone();
+        let before = live_trees(&root);
+        for step in ["layout-copied", "layout-committed"] {
+            let what = format!("{fs_type}, killed at {step}");
+            let killed = helper("layout", &root, &[("ARCHIX_TEST_CRASH", step)])
+                .output()
+                .unwrap();
+            assert_eq!(
+                std::os::unix::process::ExitStatusExt::signal(&killed.status),
+                Some(libc::SIGKILL),
+                "{what}: {}",
+                stderr(&killed)
+            );
+            assert!(
+                !root.join("archix/current").exists(),
+                "{what}: nothing names a deployment yet"
+            );
+            assert_eq!(live_trees(&root), before, "{what}: the live system changed");
+        }
+        let store = archix::deploy::layout::lay_out(&root).unwrap();
+        assert_eq!(store.deployments().unwrap(), vec![1], "{fs_type}");
+        let names: Vec<String> = fs::read_dir(store.deploy_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["1"], "{fs_type}: leftovers of the killed layouts");
+        assert_eq!(snapshot(&store.path(1).join("usr")), before["usr"], "{fs_type}");
+    }
+}
+
+#[test]
+#[ignore]
+fn a_separate_boot_or_usr_or_an_esp_in_boot_is_refused_before_anything_changes() {
+    let _serial = serial();
+    let loop_fs = plain_root("ext4");
+    let root = loop_fs.mnt.clone();
+    fs::create_dir_all(root.join("boot/efi")).unwrap();
+    let refused = |esp: &str| archix::deploy::layout::unsupported(&root, &root.join(esp)).unwrap_or_default();
+    assert!(refused("boot/efi").contains("in /boot"), "{}", refused("boot/efi"));
+    for tree in ["boot", "usr", "opt"] {
+        sh(Command::new("mount")
+            .args(["-t", "tmpfs", "tmpfs"])
+            .arg(root.join(tree)));
+        let why = refused("efi");
+        sh(Command::new("umount").arg(root.join(tree)));
+        assert!(
+            why.contains(&format!("/{tree} is a separate filesystem")),
+            "{tree}: {why}"
+        );
+    }
+    fs::remove_file(root.join("usr/lib/archix/archix-static")).unwrap();
+    assert!(refused("efi").contains("archix-static"));
+    assert!(!root.join("archix").exists());
 }

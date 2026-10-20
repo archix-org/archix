@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use super::git::AurGit;
 use super::srcinfo::SrcInfo;
-use crate::apply::TRANSACTION_ENV;
 use crate::archive::Archive;
 use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all};
+use crate::packages::TRANSACTION_ENV;
 use crate::pacman::read_sync_db;
 use crate::paths::Paths;
 use crate::repos::{Repo, is_official};

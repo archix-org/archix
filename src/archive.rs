@@ -11,7 +11,7 @@ use crate::date::Date;
 pub const ARCHIVE_URL: &str = "https://archive.archlinux.org";
 pub const ARCH: &str = "x86_64";
 
-/// The archive `switch` last used, which rollback and recover follow since they don't evaluate the config.
+/// The archive `switch` last used, which rollback follows since it doesn't evaluate the config.
 pub fn configured(state: &Path) -> String {
     fs::read_to_string(state.join("archive-url"))
         .map(|url| url.trim().to_string())
@@ -20,7 +20,7 @@ pub fn configured(state: &Path) -> String {
         .unwrap_or_else(|| ARCHIVE_URL.to_string())
 }
 
-/// The archive mirrors `switch` last used, for rollback and recover.
+/// The archive mirrors `switch` last used, for rollback.
 pub fn configured_mirrors(state: &Path) -> Vec<String> {
     fs::read_to_string(state.join("archive-mirrors"))
         .map(|text| {
@@ -40,7 +40,7 @@ pub fn remember_mirrors(state: &Path, mirrors: &[String]) -> Result<()> {
     crate::durable::write(&state.join("archive-mirrors"), mirrors.join("\n").as_bytes())
 }
 
-/// The package caches `switch` last used, for rollback and recover.
+/// The package caches `switch` last used, for rollback.
 pub fn configured_caches(state: &Path) -> Vec<String> {
     fs::read_to_string(state.join("package-caches"))
         .map(|text| {

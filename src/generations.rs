@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,15 +27,12 @@ pub struct Generation {
     pub config_dirty: bool,
     #[serde(default)]
     pub system: SystemState,
-    /// A read-only btrfs snapshot of / taken just before this generation was applied.
-    #[serde(default)]
-    pub snapshot: Option<String>,
     /// Flatpak apps this generation pinned, by id.
     #[serde(default)]
     pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
-    /// What rescue restores: the dependency closure of systemd, pacman, archix and the kernels, recorded at activation.
-    #[serde(default)]
-    pub rescue: Vec<String>,
+    /// The system as the first switch found it, laid out as deployment 1; its packages have no locked files, so it can't be rebuilt once dropped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub before_archix: bool,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -46,12 +42,16 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
-    /// The ESP holding this generation's boot entry, when archix manages booting.
+    /// How many deployments gc keeps besides the booted, current and boot-default ones.
+    #[serde(default = "default_deployments_keep")]
+    pub deployments_keep: u32,
+    /// How the generation's boot entry is built, so changing it makes a new generation and a rebuild builds the same entry.
     #[serde(default)]
-    pub esp: Option<String>,
-    /// The boot settings the entry was built with, so changing them makes a new generation.
-    #[serde(default)]
-    pub boot: Option<String>,
+    pub boot: Option<crate::system::boot::BootPlan>,
+}
+
+fn default_deployments_keep() -> u32 {
+    2
 }
 
 impl Generation {
@@ -65,6 +65,7 @@ impl Generation {
     }
 }
 
+/// The generation records; the current generation is the deployment /archix/current names.
 pub struct Store {
     dir: PathBuf,
     current: PathBuf,
@@ -74,7 +75,7 @@ impl Store {
     pub fn new(paths: &Paths) -> Store {
         Store {
             dir: paths.state.join("generations"),
-            current: paths.state.join("current"),
+            current: paths.root.join("archix/current"),
         }
     }
 
@@ -111,27 +112,32 @@ impl Store {
         read(&path)
     }
 
+    /// The generation of the current deployment, which boots when no boot entry picks another.
     pub fn current(&self) -> Result<Option<u32>> {
         match fs::read_link(&self.current) {
-            Ok(target) => {
-                let name = target
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                name.parse()
-                    .map(Some)
-                    .with_context(|| format!("{} points at {}", self.current.display(), target.display()))
-            }
+            Ok(target) => crate::deploy::store::parse_current(&target).map(Some).with_context(|| {
+                format!(
+                    "{} points at {}, not deploy/<number>",
+                    self.current.display(),
+                    target.display()
+                )
+            }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", self.current.display())),
         }
     }
 
-    /// Stores a new generation under the next free number; it only becomes current through `activate`.
-    pub fn create(&self, mut generation: Generation) -> Result<Generation> {
+    /// One past the newest generation.
+    pub fn next_number(&self) -> Result<u32> {
+        Ok(self.list()?.last().map_or(0, |g| g.number) + 1)
+    }
+
+    /// Stores a new generation under its own number, durably and whole.
+    pub fn save(&self, generation: &Generation) -> Result<()> {
         fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-        let last = self.list()?.last().map_or(0, |g| g.number);
-        generation.number = last + 1;
+        if self.path(generation.number).exists() {
+            bail!("generation {} already exists", generation.number);
+        }
         let tmp = self.dir.join(format!(".new-{}", generation.number));
         if tmp.exists() {
             fs::remove_dir_all(&tmp)?;
@@ -139,28 +145,18 @@ impl Store {
         fs::create_dir_all(&tmp)?;
         crate::durable::write(
             &tmp.join(GENERATION_FILE),
-            serde_json::to_string_pretty(&generation)?.as_bytes(),
+            serde_json::to_string_pretty(generation)?.as_bytes(),
         )?;
         fs::rename(&tmp, self.path(generation.number))
             .with_context(|| format!("storing generation {}", generation.number))?;
-        crate::durable::sync_dir(&self.path(generation.number))?;
-        Ok(generation)
+        crate::durable::sync_dir(&self.path(generation.number))
     }
 
-    /// Rewrites a stored generation, such as after its snapshot was taken.
+    /// Rewrites a stored generation, such as after its Flatpak apps were locked.
     pub fn update(&self, generation: &Generation) -> Result<()> {
         let path = self.path(generation.number).join(GENERATION_FILE);
         crate::durable::write(&path, serde_json::to_string_pretty(generation)?.as_bytes())
             .with_context(|| format!("updating generation {}", generation.number))
-    }
-
-    /// Points `current` at a generation by renaming a fresh symlink over it, which is atomic.
-    pub fn activate(&self, number: u32) -> Result<()> {
-        let tmp = self.current.with_extension("new");
-        let _ = fs::remove_file(&tmp);
-        symlink(Path::new("generations").join(number.to_string()), &tmp)?;
-        fs::rename(&tmp, &self.current).with_context(|| format!("activating generation {number}"))?;
-        crate::durable::sync_dir(&self.current)
     }
 
     pub fn delete(&self, number: u32) -> Result<()> {
@@ -213,6 +209,7 @@ pub fn config_commit(config_dir: &Path) -> Option<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     fn generation(number: u32, created: u64) -> Generation {
         Generation {
@@ -226,39 +223,36 @@ mod tests {
                 ignored: vec![],
                 keep: 10,
                 keep_days: 30,
-                esp: None,
+                deployments_keep: 2,
                 boot: None,
             },
             config_commit: None,
             config_dirty: false,
             system: SystemState::default(),
-            snapshot: None,
             flatpak: BTreeMap::new(),
-            rescue: Vec::new(),
+            before_archix: false,
         }
     }
 
-    fn store(root: &Path) -> Store {
-        let mut paths = Paths::system();
-        paths.state = root.to_path_buf();
-        Store::new(&paths)
-    }
-
     #[test]
-    fn creates_numbers_and_activates() {
+    fn the_current_generation_is_the_current_deployment() {
         let dir = tempfile::tempdir().unwrap();
-        let store = store(dir.path());
+        let store = Store::new(&Paths::under(dir.path()));
         assert_eq!(store.current().unwrap(), None);
-        let first = store.create(generation(0, 1)).unwrap();
-        let second = store.create(generation(0, 2)).unwrap();
-        assert_eq!((first.number, second.number), (1, 2));
-        store.activate(1).unwrap();
-        assert_eq!(store.current().unwrap(), Some(1));
-        store.activate(2).unwrap();
-        assert_eq!(store.current().unwrap(), Some(2));
-        assert!(store.delete(2).is_err(), "the current generation is protected");
+        assert_eq!(store.next_number().unwrap(), 1);
+        store.save(&generation(1, 1)).unwrap();
+        store.save(&generation(4, 2)).unwrap();
+        assert!(store.save(&generation(4, 3)).is_err(), "a number is taken once");
+        assert_eq!(store.next_number().unwrap(), 5);
+        fs::create_dir_all(dir.path().join("archix")).unwrap();
+        symlink("deploy/4", dir.path().join("archix/current")).unwrap();
+        assert_eq!(store.current().unwrap(), Some(4));
+        assert!(store.delete(4).is_err(), "the current generation is protected");
         store.delete(1).unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
+        fs::remove_file(dir.path().join("archix/current")).unwrap();
+        symlink("generations/4", dir.path().join("archix/current")).unwrap();
+        assert!(store.current().is_err());
     }
 
     #[test]

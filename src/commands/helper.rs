@@ -2,29 +2,29 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use archix::adopt::{adopt, newer_than_lock};
-use archix::apply;
 use archix::archive::{ARCHIVE_URL, Archive};
 use archix::aur::build::Builder;
 use archix::aur::index::Index;
 use archix::aur::install::Installer;
 use archix::aur::review::review;
+use archix::deploy::{self, build::Plan, layout};
+use archix::generations::{Store, now};
 use archix::installed::{self, FILE};
-use archix::journal::{Journal, Kind, Transaction};
 use archix::lock::AUR_REPO;
+use archix::packages::{Packages, check_packages};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
 use archix::plan::{Change, plan};
 use archix::resolve::{resolve, snapshot_conf};
+use archix::system::apply::SystemChange;
 
 use super::lock::{current_lock, load_lockfile, save_lock};
 use super::{
-    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, recipes, refuse_if_unfinished,
-    require_root, transaction_for, user_cache,
+    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, recipes, require_root,
+    transaction_for, user_cache,
 };
 
 /// An edit to an installed.lua that can be undone if the switch after it doesn't go through.
@@ -106,13 +106,18 @@ fn declared_elsewhere(config_dir: &Path, host: &str, listed: &[String], add: &[S
         .collect()
 }
 
-/// Installs packages without declaring them; the next switch removes them unless they get declared.
+/// Installs packages without declaring them, in a new deployment built on the current one; the next switch drops them unless they get declared.
 pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -> Result<()> {
     require_root("install --temp")?;
     let paths = Paths::system();
-    refuse_if_unfinished(&paths)?;
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
+    let boot = declared.boot_plan()?;
+    if !layout::laid_out(&paths.root) {
+        bail!(
+            "a temporary install builds on the current deployment, and this system isn't laid out as deployments yet; run `archix switch` first"
+        );
+    }
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
     let archive = Archive::new(&declared.archive_url)
         .with_mirrors(&declared.archive_mirrors)
@@ -132,7 +137,8 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     )?;
     review(&git, Some(&lock), &temp, declared.aur_review && !noconfirm, &confirm)?;
 
-    let installed = read_local_db(&paths.local_db())?;
+    let db = super::switch::installed_db(&paths);
+    let installed = read_local_db(&db)?;
     let changes: Vec<Change> = plan(&temp.packages, &installed)
         .into_iter()
         .filter(|change| matches!(change, Change::Install { .. }))
@@ -146,7 +152,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     }
     if !noconfirm
         && !confirm(&format!(
-            "install {} without declaring them?",
+            "install {} without declaring them, in a new deployment that boots at the next restart?",
             count(changes.len(), "package", "packages")
         ))?
     {
@@ -188,12 +194,8 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             _ => None,
         })
         .collect();
-    let transaction = Transaction {
-        config: Vec::new(),
+    let packages = Packages {
         reinstall: false,
-        at_boot: false,
-        system: None,
-        boot: None,
         install: full.install,
         remove: Vec::new(),
         versions: full
@@ -203,14 +205,49 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             .collect(),
         reasons: new.iter().map(|name| ((*name).clone(), names.contains(name))).collect(),
     };
-    archix::conflicts::check(&transaction.install, &transaction.remove, &paths.local_db())?;
-    apply::check_packages(&transaction)?;
-    let what = format!("a temporary install of {}", names.join(" "));
-    let mut journal = Journal::new(Kind::Switch, target.host, what, installed, transaction);
-    journal.begin(&paths.journal())?;
-    apply::run(&paths, &mut journal, false)?;
+    let here = super::switch::current_root(&paths);
+    archix::conflicts::check(&packages.install, &packages.remove, &db, &here)?;
+    check_packages(&packages)?;
+    let store = Store::new(&paths);
+    let current = store.current()?.context("there's no current generation to build on")?;
+    let mut generation = store.get(current)?;
+    let deployments = deploy::Store::open(&paths.root)?;
+    let number = store.next_number()?.max(deployments.next_number()?);
+    generation.number = number;
+    generation.created = now();
+    generation.settings.boot = Some(boot.clone());
+    for name in &new {
+        let mut pkg = temp.packages[*name].clone();
+        pkg.explicit = names.contains(name);
+        if let Some(path) = built.get(*name) {
+            pkg.sha256 = archix::fetch::sha256(path)?;
+            pkg.file = path
+                .file_name()
+                .map_or(pkg.file.clone(), |file| file.to_string_lossy().into_owned());
+        }
+        generation.packages.insert((*name).clone(), pkg);
+    }
+    let system_change = SystemChange {
+        from: generation.system.clone(),
+        to: generation.system.clone(),
+    };
+    eprintln!(":: building deployment {number} from deployment {current}");
+    deploy::build::build(
+        &deployments,
+        &Plan {
+            paths: &paths,
+            number,
+            base: current,
+            packages: &packages,
+            system: &system_change,
+            boot: &boot,
+            repos: &declared.repos,
+            record: Some(&generation),
+            keep: declared.deployments_keep as usize,
+        },
+    )?;
     println!(
-        "installed {} without declaring it; the next `archix switch` removes it unless it's declared",
+        "installed {} without declaring it, in deployment {number}, which boots at the next restart; the next `archix switch` drops it unless it's declared",
         names.join(" ")
     );
     Ok(())
@@ -307,7 +344,7 @@ fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
         None => archive.latest()?,
     };
     let cache = user_cache()?;
-    let installed = read_local_db(&Paths::system().local_db()).unwrap_or_default();
+    let installed = read_local_db(&super::switch::installed_db(&Paths::system())).unwrap_or_default();
     let lowered: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
     let matches = |name: &str, description: &str| {
         let haystack = format!("{name} {description}").to_lowercase();
@@ -368,47 +405,17 @@ fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
-/// `archix -Syu`: pacman -Syu from live mirrors, adopt it, move AUR packages to their newest recipes, then switch.
+/// `archix -Syu`: moves the lock to the newest archive snapshot and AUR packages to their newest recipes, then switches; pacman can't upgrade a deployment in place.
 pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
     require_root("upgrade")?;
-    let paths = Paths::system();
-    refuse_if_unfinished(&paths)?;
-    check_pacman_free(&paths)?;
-    let mut pacman = Command::new("pacman");
-    pacman.arg("-Syu");
-    if noconfirm {
-        pacman.arg("--noconfirm");
-    }
-    if !pacman.status().context("running pacman -Syu")?.success() {
-        bail!("pacman -Syu failed; nothing else was changed");
-    }
-
+    check_pacman_free(&Paths::system())?;
     let declared = declared(target.config)?;
-    let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
-    let archive = Archive::new(&declared.archive_url)
-        .with_mirrors(&declared.archive_mirrors)
-        .with_caches(&declared.package_caches);
-    let git = aur_git(&declared)?;
-    let installed = read_local_db(&paths.local_db())?;
-    if !newer_than_lock(&lock, &installed).is_empty() {
-        let previous = lock.clone();
-        let recipes = recipes(target, &declared)?;
-        let aur = aur_source(&git, &declared, &archive, Some(&previous), false, &recipes);
-        let adopted = adopt(
-            &archive,
-            &user_cache()?,
-            &paths,
-            &previous,
-            &installed,
-            &declared.repos,
-            Some(&aur),
-        )?;
-        let mut lockfile = load_lockfile(target)?;
-        save_lock(target, &mut lockfile, Some(&previous), &adopted)?;
-        drop(aur);
-        lock = adopted;
-    }
+    let (lock, _) = current_lock(target, &declared, Snapshot::Latest, true, noconfirm, false)?;
     if lock.packages.values().any(|pkg| pkg.repo == AUR_REPO) {
+        let git = aur_git(&declared)?;
+        let archive = Archive::new(&declared.archive_url)
+            .with_mirrors(&declared.archive_mirrors)
+            .with_caches(&declared.package_caches);
         let recipes = recipes(target, &declared)?;
         let aur = aur_source(&git, &declared, &archive, None, true, &recipes);
         let mut fresh = resolve(

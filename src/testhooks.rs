@@ -27,6 +27,16 @@ pub fn kernel_cmdline() -> String {
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
 
+/// The root whose /archix holds the deployments, or ARCHIX_TEST_ROOT in a debug build, so tests can switch a machine laid out in a directory.
+pub fn root() -> std::path::PathBuf {
+    if cfg!(debug_assertions)
+        && let Some(root) = std::env::var_os("ARCHIX_TEST_ROOT")
+    {
+        return std::path::PathBuf::from(root);
+    }
+    std::path::PathBuf::from("/")
+}
+
 /// systemd-boot's LoaderFeatures, or ARCHIX_TEST_LOADER_FEATURES in a debug build.
 pub fn loader_features() -> u64 {
     if cfg!(debug_assertions)

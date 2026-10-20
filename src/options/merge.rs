@@ -22,6 +22,22 @@ pub fn check(path: &str, ty: &Type, def: Def) -> Result<Value, Vec<Diagnostic>> 
     }
 }
 
+/// Options archix no longer has, with what replaced them.
+const REMOVED: &[(&str, &str)] = &[
+    (
+        "boot.snapshots",
+        "every switch builds a new deployment beside the running one, so no snapshot is taken; deployments.keep sets how many stay bootable",
+    ),
+    (
+        "boot.entries",
+        "every kept deployment has one boot entry, so deployments.keep sets how many there are",
+    ),
+    (
+        "restart_if_changed",
+        "a switch takes effect at the next boot, so archix restarts nothing",
+    ),
+];
+
 #[derive(Default)]
 struct Merger {
     errors: Vec<Diagnostic>,
@@ -98,11 +114,15 @@ impl Merger {
     }
 
     fn unknown(&mut self, path: &str, key: &str, children: &Children, source: &str) {
-        let message = format!(
-            "option does not exist (set in {source}){}",
-            did_you_mean(path, key, children)
-        );
-        self.err(&join(path, key), message);
+        let full = join(path, key);
+        let message = match REMOVED.iter().find(|(removed, _)| *removed == full) {
+            Some((_, why)) => format!("option was removed (set in {source}): {why}"),
+            None => format!(
+                "option does not exist (set in {source}){}",
+                did_you_mean(path, key, children)
+            ),
+        };
+        self.err(&full, message);
     }
 
     fn option(&mut self, path: &str, ty: &Type, default: Option<(&Raw, &Rc<str>)>, defs: Vec<Def>) -> Option<Value> {
@@ -420,6 +440,24 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].path.as_deref(), Some("kity"));
         assert!(errors[0].message.contains("did you mean `kitty`"));
+    }
+
+    #[test]
+    fn a_removed_option_names_what_replaced_it() {
+        let root = tree(vec![(
+            "boot",
+            Node::Group(Rc::new(tree(vec![("tries", opt(Type::Int, None))]))),
+        )]);
+        let (_, errors) = merge(
+            &root,
+            vec![def(
+                "a.lua",
+                map(vec![("boot", map(vec![("snapshots", Raw::Bool(false))]))]),
+            )],
+        );
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].path.as_deref(), Some("boot.snapshots"));
+        assert!(errors[0].message.contains("deployments.keep"), "{}", errors[0].message);
     }
 
     #[test]

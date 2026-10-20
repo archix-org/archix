@@ -125,36 +125,6 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
     Ok(packages)
 }
 
-/// Moves local database entries a crash tore (a `desc` without NAME and VERSION) into `aside`, returning their package names.
-pub fn set_aside_torn(dir: &Path, aside: &Path) -> Result<Vec<String>> {
-    let mut torn = Vec::new();
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .flatten()
-    {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let fields = parse_desc(&fs::read_to_string(path.join("desc")).unwrap_or_default());
-        if first(&fields, "NAME").is_some() && first(&fields, "VERSION").is_some() {
-            continue;
-        }
-        let dir_name = entry.file_name().to_string_lossy().into_owned();
-        fs::create_dir_all(aside)?;
-        let mut target = aside.join(&dir_name);
-        for n in 1.. {
-            if !target.exists() {
-                break;
-            }
-            target = aside.join(format!("{dir_name}.{n}"));
-        }
-        fs::rename(&path, &target).with_context(|| format!("moving {} aside", path.display()))?;
-        torn.push(name_from_entry(&dir_name).to_string());
-    }
-    Ok(torn)
-}
-
 /// The package name in a local database directory name, `name-pkgver-pkgrel`.
 pub fn name_from_entry(dir_name: &str) -> &str {
     dir_name.rsplitn(3, '-').nth(2).unwrap_or(dir_name)
@@ -193,7 +163,7 @@ pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
         let fields = parse_desc(&text);
         let (Some(name), Some(version)) = (first(&fields, "NAME"), first(&fields, "VERSION")) else {
             bail!(
-                "{} is missing NAME or VERSION, probably torn by a crash during a switch; `archix recover` repairs it",
+                "{} is missing NAME or VERSION, so pacman's database is damaged there; reinstall that package with pacman",
                 desc.display()
             );
         };

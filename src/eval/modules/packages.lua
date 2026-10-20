@@ -73,7 +73,7 @@ return {
     archive_mirrors = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "Copies of the archive with its layout, tried in order when archive_url is down or lacks a file, for locking, downloads, rollbacks and recovery.",
+      description = "Copies of the archive with its layout, tried in order when archive_url is down or lacks a file, for locking, downloads and rollbacks.",
     },
     third_party_fallback = archix.option {
       type = t.enum { "ask", "fallback", "fail" },

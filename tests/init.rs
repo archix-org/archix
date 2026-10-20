@@ -206,12 +206,17 @@ fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_con
         ],
     );
     let switched = setup.run(&["switch", "--noconfirm"]);
-    let script = fs::read(format!("/usr/bin/{HANDMADE}")).unwrap_or_default();
-    let mode = fs::metadata(format!("/usr/bin/{HANDMADE}"))
+    let script = fs::read(system_path(&format!("/usr/bin/{HANDMADE}"))).unwrap_or_default();
+    let mode = fs::metadata(system_path(&format!("/usr/bin/{HANDMADE}")))
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0);
-    let shipped_conf = fs::read_to_string(&conf).unwrap_or_default();
-    let scriptlet_ran = std::path::Path::new(&format!("/var/tmp/{HANDMADE}-installed")).exists();
+    let shipped_conf = fs::read_to_string(system_path(&conf)).unwrap_or_default();
+    // The scriptlet ran in the new deployment, whose /var changes wait in var-upper for its first boot.
+    let scriptlet_ran = setup
+        .machine
+        .deployment(setup.machine.current().unwrap_or_default())
+        .join(format!("var-upper/tmp/{HANDMADE}-installed"))
+        .exists();
     let push = work.path().join("push");
     let pushed = Command::new(env!("CARGO_BIN_EXE_archix"))
         .args(["cache", "push", push.to_str().unwrap()])
@@ -227,8 +232,6 @@ fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_con
             in_cache.push(entry.path().display().to_string());
         }
     }
-    setup.set_body(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
     let _ = fs::remove_file(format!("/var/cache/pacman/pkg/{HANDMADE}-1.2-3-any.pkg.tar.zst"));
 
     assert!(unpicked_ok, "{unpicked_out}");

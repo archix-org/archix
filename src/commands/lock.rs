@@ -9,18 +9,24 @@ use archix::aur::review::review;
 use archix::flatpak;
 use archix::generations::Store;
 use archix::integration;
-use archix::journal::{ConfigWrite, Journal};
 use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::pacman::read_local_db;
 use archix::paths::Paths;
 use archix::plan::rebuilds;
 use archix::resolve::resolve;
-use archix::system::{self, apply::SystemChange};
+use archix::system::{self, apply::Accounts, apply::SystemChange};
 
 use super::{
-    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, describe_unfinished, floats,
-    print_missing_ignored, print_warned, recipes, refuse_if_unfinished, select_changes, settle_flatpak, user_cache,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, floats, print_missing_ignored,
+    print_warned, recipes, select_changes, settle_flatpak, user_cache,
 };
+
+/// One config file's new text, written when the switch that changed it commits.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct ConfigWrite {
+    path: std::path::PathBuf,
+    text: String,
+}
 
 /// The host's lock, re-resolved at the locked date (or `snapshot`) if the config changed; saved when `save`.
 pub(super) fn current_lock(
@@ -133,7 +139,7 @@ thread_local! {
     static DEFERRED: std::cell::RefCell<Option<Vec<ConfigWrite>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// From here on, config writes wait in memory for the switch's journal, which writes them when the generation becomes current.
+/// From here on, config writes wait in memory until the switch commits its deployment.
 pub fn defer_config_writes() {
     DEFERRED.with(|deferred| *deferred.borrow_mut() = Some(Vec::new()));
 }
@@ -200,18 +206,16 @@ pub fn deferred_overlay(config_dir: &Path) -> std::collections::BTreeMap<std::pa
     })
 }
 
-/// The deferred writes, for the switch's journal; writes are still deferred afterwards.
-pub(super) fn take_deferred() -> Vec<ConfigWrite> {
-    DEFERRED.with(|deferred| deferred.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default())
-}
-
-/// Writes what was deferred, for a switch that commits without a journal, as when no package changes.
+/// Writes what was deferred, keeping each file's owner, once the switch has committed; writes are still deferred afterwards.
 pub(super) fn write_deferred() -> Result<()> {
-    archix::journal::write_config(&take_deferred())
+    let writes = DEFERRED.with(|deferred| deferred.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default());
+    for write in writes {
+        archix::durable::write_config(&write.path, write.text.as_bytes())?;
+    }
+    Ok(())
 }
 
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
-    refuse_if_unfinished(&Paths::system())?;
     let declared = declared(target.config)?;
     let refresh = !matches!(snapshot, Snapshot::Locked);
     let before = load_lockfile(target)?
@@ -241,10 +245,12 @@ pub(super) fn pending(
     lock: &HostLock,
 ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
     let paths = Paths::system();
-    let installed = read_local_db(&paths.local_db())?;
+    let db = super::switch::installed_db(&paths);
+    let installed = read_local_db(&db)?;
     let (changes, warned, kept) = select_changes(
         &lock.packages,
         &installed,
+        &db,
         declared.remove_undeclared,
         &declared.ignored,
     );
@@ -263,7 +269,20 @@ pub(super) fn pending(
             .iter()
             .map(ToString::to_string),
     );
-    lines.extend(system::apply::describe(&change)?);
+    let here = super::switch::current_root(&paths);
+    let place = |path: &str| {
+        let rel = path.trim_start_matches('/');
+        Some(match system::apply::deployment_tree(path) {
+            Some(_) => here.join(rel),
+            None => paths.root.join(rel),
+        })
+    };
+    lines.extend(system::apply::describe(
+        &change,
+        &place,
+        &Accounts::read(&here.join("etc")),
+        &here,
+    )?);
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
@@ -279,7 +298,7 @@ pub fn diff(target: &Target) -> Result<()> {
     let paths = Paths::system();
     let declared = declared(target.config)?;
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
-    let installed = read_local_db(&paths.local_db())?;
+    let installed = read_local_db(&super::switch::installed_db(&paths))?;
     println!(
         "snapshot {}: {}",
         lock.date,
@@ -308,18 +327,17 @@ pub fn diff(target: &Target) -> Result<()> {
 
 pub fn status(target: &Target) -> Result<()> {
     let paths = Paths::system();
-    match Journal::load(&paths.journal())? {
-        Some(journal) => println!(
-            "{}\nrun `archix recover` to deal with it",
-            describe_unfinished(&journal)
-        ),
-        None => println!("no unfinished switch"),
-    }
     let store = Store::new(&paths);
     match store.current()? {
         Some(number) => {
             let generation = store.get(number)?;
             println!("current generation: {number} (snapshot {})", generation.date);
+            match archix::system::boot::booted() {
+                Some(booted) if booted != number => {
+                    println!("booted generation: {booted}; generation {number} boots at the next restart")
+                }
+                _ => {}
+            }
         }
         None => println!("no generation yet; `archix switch` creates the first one"),
     }
@@ -393,11 +411,13 @@ pub fn status(target: &Target) -> Result<()> {
     ) {
         println!("the config changed since the lock was written; `archix lock` or `archix switch` will re-resolve");
     }
-    if paths.local_db().is_dir() {
-        let installed = read_local_db(&paths.local_db())?;
+    let db = super::switch::installed_db(&paths);
+    if db.is_dir() {
+        let installed = read_local_db(&db)?;
         let (changes, _, _) = select_changes(
             &lock.packages,
             &installed,
+            &db,
             declared.remove_undeclared,
             &declared.ignored,
         );
