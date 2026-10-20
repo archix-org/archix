@@ -265,7 +265,7 @@ fn remove_dropped(root: &Path, paths: &Paths, dropped: &[String]) -> Result<()> 
             fs::remove_file(&target).with_context(|| format!("removing {}", target.display()))?;
         }
     }
-    unsafe { libc::sync() };
+    crate::durable::sync_filesystems(&crate::durable::system_paths(root));
     Ok(())
 }
 

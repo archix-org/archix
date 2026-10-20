@@ -43,6 +43,13 @@ impl Paths {
         }
     }
 
+    pub fn root(&self) -> PathBuf {
+        self.pacman_conf
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map_or_else(|| PathBuf::from("/"), PathBuf::from)
+    }
+
     pub fn local_db(&self) -> PathBuf {
         self.pacman_db.join("local")
     }

@@ -7,6 +7,7 @@ target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 # A second run on the same volume would rebuild the debug binaries this one's tests are running.
 exec 9> "${XDG_RUNTIME_DIR:-/tmp}/$target.lock"
 flock -n 9 || { echo "another test run is using the build volume $target; waiting for it" >&2; flock 9; }
+. "$root/tests/heavy-slot.sh"
 build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"

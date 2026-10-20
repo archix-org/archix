@@ -59,7 +59,8 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
     let _held = HoldInterrupts::new(paths);
     let path = paths.journal();
     // Downloads, copies and builds the switch prepared must be on disk before anything changes, or a power cut leaves recovery with empty package files.
-    unsafe { libc::sync() };
+    let written = crate::durable::system_paths(&paths.root());
+    crate::durable::sync_filesystems(&written);
     let mut soft_failures = Vec::new();
     while let Some(step) = journal.next_step() {
         eprintln!(":: {}", step.describe());
@@ -70,7 +71,7 @@ pub fn run(paths: &Paths, journal: &mut Journal, reinstall: bool) -> Result<Vec<
             )
         })?);
         // pacman doesn't fsync, so a step is only recorded as done once what it wrote is on disk.
-        unsafe { libc::sync() };
+        crate::durable::sync_filesystems(&written);
         journal.done.push(step);
         journal.save(&path)?;
         crate::testhooks::crash_at(&format!("after-{}", format!("{step:?}").to_lowercase()));
@@ -176,7 +177,7 @@ fn run_package_step(
                 args.extend(keyrings.iter().map(|path| path.as_os_str()));
                 pacman(&args)?;
                 // Their install scripts rewrote pacman's gpg keyring; torn by a power cut, it would make pacman reject every package.
-                unsafe { libc::sync() };
+                crate::durable::sync_filesystems(&crate::durable::system_paths(&paths.root()));
             }
             let rest: Vec<&PathBuf> = tx.install.iter().filter(|path| !keyrings.contains(path)).collect();
             if rest.is_empty() {

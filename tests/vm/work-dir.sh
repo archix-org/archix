@@ -1,4 +1,5 @@
 # Sourced by the VM runners: makes $work (or takes ARCHIX_VM_WORK) and removes a made one on exit unless ARCHIX_VM_KEEP=1.
+. "$root/tests/heavy-slot.sh"
 work=${ARCHIX_VM_WORK:-}
 if [ -z "$work" ]; then
   work=$(mktemp -d "/tmp/archix-$1.XXXXXX")

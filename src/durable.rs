@@ -40,6 +40,29 @@ pub fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Flushes each filesystem holding one of `paths` once, with syncfs: a global sync also waits on unrelated disks, and a stalled one hangs the switch.
+pub fn sync_filesystems<P: AsRef<Path>>(paths: &[P]) {
+    let mut seen = Vec::new();
+    for path in paths {
+        let Ok(dir) = File::open(path.as_ref()) else {
+            continue;
+        };
+        let Ok(meta) = dir.metadata() else { continue };
+        if !seen.contains(&meta.dev()) {
+            seen.push(meta.dev());
+            unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+        }
+    }
+}
+
+/// The places a package transaction on `root` writes to, for `sync_filesystems`.
+pub fn system_paths(root: &Path) -> Vec<std::path::PathBuf> {
+    ["", "usr", "boot", "efi", "boot/efi", "var", "var/lib/pacman", "var/cache/pacman/pkg", "var/lib/archix", "var/cache/archix", "etc"]
+        .iter()
+        .map(|sub| root.join(sub))
+        .collect()
+}
+
 /// Writes a file in the user's config like `write`, keeping its owner and mode, or giving a new one its directory's owner and 0644, so a run under sudo leaves nothing root-owned there.
 pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
     let before = fs::metadata(path)
