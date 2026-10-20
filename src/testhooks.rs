@@ -7,6 +7,16 @@ pub fn crash_at(point: &str) {
     }
 }
 
+/// A named step of a deployment switch: in a debug build, runs ARCHIX_TEST_MARK with the name, as the power-cut harness logs steps, then crashes there if ARCHIX_TEST_CRASH names it.
+pub fn mark(step: &str) {
+    if cfg!(debug_assertions)
+        && let Some(program) = std::env::var_os("ARCHIX_TEST_MARK")
+    {
+        let _ = std::process::Command::new(program).arg(step).status();
+    }
+    crash_at(step);
+}
+
 /// The kernel command line, or ARCHIX_TEST_CMDLINE in a debug build, so tests can boot a generation without a reboot.
 pub fn kernel_cmdline() -> String {
     if cfg!(debug_assertions)

@@ -32,6 +32,20 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     sync_dir(path)
 }
 
+/// Copies a file like `write` does, streaming it instead of holding it in memory.
+pub fn copy(from: &Path, to: &Path) -> Result<()> {
+    if let Some(dir) = to.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let mut tmp_name = to.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = to.with_file_name(tmp_name);
+    fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
+    File::open(&tmp)?.sync_all()?;
+    fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))?;
+    sync_dir(to)
+}
+
 /// Flushes the directory entry for `path`, which a rename or new symlink only changes in memory.
 pub fn sync_dir(path: &Path) -> Result<()> {
     if let Some(dir) = path.parent() {

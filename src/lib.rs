@@ -5,6 +5,7 @@ pub mod aur;
 pub mod capture;
 pub mod conflicts;
 pub mod date;
+pub mod deploy;
 pub mod downgrade;
 pub mod durable;
 pub mod elf;
