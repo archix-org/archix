@@ -37,9 +37,18 @@ fn nothing_on_the_host_calls_a_global_sync() {
             let rust = path.extension().is_some_and(|ext| ext == "rs") && line.contains(rust_sync);
             let shell = !in_vm && path.extension().is_none_or(|ext| ext == "sh") && bare_sync(line);
             if rust || shell {
-                found.push(format!("{}:{}: {}", path.strip_prefix(root).unwrap().display(), number + 1, line.trim()));
+                found.push(format!(
+                    "{}:{}: {}",
+                    path.strip_prefix(root).unwrap().display(),
+                    number + 1,
+                    line.trim()
+                ));
             }
         }
     }
-    assert!(found.is_empty(), "global syncs; use durable::sync_filesystems or `sync -f PATH`:\n{}", found.join("\n"));
+    assert!(
+        found.is_empty(),
+        "global syncs; use durable::sync_filesystems or `sync -f PATH`:\n{}",
+        found.join("\n")
+    );
 }
