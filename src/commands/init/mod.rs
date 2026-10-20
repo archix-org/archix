@@ -535,7 +535,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     let exe = std::env::current_exe()?;
     let mut skip: BTreeSet<String> = integration::files(paths, &exe)
         .into_iter()
-        .chain(integration::boot_files(paths, &exe))
+        .chain(integration::boot_files(paths, &exe)?)
         .map(|(path, _)| path.to_string_lossy().into_owned())
         .collect();
     let (settings, settings_summary) = host_settings(&mut skip);

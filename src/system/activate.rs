@@ -11,11 +11,28 @@ use anyhow::{Context, Result, bail};
 
 use crate::paths::Paths;
 
-/// Upper-layer paths, relative to /var, that activation never writes.
-const KEEP_LIVE: &[&str] = &["log/pacman.log", ".updated"];
+/// Paths under /var that activation never writes, nor anything below them; pacman's database and DKMS state are bound from the deployment.
+const NEVER: &[&str] = &[
+    "log/pacman.log",
+    ".updated",
+    "lib/archix",
+    "log/journal",
+    "lib/systemd/random-seed",
+    "lib/systemd/timers",
+    "lib/pacman/local",
+    "lib/dkms",
+];
 
-/// Trees under /var that belong to the deployment and are bind-mounted from it at boot.
-const DEPLOYMENT_TREES: &[&str] = &["lib/pacman/local", "lib/dkms"];
+/// The mode and owner a package's mtree gives a directory.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PackageMeta {
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+/// Paths under /var, relative to it, that the deployment's packages own, with the mtree's mode and owner for directories.
+pub type Owned = BTreeMap<PathBuf, Option<PackageMeta>>;
 
 /// What one upper-layer entry is.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,23 +65,62 @@ pub enum Action {
     Replace { aside: bool },
 }
 
-/// How one upper-layer entry is applied: create or replace, never delete; what's in the way of a type change is moved aside.
-pub fn decide(rel: &Path, upper: Kind, live: Live) -> Action {
-    if KEEP_LIVE.iter().any(|keep| rel == Path::new(keep))
-        || DEPLOYMENT_TREES.iter().any(|tree| rel.starts_with(tree))
-        || upper == Kind::Socket
-    {
+/// How one upper-layer entry is applied: created when missing, replaced only when a package of the deployment owns it, never deleted; otherwise the live copy wins.
+pub fn decide(rel: &Path, upper: Kind, live: Live, owned: bool) -> Action {
+    if NEVER.iter().any(|never| rel.starts_with(never)) || upper == Kind::Socket {
         return Action::Keep;
     }
-    match (upper, live) {
-        (Kind::Whiteout, _) => Action::IgnoreWhiteout,
-        (Kind::Dir, Live::Missing) => Action::MakeDir { aside: false },
-        (Kind::Dir, Live::Dir) => Action::UpdateDir,
-        (Kind::Dir, Live::LinkToDir) => Action::Through,
-        (Kind::Dir, Live::Other) => Action::MakeDir { aside: true },
-        (_, Live::Dir) => Action::Replace { aside: true },
-        _ => Action::Replace { aside: false },
+    match (upper, live, owned) {
+        (Kind::Whiteout, _, _) => Action::IgnoreWhiteout,
+        (Kind::Dir, Live::Missing, _) => Action::MakeDir { aside: false },
+        (Kind::Dir, Live::Dir, true) => Action::UpdateDir,
+        (Kind::Dir, Live::Dir, false) | (Kind::Dir, Live::LinkToDir, _) => Action::Through,
+        (Kind::Dir, Live::Other, true) => Action::MakeDir { aside: true },
+        (_, Live::Missing, _) => Action::Replace { aside: false },
+        (_, Live::Dir, true) => Action::Replace { aside: true },
+        (_, _, true) => Action::Replace { aside: false },
+        (_, _, false) => Action::Keep,
     }
+}
+
+/// What the deployment's packages own under /var; a package whose entry can't be read owns nothing, so the live copy wins.
+pub fn package_owned(local: &Path) -> Owned {
+    let mut owned = Owned::new();
+    for entry in fs::read_dir(local).into_iter().flatten().flatten() {
+        let dir = entry.path();
+        let files = crate::pacman::parse_desc(&fs::read_to_string(dir.join("files")).unwrap_or_default());
+        let mut any = false;
+        for path in files.get("FILES").into_iter().flatten() {
+            if let Some(rel) = path.strip_prefix("var/").map(|rel| rel.trim_end_matches('/'))
+                && !rel.is_empty()
+            {
+                owned.entry(PathBuf::from(rel)).or_insert(None);
+                any = true;
+            }
+        }
+        let mut mtree = String::new();
+        if !any
+            || fs::File::open(dir.join("mtree"))
+                .and_then(|file| io::Read::read_to_string(&mut flate2::read::GzDecoder::new(file), &mut mtree))
+                .is_err()
+        {
+            continue;
+        }
+        for entry in crate::repack::parse_mtree(&mtree) {
+            if entry.kind == crate::repack::Kind::Dir
+                && let Some(rel) = entry.path.strip_prefix("var/").map(|rel| rel.trim_end_matches('/'))
+                && !rel.is_empty()
+            {
+                let meta = PackageMeta {
+                    mode: entry.mode,
+                    uid: entry.uid as u32,
+                    gid: entry.gid as u32,
+                };
+                owned.insert(PathBuf::from(rel), Some(meta));
+            }
+        }
+    }
+    owned
 }
 
 #[derive(Debug, Default)]
@@ -248,7 +304,18 @@ fn replace(from: &Path, meta: &Metadata, kind: Kind, to: &Path) -> Result<()> {
     fs::rename(&tmp, to).with_context(|| format!("replacing {}", to.display()))
 }
 
-fn walk(upper: &Path, rel: &Path, var: &Path, applied: &mut Applied) -> Result<()> {
+/// A directory's owner and mode: the package's when its mtree gives them, else the upper layer's.
+fn set_dir_meta(meta: &Metadata, to: &Path, from: &Path, package: Option<&PackageMeta>) -> Result<()> {
+    let Some(package) = package else {
+        return set_meta(meta, to, from);
+    };
+    std::os::unix::fs::lchown(to, Some(package.uid), Some(package.gid))
+        .with_context(|| format!("chown {}", to.display()))?;
+    fs::set_permissions(to, fs::Permissions::from_mode(package.mode & 0o7777))
+        .with_context(|| format!("chmod {}", to.display()))
+}
+
+fn walk(upper: &Path, rel: &Path, var: &Path, owned: &Owned, applied: &mut Applied) -> Result<()> {
     let dir = upper.join(rel);
     let mut names: Vec<_> = fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -261,7 +328,8 @@ fn walk(upper: &Path, rel: &Path, var: &Path, applied: &mut Applied) -> Result<(
         let to = var.join(&rel);
         let meta = fs::symlink_metadata(&from).with_context(|| format!("reading {}", from.display()))?;
         let kind = kind_of(&from, &meta)?;
-        match decide(&rel, kind, live_kind(&to)) {
+        let package = owned.get(&rel);
+        match decide(&rel, kind, live_kind(&to), package.is_some()) {
             Action::Keep => applied.kept.push(rel),
             Action::IgnoreWhiteout => applied.whiteouts += 1,
             Action::MakeDir { aside } => {
@@ -269,15 +337,15 @@ fn walk(upper: &Path, rel: &Path, var: &Path, applied: &mut Applied) -> Result<(
                     applied.moved_aside.push(move_aside(&to)?);
                 }
                 fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
-                set_meta(&meta, &to, &from)?;
+                set_dir_meta(&meta, &to, &from, package.and_then(Option::as_ref))?;
                 applied.written += 1;
-                walk(upper, &rel, var, applied)?;
+                walk(upper, &rel, var, owned, applied)?;
             }
             Action::UpdateDir => {
-                set_meta(&meta, &to, &from)?;
-                walk(upper, &rel, var, applied)?;
+                set_dir_meta(&meta, &to, &from, package.and_then(Option::as_ref))?;
+                walk(upper, &rel, var, owned, applied)?;
             }
-            Action::Through => walk(upper, &rel, var, applied)?,
+            Action::Through => walk(upper, &rel, var, owned, applied)?,
             Action::Replace { aside } => {
                 if aside {
                     applied.moved_aside.push(move_aside(&to)?);
@@ -290,10 +358,10 @@ fn walk(upper: &Path, rel: &Path, var: &Path, applied: &mut Applied) -> Result<(
     Ok(())
 }
 
-/// Applies a deployment's /var upper layer onto the live /var with owners, modes and xattrs.
-pub fn apply_upper(upper: &Path, var: &Path) -> Result<Applied> {
+/// Applies a deployment's /var upper layer onto the live /var with owners, modes and xattrs, as `decide` rules with `owned` from its packages.
+pub fn apply_upper(upper: &Path, var: &Path, owned: &Owned) -> Result<Applied> {
     let mut applied = Applied::default();
-    walk(upper, Path::new(""), var, &mut applied)?;
+    walk(upper, Path::new(""), var, owned, &mut applied)?;
     crate::durable::sync_filesystems(&[var]);
     Ok(applied)
 }
@@ -362,20 +430,22 @@ pub fn activate(root: &Path) -> Result<()> {
         .parse()
         .with_context(|| format!("{} doesn't name a deployment: {text:?}", record.display()))?;
     let state = Paths::under(root).state;
-    let marker = state.join("activated").join(generation.to_string());
+    let deployment = root.join("archix/deploy").join(generation.to_string());
+    let id = deployment_id(&deployment, generation)?;
+    let marker = state.join("activated").join(&id);
     if !marker.exists() {
         let read = |path: &str| fs::read_to_string(root.join(path)).with_context(|| format!("reading /{path}"));
         check_ids(&read("etc/passwd")?, &read("etc/group")?)?;
         run_tool(root, "systemd-sysusers", &[]);
-        let upper = root
-            .join("archix/deploy")
-            .join(generation.to_string())
-            .join("var-upper");
+        let upper = deployment.join("var-upper");
         if upper.is_dir() {
-            let applied = apply_upper(&upper, &root.join("var"))?;
+            let owned = package_owned(&deployment.join("pacman"));
+            let applied = apply_upper(&upper, &root.join("var"), &owned)?;
             println!(
-                "archix: applied deployment {generation}'s /var changes: {} written, {} deletions left alone",
-                applied.written, applied.whiteouts
+                "archix: applied deployment {generation}'s /var changes: {} written, {} kept as they are live, {} deletions left alone",
+                applied.written,
+                applied.kept.len(),
+                applied.whiteouts
             );
             for aside in &applied.moved_aside {
                 println!(
@@ -387,66 +457,123 @@ pub fn activate(root: &Path) -> Result<()> {
         crate::durable::write(&marker, b"")?;
     }
     let last = state.join("booted-deployment");
-    if fs::read_to_string(&last).ok().as_deref().map(str::trim) != Some(generation.to_string().as_str()) {
+    if fs::read_to_string(&last).ok().as_deref().map(str::trim) != Some(id.as_str()) {
         // The shared /var/.updated stamp keeps systemd's own catalog update from running after a rollback.
         run_tool(root, "journalctl", &["--update-catalog"]);
-        crate::durable::write(&last, format!("{generation}\n").as_bytes())?;
+        crate::durable::write(&last, format!("{id}\n").as_bytes())?;
     }
     Ok(())
 }
 
+/// Tells deployment `generation` from an earlier one with its number: the directory's inode and birth time, and its package list.
+pub fn deployment_id(deployment: &Path, generation: u32) -> Result<String> {
+    let meta = fs::metadata(deployment).with_context(|| format!("reading {}", deployment.display()))?;
+    // std reads birth times only through glibc's statx; elsewhere the inode and packages have to do.
+    let born = meta
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |since| since.as_nanos());
+    let mut packages: Vec<String> = fs::read_dir(deployment.join("pacman"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    packages.sort();
+    let digest = crate::fetch::sha256_bytes(packages.join("\n").as_bytes());
+    Ok(format!("{generation}-{}-{born}-{}", meta.ino(), &digest[..16]))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
 
     #[test]
-    fn whiteouts_pacman_log_and_deployment_trees_are_left_alone() {
+    fn whiteouts_and_what_belongs_to_the_live_system_are_left_alone() {
         let rel = Path::new;
+        for owned in [false, true] {
+            assert_eq!(
+                decide(rel("lib/foo"), Kind::Whiteout, Live::Other, owned),
+                Action::IgnoreWhiteout
+            );
+            assert_eq!(
+                decide(rel("lib/foo"), Kind::Whiteout, Live::Dir, owned),
+                Action::IgnoreWhiteout
+            );
+            for never in [
+                "log/pacman.log",
+                ".updated",
+                "lib/archix",
+                "lib/archix/booted-deployment",
+                "log/journal/0123/system.journal",
+                "lib/systemd/random-seed",
+                "lib/systemd/timers/stamp-fstrim.timer",
+                "lib/dkms",
+                "lib/dkms/nvidia/kernel-6.0",
+                "lib/pacman/local/foo-1-1/desc",
+            ] {
+                for live in [Live::Missing, Live::Other, Live::Dir] {
+                    assert_eq!(
+                        decide(rel(never), Kind::File, live, owned),
+                        Action::Keep,
+                        "{never} {live:?}"
+                    );
+                }
+            }
+        }
         assert_eq!(
-            decide(rel("lib/foo"), Kind::Whiteout, Live::Other),
-            Action::IgnoreWhiteout
-        );
-        assert_eq!(
-            decide(rel("lib/foo"), Kind::Whiteout, Live::Dir),
-            Action::IgnoreWhiteout
-        );
-        assert_eq!(decide(rel("log/pacman.log"), Kind::File, Live::Other), Action::Keep);
-        assert_eq!(decide(rel(".updated"), Kind::File, Live::Missing), Action::Keep);
-        assert_eq!(decide(rel("lib/dkms"), Kind::Dir, Live::Dir), Action::Keep);
-        assert_eq!(
-            decide(rel("lib/dkms/nvidia/kernel-6.0"), Kind::Whiteout, Live::Dir),
-            Action::Keep
-        );
-        assert_eq!(
-            decide(rel("lib/pacman/local/foo-1-1/desc"), Kind::File, Live::Other),
-            Action::Keep
-        );
-        assert_eq!(decide(rel("lib/pacman"), Kind::Dir, Live::Dir), Action::UpdateDir);
-        assert_eq!(
-            decide(rel("log/pacman.log.1"), Kind::File, Live::Other),
+            decide(rel("log/pacman.log.1"), Kind::File, Live::Other, true),
             Action::Replace { aside: false }
         );
-        assert_eq!(decide(rel("run/foo.sock"), Kind::Socket, Live::Missing), Action::Keep);
+        assert_eq!(
+            decide(rel("run/foo.sock"), Kind::Socket, Live::Missing, false),
+            Action::Keep
+        );
     }
 
     #[test]
-    fn package_files_are_created_or_replaced_and_type_changes_move_the_old_aside() {
+    fn a_path_both_wrote_is_replaced_only_when_a_package_owns_it() {
         let rel = Path::new("lib/x");
-        assert_eq!(decide(rel, Kind::Dir, Live::Missing), Action::MakeDir { aside: false });
-        assert_eq!(decide(rel, Kind::Dir, Live::Dir), Action::UpdateDir);
-        assert_eq!(decide(rel, Kind::Dir, Live::LinkToDir), Action::Through);
-        assert_eq!(decide(rel, Kind::Dir, Live::Other), Action::MakeDir { aside: true });
-        assert_eq!(decide(rel, Kind::File, Live::Missing), Action::Replace { aside: false });
-        assert_eq!(decide(rel, Kind::File, Live::Other), Action::Replace { aside: false });
+        for owned in [false, true] {
+            assert_eq!(
+                decide(rel, Kind::Dir, Live::Missing, owned),
+                Action::MakeDir { aside: false }
+            );
+            assert_eq!(
+                decide(rel, Kind::File, Live::Missing, owned),
+                Action::Replace { aside: false }
+            );
+            assert_eq!(
+                decide(rel, Kind::Special, Live::Missing, owned),
+                Action::Replace { aside: false }
+            );
+            assert_eq!(decide(rel, Kind::Dir, Live::LinkToDir, owned), Action::Through);
+        }
+        assert_eq!(decide(rel, Kind::Dir, Live::Dir, true), Action::UpdateDir);
+        assert_eq!(decide(rel, Kind::Dir, Live::Other, true), Action::MakeDir { aside: true });
+        assert_eq!(decide(rel, Kind::File, Live::Other, true), Action::Replace { aside: false });
         assert_eq!(
-            decide(rel, Kind::Symlink, Live::LinkToDir),
+            decide(rel, Kind::Symlink, Live::LinkToDir, true),
             Action::Replace { aside: false }
         );
-        assert_eq!(decide(rel, Kind::File, Live::Dir), Action::Replace { aside: true });
-        assert_eq!(
-            decide(rel, Kind::Special, Live::Missing),
-            Action::Replace { aside: false }
-        );
+        assert_eq!(decide(rel, Kind::File, Live::Dir, true), Action::Replace { aside: true });
+
+        assert_eq!(decide(rel, Kind::Dir, Live::Dir, false), Action::Through);
+        assert_eq!(decide(rel, Kind::Dir, Live::Other, false), Action::Keep);
+        assert_eq!(decide(rel, Kind::File, Live::Other, false), Action::Keep);
+        assert_eq!(decide(rel, Kind::Symlink, Live::LinkToDir, false), Action::Keep);
+        assert_eq!(decide(rel, Kind::File, Live::Dir, false), Action::Keep);
+    }
+
+    fn owned(paths: &[(&str, Option<u32>)]) -> Owned {
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        paths
+            .iter()
+            .map(|(path, mode)| (PathBuf::from(path), mode.map(|mode| PackageMeta { mode, uid, gid })))
+            .collect()
     }
 
     #[test]
@@ -458,8 +585,8 @@ mod tests {
             fs::create_dir_all(tree.join("lib/dkms")).unwrap();
         }
         fs::create_dir_all(upper.join("spool/cups/tmp")).unwrap();
-        fs::set_permissions(upper.join("spool/cups/tmp"), fs::Permissions::from_mode(0o1770)).unwrap();
         fs::create_dir_all(upper.join("lib/app")).unwrap();
+        fs::set_permissions(upper.join("lib/app"), fs::Permissions::from_mode(0o750)).unwrap();
         fs::write(upper.join("lib/app/seed"), "new").unwrap();
         fs::set_permissions(upper.join("lib/app/seed"), fs::Permissions::from_mode(0o640)).unwrap();
         let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
@@ -469,23 +596,40 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
+        fs::write(upper.join("lib/app/data"), "what staging wrote").unwrap();
+        fs::write(upper.join("lib/app/created"), "only staging wrote this").unwrap();
         std::os::unix::fs::symlink("../run/lock", upper.join("lock")).unwrap();
         fs::write(upper.join("log/pacman.log"), "only what staging logged\n").unwrap();
         fs::write(upper.join("lib/dkms/stale"), "x").unwrap();
         fs::create_dir_all(var.join("lib/app")).unwrap();
+        fs::set_permissions(var.join("lib/app"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(var.join("lib/app/seed"), "old").unwrap();
         fs::write(var.join("lib/app/data"), "user state").unwrap();
         fs::write(var.join("log/pacman.log"), "everything logged live\n").unwrap();
-        fs::create_dir_all(var.join("elsewhere")).unwrap();
+        fs::create_dir_all(var.join("elsewhere/cups/tmp")).unwrap();
+        fs::set_permissions(var.join("elsewhere/cups/tmp"), fs::Permissions::from_mode(0o755)).unwrap();
         std::os::unix::fs::symlink("elsewhere", var.join("spool")).unwrap();
+        let owned = owned(&[
+            ("lib/app", None),
+            ("lib/app/seed", None),
+            ("spool/cups/tmp", Some(0o1770)),
+        ]);
 
-        let applied = apply_upper(&upper, &var).unwrap();
+        let applied = apply_upper(&upper, &var, &owned).unwrap();
 
         let mode = |path: &str| fs::symlink_metadata(var.join(path)).unwrap().mode() & 0o7777;
         assert_eq!(fs::read_to_string(var.join("lib/app/seed")).unwrap(), "new");
         assert_eq!(mode("lib/app/seed"), 0o640);
         assert_eq!(fs::metadata(var.join("lib/app/seed")).unwrap().modified().unwrap(), old);
-        assert_eq!(fs::read_to_string(var.join("lib/app/data")).unwrap(), "user state");
+        assert_eq!(
+            fs::read_to_string(var.join("lib/app/data")).unwrap(),
+            "user state",
+            "a file both wrote that no package owns stays the live one"
+        );
+        assert_eq!(
+            fs::read_to_string(var.join("lib/app/created")).unwrap(),
+            "only staging wrote this"
+        );
         assert_eq!(fs::read_link(var.join("lock")).unwrap(), Path::new("../run/lock"));
         assert_eq!(
             fs::read_to_string(var.join("log/pacman.log")).unwrap(),
@@ -496,8 +640,10 @@ mod tests {
             "DKMS state comes from the deployment"
         );
         assert!(var.join("spool").is_symlink(), "a live symlink to a directory stays");
-        assert_eq!(mode("elsewhere/cups/tmp"), 0o1770);
+        assert_eq!(mode("elsewhere/cups/tmp"), 0o1770, "a package's directory gets its mtree mode");
+        assert_eq!(mode("lib/app"), 0o750, "an owned directory without an mtree entry gets the upper layer's");
         assert!(applied.kept.contains(&PathBuf::from("log/pacman.log")), "{applied:?}");
+        assert!(applied.kept.contains(&PathBuf::from("lib/app/data")), "{applied:?}");
         assert!(
             fs::read_dir(var.join("lib/app")).unwrap().all(|e| !e
                 .unwrap()
@@ -508,7 +654,19 @@ mod tests {
     }
 
     #[test]
-    fn a_type_change_moves_the_live_entry_aside() {
+    fn a_live_directory_no_package_owns_keeps_its_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (upper, var) = (dir.path().join("upper"), dir.path().join("var"));
+        fs::create_dir_all(upper.join("lib/mine")).unwrap();
+        fs::set_permissions(upper.join("lib/mine"), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::create_dir_all(var.join("lib/mine")).unwrap();
+        fs::set_permissions(var.join("lib/mine"), fs::Permissions::from_mode(0o700)).unwrap();
+        apply_upper(&upper, &var, &Owned::new()).unwrap();
+        assert_eq!(fs::metadata(var.join("lib/mine")).unwrap().mode() & 0o7777, 0o700);
+    }
+
+    #[test]
+    fn a_type_change_of_a_package_path_moves_the_live_entry_aside() {
         let dir = tempfile::tempdir().unwrap();
         let (upper, var) = (dir.path().join("upper"), dir.path().join("var"));
         fs::create_dir_all(upper.join("lib/became-dir")).unwrap();
@@ -516,7 +674,8 @@ mod tests {
         fs::create_dir_all(var.join("lib/became-file")).unwrap();
         fs::write(var.join("lib/became-file/state"), "kept").unwrap();
         fs::write(var.join("lib/became-dir"), "was a file").unwrap();
-        let applied = apply_upper(&upper, &var).unwrap();
+        let owned = owned(&[("lib/became-dir", None), ("lib/became-file", None)]);
+        let applied = apply_upper(&upper, &var, &owned).unwrap();
         assert!(var.join("lib/became-dir").is_dir());
         assert_eq!(
             fs::read_to_string(var.join("lib/became-dir.archix-old")).unwrap(),
@@ -528,6 +687,55 @@ mod tests {
             "kept"
         );
         assert_eq!(applied.moved_aside.len(), 2);
+    }
+
+    #[test]
+    fn package_owned_paths_come_from_the_deployments_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let entry = dir.path().join("cups-2.4-1");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(
+            entry.join("files"),
+            "%FILES%\nusr/\nusr/bin/lp\nvar/\nvar/spool/\nvar/spool/cups/\nvar/spool/cups/tmp/\nvar/lib/cups/seed\n\n",
+        )
+        .unwrap();
+        let mtree = "#mtree\n/set type=file uid=0 gid=0 mode=644\n./.PKGINFO time=1.0 size=1\n\
+                     ./var time=1.0 mode=755 type=dir\n./var/spool/cups time=1.0 mode=710 gid=209 type=dir\n\
+                     ./var/spool/cups/tmp time=1.0 mode=1770 gid=209 type=dir\n./var/lib/cups/seed time=1.0 size=3\n";
+        let file = fs::File::create(entry.join("mtree")).unwrap();
+        let mut gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        gz.write_all(mtree.as_bytes()).unwrap();
+        gz.finish().unwrap();
+        fs::create_dir_all(dir.path().join("broken-1-1")).unwrap();
+        fs::write(dir.path().join("ALPM_DB_VERSION"), "9\n").unwrap();
+
+        let meta = |mode, gid| Some(PackageMeta { mode, uid: 0, gid });
+        assert_eq!(
+            package_owned(dir.path()),
+            Owned::from([
+                (PathBuf::from("lib/cups/seed"), None),
+                (PathBuf::from("spool"), None),
+                (PathBuf::from("spool/cups"), meta(0o710, 209)),
+                (PathBuf::from("spool/cups/tmp"), meta(0o1770, 209)),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_rebuilt_deployment_has_a_new_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let deployment = dir.path().join("deploy/2");
+        fs::create_dir_all(deployment.join("pacman/glibc-2.42-1")).unwrap();
+        let first = deployment_id(&deployment, 2).unwrap();
+        assert!(first.starts_with("2-"), "{first}");
+        assert_eq!(deployment_id(&deployment, 2).unwrap(), first);
+        fs::rename(&deployment, dir.path().join("deploy/2.old")).unwrap();
+        fs::create_dir_all(deployment.join("pacman/glibc-2.42-1")).unwrap();
+        assert_ne!(
+            deployment_id(&deployment, 2).unwrap(),
+            first,
+            "the same number and packages, rebuilt"
+        );
     }
 
     #[test]

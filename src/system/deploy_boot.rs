@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::paths::Paths;
 use crate::system::boot;
 
 /// Each deployment's trees and where the booted one's go on the root.
@@ -17,6 +18,28 @@ pub const TREES: &[(&str, &str)] = &[
     ("pacman", "var/lib/pacman/local"),
     ("dkms", "var/lib/dkms"),
 ];
+
+/// Trees mounted read-only: on ext4 they share inodes with older deployments, so a write would change a rollback target.
+pub const READ_ONLY: &[&str] = &["usr", "opt"];
+
+/// Where the busybox initramfs has the root mounted when late hooks run.
+pub const BUSYBOX_ROOT: &str = "/new_root";
+
+/// Whether the root under `root` boots through deployments, and so needs the initramfs hook.
+pub fn uses_deployments(root: &Path) -> bool {
+    root.join("archix/deploy").exists()
+}
+
+/// Stops `what` from taking the initramfs hook off a root that can't boot without it.
+pub fn refuse_without_hook(root: &Path, what: &str) -> Result<()> {
+    if uses_deployments(root) {
+        bail!(
+            "{} holds deployments, which boot only through archix's initramfs hook, so {what} would leave the machine unbootable",
+            root.join("archix/deploy").display()
+        );
+    }
+    Ok(())
+}
 
 /// The generation a boot entry id belongs to, whatever its variant or boot counters.
 pub fn generation_of_entry(id: &str) -> Option<u32> {
@@ -63,18 +86,28 @@ fn current(archix: &Path) -> Result<Option<u32>> {
     }
 }
 
-/// The deployment to boot: the selected entry's if it's committed, else `current`; None on a system without deployments.
-pub fn choose(archix: &Path, selected: Option<&str>) -> Result<Option<Chosen>> {
-    if let Some(generation) = selected.and_then(generation_of_entry)
-        && complete(archix, generation)
+/// Whether archix wrote the boot entry systemd-boot reports as `id`, going by the records it keeps on the root, as the ESP is unsigned.
+fn recorded(root: &Path, id: &str) -> bool {
+    boot::entry_records(&Paths::under(root))
+        .join(boot::entry_id(id))
+        .is_file()
+}
+
+/// The deployment to boot from `root`: the selected entry's if archix recorded that entry and its deployment is committed, else `current`; None on a root without deployments.
+pub fn choose(root: &Path, selected: Option<&str>) -> Result<Option<Chosen>> {
+    let archix = root.join("archix");
+    if let Some(entry) = selected
+        && let Some(generation) = generation_of_entry(entry)
+        && recorded(root, entry)
+        && complete(&archix, generation)
     {
         return Ok(Some(Chosen {
             generation,
             selected: true,
         }));
     }
-    match current(archix)? {
-        Some(generation) if complete(archix, generation) => Ok(Some(Chosen {
+    match current(&archix)? {
+        Some(generation) if complete(&archix, generation) => Ok(Some(Chosen {
             generation,
             selected: false,
         })),
@@ -120,11 +153,11 @@ fn mount_flags(path: &Path) -> Result<libc::c_ulong> {
     Ok(stat.f_flag)
 }
 
-fn bind(from: &Path, to: &Path) -> Result<()> {
+fn bind(from: &Path, to: &Path, read_only: bool) -> Result<()> {
     sys_mount(Some(from), to, libc::MS_BIND)?;
     let flags = mount_flags(to)?;
     // A bind keeps the root's read-only flag, which remounting the root read-write after switch_root doesn't clear.
-    if flags & libc::ST_RDONLY != 0 {
+    if read_only || flags & libc::ST_RDONLY != 0 {
         let keep = [
             (libc::ST_NOSUID, libc::MS_NOSUID),
             (libc::ST_NODEV, libc::MS_NODEV),
@@ -136,7 +169,8 @@ fn bind(from: &Path, to: &Path) -> Result<()> {
         .iter()
         .filter(|(st, _)| flags & st != 0)
         .fold(0, |all, (_, ms)| all | ms);
-        sys_mount(None, to, libc::MS_REMOUNT | libc::MS_BIND | keep)?;
+        let read_only = if read_only { libc::MS_RDONLY } else { 0 };
+        sys_mount(None, to, libc::MS_REMOUNT | libc::MS_BIND | keep | read_only)?;
     }
     Ok(())
 }
@@ -152,47 +186,56 @@ fn make_mountpoint(root: &Path, dir: &Path) -> Result<()> {
     }
 }
 
-/// Mountpoints in the deployment's fstab that would cover the database and DKMS binds after switch_root.
-fn separate_var(etc: &Path) -> Vec<String> {
-    let covered = [
-        "/var",
-        "/var/lib",
-        "/var/lib/pacman",
-        "/var/lib/pacman/local",
-        "/var/lib/dkms",
+/// Mountpoints in the deployment's fstab that would cover its binds after switch_root, with what each hides.
+fn separate_mounts(etc: &Path) -> Vec<(String, &'static str)> {
+    let hidden = [
+        ("/usr", "/usr"),
+        ("/opt", "/opt"),
+        ("/boot", "/boot"),
+        ("/var", "pacman database and DKMS state"),
+        ("/var/lib", "pacman database and DKMS state"),
+        ("/var/lib/pacman", "pacman database"),
+        ("/var/lib/pacman/local", "pacman database"),
+        ("/var/lib/dkms", "DKMS state"),
     ];
     fs::read_to_string(etc.join("fstab"))
         .unwrap_or_default()
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .filter_map(|line| line.split_whitespace().nth(1))
-        .map(|at| at.trim_end_matches('/').to_string())
-        .filter(|at| covered.contains(&at.as_str()))
+        .map(|at| at.trim_end_matches('/'))
+        .filter_map(|at| hidden.iter().find(|(mountpoint, _)| *mountpoint == at))
+        .map(|(at, what)| (at.to_string(), *what))
         .collect()
 }
 
 /// In the initramfs: binds the chosen deployment's trees over `root` and records its generation in `run_dir`/deployment.
-pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<Option<u32>> {
+pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
+    let archix = root.join("archix");
+    if !is_dir(&archix) {
+        bail!(
+            "{} doesn't exist, so either the root isn't mounted at {} or it doesn't use deployments",
+            archix.display(),
+            root.display()
+        );
+    }
     if efivar == Path::new(boot::SELECTED_ENTRY_VAR) {
         boot::mount_efivars();
     }
     let selected = fs::read(efivar).ok().and_then(|bytes| boot::efivar_string(&bytes));
-    let archix = root.join("archix");
-    let Some(chosen) = choose(&archix, selected.as_deref())? else {
-        return Ok(None);
+    let Some(chosen) = choose(root, selected.as_deref())? else {
+        bail!("{} has no deployments", archix.display());
     };
     let deployment = archix.join("deploy").join(chosen.generation.to_string());
-    for at in separate_var(&deployment.join("etc")) {
-        eprintln!(
-            "archix: warning: {at} is a separate filesystem, which hides this deployment's pacman database and DKMS state"
-        );
+    for (at, what) in separate_mounts(&deployment.join("etc")) {
+        eprintln!("archix: warning: fstab mounts {at} separately, which hides this deployment's {what}");
     }
     for (tree, at) in TREES {
         let target = root.join(at);
         if !is_dir(&target) {
             make_mountpoint(root, &target)?;
         }
-        bind(&deployment.join(tree), &target)
+        bind(&deployment.join(tree), &target, READ_ONLY.contains(tree))
             .with_context(|| format!("binding deployment {}'s {tree}", chosen.generation))?;
     }
     fs::create_dir_all(run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
@@ -200,45 +243,63 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<Option<u32>> 
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;
     let why = match (&selected, chosen.selected) {
         (Some(entry), true) => format!("the boot entry {entry}"),
-        (Some(entry), false) => format!("current; the boot entry {entry} names no committed deployment"),
+        (Some(entry), false) => {
+            format!("current; the boot entry {entry} isn't one archix recorded for a committed deployment")
+        }
         (None, _) => "current".to_string(),
     };
     println!("archix: booting deployment {} ({why})", chosen.generation);
-    Ok(Some(chosen.generation))
+    Ok(chosen.generation)
 }
 
-/// The mkinitcpio hook for both initramfs types, the initrd unit, the first-boot activation unit and the conf.d line; `with_static` when the static binary the initramfs needs is installed.
-pub fn files(root: &Path, archix: &Path, with_static: bool) -> Vec<(PathBuf, String)> {
-    let static_binary = crate::integration::STATIC_BINARY;
+/// The activation unit, and on a root that uses deployments the initramfs hook, which needs the static binary (`with_static`).
+pub fn files(root: &Path, archix: &Path, with_static: bool) -> Result<Vec<(PathBuf, String)>> {
     let mut files = vec![(
         root.join("etc/systemd/system/archix-deploy-activate.service"),
         activate_unit(archix),
     )];
-    if with_static {
-        files.extend([
-            (
-                root.join("etc/initcpio/install/archix-deploy"),
-                format!(
-                    "#!/bin/bash\n\nbuild() {{\n    add_binary {static_binary} /usr/bin/archix\n    add_runscript\n    \
-                     add_file /usr/lib/archix/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n    \
-                     add_symlink /usr/lib/systemd/system/initrd-root-fs.target.requires/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n}}\n\n\
-                     help() {{\n    echo \"archix deployments: mounts the booted deployment's /usr, /etc, /opt, /boot, pacman database and DKMS state on the root\"\n}}\n"
-                ),
-            ),
-            (
-                root.join("etc/initcpio/hooks/archix-deploy"),
-                "#!/usr/bin/ash\n\nrun_latehook() {\n    if ! /usr/bin/archix deploy-mount /sysroot; then\n        \
-                 err \"archix couldn't mount this boot's deployment\"\n        launch_interactive_shell\n    fi\n}\n"
-                    .to_string(),
-            ),
-            (root.join("usr/lib/archix/archix-deploy-mount.service"), MOUNT_UNIT.to_string()),
-            (
-                root.join("etc/mkinitcpio.conf.d/archix-deploy.conf"),
-                "HOOKS+=(archix-deploy)\n".to_string(),
-            ),
-        ]);
+    if uses_deployments(root) {
+        if !with_static {
+            bail!(
+                "{} holds deployments, but {} is missing, and the initramfs needs it to mount them; reinstall archix",
+                root.join("archix/deploy").display(),
+                crate::integration::STATIC_BINARY
+            );
+        }
+        files.extend(hook_files(root));
     }
-    files
+    Ok(files)
+}
+
+/// The mkinitcpio hook for both initramfs types, the initrd unit and the conf.d line.
+pub fn hook_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let static_binary = crate::integration::STATIC_BINARY;
+    vec![
+        (
+            root.join("etc/initcpio/install/archix-deploy"),
+            format!(
+                "#!/bin/bash\n\nbuild() {{\n    add_binary {static_binary} /usr/bin/archix\n    add_runscript\n    \
+                 add_file /usr/lib/archix/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n    \
+                 add_symlink /usr/lib/systemd/system/initrd-root-fs.target.requires/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n}}\n\n\
+                 help() {{\n    echo \"archix deployments: mounts the booted deployment's /usr, /etc, /opt, /boot, pacman database and DKMS state on the root\"\n}}\n"
+            ),
+        ),
+        (
+            root.join("etc/initcpio/hooks/archix-deploy"),
+            format!(
+                "#!/usr/bin/ash\n\nrun_latehook() {{\n    if ! /usr/bin/archix deploy-mount {BUSYBOX_ROOT}; then\n        \
+                 err \"archix couldn't mount this boot's deployment; the machine halts when this shell exits\"\n        \
+                 launch_interactive_shell\n        \
+                 err \"archix: halting rather than booting the root without its deployment; pick another boot entry\"\n        \
+                 halt -f\n    fi\n}}\n"
+            ),
+        ),
+        (root.join("usr/lib/archix/archix-deploy-mount.service"), MOUNT_UNIT.to_string()),
+        (
+            root.join("etc/mkinitcpio.conf.d/archix-deploy.conf"),
+            "HOOKS+=(archix-deploy)\n".to_string(),
+        ),
+    ]
 }
 
 /// The link that starts the activation unit at every boot, and the unit it names.
@@ -249,12 +310,10 @@ pub fn activate_wants(root: &Path) -> (PathBuf, String) {
     )
 }
 
-/// Every file `files` writes plus the activation unit's link, for taking them off.
+/// Every file `files` may write plus the activation unit's link, for taking them off.
 pub fn all_files(root: &Path) -> Vec<PathBuf> {
-    let mut all: Vec<PathBuf> = files(root, Path::new("archix"), true)
-        .into_iter()
-        .map(|(path, _)| path)
-        .collect();
+    let mut all = vec![root.join("etc/systemd/system/archix-deploy-activate.service")];
+    all.extend(hook_files(root).into_iter().map(|(path, _)| path));
     all.push(activate_wants(root).0);
     all
 }
@@ -293,20 +352,30 @@ mod tests {
         assert_eq!(generation_of_entry("auto-windows"), None);
     }
 
-    fn deployment(archix: &Path, name: &str) {
+    fn deployment(root: &Path, name: &str) {
         for (tree, _) in TREES {
-            fs::create_dir_all(archix.join("deploy").join(name).join(tree)).unwrap();
+            fs::create_dir_all(root.join("archix/deploy").join(name).join(tree)).unwrap();
         }
+    }
+
+    fn record(root: &Path, entry: &str) {
+        let records = boot::entry_records(&Paths::under(root));
+        fs::create_dir_all(&records).unwrap();
+        fs::write(records.join(entry), "title archix\n").unwrap();
     }
 
     fn layout() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        let archix = dir.path();
-        deployment(archix, "1");
-        deployment(archix, "2");
-        deployment(archix, ".staging-3");
-        fs::create_dir_all(archix.join("deploy/4/usr")).unwrap();
-        std::os::unix::fs::symlink("deploy/1", archix.join("current")).unwrap();
+        let root = dir.path();
+        deployment(root, "1");
+        deployment(root, "2");
+        deployment(root, ".staging-3");
+        deployment(root, "5");
+        fs::create_dir_all(root.join("archix/deploy/4/usr")).unwrap();
+        std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
+        for entry in ["archix-1.conf", "archix-1-rescue.conf", "archix-2.conf", "archix-3.conf", "archix-4.conf"] {
+            record(root, entry);
+        }
         dir
     }
 
@@ -317,62 +386,124 @@ mod tests {
     #[test]
     fn the_selected_entry_boots_its_deployment_only_once_committed() {
         let dir = layout();
-        let archix = dir.path();
-        assert_eq!(choose(archix, Some("archix-2.conf")).unwrap(), chosen(2, true));
-        assert_eq!(choose(archix, Some("archix-2+1-2.conf")).unwrap(), chosen(2, true));
-        assert_eq!(choose(archix, Some("archix-1-rescue.conf")).unwrap(), chosen(1, true));
+        let root = dir.path();
+        assert_eq!(choose(root, Some("archix-2.conf")).unwrap(), chosen(2, true));
+        assert_eq!(choose(root, Some("archix-2+1-2.conf")).unwrap(), chosen(2, true));
+        assert_eq!(choose(root, Some("archix-1-rescue.conf")).unwrap(), chosen(1, true));
         assert_eq!(
-            choose(archix, Some("archix-3.conf")).unwrap(),
+            choose(root, Some("archix-3.conf")).unwrap(),
             chosen(1, false),
             "a staging tree is never booted"
         );
         assert_eq!(
-            choose(archix, Some("archix-4.conf")).unwrap(),
+            choose(root, Some("archix-4.conf")).unwrap(),
             chosen(1, false),
             "deployment 4 lacks trees"
         );
         assert_eq!(
-            choose(archix, Some("archix-9.conf")).unwrap(),
+            choose(root, Some("archix-9.conf")).unwrap(),
             chosen(1, false),
             "no deployment 9"
         );
-        assert_eq!(choose(archix, Some("arch-linux.efi")).unwrap(), chosen(1, false));
-        assert_eq!(choose(archix, None).unwrap(), chosen(1, false));
+        assert_eq!(choose(root, Some("arch-linux.efi")).unwrap(), chosen(1, false));
+        assert_eq!(choose(root, None).unwrap(), chosen(1, false));
+    }
+
+    #[test]
+    fn an_entry_archix_has_no_record_of_falls_back_to_current() {
+        let dir = layout();
+        let root = dir.path();
+        assert_eq!(
+            choose(root, Some("archix-5.conf")).unwrap(),
+            chosen(1, false),
+            "deployment 5 is committed, but archix never wrote archix-5.conf"
+        );
+        fs::remove_file(boot::entry_records(&Paths::under(root)).join("archix-2.conf")).unwrap();
+        assert_eq!(choose(root, Some("archix-2.conf")).unwrap(), chosen(1, false));
+        assert_eq!(
+            choose(root, Some("archix-1-rescue.conf")).unwrap(),
+            chosen(1, true),
+            "each variant has its own record"
+        );
     }
 
     #[test]
     fn current_must_name_a_complete_committed_deployment() {
         let dir = layout();
-        let archix = dir.path();
+        let root = dir.path();
         let point = |target: &str| {
-            fs::remove_file(archix.join("current")).unwrap();
-            std::os::unix::fs::symlink(target, archix.join("current")).unwrap();
+            fs::remove_file(root.join("archix/current")).unwrap();
+            std::os::unix::fs::symlink(target, root.join("archix/current")).unwrap();
         };
         point("deploy/.staging-3");
-        assert!(choose(archix, None).is_err());
+        assert!(choose(root, None).is_err());
         assert_eq!(
-            choose(archix, Some("archix-2.conf")).unwrap(),
+            choose(root, Some("archix-2.conf")).unwrap(),
             chosen(2, true),
             "a committed selected entry still boots"
         );
         point("deploy/4");
-        assert!(choose(archix, None).is_err());
+        assert!(choose(root, None).is_err());
         point("deploy/+2");
-        assert!(choose(archix, None).is_err());
-        fs::remove_file(archix.join("current")).unwrap();
-        assert!(choose(archix, None).is_err(), "deployments without a current one");
+        assert!(choose(root, None).is_err());
+        fs::remove_file(root.join("archix/current")).unwrap();
+        assert!(choose(root, None).is_err(), "deployments without a current one");
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(choose(empty.path(), None).unwrap(), None, "not a deployment system");
     }
 
     #[test]
-    fn a_separate_var_is_named() {
+    fn mounting_fails_when_the_root_or_its_deployments_are_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let efivar = dir.path().join("no-efivar");
+        let err = mount(&dir.path().join("not-mounted"), &efivar, &run).unwrap_err();
+        assert!(format!("{err:#}").contains("isn't mounted"), "{err:#}");
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("usr")).unwrap();
+        assert!(mount(&root, &efivar, &run).is_err(), "a root without /archix");
+        fs::create_dir_all(root.join("archix")).unwrap();
+        let err = mount(&root, &efivar, &run).unwrap_err();
+        assert!(format!("{err:#}").contains("no deployments"), "{err:#}");
+        assert!(!run.exists());
+    }
+
+    #[test]
+    fn separate_var_usr_opt_and_boot_mounts_are_named() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             dir.path().join("fstab"),
-            "UUID=a / ext4 rw 0 1\n# UUID=b /var ext4 rw 0 2\nUUID=c /var/ ext4 rw 0 2\nUUID=d /var/log ext4 rw 0 2\n",
+            "UUID=a / ext4 rw 0 1\n# UUID=b /var ext4 rw 0 2\nUUID=c /var/ ext4 rw 0 2\nUUID=d /var/log ext4 rw 0 2\n\
+             UUID=e /usr ext4 ro 0 2\nUUID=f /opt/ ext4 rw 0 2\nUUID=g /boot vfat rw 0 2\nUUID=h /efi vfat rw 0 2\nUUID=i /usr/local ext4 rw 0 2\n",
         )
         .unwrap();
-        assert_eq!(separate_var(dir.path()), ["/var"]);
+        let at: Vec<String> = separate_mounts(dir.path()).into_iter().map(|(at, _)| at).collect();
+        assert_eq!(at, ["/var", "/usr", "/opt", "/boot"]);
+    }
+
+    fn run_hook(archix: &str) -> std::process::Output {
+        let hook = hook_files(Path::new("/"))
+            .into_iter()
+            .find(|(path, _)| path.ends_with("hooks/archix-deploy"))
+            .unwrap()
+            .1;
+        assert!(hook.contains("/usr/bin/archix deploy-mount /new_root;"), "{hook}");
+        let script = format!(
+            "{}\nerr() {{ echo \"ERR $*\"; }}\nlaunch_interactive_shell() {{ echo SHELL; }}\nhalt() {{ echo \"HALT $*\"; exit 3; }}\nrun_latehook\necho BOOTING ON\n",
+            hook.replace("/usr/bin/archix deploy-mount", archix)
+        );
+        std::process::Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+
+    #[test]
+    fn the_busybox_hook_halts_after_the_shell_when_mounting_fails() {
+        let failed = run_hook("false");
+        let out = String::from_utf8_lossy(&failed.stdout);
+        assert_eq!(failed.status.code(), Some(3), "{out}");
+        assert!(out.contains("SHELL\nERR archix: halting") && out.contains("HALT -f"), "{out}");
+        assert!(!out.contains("BOOTING ON"), "{out}");
+        let mounted = run_hook("true");
+        let out = String::from_utf8_lossy(&mounted.stdout);
+        assert!(mounted.status.success() && out == "BOOTING ON\n", "{out}");
     }
 }

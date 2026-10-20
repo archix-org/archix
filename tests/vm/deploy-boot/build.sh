@@ -100,7 +100,11 @@ ln -s deploy/2 /mnt/archix/current
 
 mkdir -p /mnt/efi/EFI/archix /mnt/efi/loader/entries
 cp "$deploy/1/boot/archix.efi" /mnt/efi/EFI/archix/shared.efi
-for n in 1 2 3; do printf 'title archix %s\nefi /EFI/archix/shared.efi\n' "$n" > "/mnt/efi/loader/entries/archix-$n.conf"; done
+mkdir -p /mnt/var/lib/archix/boot/entries
+for n in 1 2 3; do
+  printf 'title archix %s\nefi /EFI/archix/shared.efi\n' "$n" > "/mnt/efi/loader/entries/archix-$n.conf"
+  cp "/mnt/efi/loader/entries/archix-$n.conf" /mnt/var/lib/archix/boot/entries/
+done
 printf 'timeout 2\nconsole-mode keep\ndefault archix-2.conf\n' > /mnt/efi/loader/loader.conf
 sync -f /mnt/efi
 sync -f /mnt

@@ -15,10 +15,13 @@ check_deployment() {
   for at in /usr /etc /opt /boot /var/lib/pacman/local /var/lib/dkms; do
     findmnt -n -o SOURCE "$at" | grep -q "archix/deploy/$1/" || fail "$at should come from deployment $1: $(findmnt -n -o SOURCE "$at")"
   done
-  touch /usr/.archix-vm-rw && rm /usr/.archix-vm-rw || fail "/usr should be writable once the root is"
+  for at in /usr /opt; do
+    touch "$at/.archix-vm-rw" 2> /dev/null && fail "$at should be read-only"
+  done
+  touch /etc/.archix-vm-rw && rm /etc/.archix-vm-rw || fail "/etc should be writable once the root is"
   pacman -Q linux > /dev/null || fail "pacman should read deployment $1's database"
-  [ -e "/var/lib/archix/activated/$1" ] || fail "deployment $1 should be activated"
-  [ "$(cat /var/lib/archix/booted-deployment)" = "$1" ] || fail "the booted deployment should be recorded"
+  ls /var/lib/archix/activated | grep -q "^$1-" || fail "deployment $1 should be activated"
+  [ "$(cut -d- -f1 /var/lib/archix/booted-deployment)" = "$1" ] || fail "the booted deployment should be recorded"
   systemctl is-active -q archix-deploy-activate.service || fail "activation: $(systemctl status archix-deploy-activate.service | tail -5)"
 }
 

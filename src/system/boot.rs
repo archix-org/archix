@@ -986,7 +986,7 @@ pub fn tampered_selected_entry() -> Option<String> {
 }
 
 /// Where archix keeps a copy of each boot entry it wrote, on the root filesystem, which unlike the ESP holds no unsigned input to trust.
-fn entry_records(paths: &Paths) -> PathBuf {
+pub(crate) fn entry_records(paths: &Paths) -> PathBuf {
     paths.state.join("boot").join("entries")
 }
 

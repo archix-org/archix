@@ -42,7 +42,23 @@ fn xattr_names(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// A root filesystem as the initramfs sees it, on its own tmpfs: deployments 1 and 2, an uncommitted staging tree, current at 1 and no /var/lib/dkms yet.
+/// systemd-boot's LoaderEntrySelected for `entry`: attributes, then UTF-16LE with a NUL.
+fn efivar_bytes(entry: &str) -> Vec<u8> {
+    let mut bytes = vec![7, 0, 0, 0];
+    for unit in entry.encode_utf16().chain([0]) {
+        bytes.extend(unit.to_le_bytes());
+    }
+    bytes
+}
+
+/// The activation unit and the whole initramfs hook, under `root`.
+fn all_boot_files(root: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = deploy_boot::files(root, Path::new("/usr/bin/archix"), true).unwrap();
+    files.extend(deploy_boot::hook_files(root));
+    files
+}
+
+/// A root filesystem as the initramfs sees it, on its own tmpfs: deployments 1 and 2, an uncommitted staging tree, current at 1, an entry record for each and no /var/lib/dkms yet.
 struct Sysroot {
     dir: tempfile::TempDir,
 }
@@ -64,6 +80,11 @@ impl Sysroot {
             }
         }
         std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
+        let records = root.join("var/lib/archix/boot/entries");
+        fs::create_dir_all(&records).unwrap();
+        for n in 1..=3 {
+            fs::write(records.join(format!("archix-{n}.conf")), "title archix\n").unwrap();
+        }
         sh("mount", &["-o", "remount,ro", root.to_str().unwrap()]);
         Sysroot { dir }
     }
@@ -72,14 +93,9 @@ impl Sysroot {
         self.dir.path().join("sysroot")
     }
 
-    /// systemd-boot's LoaderEntrySelected for `entry`: attributes, then UTF-16LE with a NUL.
     fn efivar(&self, entry: &str) -> PathBuf {
         let path = self.dir.path().join("efivar");
-        let mut bytes = vec![7, 0, 0, 0];
-        for unit in entry.encode_utf16().chain([0]) {
-            bytes.extend(unit.to_le_bytes());
-        }
-        fs::write(&path, bytes).unwrap();
+        fs::write(&path, efivar_bytes(entry)).unwrap();
         path
     }
 
@@ -108,7 +124,7 @@ impl Drop for Sysroot {
 
 #[test]
 #[ignore]
-fn the_initramfs_mounts_the_selected_committed_deployment_writable_once_the_root_is() {
+fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_and_opt_read_only() {
     let sysroot = Sysroot::new();
     let out = sysroot.mount(&sysroot.efivar("archix-2+1-2.conf"));
     assert!(out.status.success(), "{}", text(&out));
@@ -126,8 +142,14 @@ fn the_initramfs_mounts_the_selected_committed_deployment_writable_once_the_root
     );
     // As systemd-remount-fs does after switch_root, for a command line with `ro`.
     sh("mount", &["-o", "remount,rw", sysroot.root().to_str().unwrap()]);
-    fs::write(sysroot.root().join("usr/written"), "x").expect("/usr is writable once the root is");
-    assert!(sysroot.root().join("archix/deploy/2/usr/written").exists());
+    for at in ["etc", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
+        fs::write(sysroot.root().join(at).join("written"), "x").unwrap_or_else(|e| panic!("{at} is writable: {e}"));
+    }
+    for at in deploy_boot::READ_ONLY {
+        let err = fs::write(sysroot.root().join(at).join("written"), "x").expect_err(at);
+        assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{at}: {err}");
+        assert!(!sysroot.root().join("archix/deploy/2").join(at).join("written").exists());
+    }
 }
 
 #[test]
@@ -153,7 +175,7 @@ fn the_initramfs_never_mounts_a_staging_tree_and_falls_back_to_current() {
 
 #[test]
 #[ignore]
-fn the_initramfs_leaves_a_root_without_deployments_alone() {
+fn the_initramfs_fails_on_a_root_without_deployments() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("usr")).unwrap();
     let out = archix(&[
@@ -164,7 +186,8 @@ fn the_initramfs_leaves_a_root_without_deployments_alone() {
         dir.path().join("run").to_str().unwrap(),
         dir.path().to_str().unwrap(),
     ]);
-    assert!(out.status.success(), "{}", text(&out));
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("/archix doesn't exist"), "{}", text(&out));
     assert!(!dir.path().join("run").exists());
 }
 
@@ -220,11 +243,37 @@ fn staged_root() -> tempfile::TempDir {
         &["-c", &format!("echo 'logged in staging' >> {}", m("log/pacman.log"))],
     );
     fs::create_dir_all(m("lib/dkms/nvidia")).unwrap();
+    fs::write(m("lib/app/data"), "staging's copy").unwrap();
+    for never in [
+        "lib/archix/staged",
+        "lib/systemd/random-seed",
+        "lib/systemd/timers/stamp-x.timer",
+        "log/journal/0123/system.journal",
+    ] {
+        fs::create_dir_all(Path::new(&m(never)).parent().unwrap()).unwrap();
+        fs::write(m(never), "staging's").unwrap();
+    }
     sh("umount", &[merged.to_str().unwrap()]);
 
     let deployment = root.join("archix/deploy/2");
     fs::create_dir_all(&deployment).unwrap();
     fs::rename(&upper, deployment.join("var-upper")).unwrap();
+    let package = deployment.join("pacman/app-1-1");
+    fs::create_dir_all(&package).unwrap();
+    fs::write(
+        package.join("files"),
+        "%FILES%\nvar/\nvar/lib/\nvar/lib/app/\nvar/lib/app/helper\nvar/lib/app/seed\nvar/spool/\nvar/spool/cups/\nvar/spool/cups/tmp/\n\n",
+    )
+    .unwrap();
+    let mtree = "#mtree\n/set type=file uid=0 gid=0 mode=644\n./var/spool/cups time=1.0 mode=710 gid=209 type=dir\n\
+                 ./var/spool/cups/tmp time=1.0 mode=1770 gid=209 type=dir\n./var/lib/app/seed time=1.0 mode=640 gid=209 size=16\n";
+    let mut gz = flate2::write::GzEncoder::new(
+        fs::File::create(package.join("mtree")).unwrap(),
+        flate2::Compression::default(),
+    );
+    std::io::Write::write_all(&mut gz, mtree.as_bytes()).unwrap();
+    gz.finish().unwrap();
+    fs::write(var.join("lib/app/seed"), "edited live after the commit").unwrap();
     sh(
         "sh",
         &[
@@ -272,7 +321,19 @@ fn the_first_boot_applies_a_real_overlay_upper_layer_once() {
         sh("getcap", &[var.join("lib/app/helper").to_str().unwrap()]).contains("cap_net_raw=ep"),
         "file capabilities survive"
     );
-    assert_eq!(fs::read_to_string(var.join("lib/app/data")).unwrap(), "user state");
+    assert_eq!(
+        fs::read_to_string(var.join("lib/app/data")).unwrap(),
+        "user state",
+        "both wrote it and no package owns it, so the live copy wins"
+    );
+    for never in [
+        "lib/archix/staged",
+        "lib/systemd/random-seed",
+        "lib/systemd/timers/stamp-x.timer",
+        "log/journal/0123/system.journal",
+    ] {
+        assert!(!var.join(never).exists(), "{never}");
+    }
     assert_eq!(
         fs::read_to_string(var.join("lib/app/removed-by-staging"))
             .ok()
@@ -296,10 +357,17 @@ fn the_first_boot_applies_a_real_overlay_upper_layer_once() {
             "{path}: {names:?}"
         );
     }
-    assert!(var.join("lib/archix/activated/2").exists());
+    let markers = || -> Vec<String> {
+        fs::read_dir(var.join("lib/archix/activated"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    let first = markers();
+    assert!(first.len() == 1 && first[0].starts_with("2-"), "{first:?}");
     assert_eq!(
         fs::read_to_string(var.join("lib/archix/booted-deployment")).unwrap(),
-        "2\n"
+        format!("{}\n", first[0])
     );
 
     fs::write(var.join("lib/app/seed"), "changed since").unwrap();
@@ -310,6 +378,21 @@ fn the_first_boot_applies_a_real_overlay_upper_layer_once() {
         "changed since",
         "only a deployment's first boot applies its upper layer"
     );
+
+    let deploy = root.join("archix/deploy");
+    fs::rename(deploy.join("2"), deploy.join("2.old")).unwrap();
+    fs::create_dir(deploy.join("2")).unwrap();
+    for tree in ["var-upper", "pacman"] {
+        fs::rename(deploy.join("2.old").join(tree), deploy.join("2").join(tree)).unwrap();
+    }
+    let rebuilt = archix(&["deploy-activate", "--root", root.to_str().unwrap()]);
+    assert!(rebuilt.status.success(), "{}", text(&rebuilt));
+    assert_eq!(
+        fs::read_to_string(var.join("lib/app/seed")).unwrap(),
+        "from the package",
+        "a rebuilt deployment 2 activates again"
+    );
+    assert_eq!(markers().len(), 2);
 }
 
 #[test]
@@ -325,8 +408,11 @@ fn two_accounts_sharing_an_id_stop_activation_before_anything_is_applied() {
     let out = archix(&["deploy-activate", "--root", root.to_str().unwrap()]);
     assert!(!out.status.success());
     assert!(text(&out).contains("UID 209 is shared by cups, live"), "{}", text(&out));
-    assert!(!root.join("var/lib/app/seed").exists());
-    assert!(!root.join("var/lib/archix/activated/2").exists());
+    assert_eq!(
+        fs::read_to_string(root.join("var/lib/app/seed")).unwrap(),
+        "edited live after the commit"
+    );
+    assert!(!root.join("var/lib/archix/activated").exists());
 }
 
 /// A root with systemd's units, a stand-in for the initrd's generated sysroot.mount, archix and the deployment files.
@@ -351,7 +437,7 @@ fn unit_root(edit: impl Fn(String) -> String) -> tempfile::TempDir {
         "[Mount]\nWhat=/dev/disk/by-label/root\nWhere=/sysroot\n",
     )
     .unwrap();
-    for (path, content) in deploy_boot::files(root, Path::new("/usr/bin/archix"), true) {
+    for (path, content) in all_boot_files(root) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, edit(content)).unwrap();
     }
@@ -437,7 +523,7 @@ fn boot_files_for_the_vm_image() {
     let Ok(dir) = std::env::var("ARCHIX_VM_FILES") else {
         return;
     };
-    for (path, content) in deploy_boot::files(Path::new(&dir), Path::new("/usr/bin/archix"), true) {
+    for (path, content) in all_boot_files(Path::new(&dir)) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
     }
@@ -454,14 +540,39 @@ fn kernel() -> String {
         .into_owned()
 }
 
+/// Runs the busybox image's own init functions and archix-deploy hook as its init does after mounting the root, with `sysroot` where the init mounts it and `entry` as the selected boot entry.
+fn run_busybox_hook(image: &Path, sysroot: Option<&Sysroot>, entry: &str) -> (Option<i32>, String) {
+    let efivar = image.with_extension("efivar");
+    fs::write(&efivar, efivar_bytes(entry)).unwrap();
+    let selected = image.join(archix::system::boot::SELECTED_ENTRY_VAR.trim_start_matches('/'));
+    let bind = sysroot.map_or(String::new(), |sysroot| {
+        format!("mount --bind {} {}/sysroot\n", sysroot.root().display(), image.display())
+    });
+    let script = format!(
+        "set -e\nmount -t tmpfs run {image}/run\nmount -t tmpfs sys {image}/sys\nmkdir -p {dir}\ncp {efivar} {selected}\n{bind}\
+         exec chroot {image} /usr/bin/ash -c '. /init_functions; launch_interactive_shell() {{ echo SHELL; }}; \
+         halt() {{ echo \"HALT $*\"; exit 3; }}; . /hooks/archix-deploy; run_latehook; echo BOOTED; \
+         cat /run/archix/deployment /sysroot/usr/which; echo; touch /sysroot/usr/written 2>/dev/null && echo USR-WRITABLE || echo USR-READ-ONLY'\n",
+        image = image.display(),
+        dir = selected.parent().unwrap().display(),
+        efivar = efivar.display(),
+        selected = selected.display(),
+    );
+    let out = Command::new("unshare")
+        .args(["-m", "--propagation", "private", "sh", "-c", &script])
+        .output()
+        .unwrap();
+    (out.status.code(), text(&out))
+}
+
 #[test]
 #[ignore]
 fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
     let _system = lock_system();
-    let dir = tempfile::tempdir().unwrap();
+    // The container's /tmp is noexec, and the busybox image is run from where it's unpacked.
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
     let root = dir.path().join("root");
-    let files = deploy_boot::files(&root, Path::new("/usr/bin/archix"), true);
-    for (path, content) in &files {
+    for (path, content) in &deploy_boot::hook_files(&root) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
     }
@@ -502,7 +613,7 @@ fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
             .output()
             .unwrap();
         let listing = sh("lsinitcpio", &[image.to_str().unwrap()]);
-        let unpacked = dir.path().join(format!("{hooks}.d"));
+        let unpacked = dir.path().join(hooks.replace(' ', "-"));
         fs::create_dir(&unpacked).unwrap();
         let extracted = Command::new("lsinitcpio")
             .arg("-x")
@@ -513,16 +624,16 @@ fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
         assert!(extracted.success());
         let config = fs::read_to_string(unpacked.join("config")).unwrap_or_default();
         let _ = fs::remove_file(&image);
-        let _ = fs::remove_dir_all(&unpacked);
-        (text(&out), out.status.success(), listing, config)
+        (text(&out), out.status.success(), listing, config, unpacked)
     };
     let busybox = build("base udev");
     let systemd = build("base systemd");
+    let _ = fs::remove_dir_all(&systemd.4);
     for path in placed {
         let _ = fs::remove_file(path);
     }
 
-    let (log, ok, listing, config) = busybox;
+    let (log, ok, listing, config, unpacked) = busybox;
     assert!(ok, "{log}");
     assert!(listing.lines().any(|l| l == "usr/bin/archix"), "{listing}");
     assert!(listing.lines().any(|l| l == "hooks/archix-deploy"), "{listing}");
@@ -532,8 +643,20 @@ fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
             .any(|l| l.starts_with("LATEHOOKS=") && l.contains("archix-deploy")),
         "the busybox init runs the hook after mounting the root: {config}"
     );
+    let sysroot = Sysroot::new();
+    let (code, out) = run_busybox_hook(&unpacked, Some(&sysroot), "archix-2.conf");
+    assert_eq!(code, Some(0), "{out}");
+    assert!(out.contains("archix: booting deployment 2 (the boot entry archix-2.conf)"), "{out}");
+    assert!(out.contains("BOOTED\n2\n2\nUSR-READ-ONLY"), "{out}");
+    let (code, out) = run_busybox_hook(&unpacked, None, "archix-2.conf");
+    assert_eq!(code, Some(3), "{out}");
+    assert!(
+        out.contains("ERROR: archix couldn't mount") && out.contains("SHELL") && out.contains("HALT -f"),
+        "{out}"
+    );
+    assert!(!out.contains("BOOTED"), "nothing boots half-mounted: {out}");
 
-    let (log, ok, listing, _) = systemd;
+    let (log, ok, listing, _, _) = systemd;
     assert!(ok, "{log}");
     assert!(listing.lines().any(|l| l == "usr/bin/archix"), "{listing}");
     assert!(
