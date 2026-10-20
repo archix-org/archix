@@ -17,6 +17,14 @@ pub fn mark(step: &str) {
     crash_at(step);
 }
 
+/// Fails with an error when ARCHIX_TEST_FAIL names `step` in a debug build, as a write error there would.
+pub fn fail_at(step: &str) -> anyhow::Result<()> {
+    if cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_FAIL").as_deref() == Ok(step) {
+        anyhow::bail!("failing at {step} for a test");
+    }
+    Ok(())
+}
+
 /// The kernel command line, or ARCHIX_TEST_CMDLINE in a debug build, so tests can boot a generation without a reboot.
 pub fn kernel_cmdline() -> String {
     if cfg!(debug_assertions)

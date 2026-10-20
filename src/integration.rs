@@ -124,6 +124,29 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
     Ok(())
 }
 
+/// Where a staging view gets the running archix when the deployment has none that writes its own integration.
+const RUNNING_IN_VIEW: &str = "/run/archix-running";
+
+/// Writes the integration into a staging root through its view: by the staged static archix, so an archix the switch upgrades writes its own version, else by this one; the units run `archix`.
+pub fn write_staged(staging: &crate::deploy::Staging, archix: &Path) -> Result<()> {
+    let exec = archix.to_str().context("archix's path isn't UTF-8")?;
+    if staging.read_path(Path::new(STATIC_BINARY))?.is_file() {
+        let output = staging
+            .transaction()?
+            .output(&[STATIC_BINARY, "deploy-integrate", "--exec", exec])?;
+        if output.status.success() {
+            return Ok(());
+        }
+        eprintln!(
+            "warning: the new deployment's archix couldn't write its boot integration ({}), so this archix does",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    staging
+        .transaction_with(&[(archix.to_path_buf(), PathBuf::from(RUNNING_IN_VIEW))])?
+        .run(&[RUNNING_IN_VIEW, "deploy-integrate", "--exec", exec])
+}
+
 /// Takes every integration file off a system without deployments, for `archix eject`.
 pub fn remove(paths: &Paths) -> Result<()> {
     let root = &paths.root;

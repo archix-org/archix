@@ -1120,6 +1120,11 @@ fn a_commit_that_fills_the_esp_leaves_no_temporary_file_and_the_next_commit_succ
         tmp_files(&esp)
     );
     assert_eq!(store.current().unwrap(), Some(1));
+    assert_eq!(
+        store.deployments().unwrap(),
+        vec![1],
+        "deployment 2 stayed without a boot entry: {err:#}"
+    );
     fs::remove_file(&filler).unwrap();
     fs::write(
         esp.join("EFI/archix/9.efi.tmp"),
@@ -1488,14 +1493,14 @@ fn a_layout_killed_partway_leaves_the_old_system_whole_and_starts_over_cleanly()
 
 #[test]
 #[ignore]
-fn a_separate_boot_or_usr_or_an_esp_in_boot_is_refused_before_anything_changes() {
+fn a_separate_boot_usr_opt_or_var_or_an_esp_in_boot_is_refused_before_anything_changes() {
     let _serial = serial();
     let loop_fs = plain_root("ext4");
     let root = loop_fs.mnt.clone();
     fs::create_dir_all(root.join("boot/efi")).unwrap();
     let refused = |esp: &str| archix::deploy::layout::unsupported(&root, &root.join(esp)).unwrap_or_default();
     assert!(refused("boot/efi").contains("in /boot"), "{}", refused("boot/efi"));
-    for tree in ["boot", "usr", "opt"] {
+    for tree in ["boot", "usr", "opt", "var", "var/lib", "var/lib/pacman"] {
         sh(Command::new("mount")
             .args(["-t", "tmpfs", "tmpfs"])
             .arg(root.join(tree)));

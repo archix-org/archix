@@ -478,35 +478,21 @@ impl Builder<'_> {
         run(&mut cmd, "makechrootpkg")
     }
 
-    /// Installs missing build dependencies from the snapshot, runs makepkg as the build user, then removes them again.
-    fn build_on_host(
+    /// The package files a build needs installed besides what `installed` has: `inputs`, and the snapshot's packages for the `missing` dependencies.
+    fn build_inputs(
         &self,
-        dir: &Path,
-        info: &SrcInfo,
+        missing: &[String],
+        installed: &BTreeMap<String, crate::pacman::LocalPkg>,
         date: Date,
         repos: &[String],
         inputs: &[PathBuf],
-        nocheck: bool,
-    ) -> Result<()> {
-        let mut deps: BTreeSet<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
-        deps.extend(info.packages.iter().flat_map(|pkg| pkg.depends.iter().cloned()));
-        let output = Command::new("pacman")
-            .arg("-T")
-            .args(&deps)
-            .output()
-            .context("running pacman -T")?;
-        let missing: Vec<String> = String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect();
-
-        let installed_before = crate::pacman::read_local_db(&self.paths.local_db())?;
+    ) -> Result<Vec<PathBuf>> {
         let mut files: Vec<PathBuf> = inputs.to_vec();
         if !missing.is_empty() {
             let (conf, db) = snapshot_conf(self.archive, self.snapshot_cache, date, &official(repos))?;
-            let needed: Vec<(String, String, String)> = print_targets(&conf, &db, &missing, false, &[])?
+            let needed: Vec<(String, String, String)> = print_targets(&conf, &db, missing, false, &[])?
                 .into_iter()
-                .filter(|(name, _, _)| !installed_before.contains_key(name))
+                .filter(|(name, _, _)| !installed.contains_key(name))
                 .collect();
             let mut wanted = Vec::new();
             for (name, _, repo) in &needed {
@@ -527,6 +513,156 @@ impl Builder<'_> {
                 &wanted,
             )?);
         }
+        Ok(files)
+    }
+
+    /// Builds with makepkg as the build user in a throwaway view staged from the current deployment, with the missing build dependencies installed only there; a system not laid out yet builds live.
+    fn build_on_host(
+        &self,
+        dir: &Path,
+        info: &SrcInfo,
+        date: Date,
+        repos: &[String],
+        inputs: &[PathBuf],
+        nocheck: bool,
+    ) -> Result<()> {
+        let mut deps: BTreeSet<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
+        deps.extend(info.packages.iter().flat_map(|pkg| pkg.depends.iter().cloned()));
+        if !crate::deploy::layout::laid_out(&self.paths.root) {
+            return self.build_live(dir, &deps, date, repos, inputs, nocheck);
+        }
+        let store = crate::deploy::Store::open(&self.paths.root)?;
+        let current = store.current()?.context("there's no current deployment to build on")?;
+        let staging = crate::deploy::Staging::scratch(&store, current)?;
+        let built = self.build_in_view(&staging, dir, &deps, date, repos, inputs, nocheck);
+        let discarded = staging.discard();
+        built.and(discarded)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_in_view(
+        &self,
+        staging: &crate::deploy::Staging,
+        dir: &Path,
+        deps: &BTreeSet<String>,
+        date: Date,
+        repos: &[String],
+        inputs: &[PathBuf],
+        nocheck: bool,
+    ) -> Result<()> {
+        let mut binds = vec![(dir.to_path_buf(), dir.to_path_buf())];
+        for live in [self.keyring(), PathBuf::from("/run/systemd/resolve")] {
+            if live.is_dir() {
+                binds.push((live.clone(), live));
+            }
+        }
+        let tx = staging.transaction_with(&binds)?;
+        let in_view = |argv: &[String]| -> Result<std::process::Output> {
+            tx.command(&argv[0])
+                .args(&argv[1..])
+                .env(TRANSACTION_ENV, "1")
+                .output()
+                .with_context(|| format!("running {} in the build view", argv[0]))
+        };
+        let succeeds = |argv: &[String]| -> Result<()> {
+            let output = in_view(argv)?;
+            if !output.status.success() {
+                bail!(
+                    "{} failed in the build view: {}",
+                    argv.join(" "),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Ok(())
+        };
+        let args = |parts: &[&str]| -> Vec<String> { parts.iter().map(|part| part.to_string()).collect() };
+        let dir_text = dir.to_str().context("the build directory isn't UTF-8")?;
+        if !in_view(&args(&["id", "-u", BUILD_USER]))?.status.success() {
+            let (uid, gid) = (live_id("-u")?, live_id("-g")?);
+            let _ = in_view(&args(&["groupadd", "--system", "--gid", &gid, BUILD_USER]))?;
+            let user = [
+                "useradd",
+                "--system",
+                "--no-create-home",
+                "--shell",
+                "/usr/bin/nologin",
+                "--gid",
+                BUILD_USER,
+            ];
+            if !in_view(&args(&[&user[..], &["--uid", &uid, BUILD_USER]].concat()))?
+                .status
+                .success()
+            {
+                succeeds(&args(&[&user[..], &[BUILD_USER]].concat()))?;
+            }
+        }
+        succeeds(&args(&["chown", "-R", &format!("{BUILD_USER}:"), dir_text]))?;
+        let mut test = args(&["pacman", "-T"]);
+        test.extend(deps.iter().cloned());
+        let missing: Vec<String> = String::from_utf8_lossy(&in_view(&test)?.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let installed = crate::pacman::read_local_db(&staging.tree("pacman"))?;
+        let files = self.build_inputs(&missing, &installed, date, repos, inputs)?;
+        if !files.is_empty() {
+            let mut install = args(&["pacman", "-U", "--noconfirm", "--needed", "--asdeps"]);
+            for file in &files {
+                install.push(file.to_str().context("a package path isn't UTF-8")?.to_string());
+            }
+            succeeds(&install)?;
+        }
+        let mut makepkg = args(&[
+            "setpriv",
+            "--reuid",
+            BUILD_USER,
+            "--regid",
+            BUILD_USER,
+            "--init-groups",
+            "--",
+            "env",
+            "-C",
+            dir_text,
+        ]);
+        makepkg.push(format!("HOME={dir_text}"));
+        makepkg.push(format!("SRCDEST={dir_text}"));
+        makepkg.push(format!("GNUPGHOME={}", self.keyring().display()));
+        makepkg.extend(args(&["makepkg", "--noconfirm", "--clean"]));
+        if nocheck {
+            makepkg.push("--nocheck".to_string());
+        }
+        let status = tx
+            .command(&makepkg[0])
+            .args(&makepkg[1..])
+            .status()
+            .context("running makepkg in the build view")?;
+        if !status.success() {
+            bail!("makepkg failed ({status})");
+        }
+        Ok(())
+    }
+
+    /// For a system not laid out as deployments yet: installs missing build dependencies live, runs makepkg as the build user, then removes them again.
+    fn build_live(
+        &self,
+        dir: &Path,
+        deps: &BTreeSet<String>,
+        date: Date,
+        repos: &[String],
+        inputs: &[PathBuf],
+        nocheck: bool,
+    ) -> Result<()> {
+        let output = Command::new("pacman")
+            .arg("-T")
+            .args(deps)
+            .output()
+            .context("running pacman -T")?;
+        let missing: Vec<String> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let installed_before = crate::pacman::read_local_db(&self.paths.local_db())?;
+        let files = self.build_inputs(&missing, &installed_before, date, repos, inputs)?;
         if !files.is_empty() {
             let mut cmd = Command::new("pacman");
             cmd.args(["-U", "--noconfirm", "--needed", "--asdeps"])
@@ -673,6 +809,19 @@ pub(crate) fn ensure_user() -> Result<()> {
         ]),
         "useradd",
     )
+}
+
+/// The build user's uid (`-u`) or gid (`-g`) on the running system.
+fn live_id(which: &str) -> Result<String> {
+    let output = Command::new("id")
+        .arg(which)
+        .arg(BUILD_USER)
+        .output()
+        .context("running id")?;
+    if !output.status.success() {
+        bail!("{BUILD_USER} doesn't exist");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn chown(dir: &Path) -> Result<()> {

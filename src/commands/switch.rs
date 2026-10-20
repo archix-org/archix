@@ -118,6 +118,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     if !laid_out && let Some(why) = layout::unsupported(&paths.root, Path::new(&boot.esp)) {
         bail!("{why}; nothing was changed");
     }
+    if let Some(why) = layout::separate_var(&paths.root) {
+        bail!("{why}; nothing was changed");
+    }
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     if let Some(warning) = super::lock_age_warning(&lock, declared.lock_warn_after_days) {
         eprintln!("{warning}");
@@ -309,8 +312,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "nothing to do: the system matches generation {} (snapshot {})",
             current.number, lock.date
         );
-        print_hooks(&system_change);
-        let failures = run_hooks(&paths, &system_change, &BTreeSet::new());
+        if !system_change.to.hooks.is_empty() {
+            eprintln!(":: running hooks");
+        }
+        let failures = system::hooks::run(&paths.root, &BTreeMap::new(), &system_change.to.hooks);
         return report_soft_failures(&failures, "nothing was changed");
     }
     for change in &changes {
@@ -506,6 +511,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         };
         first_layout(&paths, &boot, &first)?;
         if nothing_changes {
+            let due = system::hooks::due(&system_change, &rewritten);
+            if let Err(e) = system::hooks::defer(&paths.state, 1, &due, &system_change.to.hooks) {
+                soft_failures.push(format!("recording the hooks for deployment 1's boot: {e:#}"));
+            }
             return after_commit(
                 target,
                 &declared,
@@ -514,7 +523,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
                 &store,
                 1,
                 &system_change,
-                &rewritten,
                 &previous_flatpak,
                 Vec::new(),
                 soft_failures,
@@ -532,6 +540,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         from: store.get(base)?.system,
         to: generation.system.clone(),
     };
+    let mut due = BTreeMap::new();
+    if system::boot::booted_deployment(&paths.root) != Some(base) {
+        due.extend(system::hooks::pending(&paths.state, base).on_change);
+    }
+    due.extend(system::hooks::due(&system_change, &rewritten));
+    system::hooks::defer(&paths.state, number, &due, &system_change.to.hooks)?;
     eprintln!(":: building deployment {number} from deployment {base}");
     let made = deploy::build::build(
         &deployments,
@@ -543,10 +557,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             system: &system_change,
             boot: &boot,
             repos: &declared.repos,
-            record: Some(&generation),
+            record: &generation,
             keep: declared.deployments_keep as usize,
+            config: &|staged: &Path| {
+                carry_config(target.config_dir, &paths, staged)?;
+                super::lock::stage_deferred(&paths, &staged.join("etc"))
+            },
         },
-    )?;
+    )
+    .inspect_err(|_| {
+        let _ = fs::remove_file(system::hooks::pending_path(&paths.state, number));
+    })?;
     soft_failures.extend(made.failures);
     after_commit(
         target,
@@ -556,7 +577,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &store,
         number,
         &system_change,
-        &rewritten,
         &previous_flatpak,
         made.users,
         soft_failures,
@@ -573,16 +593,12 @@ fn after_commit(
     store: &Store,
     number: u32,
     system_change: &SystemChange,
-    rewritten: &BTreeSet<String>,
     previous_flatpak: &BTreeMap<String, LockedApp>,
     users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
+    // A config outside /etc gets this switch's writes only here, so a crash right after the commit leaves it as it was.
     super::lock::write_deferred()?;
-    system::hooks::defer(
-        &paths.pending_on_change(),
-        &system::hooks::due(system_change, rewritten),
-    )?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
     if let Err(e) = system::apply::files(paths, system_change, &live_place(paths), &accounts) {
@@ -611,20 +627,18 @@ fn after_commit(
     if let Err(e) = carry_config(target.config_dir, paths, &deployment) {
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
     }
-    soft_failures.extend(run_hooks(paths, system_change, rewritten));
-    match gc::collect(paths, &user_cache()?) {
-        Ok(report) => print_gc(&report, false),
-        Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
-    }
-    if declared.boot.as_ref().is_some_and(|boot| boot.revoke_unused)
-        && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true))
-    {
-        soft_failures.push(format!("revoking boot images no entry uses: {e:#}"));
-    }
+    collect_and_revoke(
+        paths,
+        declared.boot.as_ref().is_some_and(|boot| boot.revoke_unused),
+        &mut soft_failures,
+    )?;
     println!(
         "switched to generation {number} (snapshot {}); its deployment boots at the next restart",
         lock.date
     );
+    if super::lock::pending_etc(paths).is_some() {
+        println!("{}", super::lock::pending_note(number));
+    }
     push_to_cache(declared);
     report_soft_failures(
         &soft_failures,
@@ -657,7 +671,7 @@ fn before_archix(target: &Generation, installed: &BTreeMap<String, archix::pacma
     }
 }
 
-/// Lays the live system out as deployment 1 with its own boot entry: archix's integration and the initramfs hook first, then the layout, the entry, the live binds and the cleanup of what they hide.
+/// Lays the live system out as deployment 1 with its own boot entry: archix's integration and the initramfs hook first, then the layout, the entry and the live binds; what they hide is pruned at the next boot, once no service still uses it.
 fn first_layout(paths: &Paths, boot: &BootPlan, record: &Generation) -> Result<()> {
     eprintln!(":: laying the system out as deployment 1");
     let archix = integration::own_path()?;
@@ -673,11 +687,6 @@ fn first_layout(paths: &Paths, boot: &BootPlan, record: &Generation) -> Result<(
     let deployments = layout::lay_out(&paths.root)?;
     deploy::build::entry_for(&deployments, paths, boot, 1)?;
     layout::bind_live(&paths.root, &deployments, 1)?;
-    if let Err(e) = layout::prune_hidden(&paths.root, &archix) {
-        eprintln!("warning: {e:#}; the next boot tries again");
-    } else {
-        let _ = archix::durable::write(&paths.state.join("layout-pruned"), b"");
-    }
     println!(
         "laid the system out as deployment 1, which boots from its own entry; changes from now on take effect at the next boot"
     );
@@ -776,31 +785,25 @@ pub(super) fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -
     Ok(())
 }
 
-/// The preview line naming the hooks a switch or rollback runs, in order.
+/// The preview line naming the hooks a switch or rollback runs, in order, at the boot of the deployment it makes current.
 fn print_hooks(change: &SystemChange) {
     if let Ok(names) = system::hooks::order(&change.to.hooks)
         && !names.is_empty()
     {
-        println!("run hooks  {}", names.join(", "));
+        println!("run hooks  {}, when the deployment boots", names.join(", "));
     }
 }
 
-/// on_change scripts and hooks, last thing in every switch and rollback, like NixOS activation.
-pub(super) fn run_hooks(paths: &Paths, change: &SystemChange, rewritten: &BTreeSet<String>) -> Vec<String> {
-    let pending = paths.pending_on_change();
-    let mut due = system::hooks::deferred(&pending);
-    due.extend(system::hooks::due(change, rewritten));
-    if change.to.hooks.is_empty() && due.is_empty() {
-        return Vec::new();
+/// gc and revoking the boot images no entry uses, after every switch or rollback that commits a deployment.
+fn collect_and_revoke(paths: &Paths, revoke_unused: bool, soft_failures: &mut Vec<String>) -> Result<()> {
+    match gc::collect(paths, &user_cache()?) {
+        Ok(report) => print_gc(&report, false),
+        Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
     }
-    eprintln!(":: running activation hooks");
-    let failures = system::hooks::run(change, &due);
-    if let Err(e) = fs::remove_file(&pending)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("warning: could not clear {}: {e}", pending.display());
+    if revoke_unused && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true)) {
+        soft_failures.push(format!("revoking boot images no entry uses: {e:#}"));
     }
-    failures
+    Ok(())
 }
 
 /// Rebuilds for built packages that would lose a library they link once the snapshot moves; only the owners of those libraries are downloaded to check.
@@ -1364,12 +1367,22 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                 system: &system_change,
                 boot: &boot,
                 repos: &repos,
-                record: None,
+                record: &generation,
                 keep: generation.settings.deployments_keep as usize,
+                config: &|staged: &Path| carry_config(config_dir, &paths, staged),
             },
         )?;
         soft_failures.extend(made.failures);
         users = made.users;
+    }
+    let hooks = system::hooks::defer(
+        &paths.state,
+        number,
+        &system::hooks::due(&current_change, &BTreeSet::new()),
+        &generation.system.hooks,
+    );
+    if let Err(e) = hooks {
+        soft_failures.push(format!("recording the hooks for deployment {number}'s boot: {e:#}"));
     }
     let deployment = deployments.path(number);
     if let Err(e) = carry_config(config_dir, &paths, &deployment) {
@@ -1386,10 +1399,15 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
-    soft_failures.extend(run_hooks(&paths, &current_change, &BTreeSet::new()));
+    if !kept {
+        collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
+    }
     println!(
         "rolled back to {name}; it boots at the next restart. archix.lock is unchanged, so the next `archix switch` returns to the config"
     );
+    if super::lock::pending_etc(&paths).is_some() {
+        println!("{}", super::lock::pending_note(number));
+    }
     report_soft_failures(
         &soft_failures,
         &format!("{name} is current and boots at the next restart"),
@@ -1400,7 +1418,7 @@ pub fn generations() -> Result<()> {
     let paths = Paths::system();
     let store = Store::new(&paths);
     let current = store.current()?;
-    let booted = boot::booted();
+    let booted = boot::booted_deployment(&paths.root);
     let deployed: BTreeSet<u32> = match layout::laid_out(&paths.root) {
         true => deploy::Store::open(&paths.root)?.deployments()?.into_iter().collect(),
         false => BTreeSet::new(),
@@ -1527,6 +1545,16 @@ pub fn prune_hidden(root: &Path) -> Result<()> {
 
 /// Run early at boot by archix-boot.service: a boot of another deployment than the current one, picked in the menu or fallen back to after failed tries, makes that one current; nothing is reinstalled.
 pub fn boot_check(cmdline: Option<String>) -> Result<()> {
+    let paths = Paths::system();
+    let laid_out = layout::laid_out(&paths.root);
+    if laid_out && !paths.state.join("layout-pruned").exists() {
+        match integration::own_path().and_then(|archix| layout::prune_hidden(&paths.root, &archix)) {
+            Ok(()) => {
+                let _ = archix::durable::write(&paths.state.join("layout-pruned"), b"");
+            }
+            Err(e) => println!("archix: {e:#}"),
+        }
+    }
     let booted = match cmdline {
         Some(cmdline) => system::boot::booted_generation(&cmdline),
         None => system::boot::booted(),
@@ -1539,17 +1567,8 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         }
         return Ok(());
     };
-    let paths = Paths::system();
-    if !layout::laid_out(&paths.root) {
+    if !laid_out {
         return Ok(());
-    }
-    if !paths.state.join("layout-pruned").exists() {
-        match integration::own_path().and_then(|archix| layout::prune_hidden(&paths.root, &archix)) {
-            Ok(()) => {
-                let _ = archix::durable::write(&paths.state.join("layout-pruned"), b"");
-            }
-            Err(e) => println!("archix: {e:#}"),
-        }
     }
     let deployments = deploy::Store::open(&paths.root)?;
     if !deployments.deployments()?.contains(&booted) {

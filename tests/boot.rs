@@ -244,8 +244,25 @@ fn every_deployment_gets_a_signed_boot_entry_and_booting_an_older_one_makes_it_c
     assert!(installed("tree").is_none());
 
     sbctl_keys(&esp);
+    let loader = esp.join("EFI/systemd/systemd-bootx64.efi");
+    fs::create_dir_all(loader.parent().unwrap()).unwrap();
+    fs::copy("/usr/lib/systemd/boot/efi/systemd-bootx64.efi", &loader).unwrap();
+    let unsigned = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&loader).unwrap());
     setup.set_body(&[], &(boot_body(&esp, ", secure_boot = true") + keep));
     setup.ok(&["switch", "--noconfirm"]);
+    assert_ne!(
+        std::os::unix::fs::MetadataExt::ino(&fs::metadata(&loader).unwrap()),
+        unsigned,
+        "the loader was signed in place, which a crash can leave half written"
+    );
+    let verified = Command::new("sbctl")
+        .env("ESP_PATH", &esp)
+        .arg("verify")
+        .arg(&loader)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("is signed"));
+    assert!(!loader.with_file_name("systemd-bootx64.efi.tmp").exists());
     let signed = uki(machine, &format!("archix-{}.conf", machine.current().unwrap()));
     let verify = Command::new("sbctl")
         .env("ESP_PATH", &esp)
@@ -283,6 +300,57 @@ fn deployment_1s_entry_boots_through_the_deployment_hook_from_the_first_switch_o
     assert!(
         files.lines().any(|line| line.ends_with("hooks/archix-deploy")) && files.contains("usr/bin/archix"),
         "a deployment boots only through the hook, so deployment 1's initramfs has it from the start:\n{files}"
+    );
+}
+
+/// A file from the initramfs packed into a UKI, empty when it has none.
+fn initramfs_file(uki: &Path, path: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let initrd = dir.path().join("initrd");
+    let copied = Command::new("objcopy")
+        .args(["-O", "binary", "--only-section=.initrd"])
+        .arg(uki)
+        .arg(&initrd)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    let out = dir.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let extracted = Command::new("lsinitcpio")
+        .arg("-x")
+        .arg(&initrd)
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(extracted.success());
+    fs::read_to_string(out.join(path)).unwrap_or_default()
+}
+
+#[test]
+#[ignore]
+fn an_archix_the_switch_upgrades_writes_its_own_mount_unit_into_the_new_initramfs() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let lib = machine.deployment(machine.current().unwrap()).join("usr/lib/archix");
+    // As after an upgrade in the switch: the new deployment's archix writes another mount unit than the running one.
+    fs::rename(lib.join("archix-static"), lib.join("archix-static.real")).unwrap();
+    write_executable(
+        &lib.join("archix-static"),
+        "#!/bin/sh\n/usr/lib/archix/archix-static.real \"$@\" || exit\n\
+         [ \"$1\" != deploy-integrate ] || echo '# the upgraded archix' >> /usr/lib/archix/archix-deploy-mount.service\n",
+    );
+    setup.set_body(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    let unit = initramfs_file(
+        &uki(machine, &format!("archix-{new}.conf")),
+        "usr/lib/systemd/system/archix-deploy-mount.service",
+    );
+    assert!(
+        unit.contains("ExecStart=/usr/bin/archix deploy-mount") && unit.ends_with("# the upgraded archix\n"),
+        "the initramfs has the running archix's mount unit, not the new one's:\n{unit}"
     );
 }
 

@@ -79,7 +79,7 @@ pub fn edit_installed(
         return Ok(());
     }
     if !super::lock::defer_write(&file, &text) {
-        archix::durable::write_config(&file, text.as_bytes())?;
+        super::lock::write_config(&file, text.as_bytes())?;
     }
     Ok(())
 }
@@ -241,8 +241,9 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             system: &system_change,
             boot: &boot,
             repos: &declared.repos,
-            record: Some(&generation),
+            record: &generation,
             keep: declared.deployments_keep as usize,
+            config: &|staged: &Path| super::switch::carry_config(target.config_dir, &paths, staged),
         },
     )?;
     println!(

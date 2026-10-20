@@ -60,6 +60,9 @@ pub fn unsupported(root: &Path, esp: &Path) -> Option<String> {
             ));
         }
     }
+    if let Some(why) = separate_var(root) {
+        return Some(why);
+    }
     let Ok(c_root) = CString::new(root.as_os_str().as_bytes()) else {
         return Some(format!("{} has a NUL byte", root.display()));
     };
@@ -75,6 +78,19 @@ pub fn unsupported(root: &Path, esp: &Path) -> Option<String> {
         ));
     }
     None
+}
+
+/// Why the root at `root` can't boot deployments' pacman databases: /var, /var/lib or /var/lib/pacman is its own filesystem, mounted after the initramfs over what it bound.
+pub fn separate_var(root: &Path) -> Option<String> {
+    let mounts = mounted(root);
+    ["var", "var/lib", "var/lib/pacman"]
+        .into_iter()
+        .find(|rel| mounts.contains(&root.join(rel)))
+        .map(|rel| {
+            format!(
+                "/{rel} is a separate filesystem, which at boot would cover the pacman database each deployment keeps on the root filesystem; archix can't use deployments on this system"
+            )
+        })
 }
 
 fn cp(args: &[&str], from: &Path, to: &Path) -> Result<()> {
@@ -157,10 +173,15 @@ pub fn lay_out(root: &Path) -> Result<Store> {
     Ok(store)
 }
 
-/// Binds deployment `number`'s trees over the live root, as its boot would, so the running system works on the deployment's files from now on.
+/// Binds deployment `number`'s trees over the live root, as its boot would, and records it as the running one, so the system works on the deployment's files from now on.
 pub fn bind_live(root: &Path, store: &Store, number: u32) -> Result<()> {
     crate::system::deploy_boot::bind_trees(root, &store.path(number))
-        .with_context(|| format!("mounting deployment {number} over the live system"))
+        .with_context(|| format!("mounting deployment {number} over the live system"))?;
+    let record = root.join(crate::system::boot::DEPLOYMENT_RECORD.trim_start_matches('/'));
+    if let Some(dir) = record.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    fs::write(&record, format!("{number}\n")).with_context(|| format!("writing {}", record.display()))
 }
 
 /// Deletes what the live root's own usr, etc, opt, boot, pacman database and DKMS directories held before the first layout, now hidden under a deployment's binds, by running `archix` (`prune-hidden`) in a private mount namespace; nothing is touched unless every tree is bound from a deployment.

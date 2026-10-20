@@ -124,7 +124,7 @@ impl Drop for Sysroot {
 
 #[test]
 #[ignore]
-fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_and_opt_read_only() {
+fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_opt_and_boot_read_only() {
     let sysroot = Sysroot::new();
     let out = sysroot.mount(&sysroot.efivar("archix-2+1-2.conf"));
     assert!(out.status.success(), "{}", text(&out));
@@ -142,10 +142,10 @@ fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_and_opt_read_
     );
     // As systemd-remount-fs does after switch_root, for a command line with `ro`.
     sh("mount", &["-o", "remount,rw", sysroot.root().to_str().unwrap()]);
-    for at in ["etc", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
+    for at in ["etc", "var/lib/pacman/local", "var/lib/dkms"] {
         fs::write(sysroot.root().join(at).join("written"), "x").unwrap_or_else(|e| panic!("{at} is writable: {e}"));
     }
-    for at in deploy_boot::READ_ONLY {
+    for at in ["usr", "opt", "boot"] {
         let err = fs::write(sysroot.root().join(at).join("written"), "x").expect_err(at);
         assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{at}: {err}");
         assert!(!sysroot.root().join("archix/deploy/2").join(at).join("written").exists());

@@ -151,6 +151,7 @@ impl BootSettings {
             secure_boot: self.secure_boot,
             anticheat: self.protected_entry,
             tries: self.tries,
+            revoke_unused: self.revoke_unused,
         }
     }
 }

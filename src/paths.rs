@@ -60,11 +60,6 @@ impl Paths {
         self.state.join("notes")
     }
 
-    /// on_change scripts a committed switch hasn't run yet, so a crash right after the commit doesn't lose them.
-    pub fn pending_on_change(&self) -> PathBuf {
-        self.state.join("pending-on-change")
-    }
-
     pub fn outside_changes(&self) -> PathBuf {
         self.state.join("outside-changes.json")
     }

@@ -35,6 +35,8 @@ pub struct Layout<'a> {
     /// The deployment being staged from, the lower layer of usr, opt and boot on the overlay backend.
     pub base: &'a Path,
     pub staging: &'a Path,
+    /// Live directories or files bound in last, each at an absolute path of the view.
+    pub binds: &'a [(PathBuf, PathBuf)],
 }
 
 impl Transaction {
@@ -245,6 +247,27 @@ impl Plan {
             None,
         )?;
         plan.dev(&at("dev"))?;
+        for (source, inside) in layout.binds {
+            let rel = inside
+                .strip_prefix("/")
+                .with_context(|| format!("{} isn't an absolute path", inside.display()))?;
+            let target = view.join(rel);
+            let mut dir = view.clone();
+            let parts: Vec<&OsStr> = rel.iter().collect();
+            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                dir.push(part);
+                plan.mkdir(&dir, 0o755, None)?;
+            }
+            if source.is_dir() {
+                plan.mkdir(&target, 0o755, None)?;
+            } else {
+                plan.push(
+                    Op::Touch { path: c(&target)? },
+                    &format!("creating {}", target.display()),
+                )?;
+            }
+            plan.bind(source, &target)?;
+        }
         Ok(plan)
     }
 

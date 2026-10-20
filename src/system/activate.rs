@@ -419,7 +419,7 @@ fn run_tool(root: &Path, program: &str, args: &[&str]) {
     }
 }
 
-/// Early at boot: on a deployment's first boot, checks account IDs and applies its /var changes; refreshes the journal catalog whenever the booted deployment changes.
+/// Early at boot: on a deployment's first boot, checks account IDs and applies its /var changes; then runs the hooks waiting for it, and refreshes the journal catalog whenever the booted deployment changes.
 pub fn activate(root: &Path) -> Result<()> {
     let record = root.join("run/archix/deployment");
     let Ok(text) = fs::read_to_string(&record) else {
@@ -455,6 +455,15 @@ pub fn activate(root: &Path) -> Result<()> {
             }
         }
         crate::durable::write(&marker, b"")?;
+    }
+    let failures = crate::system::hooks::run_pending(root, &state, generation);
+    if !failures.is_empty() {
+        let mut notes = fs::read_to_string(Paths::under(root).notes()).unwrap_or_default();
+        for failure in &failures {
+            println!("archix: {failure}; it runs again at the next boot");
+            notes.push_str(&format!("archix: at boot, {failure}; it runs again at the next boot\n"));
+        }
+        let _ = crate::durable::write(&Paths::under(root).notes(), notes.as_bytes());
     }
     let last = state.join("booted-deployment");
     if fs::read_to_string(&last).ok().as_deref().map(str::trim) != Some(id.as_str()) {

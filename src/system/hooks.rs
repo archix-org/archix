@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use super::Hook;
 use super::apply::SystemChange;
@@ -75,70 +76,156 @@ pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeMap<Stri
         .collect()
 }
 
-/// Records on_change scripts as pending until they have run, adding to any already waiting; written before a switch changes files, so a crash can't lose them.
-pub fn defer(path: &Path, due: &BTreeMap<String, Hook>) -> Result<()> {
-    let mut pending = deferred(path);
-    pending.extend(due.clone());
-    if pending.is_empty() {
-        return Ok(());
-    }
-    crate::durable::write(path, serde_json::to_string_pretty(&pending)?.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
+/// The on_change scripts and hooks waiting for one deployment's boot, whose activation runs them once its users exist.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    #[serde(default)]
+    pub on_change: BTreeMap<String, Hook>,
+    #[serde(default)]
+    pub hooks: BTreeMap<String, Hook>,
 }
 
-/// on_change scripts still waiting to run, keyed by file.
-pub fn deferred(path: &Path) -> BTreeMap<String, Hook> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return BTreeMap::new();
+impl Pending {
+    pub fn is_empty(&self) -> bool {
+        self.on_change.is_empty() && self.hooks.is_empty()
+    }
+}
+
+/// Where what deployment `number`'s boot runs is recorded.
+pub fn pending_path(state: &Path, number: u32) -> PathBuf {
+    state.join("pending-hooks").join(format!("{number}.json"))
+}
+
+/// What waits for deployment `number`'s boot; an unreadable record is set aside and runs nothing.
+pub fn pending(state: &Path, number: u32) -> Pending {
+    let path = pending_path(state, number);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Pending::default();
     };
     serde_json::from_str(&text).unwrap_or_else(|e| {
         let kept = path.with_extension("unreadable");
         eprintln!(
-            "warning: {} is unreadable ({e}); its on_change scripts won't run, the file is kept as {}",
+            "warning: {} is unreadable ({e}); its hooks won't run, the file is kept as {}",
             path.display(),
             kept.display()
         );
-        let _ = fs::rename(path, &kept);
-        BTreeMap::new()
+        let _ = fs::rename(&path, &kept);
+        Pending::default()
     })
 }
 
-/// Runs the on_change scripts in `due`, then every hook of the target; failures are returned, not fatal.
-pub fn run(change: &SystemChange, due: &BTreeMap<String, Hook>) -> Vec<String> {
+/// Records what deployment `number`'s boot runs: the `due` on_change scripts, added to any already waiting for it, and `hooks`.
+pub fn defer(state: &Path, number: u32, due: &BTreeMap<String, Hook>, hooks: &BTreeMap<String, Hook>) -> Result<()> {
+    let mut waiting = pending(state, number);
+    waiting.on_change.extend(due.clone());
+    waiting.hooks = hooks.clone();
+    let path = pending_path(state, number);
+    if waiting.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("removing {}", path.display()))
+            }
+            _ => Ok(()),
+        };
+    }
+    crate::durable::write(&path, serde_json::to_string_pretty(&waiting)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// At boot, under `root`: runs what waits for deployment `number`, deleting its record only once all of it succeeded; returns the failures.
+pub fn run_pending(root: &Path, state: &Path, number: u32) -> Vec<String> {
+    let waiting = pending(state, number);
+    if waiting.is_empty() {
+        return Vec::new();
+    }
+    println!("archix: running deployment {number}'s hooks");
+    let failures = run(root, &waiting.on_change, &waiting.hooks);
+    if failures.is_empty() {
+        let path = pending_path(state, number);
+        if let Err(e) = fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return vec![format!("clearing {}: {e}", path.display())];
+        }
+    }
+    failures
+}
+
+/// Runs the on_change scripts in `due`, then every hook, on the system under `root`; failures are returned, not fatal.
+pub fn run(root: &Path, due: &BTreeMap<String, Hook>, hooks: &BTreeMap<String, Hook>) -> Vec<String> {
     let mut failures = Vec::new();
     for (path, hook) in due {
-        if let Err(e) = run_one(hook) {
+        if let Err(e) = run_one(root, hook) {
             failures.push(format!("on_change of {path}: {e:#}"));
         }
     }
-    let names = match order(&change.to.hooks) {
+    let names = match order(hooks) {
         Ok(names) => names,
         Err(e) => return vec![format!("{e:#}")],
     };
     for name in names {
         eprintln!("   hook {name}");
-        if let Err(e) = run_one(&change.to.hooks[name]) {
+        if let Err(e) = run_one(root, &hooks[name]) {
             failures.push(format!("hook {name}: {e:#}"));
         }
     }
     failures
 }
 
-fn run_one(hook: &Hook) -> Result<()> {
-    let script = ["bash", "-e", "-o", "pipefail", "-c", hook.run.as_str()];
-    let mut cmd = match &hook.user {
-        None => {
-            let mut cmd = Command::new(script[0]);
-            cmd.args(&script[1..]).env_clear().current_dir("/");
-            cmd.env("HOME", "/root").env("USER", "root").env("LOGNAME", "root");
-            cmd
-        }
-        Some(user) => user_command(user, &script)?,
-    };
-    cmd.env("PATH", PATH);
+fn run_one(root: &Path, hook: &Hook) -> Result<()> {
+    let mut argv: Vec<String> = Vec::new();
+    let mut env: Vec<(&str, String)> = vec![("PATH", PATH.to_string())];
     if let Ok(lang) = std::env::var("LANG") {
-        cmd.env("LANG", lang);
+        env.push(("LANG", lang));
     }
+    match &hook.user {
+        None => env.extend([
+            ("HOME", "/root".into()),
+            ("USER", "root".into()),
+            ("LOGNAME", "root".into()),
+        ]),
+        Some(user) => {
+            let Some((uid, gid, home)) = account(root, user) else {
+                bail!("user {user} doesn't exist");
+            };
+            // setpriv, not runuser: runuser opens a PAM session, which starts a systemd user manager that outlives the hook.
+            argv.extend(
+                [
+                    "setpriv",
+                    "--reuid",
+                    &uid.to_string(),
+                    "--regid",
+                    &gid.to_string(),
+                    "--init-groups",
+                    "--",
+                ]
+                .map(String::from),
+            );
+            argv.extend(["env", "-C"].map(String::from));
+            argv.push(if root.join(home.trim_start_matches('/')).is_dir() {
+                home.clone()
+            } else {
+                "/".into()
+            });
+            env.extend([("HOME", home), ("USER", user.clone()), ("LOGNAME", user.clone())]);
+            let runtime = format!("/run/user/{uid}");
+            if root.join(runtime.trim_start_matches('/')).is_dir() {
+                if root.join(runtime.trim_start_matches('/')).join("bus").exists() {
+                    env.push(("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={runtime}/bus")));
+                }
+                env.push(("XDG_RUNTIME_DIR", runtime));
+            }
+        }
+    }
+    argv.extend(["bash", "-e", "-o", "pipefail", "-c", hook.run.as_str()].map(String::from));
+    let mut cmd = if root == Path::new("/") {
+        Command::new(&argv[0])
+    } else {
+        let mut cmd = Command::new("chroot");
+        cmd.arg(root).arg(&argv[0]);
+        cmd
+    };
+    cmd.args(&argv[1..]).env_clear().envs(env).current_dir("/");
     let status = cmd.status()?;
     if !status.success() {
         bail!("exited with {status}");
@@ -146,36 +233,19 @@ fn run_one(hook: &Hook) -> Result<()> {
     Ok(())
 }
 
-/// The script as `user` with a clean environment: their home, and their session bus when they're logged in.
-fn user_command(user: &str, script: &[&str]) -> Result<Command> {
-    let Some((uid, gid, home)) = account(user) else {
-        bail!("user {user} doesn't exist on the running system; a user the switch declares exists from the next boot");
-    };
-    // setpriv, not runuser: runuser opens a PAM session, which starts a systemd user manager that outlives the hook.
-    let mut cmd = Command::new("setpriv");
-    cmd.args([
-        "--reuid",
-        &uid.to_string(),
-        "--regid",
-        &gid.to_string(),
-        "--init-groups",
-        "--",
-    ])
-    .args(script)
-    .env_clear();
-    cmd.env("HOME", &home).env("USER", user).env("LOGNAME", user);
-    cmd.current_dir(if Path::new(&home).is_dir() { home.as_str() } else { "/" });
-    let runtime = format!("/run/user/{uid}");
-    if Path::new(&runtime).is_dir() {
-        cmd.env("XDG_RUNTIME_DIR", &runtime);
-        if Path::new(&runtime).join("bus").exists() {
-            cmd.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={runtime}/bus"));
-        }
+/// A user's uid, gid and home: from the passwd file under `root`, or on the running system from NSS as well.
+fn account(root: &Path, user: &str) -> Option<(u32, u32, String)> {
+    let from_file = fs::read_to_string(root.join("etc/passwd")).ok().and_then(|text| {
+        text.lines().find_map(|line| {
+            let fields: Vec<&str> = line.split(':').collect();
+            (fields.len() >= 6 && fields[0] == user)
+                .then(|| Some((fields[2].parse().ok()?, fields[3].parse().ok()?, fields[5].to_string())))
+                .flatten()
+        })
+    });
+    if from_file.is_some() || root != Path::new("/") {
+        return from_file;
     }
-    Ok(cmd)
-}
-
-fn account(user: &str) -> Option<(u32, u32, String)> {
     let name = CString::new(user).ok()?;
     let entry = unsafe { libc::getpwnam(name.as_ptr()) };
     if entry.is_null() {
@@ -200,32 +270,73 @@ mod tests {
     }
 
     #[test]
-    fn deferred_on_change_scripts_accumulate_until_run() {
+    fn deferred_on_change_scripts_accumulate_and_hooks_are_replaced_until_run() {
         let dir = tempfile::tempdir().unwrap();
-        let pending = dir.path().join("pending");
-        assert!(deferred(&pending).is_empty());
+        let state = dir.path();
+        assert!(pending(state, 3).is_empty());
         let script = |run: &str| Hook {
             run: run.into(),
             user: None,
             after: Vec::new(),
         };
-        defer(&pending, &BTreeMap::from([("/etc/a".to_string(), script("old a"))])).unwrap();
+        let hooks = |run: &str| BTreeMap::from([("h".to_string(), script(run))]);
         defer(
-            &pending,
+            state,
+            3,
+            &BTreeMap::from([("/etc/a".to_string(), script("old a"))]),
+            &hooks("first"),
+        )
+        .unwrap();
+        defer(
+            state,
+            3,
             &BTreeMap::from([
                 ("/etc/a".to_string(), script("new a")),
                 ("/etc/b".to_string(), script("b")),
             ]),
+            &hooks("second"),
         )
         .unwrap();
-        let waiting = deferred(&pending);
-        assert_eq!(waiting.len(), 2);
+        let waiting = pending(state, 3);
+        assert_eq!(waiting.on_change.len(), 2);
         assert_eq!(
-            waiting["/etc/a"].run, "new a",
-            "a later boot rollback's script replaces an earlier one"
+            waiting.on_change["/etc/a"].run, "new a",
+            "a later rollback's script replaces an earlier one"
         );
-        defer(&dir.path().join("untouched"), &BTreeMap::new()).unwrap();
-        assert!(!dir.path().join("untouched").exists(), "nothing due writes nothing");
+        assert_eq!(waiting.hooks["h"].run, "second");
+        assert!(pending(state, 4).is_empty(), "each deployment has its own");
+        defer(state, 5, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        assert!(!pending_path(state, 5).exists(), "nothing due writes nothing");
+    }
+
+    #[test]
+    fn pending_hooks_are_cleared_only_once_all_of_them_succeeded() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, log) = (dir.path().join("state"), dir.path().join("log"));
+        let hook = |run: String| Hook {
+            run,
+            user: None,
+            after: Vec::new(),
+        };
+        let flag = dir.path().join("fail");
+        fs::write(&flag, "").unwrap();
+        let hooks = BTreeMap::from([(
+            "h".to_string(),
+            hook(format!("echo ran >> {}; test ! -e {}", log.display(), flag.display())),
+        )]);
+        defer(&state, 7, &BTreeMap::new(), &hooks).unwrap();
+        let failures = run_pending(Path::new("/"), &state, 7);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            pending_path(&state, 7).exists(),
+            "a failed hook stays pending for the next boot"
+        );
+        fs::remove_file(&flag).unwrap();
+        assert!(run_pending(Path::new("/"), &state, 7).is_empty());
+        assert!(!pending_path(&state, 7).exists());
+        assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
+        assert!(run_pending(Path::new("/"), &state, 7).is_empty(), "nothing runs twice");
+        assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
     }
 
     #[test]

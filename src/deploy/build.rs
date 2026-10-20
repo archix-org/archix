@@ -20,10 +20,12 @@ pub struct Plan<'a> {
     pub system: &'a SystemChange,
     pub boot: &'a BootPlan,
     pub repos: &'a [Repo],
-    /// Its generation record, saved just before the commit; None when the record exists, as for a rebuilt rollback.
-    pub record: Option<&'a Generation>,
+    /// Its generation record, kept in the tree and saved to the store once the commit succeeded, unless the store has it, as for a rebuilt rollback.
+    pub record: &'a Generation,
     /// `deployments.keep`, which decides whose boot entries may go when the ESP is short of room.
     pub keep: usize,
+    /// Puts the config as this switch leaves it into the staging tree at the given directory, before the commit.
+    pub config: &'a dyn Fn(&Path) -> Result<()>,
 }
 
 /// What a committed deployment left for after its commit.
@@ -58,18 +60,16 @@ pub fn build(store: &Store, plan: &Plan) -> Result<Built> {
     let in_etc = |path: &str| (deployment_tree(path) == Some("etc")).then(|| etc.join(&path["/etc/".len()..]));
     crate::system::apply::files(paths, plan.system, &in_etc, &accounts)?;
     failures.extend(crate::system::apply::enable_services(plan.system, &run));
-    let archix = crate::integration::own_path()?;
-    crate::integration::write_all(paths, &archix, &|path: &Path| staging.write_path(path))?;
+    crate::integration::write_staged(&staging, &crate::integration::own_path()?)?;
     crate::integration::sync_pacman_conf(&etc.join("pacman.conf"), plan.repos)?;
+    (plan.config)(staging.dir())?;
     let built = boot::build(paths, plan.boot, plan.number, &staging, &tx)?;
     drop(tx);
+    crate::generations::write_into(staging.dir(), plan.record)?;
     let staged = staging.finish()?;
     let dir = staged.dir.clone();
     let in_trees = |path: &str| matches!(deployment_tree(path), Some("usr" | "opt")).then(|| dir.join(&path[1..]));
     crate::system::apply::files(paths, plan.system, &in_trees, &accounts)?;
-    if let Some(record) = plan.record {
-        crate::generations::Store::new(paths).save(record)?;
-    }
     let esp = PathBuf::from(&plan.boot.esp);
     let mut pins = Keep::read(plan.keep, store, &esp)?;
     pins.current = Some(plan.number);
@@ -82,6 +82,10 @@ pub fn build(store: &Store, plan: &Plan) -> Result<Built> {
         droppable: pins.to_delete(&committed),
     };
     staged.commit(store, &esp, &entries)?;
+    let records = crate::generations::Store::new(paths);
+    if !records.has(plan.number) {
+        records.save(plan.record)?;
+    }
     Ok(Built { users, failures })
 }
 

@@ -111,7 +111,7 @@ impl Machine {
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
             cd /var/lib/archix && rm -rf generations boot backups edited id-map.json outside-changes.json \
-              pending-on-change notes layout-pruned"#,
+              pending-hooks notes layout-pruned"#,
             root = root.display(),
             template = template.display(),
         ));
@@ -250,10 +250,10 @@ impl Machine {
         text
     }
 
-    /// Runs plain pacman against the machine's running deployment, as `pacman -U` or yay would there, with /usr made writable for it.
+    /// Runs plain pacman against the machine's running deployment, as `pacman -U` or yay would there, with /usr, /opt and /boot made writable for it.
     pub fn pacman(&self, args: &[&str]) {
         let remount = |mode: &str| {
-            for tree in ["usr", "opt"] {
+            for tree in archix::system::deploy_boot::READ_ONLY {
                 let path = self.root.join(tree);
                 if Machine::mounts_under(&path).contains(&path) {
                     let _ = Command::new("mount")
@@ -299,6 +299,8 @@ impl Drop for Machine {
 
 pub struct Setup {
     pub dir: TempDir,
+    /// The config directory archix runs with: `dir`, or the machine's /etc/archix once moved there.
+    pub config: PathBuf,
     pub paths: Paths,
     pub machine: Machine,
 }
@@ -328,10 +330,26 @@ impl Setup {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, content).unwrap();
         }
-        let setup = Setup { dir, paths, machine };
+        let setup = Setup {
+            config: dir.path().to_path_buf(),
+            dir,
+            paths,
+            machine,
+        };
         setup.write_init(extra, body);
         setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
         setup
+    }
+
+    /// Moves the config into the machine's running /etc/archix, as on a real machine, and runs archix with it there.
+    pub fn move_config_to_etc(&mut self) {
+        let etc = self.machine.root.join("etc/archix");
+        sh(&format!(
+            "rm -rf {etc}; cp -a {from} {etc}",
+            etc = etc.display(),
+            from = self.config.display()
+        ));
+        self.config = etc;
     }
 
     /// Writes init.lua declaring the image's explicit packages plus `extra`, with the machine's boot settings unless `body` has its own.
@@ -353,7 +371,7 @@ impl Setup {
             fields.push(boot_body(&self.machine));
         }
         let init = format!("return {{ {} }}", fields.join(", "));
-        fs::write(self.dir.path().join("init.lua"), init).unwrap();
+        fs::write(self.config.join("init.lua"), init).unwrap();
     }
 
     pub fn run(&self, args: &[&str]) -> Output {
@@ -362,7 +380,7 @@ impl Setup {
 
     pub fn run_env(&self, env: &[(&str, &str)], args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_archix"))
-            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
+            .args(["--config", self.config.to_str().unwrap(), "--host", "box"])
             .args(args)
             .envs(self.machine.env())
             .envs(env.iter().copied())
@@ -382,16 +400,16 @@ impl Setup {
     }
 
     pub fn read(&self, path: &str) -> Option<String> {
-        fs::read_to_string(self.dir.path().join(path)).ok()
+        fs::read_to_string(self.config.join(path)).ok()
     }
 
     pub fn write(&self, path: &str, content: &str) {
-        fs::write(self.dir.path().join(path), content).unwrap();
+        fs::write(self.config.join(path), content).unwrap();
     }
 
     pub fn answering_raw(&self, input: &str, args: &[&str]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
-            .args(["--config", self.dir.path().to_str().unwrap(), "--host", "box"])
+            .args(["--config", self.config.to_str().unwrap(), "--host", "box"])
             .args(args)
             .envs(self.machine.env())
             .stdin(Stdio::piped())
@@ -415,7 +433,7 @@ impl Setup {
     }
 
     pub fn lock(&self) -> archix::lock::HostLock {
-        archix::lock::Lockfile::load(&self.dir.path().join("archix.lock"))
+        archix::lock::Lockfile::load(&self.config.join("archix.lock"))
             .unwrap()
             .hosts["box"]
             .clone()
@@ -433,7 +451,7 @@ impl Setup {
 
     /// Replaces the config with one declaring `extra` and `body`, relocked at the image's snapshot.
     pub fn set_body(&self, extra: &[&str], body: &str) {
-        let _ = fs::remove_file(self.dir.path().join("archix.lock"));
+        let _ = fs::remove_file(self.config.join("archix.lock"));
         self.write_init(extra, body);
         self.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     }

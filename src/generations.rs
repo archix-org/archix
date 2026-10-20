@@ -69,6 +69,15 @@ impl Generation {
 pub struct Store {
     dir: PathBuf,
     current: PathBuf,
+    deploy: PathBuf,
+}
+
+/// Writes a deployment's own copy of its record into its tree before the commit, which the store takes back if a crash came between the commit and saving the record.
+pub fn write_into(deployment: &Path, generation: &Generation) -> Result<()> {
+    crate::durable::write(
+        &deployment.join(GENERATION_FILE),
+        serde_json::to_string_pretty(generation)?.as_bytes(),
+    )
 }
 
 impl Store {
@@ -76,6 +85,7 @@ impl Store {
         Store {
             dir: paths.state.join("generations"),
             current: paths.root.join("archix/current"),
+            deploy: paths.root.join("archix/deploy"),
         }
     }
 
@@ -83,21 +93,45 @@ impl Store {
         self.dir.join(number.to_string())
     }
 
+    /// Whether the store itself holds generation `number`'s record.
+    pub fn has(&self, number: u32) -> bool {
+        self.path(number).is_dir()
+    }
+
+    /// The record committed deployment `number` holds of itself, saved to the store when the store lacks it.
+    fn recovered(&self, number: u32) -> Option<Generation> {
+        let deployment = self.deploy.join(number.to_string());
+        if !deployment.join(GENERATION_FILE).is_file() || self.path(number).exists() {
+            return None;
+        }
+        let generation = read(&deployment).ok().filter(|g| g.number == number)?;
+        if let Err(e) = self.save(&generation) {
+            eprintln!("warning: couldn't save generation {number}'s record from its deployment: {e:#}");
+        }
+        Some(generation)
+    }
+
     pub fn list(&self) -> Result<Vec<Generation>> {
+        let mut generations = Vec::new();
         let entries = match fs::read_dir(&self.dir) {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Ok(entries) => entries.collect::<std::io::Result<Vec<_>>>()?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e).with_context(|| format!("reading {}", self.dir.display())),
         };
-        let mut generations = Vec::new();
         for entry in entries {
-            let entry = entry?;
             if entry.file_name().to_string_lossy().parse::<u32>().is_ok() {
                 // A generation a power cut tore before archix wrote it durably shouldn't hide all the others.
                 match read(&entry.path()) {
                     Ok(generation) => generations.push(generation),
                     Err(e) => eprintln!("warning: skipping {}: {e:#}", entry.path().display()),
                 }
+            }
+        }
+        for entry in fs::read_dir(&self.deploy).into_iter().flatten().flatten() {
+            if let Some(number) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok())
+                && let Some(generation) = self.recovered(number)
+            {
+                generations.push(generation);
             }
         }
         generations.sort_by_key(|generation| generation.number);
@@ -107,6 +141,9 @@ impl Store {
     pub fn get(&self, number: u32) -> Result<Generation> {
         let path = self.path(number);
         if !path.is_dir() {
+            if let Some(generation) = self.recovered(number) {
+                return Ok(generation);
+            }
             bail!("generation {number} does not exist; `archix generations` lists them");
         }
         read(&path)
@@ -232,6 +269,25 @@ mod tests {
             flatpak: BTreeMap::new(),
             before_archix: false,
         }
+    }
+
+    #[test]
+    fn a_record_lost_after_its_deployment_was_committed_comes_back_from_the_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(&Paths::under(dir.path()));
+        store.save(&generation(1, 1)).unwrap();
+        let deployment = dir.path().join("archix/deploy/2");
+        fs::create_dir_all(&deployment).unwrap();
+        write_into(&deployment, &generation(2, 2)).unwrap();
+        let staged = dir.path().join("archix/deploy/.staging-3");
+        fs::create_dir_all(&staged).unwrap();
+        write_into(&staged, &generation(3, 3)).unwrap();
+        let numbers: Vec<u32> = store.list().unwrap().iter().map(|g| g.number).collect();
+        assert_eq!(numbers, [1, 2], "an uncommitted staging tree's record isn't taken");
+        assert!(store.path(2).is_dir(), "the store keeps it from now on");
+        fs::remove_dir_all(store.path(2)).unwrap();
+        assert_eq!(store.get(2).unwrap().number, 2);
+        assert!(store.get(3).is_err());
     }
 
     #[test]

@@ -26,6 +26,9 @@ pub struct BootPlan {
     /// Boots systemd-boot tries the new entry before falling back to an older one; 0 turns boot counting off.
     #[serde(default)]
     pub tries: u32,
+    /// Revoke the UKIs no entry uses after each switch or rollback that commits a deployment.
+    #[serde(default)]
+    pub revoke_unused: bool,
 }
 
 /// The entries one generation gets: the normal one and a protected twin.
@@ -349,13 +352,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
         for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
             let path = esp.join(loader);
             if path.exists() {
-                run(
-                    Command::new("sbctl")
-                        .env("ESP_PATH", esp)
-                        .args(["sign", "-s"])
-                        .arg(&path),
-                    "sbctl sign",
-                )?;
+                sign_replacing(esp, &path)?;
             }
         }
     }
@@ -368,6 +365,28 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
     }
     refuse_unsigned(plan, &to_check)?;
     Ok(Built { version, ukis })
+}
+
+/// Signs a loader on the ESP as a copy that replaces it by rename, so a crash never leaves it half written.
+fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let signed = fs::copy(path, &tmp)
+        .with_context(|| format!("copying {}", path.display()))
+        .and_then(|_| {
+            run(
+                Command::new("sbctl").env("ESP_PATH", esp).arg("sign").arg(&tmp),
+                "sbctl sign",
+            )
+        })
+        .and_then(|()| Ok(fs::File::open(&tmp)?.sync_all()?))
+        .and_then(|()| fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
+    if signed.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    signed?;
+    crate::durable::sync_dir(path)
 }
 
 /// The ESP step of a commit: copies the UKIs a deployment built, writes its entries and their records, and makes it systemd-boot's default; entries of `droppable` deployments go first when the ESP is short of room.
@@ -411,6 +430,7 @@ impl EspStep for Entries<'_> {
             )?;
         }
         mark("deploy-esp-entry");
+        crate::testhooks::fail_at("deploy-esp-entry")?;
         let counted = self.plan.tries > 0 && loader_counts_boots(crate::testhooks::loader_features());
         if self.plan.tries > 0
             && let Some(why) = counting_off()
@@ -446,6 +466,18 @@ impl EspStep for Entries<'_> {
 
     fn clean(&self) -> Result<()> {
         crate::deploy::commit::clean_esp(Path::new(&self.plan.esp))
+    }
+
+    fn abandon(&self, number: u32, previous: Option<u32>) -> Result<()> {
+        let esp = Path::new(&self.plan.esp);
+        crate::deploy::commit::clean_esp(esp)?;
+        drop_entries(self.paths, esp, number)?;
+        match previous {
+            Some(previous) if entries(esp).iter().any(|(n, extra, _)| *n == previous && !extra) => {
+                set_default_entry(esp, previous)
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -813,6 +845,17 @@ pub fn booted() -> Option<u32> {
         entry_unchanged(&Paths::system(), &entry).then_some(number)
     })
 }
+
+/// The deployment this boot runs on the root at `root`: what the initramfs recorded mounting, else the entry systemd-boot started.
+pub fn booted_deployment(root: &Path) -> Option<u32> {
+    fs::read_to_string(root.join(DEPLOYMENT_RECORD.trim_start_matches('/')))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .or_else(booted)
+}
+
+/// Where the initramfs records the deployment it mounted, which lasts until shutdown.
+pub const DEPLOYMENT_RECORD: &str = "/run/archix/deployment";
 
 /// The entry systemd-boot started when it names an archix generation but isn't what archix wrote there.
 pub fn tampered_selected_entry() -> Option<String> {

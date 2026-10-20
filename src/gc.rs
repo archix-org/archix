@@ -39,6 +39,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
             Some(esp) => Keep::read(keep, &deployments, esp)?,
             None => Keep {
                 keep,
+                booted: crate::system::boot::booted_deployment(&paths.root),
                 current: deployments.current()?,
                 ..Keep::default()
             },
@@ -49,13 +50,14 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
                 crate::system::boot::drop_entries(paths, esp, number)?;
             }
             deployments.delete(number, &pins)?;
+            let _ = fs::remove_file(crate::system::hooks::pending_path(&paths.state, number));
             report.deployments.push(number);
         }
         deployed.extend(deployments.deployments()?);
     }
     let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
     // The running system came from the booted generation; it's what a broken switch falls back to.
-    let booted = crate::system::boot::booted();
+    let booted = crate::system::boot::booted_deployment(&paths.root);
     keep.extend(booted.filter(|number| generations.iter().any(|g| g.number == *number)));
     keep.extend(deployed);
     for generation in &generations {

@@ -168,75 +168,101 @@ fn hooks_body(conf: &str, extra_hook: &str) -> String {
     )
 }
 
+/// Boots the machine's current deployment, as its entry would, up to activation; returns what activation said.
+fn boot_current(setup: &Setup) -> String {
+    let machine = &setup.machine;
+    machine.reboot(Some(&format!("archix-{}.conf", machine.current().unwrap())));
+    setup.ok(&["deploy-activate", "--root", machine.root.to_str().unwrap()])
+}
+
 #[test]
 #[ignore]
-fn hooks_run_on_every_switch_and_on_change_only_when_the_file_changed() {
+fn hooks_run_when_the_deployment_boots_and_on_change_only_when_the_file_changed() {
     let _system = lock_system();
-    let log = |path: &str| fs::read_to_string(path).unwrap_or_default();
-    for path in ["/var/tmp/archix-hooks", "/var/tmp/archix-on-change"] {
-        let _ = fs::remove_file(path);
-    }
     let setup = Setup::new(&[], &hooks_body("one", ""));
+    let root = setup.machine.root.clone();
+    let log = |path: &str| fs::read_to_string(root.join(path)).unwrap_or_default();
     let out = setup.lay_out();
     assert!(out.contains("run hooks  z, a"), "{out}");
+    assert_eq!(log("var/tmp/archix-hooks"), "", "hooks wait for the deployment's boot");
+    boot_current(&setup);
     assert_eq!(
-        log("/var/tmp/archix-hooks"),
+        log("var/tmp/archix-hooks"),
         "z root\na nobody /\n",
         "after orders hooks, and user hooks run as that user"
     );
-    assert_eq!(log("/var/tmp/archix-on-change"), "changed\n");
+    assert_eq!(log("var/tmp/archix-on-change"), "changed\n");
+    boot_current(&setup);
+    assert_eq!(
+        log("var/tmp/archix-hooks").lines().count(),
+        2,
+        "hooks run once per switch"
+    );
 
     assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
     assert_eq!(
-        log("/var/tmp/archix-hooks").lines().count(),
+        log("var/tmp/archix-hooks").lines().count(),
         4,
-        "hooks run on every switch"
+        "a switch with nothing to build runs the hooks right away"
     );
-    assert_eq!(log("/var/tmp/archix-on-change"), "changed\n", "the file didn't change");
+    assert_eq!(log("var/tmp/archix-on-change"), "changed\n", "the file didn't change");
 
     fs::write(system_path("/etc/archix-hook.conf"), "edited by hand\n").unwrap();
     setup.ok(&["switch", "--noconfirm"]);
+    boot_current(&setup);
     assert_eq!(
-        log("/var/tmp/archix-on-change"),
+        log("var/tmp/archix-on-change"),
         "changed\nchanged\n",
         "restoring a hand-edited file changes it"
     );
 
     setup.set_body(&[], &hooks_body("two", ""));
     setup.ok(&["switch", "--noconfirm"]);
-    assert_eq!(log("/var/tmp/archix-on-change").lines().count(), 3);
+    boot_current(&setup);
+    assert_eq!(log("var/tmp/archix-on-change").lines().count(), 3);
 
     setup.set_body(&[], &hooks_body("three", r#"broken = { run = "false" },"#));
-    let output = setup.run(&["switch", "--noconfirm"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "a failing hook is reported");
-    assert!(stderr.contains("hook broken"), "{stderr}");
-    assert_eq!(read("/etc/archix-hook.conf"), "three\n", "the switch still committed");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(read("/etc/archix-hook.conf"), "three\n");
+    let out = boot_current(&setup);
+    assert!(
+        out.contains("hook broken") && out.contains("runs again at the next boot"),
+        "{out}"
+    );
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(notes.contains("hook broken"), "{notes}");
+    let before = log("var/tmp/archix-on-change").lines().count();
+    boot_current(&setup);
+    assert_eq!(
+        log("var/tmp/archix-on-change").lines().count(),
+        before + 1,
+        "what failed stays pending and runs again"
+    );
 
     setup.ok(&["rollback", "--noconfirm"]);
+    let before = log("var/tmp/archix-on-change").lines().count();
+    boot_current(&setup);
     assert_eq!(
-        log("/var/tmp/archix-on-change").lines().count(),
-        5,
-        "a rollback runs the target generation's on_change too"
+        log("var/tmp/archix-on-change").lines().count(),
+        before + 1,
+        "a rollback runs the target generation's on_change at its boot too"
     );
 }
 
 #[test]
 #[ignore]
-fn a_hook_for_a_user_the_switch_declares_waits_for_the_boot_that_makes_them() {
+fn a_hook_for_a_user_the_switch_declares_runs_at_the_deployments_first_boot() {
     let _system = lock_system();
     let setup = Setup::new(
         &[],
-        r#"users = { archixhook = {} }, hooks = { a = { run = "true", user = "archixhook" } }"#,
+        r#"users = { archixhook = {} }, hooks = { a = { run = "id -un > /var/tmp/archix-hook-user", user = "archixhook" } }"#,
     );
-    let output = setup.run(&["switch", "--noconfirm"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("user archixhook doesn't exist on the running system"),
-        "{stderr}"
-    );
+    let ran = setup.machine.root.join("var/tmp/archix-hook-user");
+    setup.ok(&["switch", "--noconfirm"]);
     assert!(uid("archixhook").is_some(), "the user is in the new deployment");
+    assert!(!ran.exists(), "the hook ran before the boot that makes its user");
+    boot_current(&setup);
+    assert_eq!(fs::read_to_string(&ran).unwrap_or_default(), "archixhook\n");
 }
 
 #[test]

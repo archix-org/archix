@@ -151,6 +151,66 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
 
 #[test]
 #[ignore]
+fn a_build_on_the_host_gets_its_build_dependencies_only_in_a_throwaway_view() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        makedepends: &["lemon"],
+        build: "command -v lemon > \"$srcdir/marker\"",
+        package: "install -Dm644 \"$srcdir/marker\" \"$pkgdir/usr/share/archix-test-hostbuilt/marker\"",
+        ..TestPkg::new("archix-test-hostbuilt", "1.0")
+    });
+    let body = format!(
+        "aur = {{ url = {:?}, build_on_host = {{ \"archix-test-hostbuilt\" }} }}",
+        aur.url()
+    );
+    let setup = Setup::new(&[], &body);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let base = machine.current().unwrap();
+    let tree = |dir: &str| {
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "cd {} && find . -printf '%p %i %m %s %T@\\n' | sort",
+                machine.deployment(base).join(dir).display()
+            ))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let (db, usr) = (tree("pacman"), tree("usr"));
+    let host_log = fs::read_to_string("/var/log/pacman.log").unwrap_or_default();
+
+    setup.set_body(&["archix-test-hostbuilt"], &body);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("on the host"), "{out}");
+    let marker = read("/usr/share/archix-test-hostbuilt/marker");
+    assert!(
+        marker.ends_with("bin/lemon"),
+        "the build lacked its build dependency: {marker:?}"
+    );
+    assert_eq!(
+        installed("lemon"),
+        None,
+        "build dependencies stay out of the new deployment"
+    );
+    assert_eq!(machine.installed_in(base, "lemon"), None);
+    assert!(
+        tree("pacman") == db,
+        "the build changed deployment {base}'s pacman database"
+    );
+    assert!(tree("usr") == usr, "the build changed deployment {base}'s /usr");
+    let host_log = fs::read_to_string("/var/log/pacman.log").unwrap_or_default()[host_log.len()..].to_string();
+    assert!(
+        !host_log.contains("lemon"),
+        "pacman ran on the running system:\n{host_log}"
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+}
+
+#[test]
+#[ignore]
 fn real_aur_packages_resolve() {
     let _system = lock_system();
     let dir = TempDir::new().unwrap();

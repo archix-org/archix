@@ -120,35 +120,6 @@ impl Staging {
         self.dir.join(name)
     }
 
-    /// Where a write to the absolute `path` of the staging root lands when made from outside the view; on the overlay backend usr, opt and boot writes go to the upper layer, whose missing directories take the lower ones' owner and mode.
-    pub fn write_path(&self, path: &Path) -> Result<PathBuf> {
-        let (tree, rest) = split_tree(path)?;
-        if self.store.backend() == Backend::Snapshot || !OVERLAID.contains(&tree) {
-            return Ok(self.dir.join(tree).join(rest));
-        }
-        let upper = self.dir.join(".upper").join(tree);
-        let lower = self.base.join(tree);
-        let mut dir = PathBuf::new();
-        if let Some(parent) = rest.parent() {
-            for part in parent.iter() {
-                dir.push(part);
-                let made = upper.join(&dir);
-                if made.symlink_metadata().is_ok() {
-                    continue;
-                }
-                fs::create_dir(&made).with_context(|| format!("creating {}", made.display()))?;
-                if let Ok(meta) = fs::metadata(lower.join(&dir)) {
-                    std::os::unix::fs::lchown(&made, Some(meta.uid()), Some(meta.gid()))?;
-                    fs::set_permissions(
-                        &made,
-                        std::os::unix::fs::PermissionsExt::from_mode(meta.mode() & 0o7777),
-                    )?;
-                }
-            }
-        }
-        Ok(upper.join(rest))
-    }
-
     /// Where the file at the absolute `path` of the staging root is on disk, for reading from outside the view: on the overlay backend, the upper layer's copy if it has one, else the base deployment's.
     pub fn read_path(&self, path: &Path) -> Result<PathBuf> {
         let (tree, rest) = split_tree(path)?;
@@ -169,12 +140,18 @@ impl Staging {
 
     /// The staging root to run pacman, mkinitcpio and the like in.
     pub fn transaction(&self) -> Result<Transaction> {
+        self.transaction_with(&[])
+    }
+
+    /// The staging root with live paths bound in, each at an absolute path of the view.
+    pub fn transaction_with(&self, binds: &[(PathBuf, PathBuf)]) -> Result<Transaction> {
         mark("deploy-transact");
         Transaction::new(&Layout {
             backend: self.store.backend(),
             root: self.store.root(),
             base: &self.base,
             staging: &self.dir,
+            binds,
         })
     }
 

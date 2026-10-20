@@ -198,6 +198,12 @@ enum Command {
     /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
     #[command(hide = true)]
     PruneHidden { root: PathBuf },
+    /// Run by archix inside a new deployment's staging root: write archix's integration files there, with units that run `exec`
+    #[command(hide = true)]
+    DeployIntegrate {
+        #[arg(long)]
+        exec: PathBuf,
+    },
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
@@ -438,6 +444,11 @@ fn run() -> Result<ExitCode> {
             commands::prune_hidden(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::DeployIntegrate { exec } => {
+            let paths = archix::paths::Paths::system();
+            archix::integration::write_all(&paths, &exec, &|path| Ok(paths.root.join(path.strip_prefix("/")?)))?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Recover { .. } => anyhow::bail!(
             "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
         ),
@@ -661,6 +672,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
+        | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
         | Command::Sync { .. } => {

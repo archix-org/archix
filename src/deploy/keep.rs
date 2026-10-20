@@ -25,17 +25,19 @@ pub fn boot_default(conf: &str) -> Option<u32> {
         .and_then(|rest| entry_number(rest.trim()))
 }
 
-/// What `deployments.keep` leaves: never the booted, current or boot-default deployment, and then the newest others until `keep` are left.
+/// What `deployments.keep` leaves: never the booted, current or boot-default deployment, then the newest others with a boot entry, then the newest without, until `keep` are left.
 #[derive(Debug, Clone, Default)]
 pub struct Keep {
     pub keep: usize,
     pub booted: Option<u32>,
     pub current: Option<u32>,
     pub boot_default: Option<u32>,
+    /// Deployments with a boot entry on the ESP.
+    pub entries: BTreeSet<u32>,
 }
 
 impl Keep {
-    /// The pins as they stand: the deployment this boot came from, `current`, and loader.conf's default on `esp`.
+    /// The pins as they stand: the deployment this boot runs, `current`, and loader.conf's default and the entries on `esp`.
     pub fn read(keep: usize, store: &Store, esp: &Path) -> Result<Keep> {
         let conf = esp.join("loader/loader.conf");
         let conf = match fs::read_to_string(&conf) {
@@ -45,9 +47,14 @@ impl Keep {
         };
         Ok(Keep {
             keep,
-            booted: crate::system::boot::booted(),
+            booted: crate::system::boot::booted_deployment(store.root()),
             current: store.current()?,
             boot_default: boot_default(&conf),
+            entries: crate::system::boot::entries(esp)
+                .into_iter()
+                .filter(|(_, extra, _)| !extra)
+                .map(|(n, _, _)| n)
+                .collect(),
         })
     }
 
@@ -59,7 +66,8 @@ impl Keep {
             .flatten()
             .filter(|n| committed.contains(n))
             .collect();
-        for &n in committed.iter().rev() {
+        let (entried, bare): (Vec<u32>, Vec<u32>) = committed.iter().rev().partition(|n| self.entries.contains(n));
+        for n in entried.into_iter().chain(bare) {
             if kept.len() >= self.keep.max(1) {
                 break;
             }
@@ -79,7 +87,22 @@ mod tests {
             booted: Some(booted),
             current: Some(current),
             boot_default: Some(boot_default),
+            entries: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn deployments_with_a_boot_entry_are_kept_before_ones_without() {
+        let pins = Keep {
+            entries: BTreeSet::from([5, 8]),
+            ..keep(2, 8, 8, 8)
+        };
+        assert_eq!(pins.to_delete(&[5, 6, 7, 8]), vec![6, 7]);
+        let pins = Keep {
+            entries: BTreeSet::from([5, 8]),
+            ..keep(3, 8, 8, 8)
+        };
+        assert_eq!(pins.to_delete(&[5, 6, 7, 8]), vec![6], "then the newest without one");
     }
 
     #[test]
@@ -126,6 +149,7 @@ mod tests {
             booted: Some(1),
             current: Some(9),
             boot_default: None,
+            entries: BTreeSet::new(),
         };
         assert_eq!(stale.to_delete(&[7, 8, 9]), vec![7]);
     }

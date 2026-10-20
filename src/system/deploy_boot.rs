@@ -19,8 +19,8 @@ pub const TREES: &[(&str, &str)] = &[
     ("dkms", "var/lib/dkms"),
 ];
 
-/// Trees mounted read-only: on ext4 they share inodes with older deployments, so a write would change a rollback target.
-pub const READ_ONLY: &[&str] = &["usr", "opt"];
+/// Trees mounted read-only: on ext4 they share inodes with older deployments, so a write would change a rollback target; staging writes them instead.
+pub const READ_ONLY: &[&str] = &["usr", "opt", "boot"];
 
 /// Where the busybox initramfs has the root mounted when late hooks run.
 pub const BUSYBOX_ROOT: &str = "/new_root";
@@ -212,7 +212,7 @@ fn separate_mounts(etc: &Path) -> Vec<(String, &'static str)> {
         .collect()
 }
 
-/// Binds a deployment's trees over `root`'s usr, etc, opt, boot, pacman database and DKMS state, usr and opt read-only.
+/// Binds a deployment's trees over `root`'s usr, etc, opt, boot, pacman database and DKMS state, usr, opt and boot read-only.
 pub fn bind_trees(root: &Path, deployment: &Path) -> Result<()> {
     for (tree, at) in TREES {
         let target = root.join(at);
@@ -316,7 +316,7 @@ const MOUNT_UNIT: &str = "[Unit]\nDescription=archix: mount the deployment this 
 
 fn activate_unit(archix: &Path) -> String {
     format!(
-        "[Unit]\nDescription=archix: apply this deployment's /var changes on its first boot\nDefaultDependencies=no\n\
+        "[Unit]\nDescription=archix: apply this deployment's /var changes on its first boot and run its hooks\nDefaultDependencies=no\n\
          ConditionPathExists=/run/archix/deployment\nAfter=local-fs.target systemd-sysusers.service\n\
          Before=sysinit.target systemd-tmpfiles-setup.service systemd-journal-catalog-update.service\n\
          Conflicts=shutdown.target\nBefore=shutdown.target\nOnFailure=emergency.target\nOnFailureJobMode=replace-irreversibly\n\n\

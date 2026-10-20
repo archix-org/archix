@@ -198,6 +198,20 @@ impl Store {
         fs::remove_dir(&hidden).with_context(|| format!("removing {}", hidden.display()))
     }
 
+    /// Renames deployment `number`, whose commit failed and which `current` doesn't name, to a leftover the next staging deletes.
+    pub fn abandon(&self, number: u32) -> Result<()> {
+        if self.current()? == Some(number) {
+            bail!("deployment {number} is current; it can't be taken back");
+        }
+        let path = self.path(number);
+        let hidden = self.deploy_dir().join(format!("{DELETING_PREFIX}{number}"));
+        if hidden.symlink_metadata().is_ok() {
+            self.remove_tree(&hidden)?;
+        }
+        fs::rename(&path, &hidden).with_context(|| format!("renaming {} to {}", path.display(), hidden.display()))?;
+        crate::durable::sync_dir(&hidden)
+    }
+
     /// Points `current` at a complete committed deployment with an atomic rename, flushed to disk.
     pub fn point_current(&self, number: u32) -> Result<()> {
         if let Some(why) = incomplete(&self.path(number)) {
@@ -358,6 +372,7 @@ mod tests {
             booted: Some(3),
             current: Some(5),
             boot_default: Some(4),
+            ..Keep::default()
         };
         for pinned in [3, 4, 5] {
             assert!(store.delete(pinned, &pins).is_err(), "{pinned}");

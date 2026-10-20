@@ -18,6 +18,11 @@ pub trait EspStep {
     fn clean(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Takes back what a failed `install` of deployment `number` wrote, leaving `previous` the default.
+    fn abandon(&self, _number: u32, _previous: Option<u32>) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<F: Fn(u32, &Path) -> Result<()>> EspStep for F {
@@ -67,6 +72,8 @@ pub fn clean_esp(esp: &Path) -> Result<()> {
         ("EFI/archix", ""),
         ("loader/entries", "archix-"),
         ("loader", "loader.conf"),
+        ("EFI/systemd", "systemd-bootx64.efi"),
+        ("EFI/BOOT", "BOOTX64.EFI"),
     ] {
         let dir = esp.join(dir);
         let entries = match fs::read_dir(&dir) {
@@ -98,23 +105,44 @@ pub fn with_default(conf: &str, entry: &str) -> String {
 }
 
 impl Staged {
-    /// Commits in the order that keeps every surviving pointer naming a complete deployment: flush, rename into place, ESP, then `current`, stopping at the first failed flush.
+    /// Commits in the order that keeps every surviving pointer naming a complete deployment: flush, rename into place, ESP, then `current`, stopping at the first failed flush; a failure after the rename takes the deployment and its entries back out.
     pub fn commit(self, store: &Store, esp: &Path, step: &dyn EspStep) -> Result<PathBuf> {
         self.check()?;
         step.clean().context("removing temporary files from the ESP")?;
         mark("deploy-commit-sync");
         durable::sync_filesystems_checked(&[store.dir(), esp])?;
         mark("deploy-commit-rename");
+        let previous = store.current()?;
         let path = store.path(self.number);
         rename_noreplace(&self.dir, &path)?;
-        durable::sync_dir(&path)?;
-        durable::sync_filesystems_checked(&[store.dir()])?;
-        mark("deploy-commit-esp");
-        step.install(self.number, &path)
-            .with_context(|| format!("writing deployment {}'s boot entry", self.number))?;
-        durable::sync_filesystems_checked(&[esp])?;
-        mark("deploy-commit-current");
-        store.point_current(self.number)?;
+        let committed = (|| {
+            durable::sync_dir(&path)?;
+            durable::sync_filesystems_checked(&[store.dir()])?;
+            mark("deploy-commit-esp");
+            step.install(self.number, &path)
+                .with_context(|| format!("writing deployment {}'s boot entry", self.number))?;
+            durable::sync_filesystems_checked(&[esp])?;
+            mark("deploy-commit-current");
+            store.point_current(self.number)
+        })();
+        if let Err(e) = committed {
+            if store.current().ok().flatten() == Some(self.number) {
+                return Err(e);
+            }
+            if let Err(undo) = step.abandon(self.number, previous) {
+                eprintln!(
+                    "warning: taking deployment {}'s boot entry back off failed: {undo:#}",
+                    self.number
+                );
+            }
+            return Err(match store.abandon(self.number) {
+                Ok(()) => e,
+                Err(undo) => e.context(format!(
+                    "and taking deployment {} back out failed: {undo:#}",
+                    self.number
+                )),
+            });
+        }
         durable::sync_filesystems_checked(&[store.dir()])?;
         mark("deploy-done");
         Ok(path)

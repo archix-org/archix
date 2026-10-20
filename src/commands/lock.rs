@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use archix::adopt::newer_than_lock;
 use archix::archive::Archive;
@@ -127,7 +127,7 @@ pub(super) fn save_lock(
     let path = target.config_dir.join(LOCK_FILE);
     lockfile.hosts.insert(target.host.to_string(), new.clone());
     if !defer_write(&path, &lockfile.render()) {
-        lockfile.save(&path)?;
+        write_config(&path, lockfile.render().as_bytes())?;
         println!("wrote {}", path.display());
     }
     archix::testhooks::crash_at("lock-resolved");
@@ -172,7 +172,7 @@ pub(super) fn load_lockfile(target: &Target) -> Result<Lockfile> {
 pub(super) fn store_lockfile(target: &Target, lockfile: &Lockfile) -> Result<()> {
     let path = target.config_dir.join(LOCK_FILE);
     if !defer_write(&path, &lockfile.render()) {
-        lockfile.save(&path)?;
+        write_config(&path, lockfile.render().as_bytes())?;
     }
     Ok(())
 }
@@ -210,9 +210,69 @@ pub fn deferred_overlay(config_dir: &Path) -> std::collections::BTreeMap<std::pa
 pub(super) fn write_deferred() -> Result<()> {
     let writes = DEFERRED.with(|deferred| deferred.borrow_mut().as_mut().map(std::mem::take).unwrap_or_default());
     for write in writes {
-        archix::durable::write_config(&write.path, write.text.as_bytes())?;
+        write_config(&write.path, write.text.as_bytes())?;
     }
     Ok(())
+}
+
+/// Writes the deferred config files that live in the running /etc into `etc`, a staged deployment's, before it's committed.
+pub(super) fn stage_deferred(paths: &Paths, etc: &Path) -> Result<()> {
+    let writes = DEFERRED.with(|deferred| deferred.borrow().clone().unwrap_or_default());
+    for write in writes {
+        if let Some(staged) = in_etc(paths, &write.path, etc) {
+            archix::durable::write_config(&staged, write.text.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, which nothing merges the running /etc into.
+pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
+    archix::durable::write_config(path, text)?;
+    let paths = Paths::system();
+    if let Some(etc) = pending_etc(&paths)
+        && let Some(copy) = in_etc(&paths, path, &etc)
+    {
+        archix::durable::write_config(&copy, text).with_context(|| format!("writing {}", copy.display()))?;
+    }
+    Ok(())
+}
+
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
+}
+
+/// What a deployment waiting for the next boot means for /etc until then.
+pub(super) fn pending_note(number: u32) -> String {
+    format!(
+        "deployment {number} is committed and boots at the next restart; changes to /etc made before then don't carry over to it, except archix's own config"
+    )
+}
+
+/// The /etc of the deployment that boots next, when it isn't the one the running /etc belongs to.
+pub(super) fn pending_etc(paths: &Paths) -> Option<std::path::PathBuf> {
+    if !archix::deploy::layout::laid_out(&paths.root) {
+        return None;
+    }
+    let store = archix::deploy::Store::open(&paths.root).ok()?;
+    let etc = store.path(store.current().ok()??).join("etc");
+    (identity(&etc) != identity(&paths.root.join("etc"))).then_some(etc)
+}
+
+/// Where `path`, a file under the running /etc, is under `etc`; None for a file elsewhere.
+fn in_etc(paths: &Paths, path: &Path, etc: &Path) -> Option<std::path::PathBuf> {
+    let live = std::fs::canonicalize(paths.root.join("etc")).ok()?;
+    let path = std::path::absolute(path).ok()?;
+    let parent = path.parent()?;
+    let (found, rest) = parent
+        .ancestors()
+        .find_map(|dir| Some((std::fs::canonicalize(dir).ok()?, parent.strip_prefix(dir).ok()?)))?;
+    Some(
+        etc.join(found.strip_prefix(&live).ok()?)
+            .join(rest)
+            .join(path.file_name()?),
+    )
 }
 
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
@@ -332,11 +392,14 @@ pub fn status(target: &Target) -> Result<()> {
         Some(number) => {
             let generation = store.get(number)?;
             println!("current generation: {number} (snapshot {})", generation.date);
-            match archix::system::boot::booted() {
+            match archix::system::boot::booted_deployment(&paths.root) {
                 Some(booted) if booted != number => {
                     println!("booted generation: {booted}; generation {number} boots at the next restart")
                 }
                 _ => {}
+            }
+            if pending_etc(&paths).is_some() {
+                println!("{}", pending_note(number));
             }
         }
         None => println!("no generation yet; `archix switch` creates the first one"),
@@ -460,4 +523,30 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
     }
     lines.push(format!("{} locked", count(new.packages.len(), "package", "packages")));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_config_file_in_the_running_etc_maps_to_the_same_place_in_another_etc() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        std::fs::create_dir_all(dir.path().join("etc/archix")).unwrap();
+        std::fs::write(dir.path().join("etc/archix/archix.lock"), "").unwrap();
+        let other = dir.path().join("pending/etc");
+        let mapped = |path: &str| in_etc(&paths, &dir.path().join(path), &other).map(|p| p.into_os_string());
+        assert_eq!(
+            mapped("etc/archix/archix.lock"),
+            Some(other.join("archix/archix.lock").into_os_string()),
+            "a rename to a path with a trailing slash fails"
+        );
+        assert_eq!(
+            mapped("etc/archix/lua/hosts/box/installed.lua"),
+            Some(other.join("archix/lua/hosts/box/installed.lua").into_os_string()),
+            "a file in directories not made yet"
+        );
+        assert_eq!(mapped("home/config/init.lua"), None);
+    }
 }
