@@ -75,7 +75,9 @@ pub fn boot_files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
     ];
-    if root.join(STATIC_BINARY.trim_start_matches('/')).exists() {
+    let with_static = root.join(STATIC_BINARY.trim_start_matches('/')).exists();
+    files.extend(crate::system::deploy_boot::files(root, archix, with_static));
+    if with_static {
         files.push((
             root.join("etc/initcpio/install/archix-rescue"),
             format!(
@@ -127,7 +129,7 @@ fn root(paths: &Paths) -> PathBuf {
         .to_path_buf()
 }
 
-/// The rescue hook's files, which put it into every initramfs mkinitcpio builds.
+/// The rescue and deployment hooks' files, which put them into every initramfs mkinitcpio builds, and the activation unit.
 pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
     let root = root(paths);
     [
@@ -138,6 +140,7 @@ pub fn rescue_files(paths: &Paths) -> Vec<PathBuf> {
     ]
     .iter()
     .map(|path| root.join(path))
+    .chain(crate::system::deploy_boot::all_files(&root))
     .collect()
 }
 
@@ -172,7 +175,7 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
         .and_then(Path::parent)
         .unwrap_or(Path::new("/"))
         .to_path_buf();
-    let wants = [
+    let mut wants: Vec<(PathBuf, String)> = [
         ("sysinit.target.wants", "archix-boot.service"),
         ("multi-user.target.wants", "archix-boot-complete.service"),
     ]
@@ -181,7 +184,9 @@ pub fn ensure(paths: &Paths, boot: bool) -> Result<()> {
             root.join("etc/systemd/system").join(dir).join(unit),
             format!("/etc/systemd/system/{unit}"),
         )
-    });
+    })
+    .into();
+    wants.push(crate::system::deploy_boot::activate_wants(&root));
     if boot {
         for (link, unit) in &wants {
             if let Some(dir) = link.parent() {

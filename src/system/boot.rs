@@ -248,7 +248,7 @@ pub fn is_bad(name: &str) -> bool {
 }
 
 /// The generation an entry file (archix-N.conf, archix-N-rescue.conf, or a pre-sharing archix-N.efi) belongs to, and whether it's an extra one.
-fn parse_entry(name: &str) -> Option<(u32, bool)> {
+pub(crate) fn parse_entry(name: &str) -> Option<(u32, bool)> {
     let stem = name.strip_prefix("archix-")?;
     let stem = stem.strip_suffix(".conf").or_else(|| stem.strip_suffix(".efi"))?;
     let stem = stem.split('+').next().unwrap_or(stem);
@@ -991,7 +991,7 @@ fn entry_records(paths: &Paths) -> PathBuf {
 }
 
 /// The id systemd-boot reports for an entry file: its name without the boot counters.
-fn entry_id(name: &str) -> String {
+pub(crate) fn entry_id(name: &str) -> String {
     match name.split_once('+') {
         Some((stem, _)) => format!("{stem}.conf"),
         None => name.to_string(),
@@ -1029,9 +1029,11 @@ fn record_entries(paths: &Paths, esp: &str) -> Result<()> {
 
 /// systemd-boot's LoaderEntrySelected: 4 bytes of attributes, then the entry's id in UTF-16LE.
 pub fn read_selected_entry() -> Option<String> {
-    const VAR: &str = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
-    efivar_string(&fs::read(VAR).ok()?)
+    efivar_string(&fs::read(SELECTED_ENTRY_VAR).ok()?)
 }
+
+pub const SELECTED_ENTRY_VAR: &str =
+    "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 
 /// systemd-boot's LoaderFeatures, a bit set of what the loader that started this boot supports.
 pub fn read_loader_features() -> u64 {
@@ -1052,7 +1054,7 @@ fn efivar_u64(bytes: &[u8]) -> Option<u64> {
     Some(u64::from_le_bytes(bytes.get(4..12)?.try_into().ok()?))
 }
 
-fn efivar_string(bytes: &[u8]) -> Option<String> {
+pub(crate) fn efivar_string(bytes: &[u8]) -> Option<String> {
     let units: Vec<u16> = bytes
         .get(4..)?
         .chunks_exact(2)
