@@ -408,7 +408,10 @@ mod tests {
         let archix = Path::new("/usr/bin/archix");
         let hook = dir.path().join("etc/initcpio/hooks/archix-deploy");
         let has_hook = |files: &[(PathBuf, String)]| files.iter().any(|(path, _)| *path == hook);
-        assert!(!has_hook(&boot_files(&paths, archix).unwrap()), "no deployments, no hook");
+        assert!(
+            !has_hook(&boot_files(&paths, archix).unwrap()),
+            "no deployments, no hook"
+        );
 
         fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
         let err = boot_files(&paths, archix).unwrap_err().to_string();

@@ -553,13 +553,22 @@ mod tests {
             assert_eq!(decide(rel, Kind::Dir, Live::LinkToDir, owned), Action::Through);
         }
         assert_eq!(decide(rel, Kind::Dir, Live::Dir, true), Action::UpdateDir);
-        assert_eq!(decide(rel, Kind::Dir, Live::Other, true), Action::MakeDir { aside: true });
-        assert_eq!(decide(rel, Kind::File, Live::Other, true), Action::Replace { aside: false });
+        assert_eq!(
+            decide(rel, Kind::Dir, Live::Other, true),
+            Action::MakeDir { aside: true }
+        );
+        assert_eq!(
+            decide(rel, Kind::File, Live::Other, true),
+            Action::Replace { aside: false }
+        );
         assert_eq!(
             decide(rel, Kind::Symlink, Live::LinkToDir, true),
             Action::Replace { aside: false }
         );
-        assert_eq!(decide(rel, Kind::File, Live::Dir, true), Action::Replace { aside: true });
+        assert_eq!(
+            decide(rel, Kind::File, Live::Dir, true),
+            Action::Replace { aside: true }
+        );
 
         assert_eq!(decide(rel, Kind::Dir, Live::Dir, false), Action::Through);
         assert_eq!(decide(rel, Kind::Dir, Live::Other, false), Action::Keep);
@@ -640,8 +649,16 @@ mod tests {
             "DKMS state comes from the deployment"
         );
         assert!(var.join("spool").is_symlink(), "a live symlink to a directory stays");
-        assert_eq!(mode("elsewhere/cups/tmp"), 0o1770, "a package's directory gets its mtree mode");
-        assert_eq!(mode("lib/app"), 0o750, "an owned directory without an mtree entry gets the upper layer's");
+        assert_eq!(
+            mode("elsewhere/cups/tmp"),
+            0o1770,
+            "a package's directory gets its mtree mode"
+        );
+        assert_eq!(
+            mode("lib/app"),
+            0o750,
+            "an owned directory without an mtree entry gets the upper layer's"
+        );
         assert!(applied.kept.contains(&PathBuf::from("log/pacman.log")), "{applied:?}");
         assert!(applied.kept.contains(&PathBuf::from("lib/app/data")), "{applied:?}");
         assert!(

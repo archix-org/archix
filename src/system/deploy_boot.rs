@@ -297,7 +297,10 @@ pub fn hook_files(root: &Path) -> Vec<(PathBuf, String)> {
                  halt -f\n    fi\n}}\n"
             ),
         ),
-        (root.join("usr/lib/archix/archix-deploy-mount.service"), MOUNT_UNIT.to_string()),
+        (
+            root.join("usr/lib/archix/archix-deploy-mount.service"),
+            MOUNT_UNIT.to_string(),
+        ),
         (
             root.join("etc/mkinitcpio.conf.d/archix-deploy.conf"),
             "HOOKS+=(archix-deploy)\n".to_string(),
@@ -376,7 +379,13 @@ mod tests {
         deployment(root, "5");
         fs::create_dir_all(root.join("archix/deploy/4/usr")).unwrap();
         std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
-        for entry in ["archix-1.conf", "archix-1-rescue.conf", "archix-2.conf", "archix-3.conf", "archix-4.conf"] {
+        for entry in [
+            "archix-1.conf",
+            "archix-1-rescue.conf",
+            "archix-2.conf",
+            "archix-3.conf",
+            "archix-4.conf",
+        ] {
             record(root, entry);
         }
         dir
@@ -503,7 +512,10 @@ mod tests {
         let failed = run_hook("false");
         let out = String::from_utf8_lossy(&failed.stdout);
         assert_eq!(failed.status.code(), Some(3), "{out}");
-        assert!(out.contains("SHELL\nERR archix: halting") && out.contains("HALT -f"), "{out}");
+        assert!(
+            out.contains("SHELL\nERR archix: halting") && out.contains("HALT -f"),
+            "{out}"
+        );
         assert!(!out.contains("BOOTING ON"), "{out}");
         let mounted = run_hook("true");
         let out = String::from_utf8_lossy(&mounted.stdout);

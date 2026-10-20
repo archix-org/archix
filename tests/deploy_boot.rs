@@ -546,7 +546,11 @@ fn run_busybox_hook(image: &Path, sysroot: Option<&Sysroot>, entry: &str) -> (Op
     fs::write(&efivar, efivar_bytes(entry)).unwrap();
     let selected = image.join(archix::system::boot::SELECTED_ENTRY_VAR.trim_start_matches('/'));
     let bind = sysroot.map_or(String::new(), |sysroot| {
-        format!("mount --bind {} {}/sysroot\n", sysroot.root().display(), image.display())
+        format!(
+            "mount --bind {} {}/sysroot\n",
+            sysroot.root().display(),
+            image.display()
+        )
     });
     let script = format!(
         "set -e\nmount -t tmpfs run {image}/run\nmount -t tmpfs sys {image}/sys\nmkdir -p {dir}\ncp {efivar} {selected}\n{bind}\
@@ -646,7 +650,10 @@ fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
     let sysroot = Sysroot::new();
     let (code, out) = run_busybox_hook(&unpacked, Some(&sysroot), "archix-2.conf");
     assert_eq!(code, Some(0), "{out}");
-    assert!(out.contains("archix: booting deployment 2 (the boot entry archix-2.conf)"), "{out}");
+    assert!(
+        out.contains("archix: booting deployment 2 (the boot entry archix-2.conf)"),
+        "{out}"
+    );
     assert!(out.contains("BOOTED\n2\n2\nUSR-READ-ONLY"), "{out}");
     let (code, out) = run_busybox_hook(&unpacked, None, "archix-2.conf");
     assert_eq!(code, Some(3), "{out}");
