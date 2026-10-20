@@ -130,7 +130,6 @@ pub fn name_from_entry(dir_name: &str) -> &str {
     dir_name.rsplitn(3, '-').nth(2).unwrap_or(dir_name)
 }
 
-/// Reads the installed packages from a local database directory, normally `/var/lib/pacman/local`.
 /// Installed packages that ship a pacman keyring, such as archlinux-keyring and cachyos-keyring.
 pub fn keyring_packages(dir: &Path) -> BTreeSet<String> {
     fs::read_dir(dir)
@@ -152,6 +151,7 @@ pub fn keyring_packages(dir: &Path) -> BTreeSet<String> {
 /// Where keyring packages put the keys `pacman-key --populate` imports.
 pub const KEYRINGS: &str = "usr/share/pacman/keyrings/";
 
+/// Reads the installed packages from a local database directory, normally `/var/lib/pacman/local`.
 pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
     let mut packages = BTreeMap::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {

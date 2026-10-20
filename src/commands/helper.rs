@@ -27,7 +27,6 @@ use super::{
     transaction_for, user_cache,
 };
 
-/// An edit to an installed.lua that can be undone if the switch after it doesn't go through.
 /// Adds (or removes) packages in the host's installed.lua, or the one in `path`; the new text waits for the switch to commit and is evaluated from memory until then.
 pub fn edit_installed(
     config_dir: &Path,
@@ -253,7 +252,6 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     Ok(())
 }
 
-/// Searches the locked snapshot's repos and the AUR; every term has to match the name or description.
 /// One search result: where it's from, what it is, and how it's shown.
 struct Hit {
     name: String,
@@ -276,6 +274,7 @@ fn rank(name: &str, terms: &[String]) -> u8 {
     }
 }
 
+/// Searches the locked snapshot's repos and the AUR; every term has to match the name or description.
 pub fn search(target: &Target, terms: &[String]) -> Result<()> {
     for hit in hits(target, terms)? {
         println!("{}", hit.line);

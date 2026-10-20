@@ -53,7 +53,7 @@ return {
       description = "System units to enable (true) or disable (false) in the next deployment; they start or stop at the next boot.",
     },
     user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user." },
-    sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings applied with sysctl, written to /etc/sysctl.d/90-archix.conf." },
+    sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf and applied at the next boot." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules." },
     modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf." },
     kernel_modules = archix.option { type = t.list_of(t.str), default = {}, description = "Kernel modules to load at boot." },

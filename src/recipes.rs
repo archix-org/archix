@@ -120,7 +120,6 @@ impl Recipes {
         self.patches.keys()
     }
 
-    /// The local recipe building a package that satisfies `dep`, and that package.
     /// The local recipe building a package that satisfies `dep`, version constraint included, the way AUR packages are matched.
     pub fn satisfier(&self, dep: &str) -> Option<(&Recipe, &SrcPkg)> {
         use crate::aur::index::{constraint, meets};

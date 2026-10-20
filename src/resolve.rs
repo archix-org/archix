@@ -97,8 +97,7 @@ pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
     text
 }
 
-/// Resolves declared packages against one snapshot into the exact closure, taking from the AUR what the repos lack.
-/// Locks `declared` and everything it depends on at `date`; `prefer` picks providers and is installed as dependencies.
+/// Locks `declared` and everything it depends on at `date` into the exact closure, taking from the AUR what the repos lack; `prefer` picks providers and is installed as dependencies.
 pub fn resolve(
     archive: &Archive,
     cache: &Path,
@@ -346,7 +345,6 @@ struct AurClosure {
     provides: Vec<String>,
 }
 
-/// Walks AUR packages and their dependencies; runtime ones get installed, make/check-only ones are just built.
 /// A snapshot's date with its pacman config and db directory.
 type Snapshot = (Date, PathBuf, PathBuf);
 
@@ -397,7 +395,7 @@ impl<'a> Newer<'a> {
     }
 }
 
-/// `in_repos` is every package name the snapshot's configured repos ship, which an AUR package may only stand in for when declared.
+/// Walks AUR packages and their dependencies, installing runtime ones and only building make/check-only ones; `in_repos` names what the snapshot's repos ship, which an AUR package may stand in for only when declared.
 fn aur_closure(
     aur: &Aur,
     conf: &Path,

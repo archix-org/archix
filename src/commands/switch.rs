@@ -1201,7 +1201,7 @@ fn nearest_deployment(committed: &[u32], number: u32) -> Option<u32> {
     committed
         .iter()
         .copied()
-        .min_by_key(|n| (n.abs_diff(number), *n > number))
+        .min_by_key(|n| (n.abs_diff(number), *n < number))
 }
 
 /// Makes an earlier generation current: by repointing when its deployment is kept, else by rebuilding that deployment from the nearest kept one and the package cache; archix.lock stays as it is.
@@ -1594,7 +1594,7 @@ mod tests {
     fn a_dropped_generation_is_rebuilt_from_the_nearest_kept_deployment() {
         assert_eq!(nearest_deployment(&[2, 7, 9], 6), Some(7));
         assert_eq!(nearest_deployment(&[2, 7, 9], 3), Some(2));
-        assert_eq!(nearest_deployment(&[4, 8], 6), Some(4), "a tie goes to the older one");
+        assert_eq!(nearest_deployment(&[4, 8], 6), Some(8), "a tie goes to the newer one");
         assert_eq!(nearest_deployment(&[], 6), None);
     }
 }
