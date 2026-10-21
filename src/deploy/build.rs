@@ -63,6 +63,19 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let paths = plan.paths;
     let staging = Staging::from(store, plan.number, plan.base)?;
     let tx = staging.transaction()?;
+    let declared = crate::etcmerge::ids::Declared {
+        names: plan
+            .system
+            .to
+            .users
+            .keys()
+            .chain(plan.system.to.groups.keys())
+            .cloned()
+            .collect(),
+        uids: plan.system.to.users.values().filter_map(|user| user.uid).collect(),
+        gids: plan.system.to.groups.values().filter_map(|group| group.gid).collect(),
+    };
+    crate::etcmerge::ids::hold(&paths.state, &staging.tree("etc"), &declared)?;
     crate::packages::transact(&tx, plan.packages, &staging.tree("pacman"))?;
     let run = |argv: &[String]| -> Result<()> {
         let output = tx.output(argv)?;
@@ -77,6 +90,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     };
     let etc = staging.tree("etc");
     let users = crate::system::apply::users(plan.system, &etc, &run, &paths.state)?;
+    crate::etcmerge::ids::release(&paths.state, &etc)?;
     let accounts = Accounts::read(&etc);
     let mut failures = crate::system::apply::disable_services(plan.system, &run);
     let in_etc = |path: &str| (deployment_tree(path) == Some("etc")).then(|| etc.join(&path["/etc/".len()..]));

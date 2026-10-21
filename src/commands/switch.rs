@@ -556,6 +556,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let (live, at_boot) = system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
     due.extend(at_boot);
     system::hooks::defer(&paths.state, number, &due, &system_change.to.hooks)?;
+    if let Err(e) = archix::etcmerge::prepare(&paths, number) {
+        eprintln!(
+            "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
+        );
+    }
     eprintln!(":: building deployment {number} from deployment {base}");
     let made = deploy::build::build(
         &deployments,
@@ -577,6 +582,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     )
     .inspect_err(|_| {
         let _ = fs::remove_file(system::hooks::pending_path(&paths.state, number));
+        archix::etcmerge::discard(&paths, number);
     })?;
     soft_failures.extend(made.failures);
     after_commit(
@@ -633,6 +639,9 @@ fn after_commit(
     users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
+    if let Err(e) = archix::etcmerge::start(paths) {
+        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
+    }
     // A config outside /etc gets this switch's writes only here, so a crash right after the commit leaves it as it was.
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
@@ -797,6 +806,23 @@ pub(super) fn carry_config(config_dir: &Path, paths: &Paths, deployment: &Path) 
     }
     archix::durable::sync_dir(&target)?;
     fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))
+}
+
+/// Carries the running system's users, groups and passwords into the /etc of a deployment a rollback makes current, so none reverts or vanishes while their files keep the number.
+fn carry_accounts(paths: &Paths, etc: &Path, soft_failures: &mut Vec<String>) {
+    carry_accounts_from(paths, &paths.root.join("etc"), etc, soft_failures);
+}
+
+fn carry_accounts_from(paths: &Paths, live: &Path, etc: &Path, soft_failures: &mut Vec<String>) {
+    match archix::etcmerge::carry_accounts(paths, live, etc) {
+        Ok(skipped) if skipped.is_empty() => {}
+        Ok(skipped) => soft_failures.push(format!(
+            "these accounts weren't carried into {}, as their number is another account's there: {}",
+            etc.display(),
+            skipped.join(", ")
+        )),
+        Err(e) => soft_failures.push(format!("carrying users and groups into {}: {e:#}", etc.display())),
+    }
 }
 
 /// Writes the boot entry of deployment `number` when the ESP has none, as after a first layout cut off before its entry.
@@ -1409,6 +1435,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     let esp = PathBuf::from(&boot.esp);
     if kept {
         ensure_entry(&paths, &boot, number)?;
+        carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
         // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
         boot::set_default_entry(&esp, number)?;
         archix::durable::sync_filesystems_checked(&[&esp])?;
@@ -1445,11 +1472,19 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                 repos: &repos,
                 record: &generation,
                 keep: generation.settings.deployments_keep as usize,
-                config: &|staged: &Path| carry_config(config_dir, &paths, staged),
+                config: &|staged: &Path| {
+                    let mut skipped = Vec::new();
+                    carry_accounts(&paths, &staged.join("etc"), &mut skipped);
+                    skipped.iter().for_each(|line| eprintln!("warning: {line}"));
+                    carry_config(config_dir, &paths, staged)
+                },
             },
         )?;
         soft_failures.extend(made.failures);
         users = made.users;
+    }
+    if let Err(e) = archix::etcmerge::start(&paths) {
+        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
     }
     let (live, at_boot) = system::hooks::split_live(system::hooks::due(&current_change, &BTreeSet::new()), &paths.root);
     let hooks = system::hooks::defer(&paths.state, number, &at_boot, &generation.system.hooks);
@@ -1719,6 +1754,18 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         }
         None => None,
     };
+    if let Some(current) = current {
+        let mut skipped = Vec::new();
+        carry_accounts_from(
+            &paths,
+            &deployments.path(current).join("etc"),
+            &paths.root.join("etc"),
+            &mut skipped,
+        );
+        for line in skipped {
+            println!("archix: {line}");
+        }
+    }
     if let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp"))
         && let Err(e) = system::boot::set_default_entry(Path::new(esp.trim()), booted)
     {
