@@ -19,6 +19,7 @@ pub(super) const STAGING_PREFIX: &str = ".staging-";
 const DELETING_PREFIX: &str = ".deleting-";
 const CURRENT_TMP: &str = ".current.tmp";
 const LOCK: &str = ".lock";
+const CHOSEN: &str = "chosen";
 
 /// How a deployment is staged from the current one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +122,20 @@ impl Store {
         }
     }
 
+    /// The deployment the last switch or rollback chose, which gc keeps whatever entry booted since.
+    pub fn chosen(&self) -> Result<Option<u32>> {
+        match fs::read_to_string(self.dir.join(CHOSEN)) {
+            Ok(text) => Ok(text.trim().parse().ok()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e).with_context(|| format!("reading {}", self.dir.join(CHOSEN).display())),
+        }
+    }
+
+    /// Records that a switch or rollback chose deployment `number`.
+    pub fn choose(&self, number: u32) -> Result<()> {
+        crate::durable::write(&self.dir.join(CHOSEN), format!("{number}\n").as_bytes())
+    }
+
     pub fn next_number(&self) -> Result<u32> {
         Ok(next_number(self.names()?.iter().map(String::as_str)))
     }
@@ -177,6 +192,9 @@ impl Store {
         }
         if pins.fallbacks.contains(&number) {
             bail!("deployment {number} is what the fallback UKI boots; it can't be deleted");
+        }
+        if pins.chosen == Some(number) {
+            bail!("deployment {number} is the one the last switch or rollback chose; it can't be deleted");
         }
         let path = self.path(number);
         if path.symlink_metadata().is_err() {
@@ -292,7 +310,13 @@ pub fn incomplete(dir: &Path) -> Option<String> {
             return Some(format!("{} has no {tree}/", dir.display()));
         }
     }
-    for scratch in [".upper", ".work", VIEW_DIR] {
+    for scratch in [
+        ".upper",
+        ".work",
+        VIEW_DIR,
+        super::stage::VAR_LOWER,
+        super::stage::VAR_BASE,
+    ] {
         if dir.join(scratch).symlink_metadata().is_ok() {
             return Some(format!("{} still has {scratch}", dir.display()));
         }

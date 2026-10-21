@@ -195,24 +195,62 @@ const ST_RELATIME: libc::c_ulong = 0x1000;
 
 fn bind(from: &Path, to: &Path, read_only: bool) -> Result<()> {
     sys_mount(Some(from), to, libc::MS_BIND)?;
-    let flags = mount_flags(to)?;
     // A bind keeps the root's read-only flag, which remounting the root read-write after switch_root doesn't clear.
-    if read_only || flags & libc::ST_RDONLY != 0 {
-        let keep = [
-            (libc::ST_NOSUID, libc::MS_NOSUID),
-            (libc::ST_NODEV, libc::MS_NODEV),
-            (libc::ST_NOEXEC, libc::MS_NOEXEC),
-            (libc::ST_NOATIME, libc::MS_NOATIME),
-            (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
-            (ST_RELATIME, libc::MS_RELATIME),
-        ]
-        .iter()
-        .filter(|(st, _)| flags & st != 0)
-        .fold(0, |all, (_, ms)| all | ms);
-        let read_only = if read_only { libc::MS_RDONLY } else { 0 };
-        sys_mount(None, to, libc::MS_REMOUNT | libc::MS_BIND | keep | read_only)?;
+    if read_only || mount_flags(to)? & libc::ST_RDONLY != 0 {
+        remount_bind(to, read_only)?;
     }
     Ok(())
+}
+
+/// Remounts the bind mount at `to` read-only or read-write, keeping its other per-mount flags.
+pub fn remount_bind(to: &Path, read_only: bool) -> Result<()> {
+    let flags = mount_flags(to)?;
+    let keep = [
+        (libc::ST_NOSUID, libc::MS_NOSUID),
+        (libc::ST_NODEV, libc::MS_NODEV),
+        (libc::ST_NOEXEC, libc::MS_NOEXEC),
+        (libc::ST_NOATIME, libc::MS_NOATIME),
+        (libc::ST_NODIRATIME, libc::MS_NODIRATIME),
+        (ST_RELATIME, libc::MS_RELATIME),
+    ]
+    .iter()
+    .filter(|(st, _)| flags & st != 0)
+    .fold(0, |all, (_, ms)| all | ms);
+    let read_only = if read_only { libc::MS_RDONLY } else { 0 };
+    sys_mount(None, to, libc::MS_REMOUNT | libc::MS_BIND | keep | read_only)
+}
+
+/// Whether `path` is itself a mount point that is mounted read-only.
+pub fn read_only_mount_point(path: &Path) -> Result<bool> {
+    let Ok(canonical) = fs::canonicalize(path) else {
+        return Ok(false);
+    };
+    // A chroot without /proc, as pacman runs its hooks in, has no mounts of its own to look at.
+    let Ok(mountinfo) = fs::read("/proc/self/mountinfo") else {
+        return Ok(false);
+    };
+    if !crate::deploy::view::mount_points(&mountinfo).contains(&canonical) {
+        return Ok(false);
+    }
+    Ok(mount_flags(&canonical)? & libc::ST_RDONLY != 0)
+}
+
+/// Binds `root`/archix over itself read-only, so no path through it can chmod, chown or write a file that hardlinks share with other deployments; archix writes it from a mount namespace of its own.
+pub fn protect_store(root: &Path) -> Result<()> {
+    let archix = root.join("archix");
+    bind(&archix, &archix, true).with_context(|| format!("binding {} read-only", archix.display()))
+}
+
+/// Makes `root`/archix writable for this process and its children alone when the boot bound it read-only: the process gets a mount namespace of its own, whose copy of the bind is remounted read-write; mount propagation stays as it was.
+pub fn writable_store(root: &Path) -> Result<()> {
+    let archix = root.join("archix");
+    if !read_only_mount_point(&archix)? {
+        return Ok(());
+    }
+    if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
+        return Err(io::Error::last_os_error()).context("making a mount namespace to write the deployments in");
+    }
+    remount_bind(&archix, false).with_context(|| format!("making {} writable for archix", archix.display()))
 }
 
 /// Creates a missing mountpoint, remounting a read-only root read-write first if it has to.
@@ -287,6 +325,7 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
         eprintln!("archix: warning: fstab mounts {at} separately, which hides this deployment's {what}");
     }
     bind_trees(root, &deployment).with_context(|| format!("mounting deployment {}", chosen.generation))?;
+    protect_store(root)?;
     fs::create_dir_all(run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
     fs::write(run_dir.join("deployment"), format!("{}\n", chosen.generation))
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;

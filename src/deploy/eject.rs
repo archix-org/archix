@@ -393,6 +393,9 @@ fn remove_store(root: &Path) -> Result<()> {
     if dir.symlink_metadata().is_err() {
         return Ok(());
     }
+    // The boot binds /archix read-only over itself, in the system's namespace and so in archix's copy of it.
+    detach(&dir)?;
+    in_init_namespace(|| detach(&dir)).context("unmounting /archix")?;
     let store = Store::open(root)?;
     match fs::remove_file(dir.join("current")) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing /archix/current"),
@@ -413,6 +416,57 @@ fn remove_store(root: &Path) -> Result<()> {
         }
     }
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))
+}
+
+/// Detaches every mount at `path` in this mount namespace.
+fn detach(path: &Path) -> Result<()> {
+    let c = c_path(path)?;
+    for _ in 0..8 {
+        let mountinfo = fs::read("/proc/self/mountinfo").context("reading /proc/self/mountinfo")?;
+        if !super::view::mount_points(&mountinfo).contains(&path.to_path_buf()) {
+            return Ok(());
+        }
+        if unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) } != 0 {
+            return Err(io::Error::last_os_error()).with_context(|| format!("unmounting {}", path.display()));
+        }
+    }
+    bail!("{} stays mounted", path.display())
+}
+
+/// Runs `work` in the mount namespace of PID 1, where the running system's mounts are, since archix works in a copy of its own; in this process when it's that one.
+fn in_init_namespace(work: impl FnOnce() -> Result<()>) -> Result<()> {
+    let ns = |pid: &str| fs::read_link(format!("/proc/{pid}/ns/mnt")).ok();
+    if ns("1").is_none() || ns("1") == ns("self") {
+        return work();
+    }
+    let init = fs::File::open("/proc/1/ns/mnt").context("opening PID 1's mount namespace")?;
+    match unsafe { libc::fork() } {
+        -1 => Err(io::Error::last_os_error()).context("forking"),
+        0 => {
+            let fd = std::os::fd::AsRawFd::as_raw_fd(&init);
+            let code = if unsafe { libc::setns(fd, libc::CLONE_NEWNS) } != 0 {
+                eprintln!("joining PID 1's mount namespace: {}", io::Error::last_os_error());
+                1
+            } else {
+                work().map_or_else(
+                    |e| {
+                        eprintln!("{e:#}");
+                        1
+                    },
+                    |()| 0,
+                )
+            };
+            unsafe { libc::_exit(code) }
+        }
+        child => {
+            let mut status = 0;
+            unsafe { libc::waitpid(child, &mut status, 0) };
+            if !libc::WIFEXITED(status) || libc::WEXITSTATUS(status) != 0 {
+                bail!("it failed in PID 1's mount namespace");
+            }
+            Ok(())
+        }
+    }
 }
 
 /// What a fresh eject would lay out: the deployment the system runs from, which has to be the current one.
@@ -459,6 +513,7 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool) -> Result<Ve
         written = run_here(root, paths, archix)?;
     }
     unbind(root)?;
+    in_init_namespace(|| unbind(root)).context("switching the running system to the root's own trees")?;
     let record = root.join(boot::DEPLOYMENT_RECORD.trim_start_matches('/'));
     match fs::remove_file(&record) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => {

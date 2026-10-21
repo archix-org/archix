@@ -345,12 +345,14 @@ fn an_archix_the_switch_upgrades_writes_its_own_mount_unit_into_the_new_initramf
     let machine = &setup.machine;
     let lib = machine.deployment(machine.current().unwrap()).join("usr/lib/archix");
     // As after an upgrade in the switch: the new deployment's archix writes another mount unit than the running one.
+    machine.store_writable(true);
     fs::rename(lib.join("archix-static"), lib.join("archix-static.real")).unwrap();
     write_executable(
         &lib.join("archix-static"),
         "#!/bin/sh\n/usr/lib/archix/archix-static.real \"$@\" || exit\n\
          [ \"$1\" != deploy-integrate ] || echo '# the upgraded archix' >> /usr/lib/archix/archix-deploy-mount.service\n",
     );
+    machine.store_writable(false);
     setup.set_body(&["tree"], "");
     setup.ok(&["switch", "--noconfirm"]);
     let new = machine.current().unwrap();
