@@ -201,6 +201,14 @@ enum Command {
         #[arg(long, default_value = "/")]
         root: PathBuf,
     },
+    /// Run by archix-etc-merge.service from a commit until shutdown: carry /etc changes into the deployment that boots next; with --boot, check at boot that the last pass finished
+    #[command(hide = true)]
+    EtcMerge {
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+        #[arg(long)]
+        boot: bool,
+    },
     /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
     #[command(hide = true)]
     PruneHidden { root: PathBuf },
@@ -450,6 +458,14 @@ fn run() -> Result<ExitCode> {
             commands::prune_hidden(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::EtcMerge { root, boot: true } => {
+            archix::etcmerge::boot(&root)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::EtcMerge { root, boot: false } => {
+            archix::etcmerge::watch::run(&root)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::DeployIntegrate { exec } => {
             let paths = archix::paths::Paths::system();
             archix::integration::write_all(&paths, &exec, &|path| Ok(paths.root.join(path.strip_prefix("/")?)))?;
@@ -694,6 +710,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
+        | Command::EtcMerge { .. }
         | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)

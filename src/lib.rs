@@ -8,6 +8,7 @@ pub mod deploy;
 pub mod downgrade;
 pub mod durable;
 pub mod elf;
+pub mod etcmerge;
 pub mod eval;
 pub mod fetch;
 pub mod flatpak;
