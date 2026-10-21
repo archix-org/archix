@@ -733,6 +733,9 @@ fn first_layout(paths: &Paths, boot: &BootPlan, record: &Generation) -> Result<(
         Ok(_) => store.update(record)?,
         Err(_) => store.save(record)?,
     }
+    for warning in system::boot::firmware_warnings(&paths.root.join("sys/firmware/efi/efivars"), Path::new(&boot.esp)) {
+        eprintln!("warning: {warning}");
+    }
     let deployments = layout::lay_out(&paths.root)?;
     deploy::build::entry_for(&deployments, paths, boot, 1)?;
     layout::bind_live(&paths.root, &deployments, 1)?;
@@ -797,6 +800,14 @@ pub(super) fn carry_config(config_dir: &Path, paths: &Paths, deployment: &Path) 
     }
     archix::durable::sync_dir(&target)?;
     fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))
+}
+
+/// Makes the fallback UKI boot deployment `number`, a copy of its entry's UKI, writing the entry first if the ESP lost it.
+fn follow_with_fallback(paths: &Paths, boot: &BootPlan, deployments: &deploy::Store, number: u32) -> Result<()> {
+    if system::boot::follow_with_fallback(paths, Path::new(&boot.esp), number)? {
+        return Ok(());
+    }
+    deploy::build::entry_for(deployments, paths, boot, number)
 }
 
 /// Writes the boot entry of deployment `number` when the ESP has none, as after a first layout cut off before its entry.
@@ -1412,6 +1423,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
         boot::set_default_entry(&esp, number)?;
         archix::durable::sync_filesystems_checked(&[&esp])?;
+        follow_with_fallback(&paths, &boot, &deployments, number)?;
         deployments.point_current(number)?;
     } else {
         let archive = archix::archive::for_system(&paths.state);
@@ -1709,6 +1721,22 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
     if current == Some(booted) {
         return Ok(());
     }
+    let esp = fs::read_to_string(paths.state.join("boot").join("esp")).map(|esp| PathBuf::from(esp.trim()));
+    if let Some(current) = current
+        && booted > current
+        && !esp.as_ref().is_ok_and(|esp| system::boot::loader_names(esp, booted))
+    {
+        // Only loader.conf going missing or torn makes systemd-boot start the newest entry on its own, which would undo a rollback.
+        println!(
+            "archix: systemd-boot started generation {booted}, newer than the current {current}, though loader.conf doesn't name it; {current} stays current and the boot default (`archix rollback {booted}` makes {booted} current)"
+        );
+        if let Ok(esp) = &esp
+            && let Err(e) = system::boot::set_default_entry(esp, current)
+        {
+            println!("archix: couldn't make generation {current} the boot default again: {e:#}");
+        }
+        return Ok(());
+    }
     let note = match current {
         Some(current) if system::boot::failed_to_boot(&paths, current) => Some(format!(
             "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, which is current now"
@@ -1723,6 +1751,11 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         && let Err(e) = system::boot::set_default_entry(Path::new(esp.trim()), booted)
     {
         println!("archix: couldn't make generation {booted} the boot default: {e:#}");
+    }
+    if let Ok(esp) = &esp
+        && let Err(e) = system::boot::follow_with_fallback(&paths, esp, booted)
+    {
+        println!("archix: couldn't point the fallback UKI at generation {booted}: {e:#}");
     }
     deployments.point_current(booted)?;
     if let Some(note) = note {

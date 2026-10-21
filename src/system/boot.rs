@@ -31,12 +31,18 @@ pub struct BootPlan {
     pub revoke_unused: bool,
 }
 
-/// The entries one generation gets: the normal one and a protected twin.
+/// A generation's entries and the Type #2 fallback, a copy of the current generation's normal UKI that systemd-boot finds without loader/entries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Variant {
     Normal,
     Protected,
+    Fallback,
 }
+
+/// The fallback's sort key: below every distribution's id, so systemd-boot starts it when loader.conf names no entry it has.
+const FALLBACK_SORT_KEY: &str = "0archix-fallback";
+/// The fallback's title in the boot menu, which tells it from the generations' own entries.
+pub const FALLBACK_TITLE: &str = "archix (fallback)";
 
 pub const MODULES: &str = "/usr/lib/modules";
 const MARGIN: u64 = 16 * 1024 * 1024;
@@ -70,12 +76,87 @@ fn entries_dir(esp: &Path) -> PathBuf {
     esp.join("loader/entries")
 }
 
-/// The boot menu entry of a generation, which names the UKI it boots.
+/// The boot menu entry of a generation, which names the UKI it boots; the fallback is a UKI systemd-boot lists by its file name.
 fn entry_name(generation: u32, variant: Variant) -> String {
     match variant {
         Variant::Normal => format!("archix-{generation}.conf"),
         Variant::Protected => format!("archix-{generation}-protected.conf"),
+        Variant::Fallback => format!("archix-fallback-{generation}.efi"),
     }
+}
+
+/// Where the fallback UKI of `generation` goes on the ESP.
+fn fallback_path(esp: &Path, generation: u32) -> PathBuf {
+    esp.join("EFI/Linux").join(entry_name(generation, Variant::Fallback))
+}
+
+/// The generation a fallback UKI's file name, which is its entry id, belongs to.
+pub fn parse_fallback(name: &str) -> Option<u32> {
+    let number = name.strip_prefix("archix-fallback-")?.strip_suffix(".efi")?;
+    if number.is_empty() || number.starts_with('0') || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    number.parse().ok()
+}
+
+/// The generations whose fallback UKI is on the ESP.
+pub fn fallbacks(esp: &Path) -> Vec<u32> {
+    let mut found: Vec<u32> = fs::read_dir(esp.join("EFI/Linux"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|file| parse_fallback(&file.file_name().to_string_lossy()))
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// Puts `uki` on the ESP as the fallback of `generation`, recorded first and written through a fsynced temporary file; the older fallbacks stay until `retire_fallbacks`.
+pub fn install_fallback(paths: &Paths, esp: &Path, generation: u32, uki: &Path) -> Result<()> {
+    let name = entry_name(generation, Variant::Fallback);
+    crate::durable::write(
+        &entry_records(paths).join(&name),
+        format!("uki /EFI/Linux/{name}\n").as_bytes(),
+    )?;
+    let target = fallback_path(esp, generation);
+    if let Some(dir) = target.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    crate::durable::copy(uki, &target)?;
+    crate::durable::sync_filesystems_checked(&[esp])
+}
+
+/// Takes every fallback UKI but `generation`'s off the ESP, with its record, once `generation`'s is flushed.
+pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
+    if !fallbacks(esp).contains(&generation) {
+        return Ok(());
+    }
+    let mut removed = false;
+    for old in fallbacks(esp).into_iter().filter(|n| *n != generation) {
+        let path = fallback_path(esp, old);
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        let _ = fs::remove_file(entry_records(paths).join(entry_name(old, Variant::Fallback)));
+        removed = true;
+    }
+    if removed {
+        crate::durable::sync_filesystems_checked(&[esp])?;
+    }
+    Ok(())
+}
+
+/// Makes the fallback UKI a copy of the UKI `generation`'s own entry starts, then takes the others off; false when it has no entry.
+pub fn follow_with_fallback(paths: &Paths, esp: &Path, generation: u32) -> Result<bool> {
+    let Some(uki) = entries(esp)
+        .into_iter()
+        .find(|(number, extra, _)| *number == generation && !extra)
+        .and_then(|(_, _, entry)| uki_of(esp, &entry))
+        .filter(|uki| uki.is_file())
+    else {
+        return Ok(false);
+    };
+    install_fallback(paths, esp, generation, &uki)?;
+    retire_fallbacks(paths, esp, generation)?;
+    Ok(true)
 }
 
 /// A generation's normal entry, with systemd-boot's boot counter when it gets `tries` attempts: archix-N+3.conf becomes archix-N.conf once a boot reaches boot-complete.target, and archix-N+0-3.conf is skipped for an older entry after three failed ones.
@@ -150,6 +231,9 @@ pub fn drop_entries(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
             let _ = fs::remove_file(entry_records(paths).join(entry_name(number, variant)));
         }
     }
+    // FAT reuses freed clusters, so the entries' removal reaches the disk before the UKIs they name are freed.
+    crate::durable::sync_filesystems_checked(&[esp])?;
+    mark("deploy-drop-ukis");
     remove_unused_ukis_but(esp, &[])?;
     crate::durable::sync_filesystems_checked(&[esp])
 }
@@ -281,12 +365,19 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
             continue;
         }
         let (title, suffix) = match variant {
-            Variant::Normal => ("archix", ""),
             Variant::Protected => ("archix protected", "-protected"),
+            _ => ("archix", ""),
         };
         let mut text = release.clone();
-        text.push(format!("PRETTY_NAME=\"Arch Linux ({title})\""));
-        text.push("IMAGE_ID=archix".to_string());
+        if variant == Variant::Normal {
+            // Entries set their own title and sort key; these are what the fallback copy of this UKI shows.
+            text.push(format!("PRETTY_NAME=\"{FALLBACK_TITLE}\""));
+            text.push(format!("IMAGE_ID={FALLBACK_SORT_KEY}"));
+            text.push(format!("IMAGE_VERSION={version}"));
+        } else {
+            text.push(format!("PRETTY_NAME=\"Arch Linux ({title})\""));
+            text.push("IMAGE_ID=archix".to_string());
+        }
         let release_text = text.join("\n") + "\n";
         let mut cmdline = plan.cmdline.trim().to_string();
         if variant == Variant::Protected {
@@ -420,7 +511,11 @@ impl EspStep for Entries<'_> {
                     fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
                 }
             }
+            // Each removal reaches the disk before the clusters it frees can be written again.
+            crate::durable::sync_filesystems_checked(&[esp])?;
+            mark("deploy-esp-drop-ukis");
             remove_unused_ukis_but(esp, &reused)?;
+            crate::durable::sync_filesystems_checked(&[esp])?;
         }
         mark("deploy-esp-uki");
         for uki in made {
@@ -451,7 +546,7 @@ impl EspStep for Entries<'_> {
             );
             let name = match uki.variant {
                 Variant::Normal => counted_entry_name(number, if counted { self.plan.tries } else { 0 }),
-                Variant::Protected => entry_name(number, Variant::Protected),
+                variant => entry_name(number, variant),
             };
             // The record comes first: the initramfs boots an entry only once archix has recorded it.
             crate::durable::write(
@@ -461,7 +556,12 @@ impl EspStep for Entries<'_> {
             crate::durable::write(&entries_dir(esp).join(name), text.as_bytes())?;
         }
         mark("deploy-esp-loader");
-        set_default_entry(esp, number)
+        set_default_entry(esp, number)?;
+        mark("deploy-esp-fallback");
+        match self.built.ukis.iter().find(|uki| uki.variant == Variant::Normal) {
+            Some(uki) => install_fallback(self.paths, esp, number, &uki_dir(esp).join(&uki.name)),
+            None => Ok(()),
+        }
     }
 
     fn clean(&self) -> Result<()> {
@@ -471,6 +571,8 @@ impl EspStep for Entries<'_> {
     fn abandon(&self, number: u32, previous: Option<u32>) -> Result<()> {
         let esp = Path::new(&self.plan.esp);
         crate::deploy::commit::clean_esp(esp)?;
+        let _ = fs::remove_file(fallback_path(esp, number));
+        let _ = fs::remove_file(entry_records(self.paths).join(entry_name(number, Variant::Fallback)));
         drop_entries(self.paths, esp, number)?;
         match previous {
             Some(previous) if entries(esp).iter().any(|(n, extra, _)| *n == previous && !extra) => {
@@ -548,6 +650,18 @@ pub fn set_default_entry(esp: &Path, generation: u32) -> Result<()> {
         .map(|name| entry_id(&name));
     let default = booted_preferred.or_else(|| setting("default"));
     write_loader(esp, default.as_deref(), Some(&entry_id(&entry)))
+}
+
+/// Whether loader.conf's `default` or `preferred` names one of `generation`'s entries.
+pub fn loader_names(esp: &Path, generation: u32) -> bool {
+    fs::read_to_string(esp.join("loader/loader.conf"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| match line.split_once(char::is_whitespace) {
+            Some(("default" | "preferred", id)) => parse_entry(&entry_id(id.trim())),
+            _ => None,
+        })
+        .any(|(number, _)| number == generation)
 }
 
 /// Names systemd-boot's `default` and `preferred` entries in loader.conf, dropping either when it's None.
@@ -688,13 +802,20 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
         bail!("no installed kernel package owns a directory in {MODULES}; nothing was changed");
     };
     write_loader(Path::new(esp), Some(&default_id), None)?;
+    mark("eject-loader");
     for (_, _, path) in entries(Path::new(esp)) {
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
+    for generation in fallbacks(Path::new(esp)) {
+        let path = fallback_path(Path::new(esp), generation);
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    crate::durable::sync_filesystems_checked(&[Path::new(esp)])?;
     match fs::remove_dir_all(uki_dir(Path::new(esp))) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing archix's UKIs"),
         _ => {}
     }
+    crate::durable::sync_filesystems_checked(&[Path::new(esp)])?;
     written.insert(0, format!("default {default_id}"));
     Ok(written)
 }
@@ -776,6 +897,94 @@ pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, pr
         );
     }
     Ok(())
+}
+
+const GLOBAL_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+
+/// The file paths in an EFI load option (Boot####), lowercased with forward slashes, and its description.
+fn load_option(bytes: &[u8]) -> Option<(String, Vec<String>)> {
+    let data = bytes.get(4..)?;
+    let list_len = u16::from_le_bytes(data.get(4..6)?.try_into().ok()?) as usize;
+    let units: Vec<u16> = data
+        .get(6..)?
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .take_while(|unit| *unit != 0)
+        .collect();
+    let description = String::from_utf16_lossy(&units);
+    let start = 6 + (units.len() + 1) * 2;
+    let mut list = data.get(start..start + list_len)?;
+    let mut paths = Vec::new();
+    while list.len() >= 4 {
+        let (kind, subtype) = (list[0], list[1]);
+        let len = u16::from_le_bytes([list[2], list[3]]) as usize;
+        if len < 4 || len > list.len() {
+            break;
+        }
+        if kind == 4 && subtype == 4 {
+            let path: Vec<u16> = list[4..len]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_le_bytes(*pair))
+                .take_while(|unit| *unit != 0)
+                .collect();
+            paths.push(String::from_utf16_lossy(&path).replace('\\', "/").to_lowercase());
+        }
+        list = &list[len..];
+    }
+    Some((description, paths))
+}
+
+/// What could keep the firmware from starting systemd-boot, from the EFI variables in `efivars` and the ESP: no boot entry for it, another one first in BootOrder, or no systemd-boot at EFI/BOOT/BOOTX64.EFI for firmware that forgets its entries.
+pub fn firmware_warnings(efivars: &Path, esp: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let read = |name: &str| fs::read(efivars.join(format!("{name}-{GLOBAL_GUID}"))).ok();
+    if let Some(order) = read("BootOrder") {
+        let order: Vec<u16> = order
+            .get(4..)
+            .unwrap_or_default()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
+            .collect();
+        let options: Vec<(u16, String, bool)> = order
+            .iter()
+            .filter_map(|n| {
+                let (description, paths) = load_option(&read(&format!("Boot{n:04X}"))?)?;
+                let systemd_boot = paths
+                    .iter()
+                    .any(|path| path.ends_with("efi/systemd/systemd-bootx64.efi"));
+                Some((*n, description, systemd_boot))
+            })
+            .collect();
+        match options.iter().position(|(_, _, systemd_boot)| *systemd_boot) {
+            None => warnings.push(
+                "the firmware's boot order has no entry that starts systemd-boot (EFI/systemd/systemd-bootx64.efi), so it may start something else; `sudo bootctl install` adds one".to_string(),
+            ),
+            Some(0) => {}
+            Some(_) => warnings.push(format!(
+                "the firmware starts \"{}\" before systemd-boot; put systemd-boot first with `sudo efibootmgr -o` unless that entry chains to it",
+                options[0].1
+            )),
+        }
+    }
+    let fallback = esp.join("EFI/BOOT/BOOTX64.EFI");
+    match fs::read(&fallback) {
+        Err(_) => warnings.push(format!(
+            "{} is missing, so firmware that loses its boot entries finds no loader; `sudo bootctl install` puts systemd-boot there",
+            fallback.display()
+        )),
+        Ok(bytes) if !bytes.windows(29).any(|w| w == b"#### LoaderInfo: systemd-boot") => warnings.push(format!(
+            "{} isn't systemd-boot, so firmware that loses its boot entries starts another loader",
+            fallback.display()
+        )),
+        Ok(_) => {}
+    }
+    warnings
 }
 
 /// Checked before a switch changes anything: with Secure Boot enforcing, entries archix won't sign could never boot.
@@ -1105,6 +1314,146 @@ mod tests {
         assert!(is_bad("archix-9+0-3.conf") && !is_bad("archix-9+1-2.conf") && !is_bad("archix-9.conf"));
         assert_eq!(counted_entry_name(9, 3), "archix-9+3.conf");
         assert_eq!(counted_entry_name(9, 0), "archix-9.conf");
+    }
+
+    #[test]
+    fn a_fallback_uki_is_named_and_titled_apart_from_its_generations_entry() {
+        assert_eq!(entry_name(12, Variant::Fallback), "archix-fallback-12.efi");
+        assert_eq!(parse_fallback("archix-fallback-12.efi"), Some(12));
+        for other in [
+            "archix-fallback-012.efi",
+            "archix-fallback-.efi",
+            "archix-fallback-12+3.efi",
+            "archix-12.conf",
+            "arch-linux.efi",
+        ] {
+            assert_eq!(parse_fallback(other), None, "{other}");
+        }
+        assert_eq!(parse_entry("archix-fallback-12.efi"), None, "it's no Type #1 entry");
+        assert_eq!(FALLBACK_TITLE, "archix (fallback)");
+        assert!(
+            FALLBACK_SORT_KEY < "arch" && FALLBACK_SORT_KEY < "archix",
+            "sorts before other distributions' UKIs and archix's entries"
+        );
+        let esp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(esp.path().join("EFI/Linux")).unwrap();
+        for name in [
+            "archix-fallback-4.efi",
+            "archix-fallback-9.efi",
+            "arch-linux.efi",
+            "archix-fallback-5.efi.tmp",
+        ] {
+            fs::write(esp.path().join("EFI/Linux").join(name), "uki").unwrap();
+        }
+        assert_eq!(fallbacks(esp.path()), [4, 9]);
+    }
+
+    #[test]
+    fn installing_a_fallback_records_it_and_retiring_leaves_only_the_newest() {
+        let esp = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let uki = root.path().join("built.efi");
+        for generation in [3, 4] {
+            fs::write(&uki, format!("uki {generation}")).unwrap();
+            install_fallback(&paths, esp.path(), generation, &uki).unwrap();
+        }
+        assert_eq!(fallbacks(esp.path()), [3, 4], "the older one stays until retired");
+        assert_eq!(
+            fs::read_to_string(entry_records(&paths).join("archix-fallback-4.efi")).unwrap(),
+            "uki /EFI/Linux/archix-fallback-4.efi\n"
+        );
+        retire_fallbacks(&paths, esp.path(), 9).unwrap();
+        assert_eq!(
+            fallbacks(esp.path()),
+            [3, 4],
+            "nothing goes before generation 9's is there"
+        );
+        retire_fallbacks(&paths, esp.path(), 4).unwrap();
+        assert_eq!(fallbacks(esp.path()), [4]);
+        assert!(!entry_records(&paths).join("archix-fallback-3.efi").exists());
+        assert_eq!(fs::read_to_string(fallback_path(esp.path(), 4)).unwrap(), "uki 4");
+    }
+
+    fn boot_option(description: &str, file: &str) -> Vec<u8> {
+        let utf16 = |text: &str| -> Vec<u8> { text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect() };
+        let mut list = vec![4, 1, 8, 0, 1, 2, 3, 4];
+        let path = utf16(file);
+        list.extend([4, 4]);
+        list.extend(((path.len() + 4) as u16).to_le_bytes());
+        list.extend(path);
+        list.extend([0x7f, 0xff, 4, 0]);
+        let mut bytes = vec![7, 0, 0, 0, 1, 0, 0, 0];
+        bytes.extend((list.len() as u16).to_le_bytes());
+        bytes.extend(utf16(description));
+        bytes.extend(list);
+        bytes
+    }
+
+    #[test]
+    fn the_firmware_must_have_a_boot_entry_for_systemd_boot_and_bootx64_must_be_systemd_boot() {
+        let vars = tempfile::tempdir().unwrap();
+        let esp = tempfile::tempdir().unwrap();
+        let var =
+            |name: &str, bytes: &[u8]| fs::write(vars.path().join(format!("{name}-{GLOBAL_GUID}")), bytes).unwrap();
+        var(
+            "Boot0001",
+            &boot_option("Windows Boot Manager", "\\EFI\\Microsoft\\Boot\\bootmgfw.efi"),
+        );
+        var(
+            "Boot0002",
+            &boot_option("Linux Boot Manager", "\\EFI\\systemd\\systemd-bootx64.efi"),
+        );
+        let order = |numbers: &[u16]| {
+            let mut bytes = vec![7, 0, 0, 0];
+            bytes.extend(numbers.iter().flat_map(|n| n.to_le_bytes()));
+            var("BootOrder", &bytes);
+        };
+        let loader = esp.path().join("EFI/BOOT/BOOTX64.EFI");
+        fs::create_dir_all(loader.parent().unwrap()).unwrap();
+        fs::write(&loader, b"MZ...#### LoaderInfo: systemd-boot 260.1-1-arch ####...").unwrap();
+        order(&[2, 1]);
+        assert_eq!(firmware_warnings(vars.path(), esp.path()), Vec::<String>::new());
+        order(&[1, 2]);
+        let warnings = firmware_warnings(vars.path(), esp.path());
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("\"Windows Boot Manager\" before systemd-boot"),
+            "{warnings:?}"
+        );
+        order(&[1]);
+        let warnings = firmware_warnings(vars.path(), esp.path());
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("no entry that starts systemd-boot"),
+            "{warnings:?}"
+        );
+        order(&[2]);
+        fs::write(&loader, b"MZ shim").unwrap();
+        let warnings = firmware_warnings(vars.path(), esp.path());
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("isn't systemd-boot"),
+            "{warnings:?}"
+        );
+        fs::remove_file(&loader).unwrap();
+        let warnings = firmware_warnings(vars.path(), esp.path());
+        assert!(
+            warnings.len() == 1 && warnings[0].contains("is missing"),
+            "{warnings:?}"
+        );
+        let none = tempfile::tempdir().unwrap();
+        assert_eq!(
+            firmware_warnings(none.path(), esp.path()).len(),
+            1,
+            "without EFI variables only the ESP is checked"
+        );
+    }
+
+    #[test]
+    fn loader_conf_names_a_generation_by_its_default_or_preferred_entry() {
+        let esp = esp_with(&[], "timeout 2\ndefault archix-3.conf\npreferred archix-5.conf\n");
+        assert!(loader_names(esp.path(), 3) && loader_names(esp.path(), 5));
+        assert!(!loader_names(esp.path(), 4));
+        let esp = esp_with(&[], "timeout 2\n");
+        assert!(!loader_names(esp.path(), 3), "a lost default names nothing");
     }
 
     #[test]

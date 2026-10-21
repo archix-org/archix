@@ -224,8 +224,13 @@ pub fn write_staged(staging: &crate::deploy::Staging, archix: &Path) -> Result<(
 
 /// Takes every integration file off a system without deployments, for `archix eject`.
 pub fn remove(paths: &Paths) -> Result<()> {
+    crate::system::deploy_boot::refuse_without_hook(&paths.root, "taking archix's boot integration off")?;
+    remove_from(paths)
+}
+
+/// Takes every integration file off the trees under `paths.root`, whatever boots them, as eject does to the plain trees it lays out.
+pub fn remove_from(paths: &Paths) -> Result<()> {
     let root = &paths.root;
-    crate::system::deploy_boot::refuse_without_hook(root, "taking archix's boot integration off")?;
     let inside = |path: &Path| root.join(path.strip_prefix("/").unwrap_or(path));
     let archix = Path::new("archix");
     let gone: Vec<PathBuf> = files(paths, archix)

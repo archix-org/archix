@@ -111,7 +111,7 @@ impl Machine {
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
             cd /var/lib/archix && rm -rf generations boot backups edited id-map.json outside-changes.json \
-              pending-hooks notes layout-pruned"#,
+              pending-hooks notes layout-pruned eject"#,
             root = root.display(),
             template = template.display(),
         ));

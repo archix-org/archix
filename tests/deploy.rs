@@ -752,6 +752,17 @@ fn deploy_helper() {
         archix::deploy::layout::lay_out(&root).unwrap();
         return;
     }
+    if action == "drop" {
+        let paths = archix::paths::Paths::under(&root);
+        let esp = PathBuf::from(std::env::var("ARCHIX_DEPLOY_ESP").unwrap());
+        archix::system::boot::drop_entries(&paths, &esp, 4).unwrap();
+        return;
+    }
+    if action == "eject" {
+        let paths = archix::paths::Paths::under(&root);
+        archix::deploy::eject::eject(&paths, Path::new(env!("CARGO_BIN_EXE_archix")), false).unwrap();
+        return;
+    }
     let store = Store::open(&root).unwrap();
     if action == "delete" {
         let number = std::env::var("ARCHIX_DEPLOY_NUMBER").unwrap().parse().unwrap();
@@ -1593,4 +1604,368 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
     assert!(left.is_empty(), "the failed build left {left:?}: {err:#}");
     assert_eq!(store.deployments().unwrap(), vec![1]);
     assert_eq!(store.current().unwrap(), Some(1));
+}
+
+#[test]
+#[ignore]
+fn dropping_a_deployments_entries_reaches_the_disk_before_its_ukis_are_freed() {
+    let _serial = serial();
+    let esp = LoopFs::sized("vfat", "40M");
+    let img = esp.mnt.parent().unwrap().join("fs.img");
+    let dir = tempfile::tempdir().unwrap();
+    for sub in ["loader/entries", "EFI/archix"] {
+        fs::create_dir_all(esp.mnt.join(sub)).unwrap();
+    }
+    for (generation, uki) in [(4, "aaaa"), (5, "bbbb")] {
+        fs::write(esp.mnt.join(format!("EFI/archix/{uki}.efi")), vec![b'u'; 1 << 20]).unwrap();
+        fs::write(
+            esp.mnt.join(format!("loader/entries/archix-{generation}.conf")),
+            format!("title t\nefi /EFI/archix/{uki}.efi\n"),
+        )
+        .unwrap();
+    }
+    sh(Command::new("sync").arg("-f").arg(&esp.mnt));
+    let listing = dir.path().join("listing");
+    let mark = dir.path().join("mark");
+    fs::write(
+        &mark,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = deploy-drop-ukis ] && fsck.fat -n -l {} > {} 2>&1\nexit 0\n",
+            img.display(),
+            listing.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&mark, fs::Permissions::from_mode(0o755)).unwrap();
+    let out = helper(
+        "drop",
+        dir.path(),
+        &[
+            ("ARCHIX_TEST_MARK", mark.to_str().unwrap()),
+            ("ARCHIX_DEPLOY_ESP", esp.mnt.to_str().unwrap()),
+        ],
+    )
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "{}", stderr(&out));
+    let on_disk = fs::read_to_string(&listing).unwrap().to_lowercase();
+    assert!(
+        on_disk.contains("archix-5.conf"),
+        "fsck.fat listed nothing useful: {on_disk}"
+    );
+    assert!(
+        !on_disk.contains("archix-4.conf"),
+        "deployment 4's entry was still on disk when its UKI was freed:\n{on_disk}"
+    );
+    assert!(!esp.mnt.join("EFI/archix/aaaa.efi").exists() && esp.mnt.join("EFI/archix/bbbb.efi").exists());
+}
+
+/// Copies installed packages' files and database entries from the container into `root`, as pacstrap would have put them.
+fn install_packages(root: &Path, names: &[&str]) {
+    let local = Path::new("/var/lib/pacman/local");
+    for name in names {
+        let entry = fs::read_dir(local)
+            .unwrap()
+            .flatten()
+            .find(|entry| {
+                fs::read_to_string(entry.path().join("desc"))
+                    .is_ok_and(|desc| desc.starts_with(&format!("%NAME%\n{name}\n")))
+            })
+            .unwrap_or_else(|| panic!("{name} isn't installed in the container"));
+        sh(Command::new("cp")
+            .arg("-a")
+            .arg(entry.path())
+            .arg(root.join("var/lib/pacman/local")));
+        let files = fs::read_to_string(entry.path().join("files")).unwrap();
+        let list: Vec<&str> = files
+            .lines()
+            .skip_while(|line| *line != "%FILES%")
+            .skip(1)
+            .take_while(|line| !line.is_empty())
+            .collect();
+        let listing = root.join(".file-list");
+        fs::write(&listing, list.join("\n") + "\n").unwrap();
+        sh(Command::new("sh").arg("-ec").arg(format!(
+            "tar -C / --no-recursion --xattrs --xattrs-include='*' -cf - -T {list} | tar -C {root} --xattrs --xattrs-include='*' -xpf -",
+            list = listing.display(),
+            root = root.display()
+        )));
+        fs::remove_file(listing).unwrap();
+    }
+}
+
+/// A root on a fresh filesystem laid out as deployments and booted from deployment 1, as eject finds one: real packages, a kernel package whose UKI a stand-in mkinitcpio writes, archix's integration and an ESP with deployment 1's entry and fallback UKI.
+fn ejectable_root(fs_type: &str) -> LoopFs {
+    let loop_fs = plain_root(fs_type);
+    let root = loop_fs.mnt.clone();
+    std::os::unix::fs::symlink("usr/lib", root.join("lib64")).unwrap();
+    fs::copy(
+        "/var/lib/pacman/local/ALPM_DB_VERSION",
+        root.join("var/lib/pacman/local/ALPM_DB_VERSION"),
+    )
+    .unwrap();
+    install_packages(&root, &["sed", "gzip"]);
+    let modules = root.join("usr/lib/modules/9.9.9-test");
+    fs::create_dir_all(&modules).unwrap();
+    fs::write(modules.join("vmlinuz"), "kernel\n").unwrap();
+    fs::write(modules.join("pkgbase"), "linux\n").unwrap();
+    let kernel = root.join("var/lib/pacman/local/linux-9.9.9-1");
+    fs::create_dir_all(&kernel).unwrap();
+    fs::write(kernel.join("desc"), "%NAME%\nlinux\n\n%VERSION%\n9.9.9-1\n\n").unwrap();
+    fs::write(
+        kernel.join("files"),
+        "%FILES%\nusr/\nusr/lib/\nusr/lib/modules/\nusr/lib/modules/9.9.9-test/\nusr/lib/modules/9.9.9-test/pkgbase\nusr/lib/modules/9.9.9-test/vmlinuz\n\n",
+    )
+    .unwrap();
+    install_program(&root.join("usr"), "/usr/lib/initcpio/busybox", "busybox");
+    let mkinitcpio = root.join("usr/bin/mkinitcpio");
+    fs::write(
+        &mkinitcpio,
+        "#!/usr/bin/busybox sh\nwhile [ $# -gt 0 ]; do [ \"$1\" = -p ] && base=$2; shift; done\n\
+         uki=$(/usr/bin/busybox sed -n 's/^default_uki=\"\\(.*\\)\"$/\\1/p' /etc/mkinitcpio.d/$base.preset)\n\
+         echo \"uki of $base\" > \"$uki\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&mkinitcpio, fs::Permissions::from_mode(0o755)).unwrap();
+    for (path, text) in [
+        (
+            "etc/mkinitcpio.d/linux.preset",
+            "ALL_kver=\"/boot/vmlinuz-linux\"\nPRESETS=('default')\n",
+        ),
+        ("etc/kernel/cmdline", "root=/dev/vda2 rw\n"),
+        ("etc/pacman.conf", "[options]\nHoldPkg = pacman\nCheckSpace\n"),
+    ] {
+        fs::create_dir_all(root.join(path).parent().unwrap()).unwrap();
+        fs::write(root.join(path), text).unwrap();
+    }
+    let paths = archix::paths::Paths::under(&root);
+    archix::integration::write_all(&paths, Path::new("/usr/bin/archix"), &|path: &Path| {
+        Ok(root.join(path.strip_prefix("/").unwrap()))
+    })
+    .unwrap();
+    let esp = root.join("efi");
+    for dir in ["loader/entries", "EFI/archix", "EFI/Linux", "EFI/BOOT"] {
+        fs::create_dir_all(esp.join(dir)).unwrap();
+    }
+    fs::write(esp.join("EFI/archix/9.9.9-test-aaaa.efi"), "uki-1").unwrap();
+    fs::write(esp.join("EFI/Linux/archix-fallback-1.efi"), "fallback-1").unwrap();
+    fs::write(
+        esp.join("loader/entries/archix-1.conf"),
+        "title archix\nversion 1\nsort-key archix\nefi /EFI/archix/9.9.9-test-aaaa.efi\n",
+    )
+    .unwrap();
+    fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
+    fs::create_dir_all(paths.state.join("boot")).unwrap();
+    fs::write(paths.state.join("boot/esp"), esp.display().to_string()).unwrap();
+    let store = archix::deploy::layout::lay_out(&root).unwrap();
+    archix::deploy::layout::bind_live(&root, &store, 1).unwrap();
+    loop_fs
+}
+
+fn pacman_qkk(root: &Path, names: &[&str]) -> String {
+    let output = Command::new("pacman")
+        .arg("--root")
+        .arg(root)
+        .arg("--dbpath")
+        .arg(root.join("var/lib/pacman"))
+        .arg("-Qkk")
+        .args(names)
+        .output()
+        .unwrap();
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+/// Takes every deployment bind off `root`, as a restart does, then mounts what the ESP's default boots: the current deployment through `archix deploy-mount` for an archix entry, nothing for the plain UKI; returns the default.
+fn restart(root: &Path) -> String {
+    for (_, at) in archix::system::deploy_boot::TREES {
+        while mounted(&root.join(at)) {
+            sh(Command::new("umount").arg("-l").arg(root.join(at)));
+        }
+    }
+    let _ = fs::remove_file(root.join("run/archix/deployment"));
+    let conf = fs::read_to_string(root.join("efi/loader/loader.conf")).unwrap();
+    let default = conf
+        .lines()
+        .find_map(|line| line.strip_prefix("default "))
+        .unwrap_or_default()
+        .to_string();
+    if default.starts_with("archix-") {
+        sh(Command::new(env!("CARGO_BIN_EXE_archix"))
+            .arg("deploy-mount")
+            .arg(root)
+            .arg("--efivar")
+            .arg(root.join("run/no-efivar"))
+            .arg("--run-dir")
+            .arg(root.join("run/archix")));
+    }
+    default
+}
+
+/// The deployments the ESP's archix entries and fallback UKIs name.
+fn archix_boot_paths(esp: &Path) -> Vec<u32> {
+    let mut named: Vec<u32> = archix::system::boot::entries(esp)
+        .into_iter()
+        .map(|(n, _, _)| n)
+        .chain(archix::system::boot::fallbacks(esp))
+        .collect();
+    named.sort_unstable();
+    named
+}
+
+/// The root's /usr as `snapshot` sees it, without its top directory and the deployment mount unit eject takes off.
+fn plain_usr(root: &Path) -> BTreeMap<PathBuf, Entry> {
+    let mut usr = snapshot(&root.join("usr"));
+    for gone in ["", "lib/archix", "lib/archix/archix-deploy-mount.service"] {
+        usr.remove(Path::new(gone));
+    }
+    usr
+}
+
+/// What a restart must find wherever an eject was cut off: a default that boots a complete deployment or the complete plain trees, and no archix boot path naming a deployment that isn't complete.
+fn assert_bootable(root: &Path, usr: &BTreeMap<PathBuf, Entry>, qkk: &str, what: &str) {
+    let esp = root.join("efi");
+    let conf = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+    let default = conf
+        .lines()
+        .find_map(|line| line.strip_prefix("default "))
+        .unwrap_or_else(|| panic!("{what}: loader.conf has no default: {conf}"));
+    let complete =
+        |n: u32| archix::deploy::store::incomplete(&root.join("archix/deploy").join(n.to_string())).is_none();
+    for n in archix_boot_paths(&esp) {
+        assert!(
+            complete(n),
+            "{what}: the ESP still boots deployment {n}, which isn't complete"
+        );
+    }
+    if let Some(n) = archix::system::deploy_boot::generation_of_entry(default) {
+        assert!(
+            complete(n),
+            "{what}: the default {default} names an incomplete deployment"
+        );
+        let current = fs::read_link(root.join("archix/current")).unwrap();
+        assert!(
+            complete(archix::deploy::store::parse_current(&current).unwrap()),
+            "{what}: current isn't complete"
+        );
+    } else {
+        assert_eq!(default, "arch-linux.efi", "{what}");
+        assert!(
+            esp.join("EFI/Linux/arch-linux.efi").is_file(),
+            "{what}: the plain UKI is missing"
+        );
+        if !mounted(&root.join("usr")) {
+            assert!(
+                plain_usr(root) == *usr,
+                "{what}: the default boots a plain /usr that isn't the deployment's"
+            );
+            assert_eq!(pacman_qkk(root, &["sed", "gzip"]), qkk, "{what}");
+        }
+    }
+}
+
+/// What a finished eject leaves: the deployment's packages on the root's own trees, archix's integration and boot paths gone, the plain UKI the default and no /archix.
+fn assert_ejected(root: &Path, usr: &BTreeMap<PathBuf, Entry>, qkk: &str, what: &str) {
+    let esp = root.join("efi");
+    assert!(!root.join("archix").exists(), "{what}: /archix is still there");
+    for (_, at) in archix::system::deploy_boot::TREES {
+        assert!(!mounted(&root.join(at)), "{what}: {at} is still bound");
+    }
+    assert!(
+        plain_usr(root) == *usr,
+        "{what}: the root's /usr isn't the deployment's"
+    );
+    assert_eq!(pacman_qkk(root, &["sed", "gzip"]), qkk, "{what}");
+    assert!(
+        qkk.contains("sed: ") && qkk.contains(" 0 altered files"),
+        "{what}: {qkk}"
+    );
+    assert!(root.join("var/lib/pacman/local/linux-9.9.9-1/desc").is_file(), "{what}");
+    for gone in [
+        "etc/initcpio/hooks/archix-deploy",
+        "etc/mkinitcpio.conf.d/archix-deploy.conf",
+        "etc/pacman.d/hooks/00-archix-deployment.hook",
+        "etc/pacman.d/hooks/archix.hook",
+        "etc/systemd/system/archix-boot.service",
+        "etc/systemd/system/sysinit.target.wants/archix-deploy-activate.service",
+        "usr/lib/archix/archix-deploy-mount.service",
+        "boot/archix",
+    ] {
+        assert!(
+            root.join(gone).symlink_metadata().is_err(),
+            "{what}: {gone} is still there"
+        );
+    }
+    let conf = fs::read_to_string(root.join("etc/pacman.conf")).unwrap();
+    assert!(conf.lines().any(|line| line == "CheckSpace"), "{what}: {conf}");
+    assert!(
+        root.join("usr/lib/archix/archix-static").is_file(),
+        "{what}: the package's own files stay"
+    );
+    assert_eq!(archix_boot_paths(&esp), Vec::<u32>::new(), "{what}");
+    assert!(!esp.join("EFI/archix").exists(), "{what}");
+    assert!(esp.join("EFI/Linux/arch-linux.efi").is_file(), "{what}");
+    let loader = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+    assert!(loader.contains("default arch-linux.efi\n"), "{what}: {loader}");
+    let preset = fs::read_to_string(root.join("etc/mkinitcpio.d/linux.preset")).unwrap();
+    assert!(
+        preset.contains("default_uki=\"/efi/EFI/Linux/arch-linux.efi\""),
+        "{what}: {preset}"
+    );
+}
+
+#[test]
+#[ignore]
+fn eject_lays_the_running_deployment_out_as_the_plain_root_and_removes_archix() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let loop_fs = ejectable_root(fs_type);
+        let root = loop_fs.mnt.clone();
+        let usr = plain_usr(&root);
+        let qkk = pacman_qkk(&root, &["sed", "gzip"]);
+        let out = helper("eject", &root, &[]).output().unwrap();
+        assert!(out.status.success(), "{fs_type}: {}", stderr(&out));
+        assert_ejected(&root, &usr, &qkk, fs_type);
+        let state = archix::deploy::eject::read_state(&root.join("var/lib/archix")).unwrap();
+        assert_eq!(
+            state.map(|state| state.phase),
+            Some(archix::deploy::eject::Phase::Plain)
+        );
+        assert_eq!(restart(&root), "arch-linux.efi");
+        assert_ejected(&root, &usr, &qkk, &format!("{fs_type}, restarted"));
+    }
+}
+
+#[test]
+#[ignore]
+fn an_eject_killed_at_any_step_leaves_a_bootable_system_and_a_rerun_finishes_it() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        for step in [
+            "eject-copying",
+            "eject-copied",
+            "eject-loader",
+            "eject-plain",
+            "eject-unbound",
+            "eject-deleting",
+            "eject-removed",
+        ] {
+            let what = format!("{fs_type}, killed at {step}");
+            let loop_fs = ejectable_root(fs_type);
+            let root = loop_fs.mnt.clone();
+            let usr = plain_usr(&root);
+            let qkk = pacman_qkk(&root, &["sed", "gzip"]);
+            let killed = helper("eject", &root, &[("ARCHIX_TEST_CRASH", step)]).output().unwrap();
+            assert!(!killed.status.success(), "{what}: the eject never got there");
+            assert_bootable(&root, &usr, &qkk, &what);
+            let booted = restart(&root);
+            assert_bootable(&root, &usr, &qkk, &format!("{what}, restarted into {booted}"));
+            let rerun = helper("eject", &root, &[]).output().unwrap();
+            assert!(rerun.status.success(), "{what}, then a rerun: {}", stderr(&rerun));
+            assert_ejected(&root, &usr, &qkk, &format!("{what}, then a rerun"));
+        }
+    }
 }

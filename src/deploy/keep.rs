@@ -25,7 +25,7 @@ pub fn boot_default(conf: &str) -> Option<u32> {
         .and_then(|rest| entry_number(rest.trim()))
 }
 
-/// What `deployments.keep` leaves: never the booted, current or boot-default deployment, then the newest others with a boot entry, then the newest without, until `keep` are left.
+/// What `deployments.keep` leaves: never the booted, current or boot-default deployment or one a fallback UKI boots, then the newest others with a boot entry, then the newest without, until `keep` are left.
 #[derive(Debug, Clone, Default)]
 pub struct Keep {
     pub keep: usize,
@@ -34,6 +34,8 @@ pub struct Keep {
     pub boot_default: Option<u32>,
     /// Deployments with a boot entry on the ESP.
     pub entries: BTreeSet<u32>,
+    /// Deployments a fallback UKI on the ESP boots.
+    pub fallbacks: BTreeSet<u32>,
 }
 
 impl Keep {
@@ -55,6 +57,7 @@ impl Keep {
                 .filter(|(_, extra, _)| !extra)
                 .map(|(n, _, _)| n)
                 .collect(),
+            fallbacks: crate::system::boot::fallbacks(esp).into_iter().collect(),
         })
     }
 
@@ -64,6 +67,7 @@ impl Keep {
         let mut kept: BTreeSet<u32> = [self.booted, self.current, self.boot_default]
             .into_iter()
             .flatten()
+            .chain(self.fallbacks.iter().copied())
             .filter(|n| committed.contains(n))
             .collect();
         let (entried, bare): (Vec<u32>, Vec<u32>) = committed.iter().rev().partition(|n| self.entries.contains(n));
@@ -88,7 +92,26 @@ mod tests {
             current: Some(current),
             boot_default: Some(boot_default),
             entries: BTreeSet::new(),
+            fallbacks: BTreeSet::new(),
         }
+    }
+
+    #[test]
+    fn a_deployment_a_fallback_uki_boots_is_never_deleted() {
+        let pins = Keep {
+            fallbacks: BTreeSet::from([5]),
+            ..keep(1, 8, 8, 8)
+        };
+        assert_eq!(pins.to_delete(&[5, 6, 7, 8]), vec![6, 7]);
+        let stale = Keep {
+            fallbacks: BTreeSet::from([3]),
+            ..keep(2, 8, 8, 8)
+        };
+        assert_eq!(
+            stale.to_delete(&[6, 7, 8]),
+            vec![6],
+            "a fallback naming a deleted deployment takes no place"
+        );
     }
 
     #[test]
@@ -150,6 +173,7 @@ mod tests {
             current: Some(9),
             boot_default: None,
             entries: BTreeSet::new(),
+            fallbacks: BTreeSet::new(),
         };
         assert_eq!(stale.to_delete(&[7, 8, 9]), vec![7]);
     }

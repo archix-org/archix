@@ -104,6 +104,9 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         droppable: pins.to_delete(&committed),
     };
     staged.commit(store, &esp, &entries)?;
+    if let Err(e) = boot::retire_fallbacks(paths, &esp, plan.number) {
+        eprintln!("warning: couldn't take the older fallback UKIs off the ESP: {e:#}; the next switch does");
+    }
     let records = crate::generations::Store::new(paths);
     if !records.has(plan.number) {
         records.save(plan.record)?;
@@ -136,5 +139,6 @@ fn write_entry(store: &Store, paths: &Paths, plan: &BootPlan, number: u32) -> Re
     super::EspStep::clean(&entries)?;
     super::EspStep::install(&entries, number, &root)?;
     crate::durable::sync_filesystems_checked(&[Path::new(&plan.esp)])?;
+    boot::retire_fallbacks(paths, Path::new(&plan.esp), number)?;
     staging.discard()
 }
