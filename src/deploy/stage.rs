@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::store::{STAGING_PREFIX, StoreLock, incomplete};
+use super::store::{StoreLock, incomplete};
 use super::view::{Layout, VAR_BINDS, VIEW_DIR, mount_points};
 use super::{Backend, COPIED, OVERLAID, Store, Transaction};
 use crate::testhooks::mark;
@@ -49,7 +49,7 @@ impl Staging {
     /// A staging root identical to deployment `base`, never committed, for building that deployment's boot entry; `discard` deletes it.
     pub fn scratch(store: &Store, base: u32) -> Result<Staging> {
         let lock = store.lock()?;
-        let dir = store.deploy_dir().join(format!("{STAGING_PREFIX}scratch"));
+        let dir = store.scratch_path();
         Staging::stage(store, base, base, lock, dir)
     }
 

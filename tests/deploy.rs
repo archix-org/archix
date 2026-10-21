@@ -1515,3 +1515,82 @@ fn a_separate_boot_usr_opt_or_var_or_an_esp_in_boot_is_refused_before_anything_c
     assert!(refused("efi").contains("archix-static"));
     assert!(!root.join("archix").exists());
 }
+
+/// Fills the filesystem holding `dir` until `leave` bytes are free.
+fn fill(dir: &Path, leave: u64) {
+    let size = free_bytes(dir).saturating_sub(leave);
+    sh(Command::new("fallocate")
+        .args(["-l", &size.to_string()])
+        .arg(dir.join("filler")));
+}
+
+#[test]
+#[ignore]
+fn a_switch_that_only_removes_packages_still_needs_room_to_stage() {
+    let _serial = serial();
+    let loop_fs = LoopFs::new("ext4");
+    let root = loop_fs.mnt.clone();
+    let db = root.join("db");
+    fs::create_dir(&db).unwrap();
+    let removed = ["tree".to_string()];
+    archix::conflicts::check(&[], &removed, &db, &root).unwrap();
+    fill(&root, 1 << 20);
+    let err = archix::conflicts::check(&[], &removed, &db, &root).expect_err("a full disk passed the space check");
+    assert!(format!("{err:#}").contains("nothing was changed"), "{err:#}");
+}
+
+#[test]
+#[ignore]
+fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
+    let _serial = serial();
+    let (_fs, store) = system("btrfs");
+    let root = store.root().to_path_buf();
+    fill(&root, 16 << 20);
+    let paths = archix::paths::Paths::under(&root);
+    let record: archix::generations::Generation = serde_json::from_str(
+        r#"{"number": 2, "created": 0, "host": "box", "date": "2026-10-10", "packages": {},
+            "settings": {"remove_undeclared": true, "ignored": [], "keep": 1, "keep_days": 0},
+            "config_commit": null, "config_dirty": false}"#,
+    )
+    .unwrap();
+    let boot = archix::system::boot::BootPlan {
+        esp: root.join("efi").display().to_string(),
+        kernel: "linux".into(),
+        microcode: Vec::new(),
+        cmdline: "rw".into(),
+        secure_boot: Some(false),
+        anticheat: false,
+        tries: 0,
+        revoke_unused: false,
+    };
+    let packages = archix::packages::Packages {
+        install: Vec::new(),
+        remove: Vec::new(),
+        versions: BTreeMap::new(),
+        reasons: BTreeMap::new(),
+        reinstall: false,
+    };
+    let plan = archix::deploy::build::Plan {
+        paths: &paths,
+        number: 2,
+        base: 1,
+        packages: &packages,
+        system: &archix::system::apply::SystemChange::default(),
+        boot: &boot,
+        repos: &[],
+        record: &record,
+        keep: 2,
+        config: &|_| Ok(()),
+    };
+    let Err(err) = archix::deploy::build::build(&store, &plan) else {
+        panic!("the build can't succeed");
+    };
+    let left: Vec<String> = fs::read_dir(store.deploy_dir())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert!(left.is_empty(), "the failed build left {left:?}: {err:#}");
+    assert_eq!(store.deployments().unwrap(), vec![1]);
+    assert_eq!(store.current().unwrap(), Some(1));
+}

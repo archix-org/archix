@@ -9,9 +9,14 @@ config=/etc/archix/init.lua
 lock=/etc/archix/archix.lock
 ax() { archix --host archix-vm "$@"; }
 say() { echo "VMTEST: $*" > /dev/console; }
+# The VM log keeps only VMTEST lines, so diagnostics go through say, one line each.
 diag() {
-  { echo "--- diagnostics"; ax status; ax generations; ls -a /archix/deploy; ls /var/lib/archix; tail -15 /var/log/pacman.log; } > /dev/console 2>&1
+  say "diagnostics: /archix/deploy holds $(listing)"
+  say "diagnostics: generations $(ax generations 2>&1 | tr '\n' '|')"
+  say "diagnostics: status $(ax status 2>&1 | tr '\n' '|')"
+  say "diagnostics: pacman.log $(tail -8 /var/log/pacman.log | tr '\n' '|')"
 }
+listing() { ls -A /archix/deploy | tr '\n' ' '; }
 fail() { say "FAIL: $*"; diag; echo failed > "$state/stage"; sync; systemctl poweroff; exit 1; }
 current() { ax generations | awk '$1 == "*" { print $2 }'; }
 deployments() { ls /archix/deploy | sort -n | tr '\n' ' '; }
@@ -52,7 +57,7 @@ interrupt_after() {
       nap
       return 0
     fi
-    kill -0 "$pid" 2>/dev/null || { tail -20 "$state/interrupted.log" > /dev/console; fail "archix $* finished before it could be interrupted"; }
+    kill -0 "$pid" 2>/dev/null || fail "archix $* finished before it could be interrupted: $(tail -8 "$state/interrupted.log" | tr '\n' '|')"
     nap
   done
   fail "pacman never got to $count packages"
@@ -76,11 +81,11 @@ case $stage in
     kept=$(deployments)
     fill_disk $((20 * 1024 * 1024))
     ax switch --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "a switch with 20 MB free should fail"
-    tail -5 /run/archix-vmtest-full.log > /dev/console
+    say "the switch on a full disk said: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
     grep -q "nothing was changed" /run/archix-vmtest-full.log || fail "the full-disk refusal should say nothing was changed"
     rm -f /var/tmp/archix-fill
     [ "$(current)" = "$(recall old)" ] || fail "the failed switch on a full disk changed the current deployment"
-    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed switch on a full disk left something behind: $(ls -a /archix/deploy)"
+    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed switch on a full disk left something behind: $(listing); deployments before $kept, now $(deployments)"
     say "PASS: a full disk stops the switch before it changes anything"
 
     remember kept "$kept"
@@ -91,13 +96,13 @@ case $stage in
     ;;
   2)
     [ "$booted" = "$(recall old)" ] && [ "$(current)" = "$(recall old)" ] || fail "after a power cut mid-switch, deployment $(recall old) should still boot and be current"
-    [ "$(deployments)" = "$(recall kept)" ] || fail "the cut switch committed a deployment: $(deployments)"
+    [ "$(deployments)" = "$(recall kept)" ] || fail "the cut switch committed a deployment: $(listing); deployments before $(recall kept), now $(deployments)"
     installed htop && ! installed git || fail "the power cut changed the running deployment's packages"
     [ "$(missing_files)" = 0 ] || fail "files are missing after the power cut: $(pacman -Qk 2>&1 | grep 'No such file' | head -5)"
     unchanged "the power cut mid-switch" "$(recall old)"
     say "PASS: a power cut mid-switch left the running deployment whole, by content"
     ax switch --noconfirm > /dev/console 2>&1 || fail "the switch after the power cut"
-    staging_left && fail "the next switch should clear the cut switch's staging tree"
+    staging_left && fail "the next switch should clear the cut switch's staging tree: $(listing)"
     unchanged "staging the switch after the power cut" "$(recall old)"
     remember new "$(current)"
     next 3
@@ -122,11 +127,11 @@ case $stage in
     kept=$(deployments)
     say "killing a rollback that rebuilds generation $(recall old)"
     interrupt_after kill 1 rollback "$(recall old)" --noconfirm
-    [ "$(current)" != "$(recall old)" ] && [ "$(deployments)" = "$kept" ] || fail "the killed rollback committed: $(deployments)"
+    [ "$(current)" != "$(recall old)" ] && [ "$(deployments)" = "$kept" ] || fail "the killed rollback committed: $(listing); deployments before $kept, now $(deployments)"
     installed git && [ "$(missing_files)" = 0 ] || fail "the killed rollback changed the running deployment"
     ax rollback "$(recall old)" --noconfirm > /dev/console 2>&1 || fail "rebuilding generation $(recall old) with the mirror unreachable"
     [ "$(current)" = "$(recall old)" ] || fail "the rebuilt deployment $(recall old) should be current"
-    staging_left && fail "the rebuild should clear the killed one's staging tree"
+    staging_left && fail "the rebuild should clear the killed one's staging tree: $(listing)"
     unchanged "the killed rebuild and the rebuild of deployment $(recall old)" "$(recall new)"
     next 4
     systemctl reboot

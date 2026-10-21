@@ -211,6 +211,8 @@ fn check_mounts(root: &Path, incoming: &[Contents]) -> Result<()> {
     let mut on_disk =
         |mount: &PathBuf, size: u64| allocated(size, *blocks.entry(mount.clone()).or_insert_with(|| block_size(mount)));
     let mut adds: BTreeMap<PathBuf, u64> = BTreeMap::new();
+    // Staging copies /etc and the database and builds an initramfs even when nothing is installed.
+    adds.insert(mount_of(""), 0);
     for package in incoming {
         for (file, size) in package.files.iter().zip(&package.sizes) {
             let mount = mount_of(file);

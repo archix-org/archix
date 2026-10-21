@@ -36,8 +36,30 @@ pub struct Built {
     pub failures: Vec<String>,
 }
 
-/// Stages, builds and commits one deployment: the package changes, users, /etc files and services, archix's integration files and the boot entry go into the staging root, /usr and /opt files into the finished tree; nothing outside it changes before the commit.
+/// Stages, builds and commits one deployment: the package changes, users, /etc files and services, archix's integration files and the boot entry go into the staging root, /usr and /opt files into the finished tree; nothing outside it changes before the commit, and a failure deletes the staging tree.
 pub fn build(store: &Store, plan: &Plan) -> Result<Built> {
+    let built = build_staged(store, plan);
+    if built.is_err() {
+        remove_staging(store, &store.staging_path(plan.number));
+    }
+    built
+}
+
+/// Deletes a staging tree a failed build left, so a full disk gets its space back now rather than at the next switch.
+fn remove_staging(store: &Store, staging: &Path) {
+    if staging.symlink_metadata().is_err() {
+        return;
+    }
+    let removed = store.lock().and_then(|_lock| store.remove_tree(staging));
+    if let Err(e) = removed {
+        eprintln!(
+            "warning: couldn't remove {}: {e:#}; the next switch does",
+            staging.display()
+        );
+    }
+}
+
+fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let paths = plan.paths;
     let staging = Staging::from(store, plan.number, plan.base)?;
     let tx = staging.transaction()?;
@@ -91,6 +113,14 @@ pub fn build(store: &Store, plan: &Plan) -> Result<Built> {
 
 /// Builds and writes the boot entry of the committed deployment `number`, in a scratch staging root identical to it, as for deployment 1 after the first layout or a current deployment whose entry is gone; it becomes the boot default.
 pub fn entry_for(store: &Store, paths: &Paths, plan: &BootPlan, number: u32) -> Result<()> {
+    let written = write_entry(store, paths, plan, number);
+    if written.is_err() {
+        remove_staging(store, &store.scratch_path());
+    }
+    written
+}
+
+fn write_entry(store: &Store, paths: &Paths, plan: &BootPlan, number: u32) -> Result<()> {
     let staging = Staging::scratch(store, number)?;
     let tx = staging.transaction()?;
     let built = boot::build(paths, plan, number, &staging, &tx)?;

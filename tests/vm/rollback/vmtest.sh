@@ -9,9 +9,14 @@ config=/etc/archix/init.lua
 lock=/etc/archix/archix.lock
 ax() { archix --host archix-vm "$@"; }
 say() { echo "VMTEST: $*" > /dev/console; }
+# The VM log keeps only VMTEST lines, so diagnostics go through say, one line each.
 diag() {
-  { echo "--- diagnostics"; ax status; ax generations; ls -a /archix/deploy; ls /var/lib/archix; tail -15 /var/log/pacman.log; } > /dev/console 2>&1
+  say "diagnostics: /archix/deploy holds $(listing)"
+  say "diagnostics: generations $(ax generations 2>&1 | tr '\n' '|')"
+  say "diagnostics: status $(ax status 2>&1 | tr '\n' '|')"
+  say "diagnostics: pacman.log $(tail -8 /var/log/pacman.log | tr '\n' '|')"
 }
+listing() { ls -A /archix/deploy | tr '\n' ' '; }
 fail() { say "FAIL: $*"; diag; echo failed > "$state/stage"; sync; systemctl poweroff; exit 1; }
 current() { ax generations | awk '$1 == "*" { print $2 }'; }
 deployments() { ls /archix/deploy | sort -n | tr '\n' ' '; }
@@ -82,7 +87,7 @@ interrupt_after() {
       nap
       return 0
     fi
-    kill -0 "$pid" 2>/dev/null || { tail -20 "$state/interrupted.log" > /dev/console; fail "archix $* finished before it could be interrupted"; }
+    kill -0 "$pid" 2>/dev/null || fail "archix $* finished before it could be interrupted: $(tail -8 "$state/interrupted.log" | tr '\n' '|')"
     nap
   done
   fail "pacman never got to $count packages"
@@ -114,11 +119,11 @@ case $stage in
     kept=$(deployments)
     fill_disk $((20 * 1024 * 1024))
     ax switch --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "a switch with 20 MB free should fail"
-    tail -5 /run/archix-vmtest-full.log > /dev/console
+    say "the switch on a full disk said: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
     grep -q "nothing was changed" /run/archix-vmtest-full.log || fail "the full-disk refusal should say nothing was changed"
     rm -f /var/tmp/archix-fill
     [ "$(current)" = "$(recall old)" ] || fail "the failed switch on a full disk changed the current deployment"
-    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed switch on a full disk left a deployment or staging tree: $(ls -a /archix/deploy)"
+    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed switch on a full disk left a deployment or staging tree: $(listing); deployments before $kept, now $(deployments)"
     say "PASS: a full disk stops the switch before it changes anything"
 
     remember kept "$kept"
@@ -129,14 +134,14 @@ case $stage in
     ;;
   3)
     [ "$booted" = "$(recall old)" ] && [ "$(current)" = "$(recall old)" ] || fail "after a power cut mid-switch, deployment $(recall old) should still boot and be current"
-    [ "$(deployments)" = "$(recall kept)" ] || fail "the cut switch committed a deployment: $(deployments)"
+    [ "$(deployments)" = "$(recall kept)" ] || fail "the cut switch committed a deployment: $(listing); deployments before $(recall kept), now $(deployments)"
     [ "$(glibc)" = 2.43 ] || fail "the power cut changed the running deployment's glibc"
     [ "$(missing_files)" = 0 ] || fail "files are missing after the power cut: $(pacman -Qk 2>&1 | grep 'No such file' | head -5)"
     [ -z "$(needs_newer_glibc)" ] || fail "after the power cut these need a newer glibc: $(needs_newer_glibc | head -c 400)"
     unchanged "the power cut mid-update" "$(recall old)"
     say "PASS: a power cut mid-update left the running deployment whole, by content"
     ax switch --noconfirm > /dev/console 2>&1 || fail "the update after the power cut"
-    staging_left && fail "the next switch should clear the cut switch's staging tree"
+    staging_left && fail "the next switch should clear the cut switch's staging tree: $(listing)"
     unchanged "the 2026-10-10 update staged from it" "$(recall old)"
     say "PASS: staging the 2026-10-10 update left deployment $(recall old)'s files as they were, by content"
     remember new "$(current)"
@@ -190,21 +195,22 @@ case $stage in
     kept=$(deployments)
     baseline "$old"
     fill_disk $((30 * 1024 * 1024))
-    ax rollback "$image" --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "rebuilding a deployment with 30 MB free should fail"
-    tail -5 /run/archix-vmtest-full.log > /dev/console
+    ax rollback "$image" --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "rebuilding a deployment with 30 MB free should fail: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
+    say "the rebuild on a full disk said: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
     rm -f /var/tmp/archix-fill
-    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed rebuild on a full disk left something behind: $(ls -a /archix/deploy)"
+    grep -q "nothing was changed" /run/archix-vmtest-full.log || fail "the full-disk refusal of the rebuild should come before staging and say nothing was changed"
+    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed rebuild on a full disk left something behind: $(listing); deployments before $kept, now $(deployments)"
     [ "$(current)" = "$old" ] || fail "the failed rebuild on a full disk changed the current deployment"
     say "PASS: a full disk stops a rebuilding rollback before it changes anything"
 
     say "killing a rollback that rebuilds generation $image"
     interrupt_after kill 1 rollback "$image" --noconfirm
     [ "$(current)" = "$old" ] || fail "the killed rollback changed the current deployment"
-    [ "$(deployments)" = "$kept" ] || fail "the killed rollback committed a deployment: $(deployments)"
+    [ "$(deployments)" = "$kept" ] || fail "the killed rollback committed a deployment: $(listing); deployments before $kept, now $(deployments)"
     [ "$(missing_files)" = 0 ] && [ "$(glibc)" = 2.43 ] || fail "the killed rollback changed the running deployment"
     ax rollback "$image" --noconfirm > /dev/console 2>&1 || fail "rebuilding generation $image after the kill"
     [ "$(current)" = "$image" ] || fail "the rebuilt deployment $image should be current"
-    staging_left && fail "the rebuild should clear the killed one's staging tree"
+    staging_left && fail "the rebuild should clear the killed one's staging tree: $(listing)"
     [ -z "$(deployed "$image" archix-test-hello)" ] || fail "the rebuilt deployment $image shouldn't have the local recipe"
     [ "$(deployed "$image" glibc | cut -d+ -f1)" = 2.43 ] || fail "the rebuilt deployment $image should have glibc 2.43"
     unchanged "the full disk, the killed rebuild and the rebuild of generation $image" "$old"
@@ -266,10 +272,10 @@ case $stage in
     printf 'disable\nsave\n' | "${keyring[@]}" --edit-key "$key" > /dev/null 2>&1 || fail "disabling $key in pacman's keyring"
     before=$(current) kept=$(deployments)
     ax switch --noconfirm > "$state/key.log" 2>&1 && fail "a switch to a package signed by a disabled (revoked) key should fail"
-    tail -5 "$state/key.log" > /dev/console
+    say "the switch to a package signed by a disabled key said: $(tail -5 "$state/key.log" | tr '\n' '|')"
     printf 'enable\nsave\n' | "${keyring[@]}" --edit-key "$key" > /dev/null 2>&1
     [ "$(current)" = "$before" ] || fail "the refused switch changed the current deployment"
-    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the refused switch left something behind: $(ls -a /archix/deploy)"
+    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the refused switch left something behind: $(listing); deployments before $kept, now $(deployments)"
     say "PASS: a package signed by a revoked key is refused before anything changes"
 
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch once the key is enabled again"

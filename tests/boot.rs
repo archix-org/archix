@@ -111,6 +111,7 @@ fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp()
     // Two more UKIs, so gc takes the first once its deployment is neither booted, current nor the default.
     setup.set_body(&[], &body(2));
     setup.ok(&["switch", "--noconfirm"]);
+    machine.reboot(Some(&format!("archix-{}.conf", machine.current().unwrap())));
     setup.set_body(&[], &body(3));
     setup.ok(&["switch", "--noconfirm"]);
     let gone = !first.exists();
@@ -503,16 +504,12 @@ fn gc_keeps_every_uki_a_remaining_entry_starts() {
     setup.ok(&["switch", "--noconfirm"]);
     let machine = &setup.machine;
     let booted = machine.current().unwrap();
-    let cmdline = format!("root=/dev/vda2 rw archix.generation={booted}");
-    let env = [("ARCHIX_TEST_CMDLINE", cmdline.as_str())];
+    machine.reboot(Some(&format!("archix-{booted}.conf")));
     for n in 1..=7 {
         setup.set_body(&[], &body(&esp, n));
-        setup.ok_env(&env, &["switch", "--noconfirm"]);
+        setup.ok(&["switch", "--noconfirm"]);
     }
-    println!(
-        "archix gc, booted into deployment {booted}:\n{}",
-        setup.ok_env(&env, &["gc"])
-    );
+    println!("archix gc, booted into deployment {booted}:\n{}", setup.ok(&["gc"]));
     let files = esp_files(machine);
     println!(
         "ESP after 7 switches (the kernel command line changed at the 4th) and gc:\n{}",

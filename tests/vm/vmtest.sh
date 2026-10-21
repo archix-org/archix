@@ -8,6 +8,7 @@ say() { echo "VMTEST: $*" > /dev/console; }
 fail() { say "FAIL: $*"; systemctl poweroff; exit 1; }
 current() { archix generations | awk '$1 == "*" { print $2 }'; }
 deployments() { ls /archix/deploy 2>/dev/null | sort -n | tr '\n' ' '; }
+listing() { ls -A /archix/deploy | tr '\n' ' '; }
 next() { echo "$1" > "$state/stage"; sync; }
 # Entries in the root's own /usr, which the deployment's bind hides.
 hidden_usr() { mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root && ls -A /run/vmtest-root/usr | wc -l; umount /run/vmtest-root; }
@@ -132,7 +133,7 @@ case $stage in
     archix --host archix-vm install jq --noconfirm > /dev/console 2>&1 && fail "an unsigned switch must be refused under Secure Boot"
     [ "$(current)" = "$before" ] || fail "the refused switch changed the current deployment"
     [ "$(deployments)" = "$kept" ] || fail "the refused switch left a deployment behind: $(deployments)"
-    ls -d /archix/deploy/.staging-* > /dev/null 2>&1 && fail "the refused switch left its staging tree"
+    ls -d /archix/deploy/.staging-* > /dev/null 2>&1 && fail "the refused switch left its staging tree: $(listing)"
     sed -i 's|secure_boot = false|secure_boot = true|' "$config"
     say "PASS: secure-boot setup, check, the protected entry, and refusing unsigned entries"
     echo "$before" > "$state/before"
@@ -149,10 +150,10 @@ case $stage in
   6)
     before=$(cat "$state/before")
     [ "$booted" = "$before" ] && [ "$(current)" = "$before" ] || fail "after a power cut mid-switch, deployment $before should still boot and be current"
-    [ "$(deployments)" = "$(cat "$state/kept")" ] || fail "the cut switch committed a deployment: $(deployments)"
+    [ "$(deployments)" = "$(cat "$state/kept")" ] || fail "the cut switch committed a deployment: $(listing); deployments before $(cat "$state/kept"), now $(deployments)"
     archix --host archix-vm install jq --noconfirm > /dev/console 2>&1 || fail "the switch after the power cut"
     [ "$(current)" -gt "$before" ] || fail "installing jq should make a newer deployment"
-    ls -d /archix/deploy/.staging-* > /dev/null 2>&1 && fail "the next switch should clear the cut switch's staging tree"
+    ls -d /archix/deploy/.staging-* > /dev/null 2>&1 && fail "the next switch should clear the cut switch's staging tree: $(listing)"
     say "PASS: a power cut mid-switch left deployment $before booting, and the next switch cleaned up after it"
     good=$booted
     echo "$good" > "$state/good"

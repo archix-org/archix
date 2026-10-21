@@ -88,6 +88,11 @@ impl Store {
         self.deploy_dir().join(format!("{STAGING_PREFIX}{number}"))
     }
 
+    /// The staging root that builds a committed deployment's boot entry or an AUR package, never committed.
+    pub fn scratch_path(&self) -> PathBuf {
+        self.deploy_dir().join(format!("{STAGING_PREFIX}scratch"))
+    }
+
     /// Committed deployments that are complete, oldest first.
     pub fn deployments(&self) -> Result<Vec<u32>> {
         let mut numbers: Vec<u32> = self
@@ -209,7 +214,14 @@ impl Store {
             self.remove_tree(&hidden)?;
         }
         fs::rename(&path, &hidden).with_context(|| format!("renaming {} to {}", path.display(), hidden.display()))?;
-        crate::durable::sync_dir(&hidden)
+        crate::durable::sync_dir(&hidden)?;
+        if let Err(e) = self.remove_tree(&hidden) {
+            eprintln!(
+                "warning: couldn't remove {}: {e:#}; the next switch does",
+                hidden.display()
+            );
+        }
+        Ok(())
     }
 
     /// Points `current` at a complete committed deployment with an atomic rename, flushed to disk.
