@@ -1,0 +1,5 @@
+#!/bin/bash
+# findings N ROOT: deployment N's package list, by hash, then what pacman -Qkk finds wrong in its /usr, /opt and /boot and files missing from its /etc; /var is the live system's.
+set -o pipefail
+echo "packages $(ls "$2/archix/deploy/$1/pacman" | sha256sum | cut -c1-16)"
+archix-check-deployment "$1" "$2" | grep -E ': /(usr|opt|boot)/|: /etc/.*\(No such file' || true

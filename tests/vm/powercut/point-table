@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+# point-table LOG ESP_START ESP_SIZE [EVERY]: one line per check point, in replay order: the log prefix it ends, whether the ESP was written since the previous point, the last mark and the last stage mark; flush entries by default, else every EVERY entries, and the whole log last.
+import struct
+import sys
+
+FLUSH, DISCARD, MARK = 1 << 0, 1 << 2, 1 << 3
+log_path, esp_start, esp_size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+every = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+with open(log_path, "rb") as log:
+    _, _, entries, sectorsize = struct.unpack("<QQQI", log.read(28))
+    log.seek(sectorsize)
+    esp = False
+    mark = stage = "boot"
+    for n in range(entries):
+        header = log.read(sectorsize)
+        sector, count, flags, data_len = struct.unpack_from("<QQQQ", header)
+        if flags & MARK:
+            mark = header[32 : 32 + data_len].rstrip(b"\0").decode().split("-", 1)[1]
+            stage = mark if mark.startswith("stage-") else stage
+        elif count:
+            first = sector * sectorsize // 512
+            last = first + count * sectorsize // 512
+            esp |= first < esp_start + esp_size and last > esp_start
+        if count and not flags & DISCARD:
+            log.seek(count * sectorsize, 1)
+        if (every and (n + 1) % every == 0) or (not every and flags & FLUSH) or n + 1 == entries:
+            print(n + 1, int(esp), mark, stage)
+            esp = False

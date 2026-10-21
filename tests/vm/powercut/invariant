@@ -1,0 +1,258 @@
+#!/usr/bin/env python3
+# `invariant pick ESP` prints the entry systemd-boot would start; `invariant check ROOT ESP BEFORE AFTER` checks a replayed disk: every archix entry names a committed deployment whose UKI matches, the picked entry and `current` name committed deployments, archix's initramfs boots the picked one, and its files match its baseline.
+import functools
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+
+# deploy_boot::TREES: what a committed deployment holds, and where the initramfs binds each.
+TREES = [("usr", "usr"), ("etc", "etc"), ("opt", "opt"), ("boot", "boot"), ("pacman", "var/lib/pacman/local"), ("dkms", "var/lib/dkms")]
+UNCOUNTED = 1 << 32
+
+
+def strverscmp(a, b):
+    pa, pb = re.findall(r"\d+|\D+", a), re.findall(r"\d+|\D+", b)
+    for x, y in zip(pa, pb):
+        if x.isdigit() and y.isdigit():
+            if int(x) != int(y):
+                return (int(x) > int(y)) - (int(x) < int(y))
+        elif x != y:
+            return (x > y) - (x < y)
+    return (len(pa) > len(pb)) - (len(pa) < len(pb))
+
+
+def read(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+class Entry:
+    def __init__(self, esp, name):
+        self.name = name
+        m = re.fullmatch(r"(.*?)(?:\+(\d+)(?:-(\d+))?)?\.conf", name, re.I)
+        self.id = m.group(1) + ".conf"
+        self.tries_left = int(m.group(2)) if m.group(2) is not None else UNCOUNTED
+        self.tries_done = int(m.group(3) or 0)
+        self.keys = {}
+        for line in (read(os.path.join(esp, "loader/entries", name)) or b"").decode(errors="replace").splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2 and not parts[0].startswith("#"):
+                self.keys.setdefault(parts[0], parts[1].strip())
+        self.image = self.keys.get("uki") or self.keys.get("efi") or self.keys.get("linux")
+        g = re.fullmatch(r"archix-([1-9]\d*)(?:-protected)?\.conf", self.id)
+        self.generation = g.group(1) if g else None
+
+
+def compare(a, b):
+    """systemd-boot's boot_entry_compare: entries out of tries last, then by sort-key, version (newest first) and id."""
+    r = (a.tries_left == 0) - (b.tries_left == 0)
+    if r:
+        return r
+    ka, kb = a.keys.get("sort-key"), b.keys.get("sort-key")
+    r = (ka is None) - (kb is None)
+    if r:
+        return r
+    if ka is not None:
+        r = (ka > kb) - (ka < kb) or -strverscmp(a.keys.get("version", ""), b.keys.get("version", ""))
+        if r:
+            return r
+    return -strverscmp(a.id, b.id) or -((a.tries_left > b.tries_left) - (a.tries_left < b.tries_left))
+
+
+def entries(esp):
+    found = []
+    folder = os.path.join(esp, "loader/entries")
+    for name in os.listdir(folder) if os.path.isdir(folder) else []:
+        if name.lower().endswith(".conf") and not name.startswith("auto-") and os.path.isfile(os.path.join(folder, name)):
+            found.append(Entry(esp, name))
+    return sorted(found, key=functools.cmp_to_key(compare))
+
+
+def loader_setting(esp, key):
+    value = None
+    for line in (read(os.path.join(esp, "loader/loader.conf")) or b"").decode(errors="replace").splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and parts[0] == key:
+            value = parts[1].strip()
+    return value
+
+
+def pick(esp, listed):
+    """What systemd-boot 260 starts with no EFI variables set: `preferred` unless it's out of tries, then `default`, then the first entry."""
+    import fnmatch
+
+    bootable = [e for e in listed if e.image]
+    preferred, default = loader_setting(esp, "preferred"), loader_setting(esp, "default")
+    for pattern, usable in ((preferred, lambda e: e.tries_left != 0), (default, lambda e: True)):
+        if pattern:
+            for e in bootable:
+                if fnmatch.fnmatchcase(e.id, pattern) and usable(e):
+                    return e
+    return bootable[0] if bootable else None
+
+
+def committed(root, gen):
+    d = os.path.join(root, "archix/deploy", gen)
+    return os.path.isdir(d) and not os.path.islink(d) and all(os.path.isdir(os.path.join(d, t)) for t, _ in TREES)
+
+
+def section(data, wanted):
+    """A PE section's bytes, as ukify writes them: VirtualSize long, at PointerToRawData."""
+    if data[:2] != b"MZ":
+        return None
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe : pe + 4] != b"PE\0\0":
+        return None
+    count, optional = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+    table = pe + 24 + optional
+    for i in range(count):
+        name, vsize, _, rsize, offset = struct.unpack_from("<8sIIII", data, table + 40 * i)
+        if name.rstrip(b"\0").decode(errors="replace") == wanted:
+            return data[offset : offset + min(vsize, rsize)]
+    return None
+
+
+def uki_problem(root, esp, entry):
+    path = os.path.join(esp, entry.image.lstrip("/"))
+    uki = read(path)
+    if uki is None:
+        return f"{entry.name} starts {entry.image}, which is missing"
+    deployment = os.path.join(root, "archix/deploy", entry.generation)
+    built = read(os.path.join(deployment, "boot/archix", os.path.basename(entry.image)))
+    if built is not None:
+        return None if built == uki else f"{entry.name}'s UKI {entry.image} isn't the one deployment {entry.generation} built"
+    uname = (section(uki, ".uname") or b"").rstrip(b"\0\n").decode(errors="replace")
+    kernel = read(os.path.join(deployment, "usr/lib/modules", uname, "vmlinuz")) if uname else None
+    if kernel is None or section(uki, ".linux") != kernel:
+        return f"{entry.name}'s UKI {entry.image} (kernel {uname or 'unreadable'}) doesn't carry deployment {entry.generation}'s kernel"
+    return None
+
+
+def boot(root, entry):
+    """Runs archix's initramfs step on the replayed root with systemd-boot's LoaderEntrySelected naming `entry`; returns the deployment it mounted, or its error."""
+    with tempfile.TemporaryDirectory() as tmp:
+        efivar = os.path.join(tmp, "selected")
+        with open(efivar, "wb") as f:
+            f.write(b"\x06\0\0\0" + (entry.id + "\0").encode("utf-16-le"))
+        run = os.path.join(tmp, "run")
+        out = subprocess.run(["archix", "deploy-mount", root, "--efivar", efivar, "--run-dir", run], capture_output=True, text=True)
+        for _, at in reversed(TREES):
+            subprocess.run(["umount", os.path.join(root, at)], capture_output=True)
+        if out.returncode != 0:
+            return None, (out.stderr or out.stdout).strip().replace("\n", " | ")[:300]
+        return (read(os.path.join(run, "deployment")) or b"").decode().strip(), None
+
+
+def check(root, esp, before, after):
+    problems = []
+    listed = entries(esp)
+    bootable = 0
+    for e in listed:
+        if e.generation is None:
+            continue
+        if not e.image:
+            problems.append(f"{e.name} has no efi or uki line, so it was written torn")
+        elif not committed(root, e.generation):
+            problems.append(f"{e.name} names deployment {e.generation}, which isn't committed")
+        else:
+            problem = uki_problem(root, esp, e)
+            if problem:
+                problems.append(problem)
+            elif e.tries_left != 0:
+                bootable += 1
+    if not bootable:
+        problems.append("no archix entry systemd-boot can read starts a committed deployment with its UKI")
+    link = os.path.join(root, "archix/current")
+    current = os.readlink(link) if os.path.islink(link) else None
+    number = current.removeprefix("deploy/") if current else None
+    if not number or not number.isdigit() or not committed(root, number):
+        problems.append(f"current names {current}, which isn't a committed deployment")
+    picked = pick(esp, listed)
+    booted = None
+    if picked is None:
+        problems.append("systemd-boot has no entry to start")
+    elif picked.generation is None:
+        problems.append(f"systemd-boot would start {picked.name}, which isn't archix's")
+    elif committed(root, picked.generation):
+        booted, error = boot(root, picked)
+        if error:
+            problems.append(f"archix's initramfs step fails for {picked.id}: {error}")
+        elif booted != picked.generation:
+            problems.append(f"systemd-boot starts {picked.name}, but archix's initramfs step mounts deployment {booted}")
+    if booted and booted.isdigit():
+        baseline = next((read(os.path.join(d, booted)) for d in (before, after) if os.path.exists(os.path.join(d, booted))), None)
+        found = subprocess.run(["/usr/local/lib/archix-powercut/findings", booted, root], capture_output=True, text=True).stdout
+        if baseline is None:
+            problems.append(f"no baseline for deployment {booted}, which boots here")
+        elif found != baseline.decode():
+            extra = sorted(set(found.splitlines()) ^ set(baseline.decode().splitlines()))
+            problems.append(f"deployment {booted}'s files differ from its baseline: {' | '.join(extra)[:400]}")
+    deployed = sorted(n for n in os.listdir(os.path.join(root, "archix/deploy")) if not n.startswith(".")) if os.path.isdir(os.path.join(root, "archix/deploy")) else []
+    print(
+        f"picked {picked.name if picked else None}, booted {booted}, current {current}, bootable entries {bootable}, entries {[e.name for e in listed]}, "
+        f"default {loader_setting(esp, 'default')}, preferred {loader_setting(esp, 'preferred')}, deploy {deployed}"
+    )
+    for problem in problems:
+        print(f"PROBLEM: {problem}")
+    return not problems
+
+
+def orphans(root, esp):
+    """After the next run: whatever has lost its counterparts, as ORPHAN, and what the next switch clears by design, as LEFTOVER."""
+    found = []
+    deploy = os.path.join(root, "archix/deploy")
+    state = os.path.join(root, "var/lib/archix")
+    listed = [e for e in entries(esp) if e.generation]
+    ids = {e.id for e in listed}
+    committed_numbers = set()
+    for name in sorted(os.listdir(deploy)) if os.path.isdir(deploy) else []:
+        if name.startswith("."):
+            found.append(f"LEFTOVER: deploy/{name}")
+        elif not committed(root, name):
+            found.append(f"ORPHAN: deploy/{name} is incomplete under a committed name")
+        else:
+            committed_numbers.add(name)
+            if not os.path.isdir(os.path.join(state, "generations", name)):
+                found.append(f"ORPHAN: deployment {name} has no generation record")
+            if not any(e.generation == name and not e.id.endswith("-protected.conf") for e in listed):
+                found.append(f"ORPHAN: deployment {name} has no boot entry")
+    for e in listed:
+        if e.generation not in committed_numbers:
+            found.append(f"ORPHAN: {e.name} names deployment {e.generation}, which isn't committed")
+        if not os.path.isfile(os.path.join(state, "boot/entries", e.id)):
+            found.append(f"ORPHAN: {e.name} has no record of archix writing it")
+    records = os.path.join(state, "boot/entries")
+    for name in sorted(os.listdir(records)) if os.path.isdir(records) else []:
+        if name not in ids:
+            found.append(f"ORPHAN: the record {name} has no entry on the ESP")
+    named = {os.path.basename(e.image) for e in listed if e.image}
+    ukis = os.path.join(esp, "EFI/archix")
+    for name in sorted(os.listdir(ukis)) if os.path.isdir(ukis) else []:
+        if name.endswith(".tmp"):
+            found.append(f"LEFTOVER: EFI/archix/{name}")
+        elif name not in named:
+            found.append(f"ORPHAN: the UKI EFI/archix/{name} is named by no entry")
+    for folder in ("loader", "loader/entries"):
+        path = os.path.join(esp, folder)
+        found += [f"LEFTOVER: {folder}/{n}" for n in sorted(os.listdir(path)) if n.endswith(".tmp")] if os.path.isdir(path) else []
+    pending = os.path.join(state, "pending-hooks")
+    for name in sorted(os.listdir(pending)) if os.path.isdir(pending) else []:
+        if name.removesuffix(".json") not in committed_numbers:
+            found.append(f"LEFTOVER: pending-hooks/{name} is for no committed deployment")
+    return found
+
+
+if __name__ == "__main__":
+    if sys.argv[1] == "pick":
+        picked = pick(sys.argv[2], entries(sys.argv[2]))
+        print(picked.name if picked else "")
+    elif sys.argv[1] == "orphans":
+        print("\n".join(orphans(sys.argv[2], sys.argv[3])))
+    else:
+        sys.exit(0 if check(*sys.argv[2:6]) else 1)
