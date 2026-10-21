@@ -8,12 +8,12 @@ return {
         user = archix.option {
           type = t.nullable(t.str),
           default = archix.null,
-          description = "Run as this user, in their home with their session bus when they're logged in; root by default.",
+          description = "Run as this user, in their home; root by default. At boot nobody is logged in, so there's no session bus; a switch with nothing to build gives them theirs if they're logged in.",
         },
         after = archix.option { type = t.list_of(t.str), default = {}, description = "Hooks that must run before this one." },
       }),
       default = {},
-      description = "Scripts run at the end of every switch and rollback, once its deployment is committed, like Home Manager's activation; the system they see is still the running one, as the new deployment boots at the next restart. They run every time, so make them idempotent; a failing hook is reported without undoing the switch.",
+      description = "Scripts run at the first boot of the deployment every switch or rollback commits, like NixOS activation scripts: early, once its users exist and its /var changes are applied, before networking, D-Bus and logins. A switch with nothing to build runs them right away. They run once per switch, so make them idempotent; a failing hook is reported on the console and at the next login, runs again at the next boot, and doesn't undo the switch.",
     },
   },
 }

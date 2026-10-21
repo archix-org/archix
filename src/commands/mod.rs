@@ -1,3 +1,4 @@
+mod deployments;
 mod eject;
 mod helper;
 mod init;
@@ -28,6 +29,7 @@ use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
+pub use deployments::{hooks, verify};
 pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, upgrade};
 pub use init::init;
 pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
@@ -74,7 +76,8 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
 }
 pub use eject::eject;
 pub use switch::{
-    boot_check, cache_push, declare_and_switch, gc, generations, hook_record, prune_hidden, rollback, switch,
+    boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record, prune_hidden, rollback,
+    switch,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";

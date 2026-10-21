@@ -14,6 +14,65 @@ const BEFORE_END: &str = "# END archix custom repos (before the official repos)"
 const AFTER_BEGIN: &str = "# BEGIN archix custom repos (after the official repos)";
 const AFTER_END: &str = "# END archix custom repos (after the official repos)";
 
+/// The PreTransaction hook that stops plain pacman on a deployment; named to sort before every other hook.
+const GUARD_HOOK: &str = "00-archix-deployment.hook";
+/// What a deployment's pacman.conf has instead of CheckSpace, whose check fails on the read-only /usr before any PreTransaction hook runs.
+const CHECK_SPACE_OFF: &str =
+    "#CheckSpace   # off on archix deployments: pacman can't install here, and archix checks space itself";
+
+/// What plain pacman, or an AUR helper running it, gets on a system running from a deployment.
+pub const PACMAN_REFUSAL: &str = "archix: this system runs from a deployment whose /usr, /opt and /boot are read-only, so pacman, and AUR helpers like yay that run it, can't change its packages. Change them with archix, which builds a new deployment that boots at the next restart: `archix install <package>` (or `archix -S`) to add one, `archix remove <package>` (or `archix -R`) to take one out, `archix upgrade` (or `archix -Syu`) to update everything, and `archix switch` to apply your config. pacman -Q, -Ss, -Si, -F and -Sw work as before. See https://archix.dev/docs/concepts/pacman-and-yay/";
+
+/// For the PreTransaction hook, which alpm runs chrooted into pacman's root: plain pacman may change the system under `root` unless it runs from a deployment with a read-only /usr; archix's own transactions always may.
+pub fn pacman_allowed(root: &Path) -> bool {
+    std::env::var_os(TRANSACTION_ENV).is_some()
+        || !crate::system::deploy_boot::uses_deployments(root)
+        || !crate::system::deploy_boot::read_only(&root.join("usr"))
+}
+
+/// pacman.conf with an active CheckSpace turned off, so the guard hook gets to explain; None when there's none.
+pub fn without_check_space(conf: &str) -> Option<String> {
+    if !conf.lines().any(|line| line.trim() == "CheckSpace") {
+        return None;
+    }
+    let lines: Vec<&str> = conf
+        .lines()
+        .map(|line| {
+            if line.trim() == "CheckSpace" {
+                CHECK_SPACE_OFF
+            } else {
+                line
+            }
+        })
+        .collect();
+    Some(lines.join("\n") + "\n")
+}
+
+/// pacman.conf with the CheckSpace archix turned off back on, for a system without deployments.
+fn with_check_space(conf: &str) -> Option<String> {
+    if !conf.lines().any(|line| line == CHECK_SPACE_OFF) {
+        return None;
+    }
+    let lines: Vec<&str> = conf
+        .lines()
+        .map(|line| if line == CHECK_SPACE_OFF { "CheckSpace" } else { line })
+        .collect();
+    Some(lines.join("\n") + "\n")
+}
+
+/// Rewrites a pacman.conf through `edit` when it changes it.
+fn edit_pacman_conf(conf: &Path, edit: fn(&str) -> Option<String>) -> Result<()> {
+    let Ok(current) = fs::read_to_string(conf) else {
+        return Ok(());
+    };
+    if let Some(wanted) = edit(&current) {
+        let tmp = conf.with_extension("conf.archix");
+        fs::write(&tmp, wanted).with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
+    }
+    Ok(())
+}
+
 /// Packages changed by one pacman or AUR-helper transaction that archix didn't run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutsideChange {
@@ -31,6 +90,12 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
          Exec = {} hook-record\nNeedsTargets\n",
         archix.display()
     );
+    let guard = format!(
+        "[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Package\nTarget = *\n\n\
+         [Action]\nDescription = Checking that pacman can change this system...\nWhen = PreTransaction\n\
+         Exec = /bin/sh -c 'test -n \"$ARCHIX_TRANSACTION\" || test ! -d /archix/deploy || test -w /usr || exec {} pacman-guard'\nAbortOnFail\n",
+        archix.display()
+    );
     let profile = format!("if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n");
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
@@ -40,6 +105,7 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     let system = Paths::system();
     vec![
         (system.pacman_hooks.join("archix.hook"), hook),
+        (system.pacman_hooks.join(GUARD_HOOK), guard),
         (system.profile_d.join("archix.sh"), profile),
         (system.autostart.join("archix-status.desktop"), autostart),
     ]
@@ -61,10 +127,18 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
          [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
         archix.display()
     );
+    let flatpak = format!(
+        "[Unit]\nDescription=archix: install the Flatpak apps left for this deployment's first boot\n\
+         Wants=network-online.target\nAfter=network-online.target\nConditionDirectoryNotEmpty={}\n\n\
+         [Service]\nType=oneshot\nExecStart={} deploy-flatpak\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n",
+        crate::flatpak::PENDING_DIR,
+        archix.display()
+    );
     let root = Path::new("/");
     let mut files = vec![
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
+        (root.join("etc/systemd/system/archix-flatpak.service"), flatpak),
     ];
     files.push(crate::system::deploy_boot::activate_file(root, archix));
     files.extend(crate::system::deploy_boot::hook_files(root));
@@ -76,6 +150,7 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
     let mut wants: Vec<(PathBuf, String)> = [
         ("sysinit.target.wants", "archix-boot.service"),
         ("multi-user.target.wants", "archix-boot-complete.service"),
+        ("multi-user.target.wants", "archix-flatpak.service"),
     ]
     .map(|(dir, unit)| {
         (
@@ -121,7 +196,7 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
             std::os::unix::fs::symlink(unit, &target).with_context(|| format!("linking {}", target.display()))?;
         }
     }
-    Ok(())
+    edit_pacman_conf(&place(&Paths::system().pacman_conf)?, without_check_space)
 }
 
 /// Where a staging view gets the running archix when the deployment has none that writes its own integration.
@@ -168,7 +243,7 @@ pub fn remove(paths: &Paths) -> Result<()> {
             _ => {}
         }
     }
-    Ok(())
+    edit_pacman_conf(&inside(&Paths::system().pacman_conf), with_check_space)
 }
 
 /// pacman.conf with archix's custom-repo blocks replaced by `repos`' custom ones, placed around the official repos.
@@ -379,6 +454,50 @@ mod tests {
                 .1
                 .contains("Exec = /opt/archix/bin/archix hook-record\nNeedsTargets")
         );
-        assert!(files[1].1.contains("state/notes"));
+        assert!(
+            files[1]
+                .1
+                .contains("test -w /usr || exec /opt/archix/bin/archix pacman-guard'\nAbortOnFail"),
+            "the shell lets archix's own and writable roots through without needing archix in them: {}",
+            files[1].1
+        );
+        assert!(files[1].0.ends_with("00-archix-deployment.hook"));
+        assert!(files[2].1.contains("state/notes"));
+    }
+
+    #[test]
+    fn a_deployments_pacman_conf_leaves_the_space_check_to_archix_and_eject_restores_it() {
+        let conf =
+            "[options]\nHoldPkg = pacman\nCheckSpace\n#VerbosePkgLists\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        let off = without_check_space(conf).unwrap();
+        assert!(!off.lines().any(|line| line.trim() == "CheckSpace"), "{off}");
+        assert!(off.contains("#VerbosePkgLists\n\n[core]\n"), "the rest is kept: {off}");
+        assert_eq!(without_check_space(&off), None, "turning it off is idempotent");
+        assert_eq!(with_check_space(&off).as_deref(), Some(conf));
+        assert_eq!(
+            without_check_space("[options]\n#CheckSpace\n"),
+            None,
+            "a commented one stays as it is"
+        );
+        assert_eq!(with_check_space("[options]\n#CheckSpace\n"), None);
+
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path().join("etc");
+        fs::create_dir_all(&etc).unwrap();
+        fs::write(etc.join("pacman.conf"), conf).unwrap();
+        let place = |path: &Path| Ok(dir.path().join(path.strip_prefix("/").unwrap()));
+        write_all(&Paths::under(dir.path()), Path::new("/usr/bin/archix"), &place).unwrap();
+        assert_eq!(fs::read_to_string(etc.join("pacman.conf")).unwrap(), off);
+        remove(&Paths::under(dir.path())).unwrap();
+        assert_eq!(fs::read_to_string(etc.join("pacman.conf")).unwrap(), conf);
+    }
+
+    #[test]
+    fn plain_pacman_may_change_a_root_without_deployments_or_with_a_writable_usr() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("usr")).unwrap();
+        assert!(pacman_allowed(dir.path()), "no deployments");
+        fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
+        assert!(pacman_allowed(dir.path()), "a writable /usr, as in a staging root");
     }
 }

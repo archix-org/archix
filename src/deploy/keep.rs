@@ -34,6 +34,8 @@ pub struct Keep {
     pub boot_default: Option<u32>,
     /// Deployments with a boot entry on the ESP.
     pub entries: BTreeSet<u32>,
+    /// The deployment the last switch or rollback chose, which booting another entry doesn't unpin.
+    pub chosen: Option<u32>,
 }
 
 impl Keep {
@@ -55,13 +57,15 @@ impl Keep {
                 .filter(|(_, extra, _)| !extra)
                 .map(|(n, _, _)| n)
                 .collect(),
+            chosen: store.chosen()?,
         })
     }
 
-    /// The committed deployments to delete, oldest first.
+    /// The committed deployments to delete, oldest first; without a recorded choice the newest stays, so a boot of an older entry never costs the newer deployment.
     pub fn to_delete(&self, committed: &[u32]) -> Vec<u32> {
         let committed: BTreeSet<u32> = committed.iter().copied().collect();
-        let mut kept: BTreeSet<u32> = [self.booted, self.current, self.boot_default]
+        let chosen = self.chosen.or_else(|| committed.last().copied());
+        let mut kept: BTreeSet<u32> = [self.booted, self.current, self.boot_default, chosen]
             .into_iter()
             .flatten()
             .filter(|n| committed.contains(n))
@@ -88,7 +92,27 @@ mod tests {
             current: Some(current),
             boot_default: Some(boot_default),
             entries: BTreeSet::new(),
+            chosen: Some(current),
         }
+    }
+
+    #[test]
+    fn a_boot_of_an_older_entry_never_costs_the_deployment_the_last_switch_chose() {
+        let booted_older = |chosen| Keep {
+            chosen,
+            ..keep(1, 7, 7, 7)
+        };
+        assert_eq!(booted_older(Some(8)).to_delete(&[6, 7, 8]), vec![6]);
+        assert_eq!(
+            booted_older(None).to_delete(&[6, 7, 8]),
+            vec![6],
+            "the newest, with no choice recorded"
+        );
+        assert_eq!(
+            booted_older(Some(7)).to_delete(&[6, 7, 8]),
+            vec![6, 8],
+            "an explicit rollback to 7 lets 8 go"
+        );
     }
 
     #[test]
@@ -150,6 +174,7 @@ mod tests {
             current: Some(9),
             boot_default: None,
             entries: BTreeSet::new(),
+            chosen: None,
         };
         assert_eq!(stale.to_delete(&[7, 8, 9]), vec![7]);
     }

@@ -60,6 +60,61 @@ fn eval_err(files: &[(&str, &str)]) -> String {
 }
 
 #[test]
+fn option_descriptions_say_what_waits_for_the_next_boot() {
+    let dir = config(&[("init.lua", "return {}")]);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args([
+            "--config",
+            dir.path().to_str().unwrap(),
+            "--host",
+            "desktop",
+            "options",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let options: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let description = |path: &str| -> String {
+        options
+            .iter()
+            .find(|option| option["path"] == path)
+            .and_then(|option| option["description"].as_str())
+            .unwrap_or_else(|| panic!("no description for {path}"))
+            .to_string()
+    };
+    for stale in [
+        "the running one",
+        "at the end of every switch",
+        "changed this file, before the hooks",
+    ] {
+        let found: Vec<&str> = options
+            .iter()
+            .filter(|option| option["description"].as_str().is_some_and(|text| text.contains(stale)))
+            .filter_map(|option| option["path"].as_str())
+            .collect();
+        assert!(found.is_empty(), "{found:?} still say {stale:?}");
+    }
+    for (path, says) in [
+        ("hooks", "first boot"),
+        ("hooks", "before networking"),
+        ("hooks.<name>.user", "no session bus"),
+        ("files", "next boot"),
+        ("files.<name>.on_change", "first boot"),
+        ("files.<name>.on_change", "right after it's written"),
+        ("home.files.<name>.on_change", "right after"),
+        ("home.files", "without waiting for the boot"),
+        ("services", "next boot"),
+        ("user_services", "next boot"),
+        ("firewall.enable", "next boot"),
+        ("flatpak.apps", "first boot"),
+    ] {
+        let text = description(path);
+        assert!(text.contains(says), "{path}: {text}");
+    }
+}
+
+#[test]
 fn host_file_force_overrides_shared_module() {
     let out = eval_ok(&[
         (

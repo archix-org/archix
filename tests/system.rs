@@ -94,7 +94,7 @@ fn files_users_and_services_follow_the_config() {
     );
     assert!(setup.ok(&["diff"]).contains("matches the lock and the config"));
 
-    fs::write(system_path("/etc/archix-test.conf"), "edited by hand\n").unwrap();
+    write_system_path("/etc/archix-test.conf", "edited by hand\n");
     assert!(
         setup
             .ok(&["diff"])
@@ -161,7 +161,7 @@ fn hooks_body(conf: &str, extra_hook: &str) -> String {
     format!(
         r#"files = {{ ["/etc/archix-hook.conf"] = {{ text = {conf:?}, on_change = "echo changed >> /var/tmp/archix-on-change" }} }},
         hooks = {{
-          z = {{ run = "echo z $USER >> /var/tmp/archix-hooks" }},
+          z = {{ run = "echo z $USER >> /var/tmp/archix-hooks; chmod 0666 /var/tmp/archix-hooks" }},
           a = {{ run = "echo a $USER $HOME >> /var/tmp/archix-hooks", user = "nobody", after = {{ "z" }} }},
           {extra_hook}
         }}"#
@@ -207,7 +207,7 @@ fn hooks_run_when_the_deployment_boots_and_on_change_only_when_the_file_changed(
     );
     assert_eq!(log("var/tmp/archix-on-change"), "changed\n", "the file didn't change");
 
-    fs::write(system_path("/etc/archix-hook.conf"), "edited by hand\n").unwrap();
+    write_system_path("/etc/archix-hook.conf", "edited by hand\n");
     setup.ok(&["switch", "--noconfirm"]);
     boot_current(&setup);
     assert_eq!(
@@ -263,6 +263,66 @@ fn a_hook_for_a_user_the_switch_declares_runs_at_the_deployments_first_boot() {
     assert!(!ran.exists(), "the hook ran before the boot that makes its user");
     boot_current(&setup);
     assert_eq!(fs::read_to_string(&ran).unwrap_or_default(), "archixhook\n");
+}
+
+fn on_change_body(text: &str) -> String {
+    format!(
+        r#"users = {{ archixlive = {{}} }},
+        files = {{
+          ["/etc/archix-boot.conf"] = {{ text = {text:?}, on_change = "echo etc >> /var/tmp/archix-on-change-etc" }},
+          ["/srv/archix-live.conf"] = {{ text = {text:?}, on_change = "echo srv >> /var/tmp/archix-on-change-srv" }},
+        }},
+        home = {{ user = "archixlive", files = {{ [".config/archix-live"] = {{ text = {text:?}, on_change = "echo $USER >> ~/archix-on-change" }} }} }}"#
+    )
+}
+
+#[test]
+#[ignore]
+fn on_change_runs_now_for_files_written_now_and_at_boot_for_the_deployments() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "users = { archixlive = {} }");
+    setup.lay_out();
+    boot_current(&setup);
+    let root = setup.machine.root.clone();
+    let runs = || -> [usize; 3] {
+        [
+            "var/tmp/archix-on-change-etc",
+            "var/tmp/archix-on-change-srv",
+            "home/archixlive/archix-on-change",
+        ]
+        .map(|log| fs::read_to_string(root.join(log)).unwrap_or_default().lines().count())
+    };
+
+    setup.set_body(&[], &on_change_body("one"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        runs(),
+        [0, 1, 1],
+        "files outside the deployment are written now, so their on_change runs now, and the /etc one waits"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("home/archixlive/archix-on-change")).unwrap(),
+        "archixlive\n",
+        "a home file's on_change runs as its user"
+    );
+    boot_current(&setup);
+    assert_eq!(runs(), [1, 1, 1], "the /etc one runs at the boot");
+    boot_current(&setup);
+    assert_eq!(runs(), [1, 1, 1], "nothing runs twice");
+
+    setup.set_body(&[], &on_change_body("two"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(runs(), [1, 2, 2]);
+    boot_current(&setup);
+    assert_eq!(runs(), [2, 2, 2]);
+    setup.ok(&["rollback", "--noconfirm"]);
+    assert_eq!(
+        runs(),
+        [2, 3, 3],
+        "a rollback writes the files outside the deployment now, and runs their on_change now too"
+    );
+    boot_current(&setup);
+    assert_eq!(runs(), [3, 3, 3]);
 }
 
 #[test]

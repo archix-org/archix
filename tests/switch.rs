@@ -507,8 +507,13 @@ fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
     let _system = lock_system();
     let setup = Setup::new(&["lemon"], "");
     setup.lay_out();
-    let stray = system_path("/usr/bin/tree");
+    let stray = setup
+        .machine
+        .deployment(setup.machine.current().unwrap())
+        .join("usr/bin/tree");
+    setup.machine.store_writable(true);
     fs::write(&stray, "mine").unwrap();
+    setup.machine.store_writable(false);
     setup.set_body(&["tree"], "");
     let deployments = setup.machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
@@ -520,7 +525,9 @@ fn an_unowned_file_in_the_way_stops_the_switch_before_anything_changes() {
         "mine",
         "the user's file is untouched"
     );
+    setup.machine.store_writable(true);
     fs::remove_file(&stray).unwrap();
+    setup.machine.store_writable(false);
     setup.ok(&["switch", "--noconfirm"]);
     assert!(installed("tree").is_some());
 }
@@ -709,6 +716,90 @@ fn upgrade_lemon_behind_archix(machine: &Machine) {
         );
     }
     machine.pacman(&["-U", file.to_str().unwrap()]);
+}
+
+/// Plain pacman on the machine's running deployment as it is, read-only /usr and all, through `sudo` as yay runs it; returns whether it succeeded and what it printed.
+fn plain_pacman(machine: &Machine, args: &[&str]) -> (bool, String) {
+    let root = machine.root.display().to_string();
+    let output = Command::new("sudo")
+        .args(["pacman", "--root", &root, "--dbpath", &format!("{root}/var/lib/pacman")])
+        .args(["--config", &format!("{root}/etc/pacman.conf")])
+        .args(["--hookdir", &format!("{root}/etc/pacman.d/hooks")])
+        .args(args)
+        .arg("--noconfirm")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), text)
+}
+
+#[test]
+#[ignore]
+fn plain_pacman_on_a_deployment_points_to_archix_and_reading_still_works() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], "");
+    let conf = setup.machine.root.join("etc/pacman.conf");
+    let arch_default = fs::read_to_string(&conf).unwrap().replace("#CheckSpace", "CheckSpace");
+    fs::write(&conf, arch_default).unwrap();
+    setup.lay_out();
+    let laid_out = fs::read_to_string(system_path("/etc/pacman.conf")).unwrap();
+    assert!(
+        !laid_out.lines().any(|line| line.trim() == "CheckSpace"),
+        "alpm's space check would stop at the read-only /usr before the hook: {laid_out}"
+    );
+    let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");
+    if !file.exists() {
+        assert!(
+            archix::archive::Archive::new(archix::archive::ARCHIVE_URL)
+                .fetch(LEMON_URL, &file)
+                .unwrap()
+        );
+    }
+    let status = Command::new("cp")
+        .args(["-a", "/var/lib/pacman/sync"])
+        .arg(setup.machine.root.join("var/lib/pacman/"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for args in [&["-U", file.to_str().unwrap()][..], &["-R", "lemon"], &["-S", "tree"]] {
+        let (ok, out) = plain_pacman(&setup.machine, args);
+        assert!(!ok, "pacman {args:?} changed a deployment: {out}");
+        assert!(
+            out.contains("archix install <package>")
+                && out.contains("archix upgrade")
+                && out.contains("archix switch")
+                && !out.contains("mounted read only"),
+            "pacman {args:?}: {out}"
+        );
+    }
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+    assert!(installed("tree").is_none());
+
+    let downloads = tempfile::tempdir().unwrap();
+    fs::set_permissions(downloads.path(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let cachedir = downloads.path().to_str().unwrap();
+    for args in [
+        &["-Q", "lemon"][..],
+        &["-Qi", "lemon"],
+        &["-Ss", "^lemon$"],
+        &["-Si", "lemon"],
+        &["-Sw", "--cachedir", cachedir, "lemon"],
+    ] {
+        let (ok, out) = plain_pacman(&setup.machine, args);
+        assert!(ok && !out.contains("archix install"), "pacman {args:?}: {out}");
+    }
+    assert!(fs::read_dir(downloads.path()).unwrap().count() > 0, "-Sw downloaded");
+
+    setup.set_body(&["lemon", "tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        installed("tree").is_some(),
+        "archix's own pacman runs in the staging root, which the hook lets through"
+    );
 }
 
 #[test]
@@ -1293,5 +1384,153 @@ fn a_crash_right_after_the_commit_still_boots_the_config_the_switch_wrote() {
         fs::read_to_string(etc.join("lua/hosts/box/installed.lua"))
             .unwrap()
             .contains("\"tree\"")
+    );
+}
+
+#[test]
+#[ignore]
+fn a_kept_deployment_cant_be_changed_through_archix_and_a_rollback_repairs_one_that_was() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let with_tree = machine.current().unwrap();
+    let usr = machine.deployment(with_tree).join("usr");
+    let tree = usr.join("bin/tree");
+    let before = identity(&usr.join("bin"));
+    for args in [
+        vec!["chmod", "-R", "700"],
+        vec!["chown", "-R", "nobody"],
+        vec!["setfacl", "-R", "-m", "u:nobody:rwx"],
+    ] {
+        let out = Command::new(args[0])
+            .args(&args[1..])
+            .arg(usr.join("bin"))
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success() && err.contains("Read-only file system"),
+            "{args:?}: {err}"
+        );
+    }
+    let out = Command::new("setcap")
+        .arg("cap_net_raw+ep")
+        .arg(&tree)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "setcap through /archix");
+    assert_eq!(identity(&usr.join("bin")), before, "a change got through /archix");
+    let out = setup.ok(&["verify"]);
+    assert!(
+        out.contains(&format!("deployment {with_tree}: matches its packages")),
+        "{out}"
+    );
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    machine.reboot(None);
+    machine.store_writable(true);
+    fs::set_permissions(&tree, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    machine.store_writable(false);
+    let out = setup.run(&["verify"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("/usr/bin/tree (tree): mode 700, not 755"), "{text}");
+    assert!(
+        setup
+            .ok(&["status"])
+            .contains(&format!("deployment {with_tree} differs from its packages in 1 files")),
+        "status shows the last check"
+    );
+    let out = setup.ok(&["rollback", &with_tree.to_string(), "--noconfirm"]);
+    assert!(out.contains("repaired 1 files"), "{out}");
+    assert_eq!(fs::metadata(&tree).unwrap().mode() & 0o7777, 0o755);
+    assert!(
+        setup
+            .ok(&["verify"])
+            .contains(&format!("deployment {with_tree}: matches its packages"))
+    );
+    assert_eq!(machine.current(), Some(with_tree));
+}
+
+#[test]
+#[ignore]
+fn a_boot_of_an_older_entry_keeps_the_newer_deployment_and_its_updates_wait_in_a_login_note() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 1 }";
+    let setup = Setup::new(&[], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let old = machine.current().unwrap();
+    setup.set_body(&["tree"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    let waiting = format!("1 update is waiting for a reboot (deployment {new}): tree ");
+    assert!(setup.ok(&["status"]).contains(&waiting), "{}", setup.ok(&["status"]));
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(notes.contains(&waiting), "{notes}");
+
+    let out = setup.ok(&["rollback", "--noconfirm"]);
+    assert!(out.contains("nothing is reinstalled"), "{out}");
+    assert_eq!(
+        machine.current(),
+        Some(old),
+        "a rollback while {new} is pending goes back to the running one"
+    );
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(!notes.contains("waiting for a reboot"), "{notes}");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains(&format!("from deployment {old}")), "{out}");
+    let new = machine.current().unwrap();
+    assert!(machine.installed_in(new, "tree").is_some());
+
+    machine.reboot(Some(&format!("archix-{old}.conf")));
+    setup.ok(&["boot-check"]);
+    assert_eq!(
+        machine.current(),
+        Some(old),
+        "the boot of the older entry made it current"
+    );
+    setup.ok(&["gc"]);
+    assert!(
+        machine.deployments().contains(&new),
+        "keep = 1 dropped deployment {new} after one boot of an older entry"
+    );
+
+    let state = Paths::system().state;
+    fs::create_dir_all(state.join("pending-hooks")).unwrap();
+    let flag = state.join("hook-may-pass");
+    let _ = fs::remove_file(&flag);
+    fs::write(
+        state.join(format!("pending-hooks/{old}.json")),
+        format!(r#"{{"hooks": {{"h": {{"run": "test -e {}"}}}}}}"#, flag.display()),
+    )
+    .unwrap();
+    fs::create_dir_all(state.join("boot-tries")).unwrap();
+    fs::write(state.join(format!("boot-tries/hooks-{old}")), "3\n").unwrap();
+    let status = setup.ok(&["status"]);
+    assert!(
+        status.contains(&format!("deployment {old}'s hooks failed at 3 boots")),
+        "{status}"
+    );
+    setup.fails(&["hooks", "retry"]);
+    fs::write(&flag, "").unwrap();
+    assert!(setup.ok(&["hooks", "retry"]).contains("hooks ran"));
+    assert!(!state.join(format!("pending-hooks/{old}.json")).exists());
+    fs::write(
+        state.join(format!("pending-hooks/{old}.json")),
+        r#"{"hooks": {"h": {"run": "false"}}}"#,
+    )
+    .unwrap();
+    assert!(setup.ok(&["hooks", "skip"]).contains("dropped"));
+    assert!(!state.join(format!("pending-hooks/{old}.json")).exists());
+    let _ = fs::remove_file(&flag);
+
+    setup.ok(&["rollback", &old.to_string(), "--noconfirm"]);
+    setup.ok(&["gc"]);
+    assert!(
+        !machine.deployments().contains(&new),
+        "an explicit rollback lets keep = 1 drop the newer deployment"
     );
 }

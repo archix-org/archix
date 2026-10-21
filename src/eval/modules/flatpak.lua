@@ -6,7 +6,7 @@ return {
       apps = archix.option {
         type = t.list_of(t.str),
         default = {},
-        description = "Flatpak app ids to install system-wide, such as org.mozilla.firefox; write remote:id for a remote other than flatpak.remote. Each is locked to a commit in archix.lock.",
+        description = "Flatpak app ids to install system-wide, such as org.mozilla.firefox; write remote:id for a remote other than flatpak.remote. Each is locked to a commit in archix.lock and installed in /var/lib/flatpak once the switch commits; when that switch brings flatpak itself, the new deployment's first boot installs them, once the network is up.",
       },
       remote = archix.option { type = t.str, default = "flathub", description = "The remote apps come from unless they name one." },
       remotes = archix.option {

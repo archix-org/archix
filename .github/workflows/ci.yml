@@ -4,10 +4,19 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -15,23 +24,90 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: tests/ci/archive-proxy-test.py
 
-  arch:
+  image:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
-      - run: tests/arch/run.sh
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: base
+          kvm: "false"
+          need-gb: "5"
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: base
+          name: image
+          status: ${{ job.status }}
 
-  vm:
+  container:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: base
+          kvm: "false"
+          need-gb: "5"
+      - run: tests/arch/run.sh
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: base
+          name: container
+          status: ${{ job.status }}
+
+  boot:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, btrfs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: boot
+          need-gb: "25"
+      - run: tests/vm/run.sh boot
+        env:
+          FS: ${{ matrix.fs }}
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: boot
+          name: boot-${{ matrix.fs }}
+          status: ${{ job.status }}
+
+  deploy-boot:
+    needs: image
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        initramfs: [systemd, busybox]
+        fs: [ext4, btrfs]
     steps:
       - uses: actions/checkout@v5
-      - name: Allow KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - run: ARCHIX_VM_WORK=$RUNNER_TEMP/vm tests/vm/run.sh
-      - if: failure()
-        run: tail -c 20000 $RUNNER_TEMP/vm/serial.log || true
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: deploy-boot
+          need-gb: "15"
+      - run: tests/vm/deploy-boot/run.sh
+        env:
+          FS: ${{ matrix.fs }}
+          INITRAMFS: ${{ matrix.initramfs }}
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: deploy-boot
+          name: deploy-boot-${{ matrix.initramfs }}-${{ matrix.fs }}
+          status: ${{ job.status }}

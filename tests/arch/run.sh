@@ -18,4 +18,5 @@ trap 'docker rm -f "$cid" >/dev/null' EXIT
 until state=$(docker exec "$cid" systemctl is-system-running 2>/dev/null); [[ $state == running || $state == degraded ]]; do sleep 1; done
 # The initramfs runs the static musl build, which can lack libc items the glibc build has.
 docker exec -e USER=root "$cid" cargo build --locked --release --target x86_64-unknown-linux-musl
-docker exec -e USER=root "$cid" cargo test --locked --no-fail-fast "$@" -- --include-ignored
+# docker exec's umask is 0000 on some hosts and 0022 on GitHub's runners; pin systemd's, which boot-time hooks get.
+docker exec -e USER=root "$cid" sh -c 'umask 022 && exec "$@"' sh cargo test --locked --no-fail-fast "$@" -- --include-ignored

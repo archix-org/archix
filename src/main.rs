@@ -180,6 +180,12 @@ enum Command {
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+    /// Called by archix's PreTransaction pacman hook: fail, pointing to archix, when plain pacman would change a deployment
+    #[command(hide = true)]
+    PacmanGuard,
+    /// Run by archix-flatpak.service once the network is up: install the Flatpak apps a switch left for this deployment's first boot
+    #[command(hide = true)]
+    DeployFlatpak,
     /// Run by the initramfs: mount the deployment this boot belongs to over the root
     #[command(hide = true)]
     DeployMount {
@@ -210,9 +216,32 @@ enum Command {
     /// Share package files and AUR builds with other machines through a package cache
     #[command(subcommand)]
     Cache(Cache),
+    /// Run again, or drop, the hooks of a deployment that failed at too many boots
+    #[command(subcommand)]
+    Hooks(Hooks),
+    /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
+    Verify {
+        /// Restore what differs from the package cache
+        #[arg(long)]
+        repair: bool,
+    },
     /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
     #[command(external_subcommand)]
     Pick(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum Hooks {
+    /// Run the waiting hooks now, on the running deployment
+    Retry {
+        /// The deployment whose hooks to run; the running one by default
+        deployment: Option<u32>,
+    },
+    /// Drop the waiting hooks without running them
+    Skip {
+        /// The deployment whose hooks to drop; the running one by default
+        deployment: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -351,6 +380,8 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
         Command::Gc => Some("gc"),
+        Command::Hooks(_) => Some("hooks"),
+        Command::Verify { .. } => Some("verify"),
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
@@ -449,6 +480,13 @@ fn run() -> Result<ExitCode> {
             archix::integration::write_all(&paths, &exec, &|path| Ok(paths.root.join(path.strip_prefix("/")?)))?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::PacmanGuard => {
+            if archix::integration::pacman_allowed(std::path::Path::new("/")) {
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("{}", archix::integration::PACMAN_REFUSAL);
+            return Ok(ExitCode::FAILURE);
+        }
         Command::Recover { .. } => anyhow::bail!(
             "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
         ),
@@ -465,13 +503,19 @@ fn run() -> Result<ExitCode> {
             with_sudo()
         );
     }
-    let changes_things =
-        needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. } | Command::BootComplete);
+    let changes_things = needs_root(&command).is_some()
+        || matches!(
+            command,
+            Command::BootCheck { .. } | Command::BootComplete | Command::DeployFlatpak
+        );
     if needs_root(&command).is_some() {
         leave_login_session();
     }
     if changes_things {
         hold_exclusive()?;
+    }
+    if is_root() {
+        archix::system::deploy_boot::writable_store(&archix::testhooks::root())?;
     }
     match command {
         Command::HookRecord => {
@@ -506,6 +550,18 @@ fn run() -> Result<ExitCode> {
             commands::cache_push(&dir)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::Hooks(Hooks::Retry { deployment }) => {
+            commands::hooks(true, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Hooks(Hooks::Skip { deployment }) => {
+            commands::hooks(false, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Verify { repair } => {
+            commands::verify(repair)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Prefetch { url } => {
             commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
@@ -516,6 +572,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::BootComplete => {
             archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::DeployFlatpak => {
+            commands::deploy_flatpak()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
@@ -661,6 +721,8 @@ fn run() -> Result<ExitCode> {
         Command::Recover { .. }
         | Command::Init { .. }
         | Command::HookRecord
+        | Command::PacmanGuard
+        | Command::DeployFlatpak
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc
@@ -675,6 +737,8 @@ fn run() -> Result<ExitCode> {
         | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
+        | Command::Hooks(_)
+        | Command::Verify { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }

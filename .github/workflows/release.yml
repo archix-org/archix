@@ -5,10 +5,19 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  gate:
+    uses: ./.github/workflows/release-gate.yml
+
   binaries:
+    needs: [ci, gate]
+    permissions:
+      contents: write
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:

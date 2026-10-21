@@ -41,6 +41,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
                 keep,
                 booted: crate::system::boot::booted_deployment(&paths.root),
                 current: deployments.current()?,
+                chosen: deployments.chosen()?,
                 ..Keep::default()
             },
         };
@@ -51,6 +52,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
             }
             deployments.delete(number, &pins)?;
             let _ = fs::remove_file(crate::system::hooks::pending_path(&paths.state, number));
+            crate::flatpak::drop_pending(&paths.state, Some(number));
             report.deployments.push(number);
         }
         deployed.extend(deployments.deployments()?);
