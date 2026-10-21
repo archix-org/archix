@@ -9,6 +9,7 @@ use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
 
 use archix::deploy::{Backend, Keep, OVERLAY_OPTIONS, Staging, Store, SystemdBoot, flatten, xattr};
+use archix::system::boot::{BootPlan, Built, Entries};
 use tempfile::TempDir;
 
 static LOOPS: Mutex<()> = Mutex::new(());
@@ -774,6 +775,35 @@ fn deploy_helper() {
             };
             staging.finish().unwrap().commit(&store, &esp, &boot).unwrap();
         }
+        "commit" => {
+            let name = format!("test-{number}.efi");
+            tx.run(&[
+                "sh",
+                "-ec",
+                &format!("mkdir -p /boot/archix && printf uki-{number} > /boot/archix/{name}"),
+            ])
+            .unwrap();
+            let esp = root.join("efi");
+            let paths = archix::paths::Paths::under(&root);
+            let plan = BootPlan {
+                esp: esp.display().to_string(),
+                kernel: "linux".to_string(),
+                microcode: Vec::new(),
+                cmdline: String::new(),
+                secure_boot: Some(false),
+                anticheat: false,
+                tries: 3,
+                revoke_unused: false,
+            };
+            let built = Built::single("test", &name, &format!("archix {number}"));
+            let entries = Entries {
+                paths: &paths,
+                plan: &plan,
+                built: &built,
+                droppable: Vec::new(),
+            };
+            staging.finish().unwrap().commit(&store, &esp, &entries).unwrap();
+        }
         other => panic!("unknown helper action {other}"),
     }
 }
@@ -850,6 +880,54 @@ fn assert_consistent(store: &Store, what: &str) {
     assert!(entries.contains(&default), "{what}: default {default}");
 }
 
+/// What must hold after any crash of archix's real ESP step: `current`, every archix entry and loader.conf's `default` and `preferred` name complete deployments, and each entry's UKI is its deployment's.
+fn assert_bootable(store: &Store, what: &str) {
+    let committed = store.deployments().unwrap();
+    let complete = |n: u32| {
+        committed.contains(&n)
+            && archix::deploy::TREES
+                .iter()
+                .all(|tree| store.path(n).join(tree).is_dir())
+    };
+    let current = store.current().unwrap().unwrap();
+    assert!(complete(current), "{what}: current {current}");
+    let esp = store.root().join("efi");
+    let found = archix::system::boot::entries(&esp);
+    for (n, _, path) in &found {
+        assert!(
+            complete(*n),
+            "{what}: {} names an incomplete deployment",
+            path.display()
+        );
+        let text = fs::read_to_string(path).unwrap();
+        let uki = text
+            .lines()
+            .find_map(|line| line.strip_prefix("efi ").or_else(|| line.strip_prefix("uki ")))
+            .unwrap_or_else(|| panic!("{what}: {} names no UKI: {text:?}", path.display()));
+        assert_eq!(
+            fs::read_to_string(esp.join(uki.trim().trim_start_matches('/'))).unwrap(),
+            format!("uki-{n}"),
+            "{what}: {}",
+            path.display()
+        );
+    }
+    let conf = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+    assert!(
+        conf.lines().any(|line| line.starts_with("default ")),
+        "{what}: no default in {conf:?}"
+    );
+    for id in conf.lines().filter_map(|line| {
+        line.strip_prefix("default ")
+            .or_else(|| line.strip_prefix("preferred "))
+    }) {
+        let n = archix::deploy::keep::entry_number(id.trim()).unwrap();
+        assert!(
+            found.iter().any(|(m, extra, _)| *m == n && !extra),
+            "{what}: loader.conf names {id}, which has no entry"
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next_switch_needs_no_repair() {
@@ -867,11 +945,18 @@ fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next
         ("deploy-commit-current", 1),
         ("deploy-done", 2),
     ];
-    for fs_type in ["ext4", "btrfs"] {
+    // systemd-boot 260's LoaderFeatures, with which archix counts tries and writes `preferred`.
+    let counting = ((1u64 << 4) | (1 << 16) | (1 << 19)).to_string();
+    for (fs_type, features) in [("ext4", "0"), ("ext4", counting.as_str()), ("btrfs", counting.as_str())] {
         let (_fs, store) = system(fs_type);
+        let esp_fs = LoopFs::sized("vfat", "64M");
+        let esp = store.root().join("efi");
+        sh(Command::new("mount").arg("--bind").arg(&esp_fs.mnt).arg(&esp));
+        esp_with_deployment_1(&esp);
+        let env = [("ARCHIX_TEST_LOADER_FEATURES", features)];
         for (step, current) in steps {
-            let what = format!("{fs_type}, killed at {step}");
-            let status = helper("switch", store.root(), &[("ARCHIX_TEST_CRASH", step)])
+            let what = format!("{fs_type} with a FAT ESP, LoaderFeatures {features}, killed at {step}");
+            let status = helper("commit", store.root(), &[env[0], ("ARCHIX_TEST_CRASH", step)])
                 .output()
                 .unwrap();
             assert_eq!(
@@ -881,17 +966,17 @@ fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next
                 String::from_utf8_lossy(&status.stderr)
             );
             assert!(!mountinfo_mentions(&store.deploy_dir()), "{what}: a view mount leaked");
-            assert_consistent(&store, &what);
+            assert_bootable(&store, &what);
             assert_eq!(store.current().unwrap(), Some(current), "{what}");
 
             let next = store.next_number().unwrap();
-            let status = helper("switch", store.root(), &[]).output().unwrap();
+            let status = helper("commit", store.root(), &env).output().unwrap();
             assert!(
                 status.status.success(),
                 "{what}, then a switch: {}",
                 String::from_utf8_lossy(&status.stderr)
             );
-            assert_consistent(&store, &format!("{what}, then a switch"));
+            assert_bootable(&store, &format!("{what}, then a switch"));
             assert_eq!(store.current().unwrap(), Some(next), "{what}, then a switch");
             let names: Vec<String> = fs::read_dir(store.deploy_dir())
                 .unwrap()
