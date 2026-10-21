@@ -48,6 +48,9 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
 /// The statically linked archix the initramfs hook copies; the package installs it.
 pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
 
+/// The unit whose failure keeps a counted boot from being blessed; boot-complete.target, and so this unit, is only part of boots systemd-boot counts.
+pub const HEALTH_UNIT: &str = "archix-health-check.service";
+
 /// Files for managed booting at their absolute paths: the early-boot generation check, the boot-complete promotion, and the deployment activation unit and initramfs hook.
 pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     let unit = format!(
@@ -61,10 +64,18 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
          [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
         archix.display()
     );
+    let health = format!(
+        "[Unit]\nDescription=archix: check a new deployment before its boot counts as good\nAfter=local-fs.target archix-boot.service\n\
+         Before=boot-complete.target\n\n\
+         [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={} health-check\nStandardOutput=journal+console\n\n\
+         [Install]\nRequiredBy=boot-complete.target\n",
+        archix.display()
+    );
     let root = Path::new("/");
     let mut files = vec![
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
+        (root.join(format!("etc/systemd/system/{HEALTH_UNIT}")), health),
     ];
     files.push(crate::system::deploy_boot::activate_file(root, archix));
     files.extend(crate::system::deploy_boot::hook_files(root));
@@ -76,6 +87,7 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
     let mut wants: Vec<(PathBuf, String)> = [
         ("sysinit.target.wants", "archix-boot.service"),
         ("multi-user.target.wants", "archix-boot-complete.service"),
+        ("boot-complete.target.requires", HEALTH_UNIT),
     ]
     .map(|(dir, unit)| {
         (

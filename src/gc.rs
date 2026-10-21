@@ -35,6 +35,9 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         let _lock = deployments.lock()?;
         let esp = settings.boot.as_ref().map(|boot| PathBuf::from(&boot.esp));
         let keep = settings.deployments_keep.max(1) as usize;
+        if let Some(esp) = &esp {
+            crate::system::boot::require_esp(esp)?;
+        }
         let pins = match &esp {
             Some(esp) => Keep::read(keep, &deployments, esp)?,
             None => Keep {

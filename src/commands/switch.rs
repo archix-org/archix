@@ -114,6 +114,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
     let boot = declared.boot_plan()?;
+    system::boot::require_esp(Path::new(&boot.esp))?;
     let laid_out = layout::laid_out(&paths.root);
     if !laid_out && let Some(why) = layout::unsupported(&paths.root, Path::new(&boot.esp)) {
         bail!("{why}; nothing was changed");
@@ -609,6 +610,7 @@ fn after_commit(
     }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
+    system::sleep::after_commit(&paths.root);
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
     let sync = paths.root.join("var/lib/pacman/sync");
@@ -1237,6 +1239,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         .boot
         .clone()
         .with_context(|| format!("generation {number} has no boot settings, so it can't boot"))?;
+    system::boot::require_esp(Path::new(&boot.esp))?;
     let deployments = deploy::Store::open(&paths.root)?;
     let committed = deployments.deployments()?;
     let kept = committed.contains(&number);
@@ -1324,6 +1327,22 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         println!("{line}");
     }
     print_hooks(&current_change);
+    if !kept {
+        let esp = PathBuf::from(&boot.esp);
+        let pins = Keep::read(generation.settings.deployments_keep as usize, &deployments, &esp)?;
+        let pinned: BTreeSet<u32> = [pins.booted, pins.current, pins.boot_default]
+            .into_iter()
+            .flatten()
+            .collect();
+        let kernel = boot::owned_version(&base_db, &boot.kernel).map(|version| {
+            deployments
+                .path(base)
+                .join("usr/lib/modules")
+                .join(version)
+                .join("vmlinuz")
+        });
+        system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot.anticheat)?;
+    }
     guard_downgrades(&risky, noconfirm, allow_unsafe)?;
     if !noconfirm && !confirm(&format!("roll back to {name}?"))? {
         bail!("aborted; nothing was changed");
@@ -1399,6 +1418,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
+    system::sleep::after_commit(&paths.root);
     if !kept {
         collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
     }
@@ -1544,7 +1564,50 @@ pub fn prune_hidden(root: &Path) -> Result<()> {
 }
 
 /// Run early at boot by archix-boot.service: a boot of another deployment than the current one, picked in the menu or fallen back to after failed tries, makes that one current; nothing is reinstalled.
+/// A fallback from a deployment that didn't boot, which `archix status` repeats while the one it fell back to is current.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(super) struct Fallback {
+    pub from: u32,
+    pub to: u32,
+    pub note: String,
+}
+
+pub(super) fn fallback_path(paths: &Paths) -> PathBuf {
+    paths.state.join("boot").join("fallback.json")
+}
+
+pub(super) fn read_fallback(paths: &Paths) -> Option<Fallback> {
+    serde_json::from_str(&fs::read_to_string(fallback_path(paths)).ok()?).ok()
+}
+
+/// The unsafe downgrades between the packages deployment `from` booted with and those of `to`, which a fallback runs without asking.
+fn went_back(deployments: &deploy::Store, from: u32, to: u32) -> Vec<String> {
+    let db = |n: u32| deployments.path(n).join("pacman");
+    let (Ok(newer), Ok(older)) = (read_local_db(&db(from)), read_local_db(&db(to))) else {
+        return Vec::new();
+    };
+    let store = Store::new(&Paths::system());
+    let configured = |n: u32| store.get(n).map(|g| g.system.unsafe_downgrades).unwrap_or_default();
+    let configured = merged(&configured(from), &configured(to));
+    older
+        .values()
+        .filter_map(|pkg| {
+            let from = &newer.get(&pkg.name)?.version;
+            let why = archix::downgrade::crossing(&pkg.name, from, &pkg.version, &configured)?;
+            Some(format!("{} {from} -> {} {why}", pkg.name, pkg.version))
+        })
+        .collect()
+}
+
 pub fn boot_check(cmdline: Option<String>) -> Result<()> {
+    let result = check_booted(cmdline);
+    if let Err(e) = system::sleep::sync(&Paths::system().root) {
+        println!("archix: couldn't update the hibernation guard: {e:#}");
+    }
+    result
+}
+
+fn check_booted(cmdline: Option<String>) -> Result<()> {
     let paths = Paths::system();
     let laid_out = layout::laid_out(&paths.root);
     if laid_out && !paths.state.join("layout-pruned").exists() {
@@ -1580,9 +1643,30 @@ pub fn boot_check(cmdline: Option<String>) -> Result<()> {
         return Ok(());
     }
     let note = match current {
-        Some(current) if system::boot::failed_to_boot(&paths, current) => Some(format!(
-            "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, which is current now"
-        )),
+        Some(current) if system::boot::failed_to_boot(&paths, current) => {
+            let mut note = match system::health::read_failure(&paths, current) {
+                Some(failure) => system::health::fallback_note(current, booted, &failure),
+                None => format!(
+                    "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, which is current now"
+                ),
+            };
+            let risky = went_back(&deployments, current, booted);
+            if !risky.is_empty() {
+                note.push_str(&format!(
+                    "\narchix: WARNING: generation {booted} runs older versions than {current} booted with, and their services may have migrated data during that boot, which these versions can't read safely: {}. Check them before relying on them",
+                    risky.join("; ")
+                ));
+            }
+            let fallback = Fallback {
+                from: current,
+                to: booted,
+                note: note.clone(),
+            };
+            if let Ok(text) = serde_json::to_string(&fallback) {
+                let _ = archix::durable::write(&fallback_path(&paths), text.as_bytes());
+            }
+            Some(note)
+        }
         Some(current) => {
             println!("archix: booted generation {booted}, but {current} was current; {booted} is current now");
             None

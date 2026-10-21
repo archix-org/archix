@@ -679,3 +679,41 @@ fn mkinitcpio_puts_the_hook_into_busybox_and_systemd_initramfs_images() {
         "{listing}"
     );
 }
+
+#[test]
+fn a_mount_or_activation_that_fails_on_a_counted_try_reboots_and_otherwise_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("root");
+    fs::create_dir_all(root.join("run/archix")).unwrap();
+    fs::write(root.join("run/archix/deployment"), "5\n").unwrap();
+    let efivar = dir.path().join("efivar");
+    let run_dir = dir.path().join("run");
+    let attempt = |args: &[&str], counted: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .args(args)
+            .env("ARCHIX_TEST_COUNTED_BOOT", counted)
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "{args:?} should fail: {}", text(&out));
+        text(&out)
+    };
+    let mount = [
+        "deploy-mount",
+        root.to_str().unwrap(),
+        "--efivar",
+        efivar.to_str().unwrap(),
+        "--run-dir",
+        run_dir.to_str().unwrap(),
+    ];
+    let activate = ["deploy-activate", "--root", root.to_str().unwrap()];
+    for args in [&mount[..], &activate[..]] {
+        let out = attempt(args, "1");
+        assert!(
+            out.contains("counted boot tries; rebooting in 10 seconds")
+                && out.contains("rebooting (skipped in a test)"),
+            "{args:?} on a counted try:\n{out}"
+        );
+        let out = attempt(args, "0");
+        assert!(!out.contains("rebooting"), "{args:?} on an uncounted boot:\n{out}");
+    }
+}
