@@ -72,6 +72,14 @@ fn assert_bootable(machine: &Machine, what: &str) {
             None => name,
         });
     }
+    let fallbacks = archix::system::boot::fallbacks(&machine.esp());
+    assert!(!fallbacks.is_empty(), "{what}: no fallback UKI");
+    for number in fallbacks {
+        assert!(
+            complete(number),
+            "{what}: the fallback UKI names deployment {number}, which isn't complete"
+        );
+    }
     let loader = machine.loader_conf();
     let default = loader
         .lines()
@@ -372,6 +380,7 @@ fn a_kill_at_any_step_of_a_switch_leaves_a_bootable_machine_and_the_next_switch_
         "deploy-esp-uki",
         "deploy-esp-entry",
         "deploy-esp-loader",
+        "deploy-esp-fallback",
         "deploy-commit-current",
         "deploy-done",
     ];
