@@ -8,6 +8,7 @@ pub mod deploy_boot;
 pub mod firewall;
 pub mod hooks;
 pub mod merge;
+pub mod reboot;
 pub mod revoke;
 pub mod secureboot;
 
