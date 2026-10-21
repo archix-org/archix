@@ -639,9 +639,6 @@ fn after_commit(
     users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
-    if let Err(e) = archix::etcmerge::start(paths) {
-        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-    }
     // A config outside /etc gets this switch's writes only here, so a crash right after the commit leaves it as it was.
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
@@ -659,6 +656,10 @@ fn after_commit(
     }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
+    system::reboot::refresh_note(&paths.root);
+    if let Err(e) = archix::etcmerge::start(paths) {
+        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
+    }
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
     let sync = paths.root.join("var/lib/pacman/sync");
@@ -1329,7 +1330,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
             .context("there is no generation older than the current one")?,
     };
     if number == current {
-        println!("generation {number} is current already; nothing was changed");
+        if layout::laid_out(&paths.root) {
+            deploy::Store::open(&paths.root)?.choose(number)?;
+        }
+        println!("generation {number} is current already; it stays, and gc may now drop newer deployments");
         return Ok(());
     }
     let generation = store.get(number)?;
@@ -1434,12 +1438,14 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     let mut users = Vec::new();
     let esp = PathBuf::from(&boot.esp);
     if kept {
+        deploy::verify::ensure_intact(&paths, &deployments, number)?;
         ensure_entry(&paths, &boot, number)?;
         carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
         // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
         boot::set_default_entry(&esp, number)?;
         archix::durable::sync_filesystems_checked(&[&esp])?;
         deployments.point_current(number)?;
+        deployments.choose(number)?;
     } else {
         let archive = archix::archive::for_system(&paths.state);
         let repos = third_party_repos(&paths);
@@ -1483,9 +1489,6 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(made.failures);
         users = made.users;
     }
-    if let Err(e) = archix::etcmerge::start(&paths) {
-        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-    }
     let (live, at_boot) = system::hooks::split_live(system::hooks::due(&current_change, &BTreeSet::new()), &paths.root);
     let hooks = system::hooks::defer(&paths.state, number, &at_boot, &generation.system.hooks);
     if let Err(e) = hooks {
@@ -1505,6 +1508,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
+    system::reboot::refresh_note(&paths.root);
+    if let Err(e) = archix::etcmerge::start(&paths) {
+        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
+    }
     if !kept {
         collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
     }

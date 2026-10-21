@@ -46,6 +46,13 @@ case $stage in
     findmnt -no SOURCE /usr | grep -q "archix/deploy/2/usr" || fail "/usr should be deployment 2's: $(findmnt -no SOURCE /usr)"
     touch /usr/archix-vmtest 2> /dev/null && fail "/usr should be read-only"
     touch /boot/archix-vmtest 2> /dev/null && fail "/boot should be read-only"
+    findmnt -no OPTIONS /archix | grep -qw ro || fail "/archix should be a read-only mount: $(findmnt -no OPTIONS /archix)"
+    for try in "chmod -R 700 /archix/deploy/1/usr/bin" "chown -R nobody /archix/deploy/1/usr/bin" \
+      "setfacl -R -m u:nobody:rwx /archix/deploy/1/usr/bin" "setcap cap_net_raw+ep /archix/deploy/1/usr/bin/pacman"; do
+      $try 2> /dev/null && fail "$try got through /archix"
+    done
+    [ -z "$(findings 1)" ] || fail "deployment 1 changed through /archix: $(findings 1)"
+    archix verify > /dev/console 2>&1 || fail "archix verify should find deployments 1 and 2 as their packages installed them"
     [ "$(hidden_usr)" = 0 ] || fail "the first boot after the layout should have emptied the root's own /usr, which deployments hide"
     systemctl is-active -q archix-protected.service || fail "the ProtectSystem=strict service should run on deployment 2"
     say "PASS: the first switch laid the system out as deployments 1 and 2, 2 boots with a read-only /usr and /boot, and its boot pruned what the binds hide"
@@ -60,6 +67,8 @@ case $stage in
     [ -e /archix/deploy/2/usr/bin/tree ] && fail "the switch changed deployment 2"
     [ "$(deployments)" = "2 3 " ] || fail "keep = 2 should keep only the booted deployment 2 and the new 3: $(deployments)"
     command -v tree > /dev/null && fail "tree should arrive with the next boot, not now"
+    archix --host archix-vm status | grep -q "waiting for a reboot (deployment 3): tree " || fail "status should name tree as waiting for a reboot: $(archix --host archix-vm status)"
+    grep -q "waiting for a reboot (deployment 3)" /var/lib/archix/notes || fail "the login notes should say updates wait for a reboot"
     systemctl is-active -q archix-marker.service || fail "the running system should keep the marker until the next boot"
     grep -qx "preferred archix-3.conf" "$loader" && grep -qx "default archix-2.conf" "$loader" \
       || fail "loader.conf should prefer deployment 3 and fall back to 2: $(cat "$loader")"
@@ -71,6 +80,7 @@ case $stage in
     [ "$booted" = 3 ] && [ "$(current)" = 3 ] || fail "the restart should boot deployment 3"
     command -v tree > /dev/null || fail "deployment 3 should have tree"
     systemctl is-enabled -q archix-marker.service && fail "deployment 3 drops the marker"
+    grep -qs "waiting for a reboot" /var/lib/archix/notes && fail "the boot of deployment 3 should take the waiting-updates note away"
     say "PASS: deployment 3 booted with tree and without the marker"
     bootctl set-oneshot archix-2.conf || fail "bootctl set-oneshot archix-2.conf"
     next 3

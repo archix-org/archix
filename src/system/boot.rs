@@ -234,7 +234,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
     if !staging.read_path(&vmlinuz)?.is_file() {
         bail!("{} is missing from the new deployment", vmlinuz.display());
     }
-    let in_view = |argv: &[&str], what: &str| -> Result<String> {
+    let in_tx = |tx: &Transaction, argv: &[&str], what: &str| -> Result<String> {
         let output = tx.output(argv)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -247,6 +247,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     };
+    let in_view = |argv: &[&str], what: &str| in_tx(tx, argv, what);
     in_view(&["rm", "-rf", BUILT], "clearing /boot/archix")?;
     in_view(&["mkdir", "-p", BUILT], "creating /boot/archix")?;
     let initramfs = format!("{BUILT}/initramfs.img");
@@ -330,7 +331,10 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
                 }
             }
             let argv: Vec<&str> = ukify.iter().map(String::as_str).collect();
-            in_view(&argv, "ukify build")?;
+            match pcr_key {
+                Some(_) => in_tx(&staging.signing_transaction()?, &argv, "ukify build")?,
+                None => in_view(&argv, "ukify build")?,
+            };
             if secure_boot {
                 let file = staging.read_path(Path::new(&output))?;
                 run(

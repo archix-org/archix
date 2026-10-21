@@ -401,6 +401,13 @@ pub fn status(target: &Target) -> Result<()> {
             if pending_etc(&paths).is_some() {
                 println!("{}", pending_note(number));
             }
+            if let Some(waiting) = archix::system::reboot::waiting(&paths.root) {
+                println!("{}", archix::system::reboot::line(&waiting));
+            }
+            archix::deploy::verify::print_status(&paths);
+            for line in archix::system::activate::boot_failures(&paths.root) {
+                println!("{line}");
+            }
             for line in archix::etcmerge::status_lines(&paths) {
                 println!("{line}");
             }

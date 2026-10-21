@@ -76,7 +76,9 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         gids: plan.system.to.groups.values().filter_map(|group| group.gid).collect(),
     };
     crate::etcmerge::ids::hold(&paths.state, &staging.tree("etc"), &declared)?;
-    crate::packages::transact(&tx, plan.packages, &staging.tree("pacman"))?;
+    let log = store.root().join("var/log/pacman.log");
+    let logged = std::fs::metadata(&log).map_or(0, |meta| meta.len());
+    crate::packages::transact(&tx, plan.packages, &staging.tree("pacman")).map_err(|e| exdev_hint(e, &log, logged))?;
     let run = |argv: &[String]| -> Result<()> {
         let output = tx.output(argv)?;
         if !output.status.success() {
@@ -109,6 +111,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let esp = PathBuf::from(&plan.boot.esp);
     let mut pins = Keep::read(plan.keep, store, &esp)?;
     pins.current = Some(plan.number);
+    pins.chosen = Some(plan.number);
     let mut committed = store.deployments()?;
     committed.push(plan.number);
     let entries = Entries {
@@ -118,11 +121,26 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         droppable: pins.to_delete(&committed),
     };
     staged.commit(store, &esp, &entries)?;
+    if let Err(e) = store.choose(plan.number) {
+        eprintln!("warning: couldn't record deployment {} as chosen: {e:#}", plan.number);
+    }
     let records = crate::generations::Store::new(paths);
     if !records.has(plan.number) {
         records.save(plan.record)?;
     }
     Ok(Built { users, failures })
+}
+
+/// Explains a failed transaction whose scriptlet output in pacman's log, from byte `from` on, shows a rename refused across the staging overlay.
+pub fn exdev_hint(error: anyhow::Error, log: &Path, from: u64) -> anyhow::Error {
+    let text = std::fs::read(log).unwrap_or_default();
+    let new = String::from_utf8_lossy(text.get(from as usize..).unwrap_or_default());
+    if !new.contains("Invalid cross-device link") {
+        return error;
+    }
+    error.context(
+        "a package's install script renamed a directory under /usr, /opt or /boot, which the staging overlay refuses on this filesystem (EXDEV, see pacman.log); its package needs to copy instead, or the switch runs on btrfs",
+    )
 }
 
 /// Builds and writes the boot entry of the committed deployment `number`, in a scratch staging root identical to it, as for deployment 1 after the first layout or a current deployment whose entry is gone; it becomes the boot default.
@@ -151,4 +169,29 @@ fn write_entry(store: &Store, paths: &Paths, plan: &BootPlan, number: u32) -> Re
     super::EspStep::install(&entries, number, &root)?;
     crate::durable::sync_filesystems_checked(&[Path::new(&plan.esp)])?;
     staging.discard()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rename_the_overlay_refused_in_this_run_is_named_in_the_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("pacman.log");
+        std::fs::write(&log, "[ALPM-SCRIPTLET] mv: Invalid cross-device link\n").unwrap();
+        let from = std::fs::metadata(&log).unwrap().len();
+        let plain = format!("{:#}", exdev_hint(anyhow::anyhow!("pacman failed"), &log, from));
+        assert_eq!(plain, "pacman failed", "an earlier run's line doesn't count");
+        std::fs::write(
+            &log,
+            "[ALPM-SCRIPTLET] mv: Invalid cross-device link\n[ALPM-SCRIPTLET] rename: Invalid cross-device link\n",
+        )
+        .unwrap();
+        let hinted = format!("{:#}", exdev_hint(anyhow::anyhow!("pacman failed"), &log, from));
+        assert!(
+            hinted.contains("renamed a directory under /usr, /opt or /boot") && hinted.ends_with("pacman failed"),
+            "{hinted}"
+        );
+    }
 }
