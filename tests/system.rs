@@ -161,7 +161,7 @@ fn hooks_body(conf: &str, extra_hook: &str) -> String {
     format!(
         r#"files = {{ ["/etc/archix-hook.conf"] = {{ text = {conf:?}, on_change = "echo changed >> /var/tmp/archix-on-change" }} }},
         hooks = {{
-          z = {{ run = "echo z $USER >> /var/tmp/archix-hooks" }},
+          z = {{ run = "echo z $USER >> /var/tmp/archix-hooks; chmod 0666 /var/tmp/archix-hooks" }},
           a = {{ run = "echo a $USER $HOME >> /var/tmp/archix-hooks", user = "nobody", after = {{ "z" }} }},
           {extra_hook}
         }}"#
