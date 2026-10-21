@@ -1,0 +1,95 @@
+name: Release gate
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 1 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  image:
+    if: github.event_name != 'schedule' || github.repository == 'archix-org/archix'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: base
+          kvm: "false"
+          need-gb: "5"
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: base
+          name: gate-image
+          status: ${{ job.status }}
+
+  suites:
+    needs: image
+    runs-on: ubuntu-latest
+    # VM_TIMEOUT leaves room under the 6 h job limit for the image build before and the log upload after.
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [rollback, nvidia, cachyos]
+        fs: [ext4, btrfs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: ${{ matrix.suite }}
+          need-gb: "40"
+      - run: tests/vm/run.sh "$SUITE"
+        env:
+          SUITE: ${{ matrix.suite }}
+          FS: ${{ matrix.fs }}
+          VM_TIMEOUT: "14400"
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: ${{ matrix.suite }}
+          name: ${{ matrix.suite }}-${{ matrix.fs }}
+          status: ${{ job.status }}
+
+  powercut:
+    needs: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: [ext4, btrfs]
+    steps:
+      - uses: actions/checkout@v5
+      - id: runner
+        run: |
+          if [ -x tests/vm/powercut/run.sh ]; then
+            echo "command=tests/vm/powercut/run.sh" >> "$GITHUB_OUTPUT"
+          elif [ -f tests/vm/powercut/vmtest.sh ]; then
+            echo "command=tests/vm/run.sh powercut" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::no power-cut suite yet (tests/vm/powercut/), so this job checks nothing"
+          fi
+      - if: steps.runner.outputs.command
+        uses: ./.github/actions/vm-setup
+        with:
+          group: powercut
+          need-gb: "60"
+      - if: steps.runner.outputs.command
+        run: ${{ steps.runner.outputs.command }}
+        env:
+          FS: ${{ matrix.fs }}
+      - if: always() && steps.runner.outputs.command
+        uses: ./.github/actions/vm-finish
+        with:
+          group: powercut
+          name: powercut-${{ matrix.fs }}
+          status: ${{ job.status }}

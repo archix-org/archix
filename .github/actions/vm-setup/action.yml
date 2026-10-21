@@ -1,0 +1,35 @@
+name: Set up a test runner
+description: KVM, disk space and a work dir, the verified archive caches, the caching archive proxy, and the archix-arch-test image built through it.
+inputs:
+  group:
+    description: The archive cache this job adds to; "base" holds what the test image needs and every job reads it.
+    required: true
+  kvm:
+    description: Whether the job boots VMs and so needs KVM.
+    default: "true"
+  need-gb:
+    description: Free space the job's VM work dir needs.
+    default: "20"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: tests/ci/runner-setup.sh
+      env:
+        KVM: ${{ inputs.kvm }}
+        NEED_GB: ${{ inputs.need-gb }}
+    - uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/archive/base
+        key: archive-base-${{ github.run_id }}
+        restore-keys: archive-base-
+    - if: inputs.group != 'base'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/archive/${{ inputs.group }}
+        key: archive-${{ inputs.group }}-${{ github.run_id }}
+        restore-keys: archive-${{ inputs.group }}-
+    - shell: bash
+      run: tests/ci/proxy-up.sh "$RUNNER_TEMP/archive/$GROUP" "$RUNNER_TEMP/archive/base"
+      env:
+        GROUP: ${{ inputs.group }}
