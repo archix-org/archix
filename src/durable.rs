@@ -32,6 +32,14 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
         file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
     })?;
+    sync_renamed(path)
+}
+
+/// Flushes a file renamed into place and its directory; on FAT the new name's entry says empty until the file itself is synced again.
+pub fn sync_renamed(path: &Path) -> Result<()> {
+    File::open(path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| format!("writing {}", path.display()))?;
     sync_dir(path)
 }
 
@@ -59,7 +67,7 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
             .with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
     })?;
-    sync_dir(to)
+    sync_renamed(to)
 }
 
 /// Flushes the directory entry for `path`, which a rename or new symlink only changes in memory.

@@ -222,6 +222,21 @@ pub struct Built {
     ukis: Vec<Uki>,
 }
 
+impl Built {
+    /// A deployment's one normal UKI, `name`, already in its /boot/archix, as the commit tests stage it without a kernel.
+    pub fn single(version: &str, name: &str, title: &str) -> Built {
+        Built {
+            version: version.to_string(),
+            ukis: vec![Uki {
+                variant: Variant::Normal,
+                title: title.to_string(),
+                name: name.to_string(),
+                built: true,
+            }],
+        }
+    }
+}
+
 /// Builds a staged deployment's initramfs and UKIs inside its staging root, from its own kernel and /etc, signing them when Secure Boot signing is on; UKIs the ESP already has are reused.
 pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx: &Transaction) -> Result<Built> {
     let version = owned_version(&staging.tree("pacman"), &plan.kernel).with_context(|| {
@@ -386,7 +401,7 @@ fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     signed?;
-    crate::durable::sync_dir(path)
+    crate::durable::sync_renamed(path)
 }
 
 /// The ESP step of a commit: copies the UKIs a deployment built, writes its entries and their records, and makes it systemd-boot's default; entries of `droppable` deployments go first when the ESP is short of room.
