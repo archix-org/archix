@@ -1086,6 +1086,35 @@ fn a_config_kept_in_etc_comes_along_into_every_deployment_a_switch_or_rollback_m
     assert!(installed("tree").is_some(), "the next switch returns to the config");
 }
 
+#[test]
+#[ignore]
+fn a_package_signed_by_a_disabled_key_stops_the_staged_transaction() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    // As pacman-key --populate does to revoked packager keys, in the running deployment's keyring only.
+    let gnupg = machine.root.join("etc/pacman.d/gnupg");
+    let script = format!(
+        "h={}; for k in $(gpg --homedir \"$h\" --batch --with-colons --list-keys | awk -F: '$1 == \"pub\" {{ getline; print $10 }}'); do \
+         printf 'disable\\nsave\\n' | gpg --homedir \"$h\" --batch --command-fd 0 --edit-key \"$k\" > /dev/null 2>&1 || true; done; \
+         gpgconf --homedir \"$h\" --kill all",
+        gnupg.display()
+    );
+    let disabled = Command::new("bash").args(["-c", &script]).status().unwrap();
+    assert!(disabled.success());
+    let (deployments, current) = (machine.deployments(), machine.current());
+    setup.set_body(&["tree"], "");
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("in the staging root"),
+        "the staged pacman took tree: {err}"
+    );
+    assert_eq!(machine.deployments(), deployments, "{err}");
+    assert_eq!(machine.current(), current);
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+}
+
 /// How many entries the root's own `at` directory holds under whatever is mounted there, through a non-recursive bind of the root.
 fn hidden_entries(root: &Path, at: &str) -> usize {
     let script = format!(

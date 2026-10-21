@@ -259,27 +259,32 @@ case $stage in
     [ "$(glibc)" = 2.44 ] && [ -z "$(needs_newer_glibc)" ] && [ "$(missing_files)" = 0 ] || fail "deployment $good should be whole"
     say "PASS: with glibc destroyed in deployment $bad, systemd-boot fell back to $good and archix made it current"
 
-    sed -i 's|"archix-test-hello", |"jq", |' "$config"
-    ax lock --noconfirm > /dev/console 2>&1 || fail "archix lock with jq"
+    # A package nothing installs yet, so the switch has to verify its signature: jq came in with devtools.
+    pkg=tree
+    pacman -Q "$pkg" > /dev/null 2>&1 && fail "$pkg should not be installed yet, or the switch installs nothing signed"
+    sed -i "s|\"archix-test-hello\", |\"$pkg\", |" "$config"
+    ax lock --noconfirm > /dev/console 2>&1 || fail "archix lock with $pkg"
     date=$(sed -n 's/^date = "\(.*\)"/\1/p' "$lock" | head -1)
-    file=$(sed -n 's/^jq = .*file = "\([^"]*\)".*/\1/p' "$lock")
-    repo=$(sed -n 's/^jq = .*repo = "\([^"]*\)".*/\1/p' "$lock")
-    curl -sfo /tmp/jq.sig "$(cat /var/lib/archix/archive-url)/repos/${date//-//}/$repo/os/x86_64/$file.sig" || fail "fetching jq's signature"
-    key=$(gpg --list-packets /tmp/jq.sig 2>/dev/null | sed -n 's/.*issuer fpr v4 \([0-9A-F]*\).*/\1/p' | head -1)
-    [ -n "$key" ] || fail "couldn't read the key that signed jq"
+    file=$(sed -n "s/^$pkg = .*file = \"\([^\"]*\)\".*/\1/p" "$lock")
+    repo=$(sed -n "s/^$pkg = .*repo = \"\([^\"]*\)\".*/\1/p" "$lock")
+    curl -sfo "/tmp/$pkg.sig" "$(cat /var/lib/archix/archive-url)/repos/${date//-//}/$repo/os/x86_64/$file.sig" || fail "fetching $pkg's signature"
+    key=$(gpg --list-packets "/tmp/$pkg.sig" 2>/dev/null | sed -n 's/.*issuer fpr v4 \([0-9A-F]*\).*/\1/p' | head -1)
+    [ -n "$key" ] || fail "couldn't read the key that signed $pkg"
     # pacman-key --populate disables revoked packager keys, and pacman refuses packages they signed.
     keyring=(gpg --homedir /etc/pacman.d/gnupg --batch --command-fd 0)
     printf 'disable\nsave\n' | "${keyring[@]}" --edit-key "$key" > /dev/null 2>&1 || fail "disabling $key in pacman's keyring"
     before=$(current) kept=$(deployments)
-    ax switch --noconfirm > "$state/key.log" 2>&1 && fail "a switch to a package signed by a disabled (revoked) key should fail"
+    ax switch --noconfirm > "$state/key.log" 2>&1 && fail "a switch to $pkg, signed by a disabled (revoked) key, should fail: $(tail -8 "$state/key.log" | tr '\n' '|')"
     say "the switch to a package signed by a disabled key said: $(tail -5 "$state/key.log" | tr '\n' '|')"
+    grep -q "install    $pkg" "$state/key.log" || fail "the switch should have tried to install $pkg: $(tail -8 "$state/key.log" | tr '\n' '|')"
+    grep -qE "pacman refuses these packages|in the staging root" "$state/key.log" || fail "the switch should fail on $pkg's signature: $(tail -8 "$state/key.log" | tr '\n' '|')"
     printf 'enable\nsave\n' | "${keyring[@]}" --edit-key "$key" > /dev/null 2>&1
     [ "$(current)" = "$before" ] || fail "the refused switch changed the current deployment"
     [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the refused switch left something behind: $(listing); deployments before $kept, now $(deployments)"
     say "PASS: a package signed by a revoked key is refused before anything changes"
 
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch once the key is enabled again"
-    [ -n "$(deployed "$(current)" jq)" ] || fail "jq should be in the new deployment"
+    [ -n "$(deployed "$(current)" "$pkg")" ] || fail "$pkg should be in the new deployment"
     [ -z "$(deployed "$(current)" archix-test-hello)" ] || fail "archix-test-hello should be gone from the new deployment"
     next done
     say "OK"
