@@ -141,6 +141,10 @@ pub fn run_pending(root: &Path, state: &Path, number: u32) -> Vec<String> {
     println!("archix: running deployment {number}'s hooks");
     let failures = run(root, &waiting.on_change, &waiting.hooks);
     if failures.is_empty() {
+        // What the hooks wrote must be on disk before the record that they still have to run goes.
+        if let Err(e) = crate::durable::sync_filesystems_checked(&[root, state]) {
+            return vec![format!("flushing what the hooks wrote: {e:#}")];
+        }
         let path = pending_path(state, number);
         if let Err(e) = fs::remove_file(&path)
             && e.kind() != std::io::ErrorKind::NotFound

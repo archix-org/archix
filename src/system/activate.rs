@@ -454,6 +454,8 @@ pub fn activate(root: &Path) -> Result<()> {
                 );
             }
         }
+        // The /var changes and users must be on disk before the marker that skips them at the next boot.
+        crate::durable::sync_filesystems_checked(&[root])?;
         crate::durable::write(&marker, b"")?;
     }
     let failures = crate::system::hooks::run_pending(root, &state, generation);
