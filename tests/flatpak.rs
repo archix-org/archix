@@ -73,12 +73,28 @@ impl Drop for NoFlatpak {
     }
 }
 
+/// Marks the container's flatpak a dependency, so a machine copied from it doesn't declare it, and explicit again when dropped, as the other tests expect.
+struct FlatpakAsDependency;
+
+impl FlatpakAsDependency {
+    fn new() -> FlatpakAsDependency {
+        pacman(&["-S", "--needed", "flatpak"]);
+        pacman(&["-D", "--asdeps", "flatpak"]);
+        FlatpakAsDependency
+    }
+}
+
+impl Drop for FlatpakAsDependency {
+    fn drop(&mut self) {
+        let _ = Command::new("pacman").args(["-D", "--asexplicit", "flatpak"]).status();
+    }
+}
+
 #[test]
 #[ignore]
 fn apps_declared_with_flatpak_itself_install_at_the_new_deployments_first_boot() {
     let _system = lock_system();
-    pacman(&["-S", "--needed", "flatpak"]);
-    pacman(&["-D", "--asdeps", "flatpak"]);
+    let _dependency = FlatpakAsDependency::new();
     let first = publish_hello(1);
     let setup = Setup::new(&[], "");
     setup.lay_out();
