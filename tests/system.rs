@@ -94,7 +94,7 @@ fn files_users_and_services_follow_the_config() {
     );
     assert!(setup.ok(&["diff"]).contains("matches the lock and the config"));
 
-    fs::write(system_path("/etc/archix-test.conf"), "edited by hand\n").unwrap();
+    write_system_path("/etc/archix-test.conf", "edited by hand\n");
     assert!(
         setup
             .ok(&["diff"])
@@ -207,7 +207,7 @@ fn hooks_run_when_the_deployment_boots_and_on_change_only_when_the_file_changed(
     );
     assert_eq!(log("var/tmp/archix-on-change"), "changed\n", "the file didn't change");
 
-    fs::write(system_path("/etc/archix-hook.conf"), "edited by hand\n").unwrap();
+    write_system_path("/etc/archix-hook.conf", "edited by hand\n");
     setup.ok(&["switch", "--noconfirm"]);
     boot_current(&setup);
     assert_eq!(

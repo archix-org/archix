@@ -1,3 +1,4 @@
+mod deployments;
 mod eject;
 mod helper;
 mod init;
@@ -28,6 +29,7 @@ use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
+pub use deployments::{hooks, verify};
 pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, upgrade};
 pub use init::init;
 pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};

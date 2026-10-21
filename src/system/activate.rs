@@ -123,12 +123,56 @@ pub fn package_owned(local: &Path) -> Owned {
     owned
 }
 
+/// A deployment's record of the md5 each backup-listed /var file had in the deployment it was staged from, as pacman's database had it: `path<TAB>md5` lines, paths relative to /var.
+pub const VAR_BACKUP: &str = "var-backup";
+
+/// What pacman's backup arrays say about /var files: which a deployment's packages list, and the md5 each had before.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Backups {
+    pub listed: BTreeMap<PathBuf, String>,
+    pub before: BTreeMap<PathBuf, String>,
+}
+
+/// The backup-listed /var files of the packages in a pacman database, with the md5 it records for each.
+pub fn var_backups(local: &Path) -> BTreeMap<PathBuf, String> {
+    crate::capture::read_installed(local)
+        .unwrap_or_default()
+        .into_values()
+        .flat_map(|installed| installed.backups)
+        .filter_map(|(path, md5)| Some((PathBuf::from(path.strip_prefix("/var/")?), md5)))
+        .collect()
+}
+
+pub fn read_var_backup(path: &Path) -> BTreeMap<PathBuf, String> {
+    fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(path, md5)| (PathBuf::from(path), md5.to_string()))
+        .collect()
+}
+
+/// Writes `deployment`'s var-backup: for each backup-listed /var file of its packages, the md5 from `carried` (the base's own record, when the base's /var changes were never applied) or else the base's database.
+pub fn write_var_backup(deployment: &Path, base_db: &Path, carried: Option<&Path>) -> Result<()> {
+    let mut before = carried.map(read_var_backup).unwrap_or_default();
+    let base = var_backups(base_db);
+    let mut text = String::new();
+    for rel in var_backups(&deployment.join("pacman")).into_keys() {
+        if let Some(md5) = before.remove(&rel).or_else(|| base.get(&rel).cloned()) {
+            text.push_str(&format!("{}\t{md5}\n", rel.display()));
+        }
+    }
+    crate::durable::write(&deployment.join(VAR_BACKUP), text.as_bytes())
+}
+
 #[derive(Debug, Default)]
 pub struct Applied {
     pub written: usize,
     pub whiteouts: usize,
     pub kept: Vec<PathBuf>,
     pub moved_aside: Vec<PathBuf>,
+    /// Backup-listed files changed live, kept, with the deployment's version written beside them as .pacnew.
+    pub pacnew: Vec<PathBuf>,
 }
 
 fn c_path(path: &Path) -> Result<CString> {
@@ -301,6 +345,7 @@ fn replace(from: &Path, meta: &Metadata, kind: Kind, to: &Path) -> Result<()> {
     if kind == Kind::File {
         fs::File::open(&tmp)?.sync_all()?;
     }
+    step();
     fs::rename(&tmp, to).with_context(|| format!("replacing {}", to.display()))
 }
 
@@ -315,54 +360,131 @@ fn set_dir_meta(meta: &Metadata, to: &Path, from: &Path, package: Option<&Packag
         .with_context(|| format!("chmod {}", to.display()))
 }
 
-fn walk(upper: &Path, rel: &Path, var: &Path, owned: &Owned, applied: &mut Applied) -> Result<()> {
-    let dir = upper.join(rel);
-    let mut names: Vec<_> = fs::read_dir(&dir)
-        .with_context(|| format!("reading {}", dir.display()))?
-        .map(|entry| entry.map(|entry| entry.file_name()))
-        .collect::<io::Result<_>>()?;
-    names.sort();
-    for name in names {
-        let rel = rel.join(name);
-        let from = upper.join(&rel);
-        let to = var.join(&rel);
-        let meta = fs::symlink_metadata(&from).with_context(|| format!("reading {}", from.display()))?;
-        let kind = kind_of(&from, &meta)?;
-        let package = owned.get(&rel);
-        match decide(&rel, kind, live_kind(&to), package.is_some()) {
-            Action::Keep => applied.kept.push(rel),
-            Action::IgnoreWhiteout => applied.whiteouts += 1,
-            Action::MakeDir { aside } => {
-                if aside {
-                    applied.moved_aside.push(move_aside(&to)?);
-                }
-                fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
-                set_dir_meta(&meta, &to, &from, package.and_then(Option::as_ref))?;
-                applied.written += 1;
-                walk(upper, &rel, var, owned, applied)?;
-            }
-            Action::UpdateDir => {
-                set_dir_meta(&meta, &to, &from, package.and_then(Option::as_ref))?;
-                walk(upper, &rel, var, owned, applied)?;
-            }
-            Action::Through => walk(upper, &rel, var, owned, applied)?,
-            Action::Replace { aside } => {
-                if aside {
-                    applied.moved_aside.push(move_aside(&to)?);
-                }
-                replace(&from, &meta, kind, &to)?;
-                applied.written += 1;
-            }
-        }
+/// Makes a directory under a temporary name with its owner, mode and xattrs, then renames it into place, so a power cut never leaves it with the wrong ones.
+fn make_dir(to: &Path, set: impl Fn(&Path) -> Result<()>) -> Result<()> {
+    let tmp = with_suffix(to, ".archix-new");
+    if fs::symlink_metadata(&tmp).is_ok() {
+        fs::remove_dir_all(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
     }
-    Ok(())
+    fs::create_dir(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+    set(&tmp)?;
+    step();
+    fs::rename(&tmp, to).with_context(|| format!("creating {}", to.display()))
 }
 
-/// Applies a deployment's /var upper layer onto the live /var with owners, modes and xattrs, as `decide` rules with `owned` from its packages.
-pub fn apply_upper(upper: &Path, var: &Path, owned: &Owned) -> Result<Applied> {
+/// How a backup-listed file goes: pacman's rule, comparing the live file with the version the deployment ships and the one it was staged over.
+#[derive(Debug, PartialEq)]
+pub enum Backup {
+    Write,
+    AlreadyThere,
+    Pacnew,
+}
+
+pub fn backup_rule(live: Option<&str>, shipped: &str, before: Option<&str>) -> Backup {
+    match live {
+        None => Backup::Write,
+        Some(live) if live == shipped => Backup::AlreadyThere,
+        Some(live) if Some(live) == before => Backup::Write,
+        Some(_) => Backup::Pacnew,
+    }
+}
+
+struct Walk<'a> {
+    upper: &'a Path,
+    var: &'a Path,
+    owned: &'a Owned,
+    backups: &'a Backups,
+}
+
+impl Walk<'_> {
+    fn dir(&self, rel: &Path, applied: &mut Applied) -> Result<()> {
+        let dir = self.upper.join(rel);
+        let mut names: Vec<_> = fs::read_dir(&dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .map(|entry| entry.map(|entry| entry.file_name()))
+            .collect::<io::Result<_>>()?;
+        names.sort();
+        for name in names {
+            let rel = rel.join(name);
+            let from = self.upper.join(&rel);
+            let to = self.var.join(&rel);
+            let meta = fs::symlink_metadata(&from).with_context(|| format!("reading {}", from.display()))?;
+            let kind = kind_of(&from, &meta)?;
+            let package = self.owned.get(&rel);
+            let dir_meta = |at: &Path| set_dir_meta(&meta, at, &from, package.and_then(Option::as_ref));
+            match decide(&rel, kind, live_kind(&to), package.is_some()) {
+                Action::Keep => applied.kept.push(rel),
+                Action::IgnoreWhiteout => applied.whiteouts += 1,
+                Action::MakeDir { aside } => {
+                    if aside {
+                        applied.moved_aside.push(move_aside(&to)?);
+                    }
+                    make_dir(&to, dir_meta)?;
+                    self.wrote(applied);
+                    self.dir(&rel, applied)?;
+                }
+                Action::UpdateDir => {
+                    dir_meta(&to)?;
+                    self.dir(&rel, applied)?;
+                }
+                Action::Through => self.dir(&rel, applied)?,
+                Action::Replace { aside } => {
+                    if aside {
+                        applied.moved_aside.push(move_aside(&to)?);
+                    }
+                    let backup = match self.backups.listed.contains_key(&rel) && kind == Kind::File {
+                        true => {
+                            let live = fs::symlink_metadata(&to)
+                                .is_ok_and(|m| m.is_file())
+                                .then(|| crate::capture::md5(&to))
+                                .transpose()?;
+                            let before = self.backups.before.get(&rel).map(String::as_str);
+                            backup_rule(live.as_deref(), &crate::capture::md5(&from)?, before)
+                        }
+                        false => Backup::Write,
+                    };
+                    match backup {
+                        Backup::Write => replace(&from, &meta, kind, &to)?,
+                        Backup::AlreadyThere => continue,
+                        Backup::Pacnew => {
+                            replace(&from, &meta, kind, &with_suffix(&to, ".pacnew"))?;
+                            applied.pacnew.push(rel);
+                        }
+                    }
+                    self.wrote(applied);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn wrote(&self, applied: &mut Applied) {
+        applied.written += 1;
+        step();
+    }
+}
+
+static STEPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A point where the power-cut tests cut the apply: before each rename into place and after each entry, numbered in order.
+fn step() {
+    if cfg!(debug_assertions) {
+        let n = STEPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        crate::testhooks::mark(&format!("activate-step-{n}"));
+    }
+}
+
+/// Applies a deployment's /var upper layer onto the live /var with owners, modes and xattrs, as `decide` rules with `owned` from its packages; a backup-listed file changed live is kept and the shipped one written as .pacnew. Every step is whole on its own, so running it again after a cut finishes the job.
+pub fn apply_upper(upper: &Path, var: &Path, owned: &Owned, backups: &Backups) -> Result<Applied> {
     let mut applied = Applied::default();
-    walk(upper, Path::new(""), var, owned, &mut applied)?;
-    crate::durable::sync_filesystems(&[var]);
+    let walk = Walk {
+        upper,
+        var,
+        owned,
+        backups,
+    };
+    walk.dir(Path::new(""), &mut applied)?;
+    crate::durable::sync_filesystems_checked(&[var])?;
     Ok(applied)
 }
 
@@ -406,16 +528,23 @@ pub fn check_ids(passwd: &str, group: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_tool(root: &Path, program: &str, args: &[&str]) {
+/// Runs a systemd tool on the system under `root`, warning when it fails; returns whether it succeeded.
+fn run_tool(root: &Path, program: &str, args: &[&str]) -> bool {
     let mut command = Command::new(program);
     command.args(args);
     if root != Path::new("/") {
         command.arg(format!("--root={}", root.display()));
     }
     match command.status() {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!("archix: warning: {program} {} failed ({status})", args.join(" ")),
-        Err(e) => eprintln!("archix: warning: couldn't run {program}: {e}"),
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            eprintln!("archix: warning: {program} {} failed ({status})", args.join(" "));
+            false
+        }
+        Err(e) => {
+            eprintln!("archix: warning: couldn't run {program}: {e}");
+            false
+        }
     }
 }
 
@@ -436,11 +565,44 @@ pub fn activate(root: &Path) -> Result<()> {
     if !marker.exists() {
         let read = |path: &str| fs::read_to_string(root.join(path)).with_context(|| format!("reading /{path}"));
         check_ids(&read("etc/passwd")?, &read("etc/group")?)?;
-        run_tool(root, "systemd-sysusers", &[]);
+        let sysusers = format!("sysusers-{id}");
+        if run_tool(root, "systemd-sysusers", &[]) {
+            clear_tries(&state, &sysusers);
+        } else {
+            let tries = count_try(&state, &sysusers)?;
+            if tries < BOOT_TRIES {
+                note(
+                    root,
+                    &format!(
+                        "archix: at boot, systemd-sysusers failed for deployment {generation} (try {tries} of {BOOT_TRIES}), so its /var changes weren't applied; the next boot tries again. `archix rollback` or the boot menu starts the previous generation meanwhile"
+                    ),
+                );
+                bail!(
+                    "systemd-sysusers failed, so deployment {generation}'s /var changes aren't applied and services don't start; the next boot tries again (try {tries} of {BOOT_TRIES})"
+                );
+            }
+            note(
+                root,
+                &format!(
+                    "archix: systemd-sysusers failed at {BOOT_TRIES} boots of deployment {generation}, so it booted without the users it couldn't create; run systemd-sysusers to see why"
+                ),
+            );
+        }
         let upper = deployment.join("var-upper");
+        let progress = state.join("activating").join(&id);
         if upper.is_dir() {
+            if progress.exists() {
+                println!(
+                    "archix: applying deployment {generation}'s /var changes was cut off at an earlier boot; applying them again from the start"
+                );
+            }
+            crate::durable::write(&progress, b"")?;
             let owned = package_owned(&deployment.join("pacman"));
-            let applied = apply_upper(&upper, &root.join("var"), &owned)?;
+            let backups = Backups {
+                listed: var_backups(&deployment.join("pacman")),
+                before: read_var_backup(&deployment.join(VAR_BACKUP)),
+            };
+            let applied = apply_upper(&upper, &root.join("var"), &owned, &backups)?;
             println!(
                 "archix: applied deployment {generation}'s /var changes: {} written, {} kept as they are live, {} deletions left alone",
                 applied.written,
@@ -453,23 +615,137 @@ pub fn activate(root: &Path) -> Result<()> {
                     aside.display()
                 );
             }
+            for rel in &applied.pacnew {
+                println!(
+                    "archix: /var/{} was changed on this machine, so it stays; the package's version is beside it as .pacnew",
+                    rel.display()
+                );
+            }
         }
         crate::durable::write(&marker, b"")?;
+        let _ = fs::remove_file(&progress);
     }
-    let failures = crate::system::hooks::run_pending(root, &state, generation);
-    if !failures.is_empty() {
-        let mut notes = fs::read_to_string(Paths::under(root).notes()).unwrap_or_default();
-        for failure in &failures {
-            println!("archix: {failure}; it runs again at the next boot");
-            notes.push_str(&format!("archix: at boot, {failure}; it runs again at the next boot\n"));
-        }
-        let _ = crate::durable::write(&Paths::under(root).notes(), notes.as_bytes());
-    }
+    run_hooks(root, &state, generation)?;
+    crate::system::reboot::refresh_note(root);
     let last = state.join("booted-deployment");
     if fs::read_to_string(&last).ok().as_deref().map(str::trim) != Some(id.as_str()) {
         // The shared /var/.updated stamp keeps systemd's own catalog update from running after a rollback.
         run_tool(root, "journalctl", &["--update-catalog"]);
         crate::durable::write(&last, format!("{id}\n").as_bytes())?;
+    }
+    Ok(())
+}
+
+/// How many boots in a row retry what failed at boot: a deployment's hooks, or systemd-sysusers on its first boot.
+pub const BOOT_TRIES: u32 = 3;
+
+fn tries_path(state: &Path, key: &str) -> PathBuf {
+    state.join("boot-tries").join(key)
+}
+
+/// How many boots so far failed at `key`.
+pub fn tries(state: &Path, key: &str) -> u32 {
+    fs::read_to_string(tries_path(state, key))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn count_try(state: &Path, key: &str) -> Result<u32> {
+    let tries = tries(state, key) + 1;
+    crate::durable::write(&tries_path(state, key), format!("{tries}\n").as_bytes())?;
+    Ok(tries)
+}
+
+pub fn clear_tries(state: &Path, key: &str) {
+    let _ = fs::remove_file(tries_path(state, key));
+}
+
+/// The key deployment `number`'s hook failures are counted under.
+pub fn hooks_key(number: u32) -> String {
+    format!("hooks-{number}")
+}
+
+/// Whether deployment `number`'s hooks failed at `BOOT_TRIES` boots and wait for `archix hooks retry` or `skip`.
+pub fn hooks_given_up(state: &Path, number: u32) -> bool {
+    crate::system::hooks::pending_path(state, number).exists() && tries(state, &hooks_key(number)) >= BOOT_TRIES
+}
+
+/// What failed at recent boots, for `archix status`: hooks still retried or given up on, and systemd-sysusers.
+pub fn boot_failures(root: &Path) -> Vec<String> {
+    let state = Paths::under(root).state;
+    let mut lines = Vec::new();
+    let mut keys: Vec<String> = fs::read_dir(state.join("boot-tries"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    keys.sort();
+    for key in keys {
+        let count = tries(&state, &key);
+        if let Some(number) = key.strip_prefix("hooks-").and_then(|n| n.parse::<u32>().ok()) {
+            if !crate::system::hooks::pending_path(&state, number).exists() {
+                continue;
+            }
+            lines.push(match count >= BOOT_TRIES {
+                true => format!(
+                    "deployment {number}'s hooks failed at {count} boots and no longer run at boot: `archix hooks retry` runs them again, `archix hooks skip` drops them"
+                ),
+                false => format!("deployment {number}'s hooks failed at {count} of {BOOT_TRIES} boots; the next boot runs them again"),
+            });
+        } else if let Some(id) = key.strip_prefix("sysusers-") {
+            let number = id.split('-').next().unwrap_or(id);
+            lines.push(format!(
+                "systemd-sysusers failed at {count} of {BOOT_TRIES} boots of deployment {number}; run systemd-sysusers to see why"
+            ));
+        }
+    }
+    lines
+}
+
+/// Adds `line` to the notes shown at login, once.
+pub fn note(root: &Path, line: &str) {
+    let path = Paths::under(root).notes();
+    let mut notes = fs::read_to_string(&path).unwrap_or_default();
+    if notes.lines().any(|existing| existing == line) {
+        return;
+    }
+    notes.push_str(line);
+    notes.push('\n');
+    let _ = crate::durable::write(&path, notes.as_bytes());
+}
+
+/// Runs the hooks waiting for deployment `generation` at boot, at most `BOOT_TRIES` boots in a row while they fail.
+fn run_hooks(root: &Path, state: &Path, generation: u32) -> Result<()> {
+    let key = hooks_key(generation);
+    if !crate::system::hooks::pending_path(state, generation).exists() {
+        clear_tries(state, &key);
+        return Ok(());
+    }
+    if hooks_given_up(state, generation) {
+        println!(
+            "archix: deployment {generation}'s hooks failed at {BOOT_TRIES} boots, so they don't run at boot any more"
+        );
+        return Ok(());
+    }
+    let failures = crate::system::hooks::run_pending(root, state, generation);
+    if failures.is_empty() {
+        clear_tries(state, &key);
+        return Ok(());
+    }
+    let tries = count_try(state, &key)?;
+    for failure in &failures {
+        let line = match tries >= BOOT_TRIES {
+            true => format!(
+                "archix: at boot, {failure}; it failed at {BOOT_TRIES} boots, so it doesn't run at boot any more: `archix hooks retry` runs it again, `archix hooks skip` drops it"
+            ),
+            false => {
+                format!("archix: at boot, {failure}; it runs again at the next boot (try {tries} of {BOOT_TRIES})")
+            }
+        };
+        println!("{line}");
+        note(root, &line);
     }
     Ok(())
 }
@@ -633,7 +909,7 @@ mod tests {
             ("spool/cups/tmp", Some(0o1770)),
         ]);
 
-        let applied = apply_upper(&upper, &var, &owned).unwrap();
+        let applied = apply_upper(&upper, &var, &owned, &Backups::default()).unwrap();
 
         let mode = |path: &str| fs::symlink_metadata(var.join(path)).unwrap().mode() & 0o7777;
         assert_eq!(fs::read_to_string(var.join("lib/app/seed")).unwrap(), "new");
@@ -680,6 +956,92 @@ mod tests {
     }
 
     #[test]
+    fn a_backup_file_is_overwritten_only_when_unchanged_since_the_version_staged_over() {
+        assert_eq!(backup_rule(None, "new", Some("old")), Backup::Write);
+        assert_eq!(backup_rule(Some("old"), "new", Some("old")), Backup::Write);
+        assert_eq!(backup_rule(Some("new"), "new", Some("old")), Backup::AlreadyThere);
+        assert_eq!(backup_rule(Some("edited"), "new", Some("old")), Backup::Pacnew);
+        assert_eq!(backup_rule(Some("edited"), "new", None), Backup::Pacnew);
+    }
+
+    #[test]
+    fn applying_backup_files_writes_pacnew_beside_a_live_edit_and_a_second_run_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (upper, var) = (dir.path().join("upper"), dir.path().join("var"));
+        for tree in [&upper, &var] {
+            fs::create_dir_all(tree.join("lib/app")).unwrap();
+        }
+        for name in ["edited", "pristine", "same", "plain"] {
+            fs::write(upper.join("lib/app").join(name), "shipped").unwrap();
+        }
+        fs::write(var.join("lib/app/edited"), "mine").unwrap();
+        fs::write(var.join("lib/app/pristine"), "old").unwrap();
+        fs::write(var.join("lib/app/same"), "shipped").unwrap();
+        fs::write(var.join("lib/app/plain"), "mine").unwrap();
+        let owned = owned(&[
+            ("lib/app/edited", None),
+            ("lib/app/pristine", None),
+            ("lib/app/same", None),
+            ("lib/app/plain", None),
+        ]);
+        let md5 = crate::capture::md5_bytes;
+        let backups = Backups {
+            listed: ["edited", "pristine", "same"]
+                .iter()
+                .map(|name| (PathBuf::from("lib/app").join(name), md5(b"shipped")))
+                .collect(),
+            before: ["edited", "pristine", "same"]
+                .iter()
+                .map(|name| (PathBuf::from("lib/app").join(name), md5(b"old")))
+                .collect(),
+        };
+        let applied = apply_upper(&upper, &var, &owned, &backups).unwrap();
+        let read = |name: &str| fs::read_to_string(var.join("lib/app").join(name)).ok();
+        assert_eq!(read("edited").as_deref(), Some("mine"));
+        assert_eq!(read("edited.pacnew").as_deref(), Some("shipped"));
+        assert_eq!(read("pristine").as_deref(), Some("shipped"));
+        assert_eq!(read("same").as_deref(), Some("shipped"));
+        assert_eq!(
+            read("plain").as_deref(),
+            Some("shipped"),
+            "not backup-listed, so replaced"
+        );
+        assert!(read("pristine.pacnew").is_none() && read("same.pacnew").is_none());
+        assert_eq!(applied.pacnew, [PathBuf::from("lib/app/edited")]);
+        let again = apply_upper(&upper, &var, &owned, &backups).unwrap();
+        assert_eq!(read("edited").as_deref(), Some("mine"));
+        assert_eq!(read("pristine").as_deref(), Some("shipped"));
+        assert_eq!(again.pacnew, [PathBuf::from("lib/app/edited")]);
+    }
+
+    #[test]
+    fn a_deployment_records_the_backup_hashes_of_the_one_it_was_staged_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = |root: &Path, md5: &str| {
+            let entry = root.join("pacman/app-1-1");
+            fs::create_dir_all(&entry).unwrap();
+            fs::write(entry.join("desc"), "%NAME%\napp\n\n").unwrap();
+            fs::write(
+                entry.join("files"),
+                format!("%FILES%\nvar/lib/app/conf\n\n%BACKUP%\nvar/lib/app/conf\t{md5}\netc/app.conf\tx\n\n"),
+            )
+            .unwrap();
+        };
+        let (base, new, carried) = (dir.path().join("1"), dir.path().join("2"), dir.path().join("carried"));
+        db(&base, "aaa");
+        db(&new, "bbb");
+        write_var_backup(&new, &base.join("pacman"), None).unwrap();
+        assert_eq!(fs::read_to_string(new.join(VAR_BACKUP)).unwrap(), "lib/app/conf\taaa\n");
+        fs::write(&carried, "lib/app/conf\tzzz\n").unwrap();
+        write_var_backup(&new, &base.join("pacman"), Some(&carried)).unwrap();
+        assert_eq!(
+            read_var_backup(&new.join(VAR_BACKUP)),
+            BTreeMap::from([(PathBuf::from("lib/app/conf"), "zzz".to_string())]),
+            "a base whose /var changes never applied hands on what it recorded"
+        );
+    }
+
+    #[test]
     fn a_live_directory_no_package_owns_keeps_its_mode() {
         let dir = tempfile::tempdir().unwrap();
         let (upper, var) = (dir.path().join("upper"), dir.path().join("var"));
@@ -687,7 +1049,7 @@ mod tests {
         fs::set_permissions(upper.join("lib/mine"), fs::Permissions::from_mode(0o755)).unwrap();
         fs::create_dir_all(var.join("lib/mine")).unwrap();
         fs::set_permissions(var.join("lib/mine"), fs::Permissions::from_mode(0o700)).unwrap();
-        apply_upper(&upper, &var, &Owned::new()).unwrap();
+        apply_upper(&upper, &var, &Owned::new(), &Backups::default()).unwrap();
         assert_eq!(fs::metadata(var.join("lib/mine")).unwrap().mode() & 0o7777, 0o700);
     }
 
@@ -701,7 +1063,7 @@ mod tests {
         fs::write(var.join("lib/became-file/state"), "kept").unwrap();
         fs::write(var.join("lib/became-dir"), "was a file").unwrap();
         let owned = owned(&[("lib/became-dir", None), ("lib/became-file", None)]);
-        let applied = apply_upper(&upper, &var, &owned).unwrap();
+        let applied = apply_upper(&upper, &var, &owned, &Backups::default()).unwrap();
         assert!(var.join("lib/became-dir").is_dir());
         assert_eq!(
             fs::read_to_string(var.join("lib/became-dir.archix-old")).unwrap(),

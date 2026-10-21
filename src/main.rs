@@ -210,9 +210,32 @@ enum Command {
     /// Share package files and AUR builds with other machines through a package cache
     #[command(subcommand)]
     Cache(Cache),
+    /// Run again, or drop, the hooks of a deployment that failed at too many boots
+    #[command(subcommand)]
+    Hooks(Hooks),
+    /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
+    Verify {
+        /// Restore what differs from the package cache
+        #[arg(long)]
+        repair: bool,
+    },
     /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
     #[command(external_subcommand)]
     Pick(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum Hooks {
+    /// Run the waiting hooks now, on the running deployment
+    Retry {
+        /// The deployment whose hooks to run; the running one by default
+        deployment: Option<u32>,
+    },
+    /// Drop the waiting hooks without running them
+    Skip {
+        /// The deployment whose hooks to drop; the running one by default
+        deployment: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -351,6 +374,8 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
         Command::Gc => Some("gc"),
+        Command::Hooks(_) => Some("hooks"),
+        Command::Verify { .. } => Some("verify"),
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
@@ -473,6 +498,9 @@ fn run() -> Result<ExitCode> {
     if changes_things {
         hold_exclusive()?;
     }
+    if is_root() {
+        archix::system::deploy_boot::writable_store(&archix::testhooks::root())?;
+    }
     match command {
         Command::HookRecord => {
             commands::hook_record();
@@ -504,6 +532,18 @@ fn run() -> Result<ExitCode> {
         }
         Command::Cache(Cache::Push { dir }) => {
             commands::cache_push(&dir)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Hooks(Hooks::Retry { deployment }) => {
+            commands::hooks(true, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Hooks(Hooks::Skip { deployment }) => {
+            commands::hooks(false, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Verify { repair } => {
+            commands::verify(repair)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Prefetch { url } => {
@@ -675,6 +715,8 @@ fn run() -> Result<ExitCode> {
         | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
+        | Command::Hooks(_)
+        | Command::Verify { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }

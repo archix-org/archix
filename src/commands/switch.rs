@@ -609,6 +609,7 @@ fn after_commit(
     }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
+    system::reboot::refresh_note(&paths.root);
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
     let sync = paths.root.join("var/lib/pacman/sync");
@@ -1227,7 +1228,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
             .context("there is no generation older than the current one")?,
     };
     if number == current {
-        println!("generation {number} is current already; nothing was changed");
+        if layout::laid_out(&paths.root) {
+            deploy::Store::open(&paths.root)?.choose(number)?;
+        }
+        println!("generation {number} is current already; it stays, and gc may now drop newer deployments");
         return Ok(());
     }
     let generation = store.get(number)?;
@@ -1332,11 +1336,13 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     let mut users = Vec::new();
     let esp = PathBuf::from(&boot.esp);
     if kept {
+        deploy::verify::ensure_intact(&paths, &deployments, number)?;
         ensure_entry(&paths, &boot, number)?;
         // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
         boot::set_default_entry(&esp, number)?;
         archix::durable::sync_filesystems_checked(&[&esp])?;
         deployments.point_current(number)?;
+        deployments.choose(number)?;
     } else {
         let archive = archix::archive::for_system(&paths.state);
         let repos = third_party_repos(&paths);
@@ -1399,6 +1405,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
+    system::reboot::refresh_note(&paths.root);
     if !kept {
         collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
     }

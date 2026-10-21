@@ -7,9 +7,16 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::store::{StoreLock, incomplete};
-use super::view::{Layout, VAR_BINDS, VIEW_DIR, mount_points};
+use super::view::{Layout, VAR_BINDS, VAR_LIVE_IF_PRESENT, VIEW_DIR, mount_points};
 use super::{Backend, COPIED, OVERLAID, Store, Transaction};
+use crate::system::activate::Owned;
 use crate::testhooks::mark;
+
+/// The view's /var lower layer in a staging tree: a private copy of what the base deployment's packages own in the live /var.
+pub(super) const VAR_LOWER: &str = ".var-lower";
+
+/// On btrfs, the base deployment's own var-upper, kept from its snapshot when its first boot hasn't applied it yet.
+pub(super) const VAR_BASE: &str = ".var-base";
 
 /// A deployment being built in `deploy/.staging-<N>` from a committed one; deleted at the next switch unless committed.
 #[derive(Debug)]
@@ -20,6 +27,9 @@ pub struct Staging {
     base: PathBuf,
     dir: PathBuf,
     lock: StoreLock,
+    var_lowers: Vec<PathBuf>,
+    /// The base deployment's var-upper when no boot applied it yet, which this deployment's var-upper must carry.
+    carried: Option<PathBuf>,
 }
 
 /// A staging tree complete on disk, ready for `commit`.
@@ -63,13 +73,21 @@ impl Staging {
         if number != base_number && store.path(number).symlink_metadata().is_ok() {
             bail!("deployment {number} already exists");
         }
+        let unapplied = !var_applied(store, &base, base_number) && has_entries(&base.join("var-upper"));
+        let mut carried = None;
         match store.backend() {
             Backend::Snapshot => {
                 run(Command::new("btrfs")
                     .args(["-q", "subvolume", "snapshot"])
                     .arg(&base)
                     .arg(&dir))?;
-                remove_any(&dir.join("var-upper"))?;
+                if unapplied {
+                    fs::rename(dir.join("var-upper"), dir.join(VAR_BASE))
+                        .with_context(|| format!("keeping deployment {base_number}'s /var changes"))?;
+                    carried = Some(dir.join(VAR_BASE));
+                } else {
+                    remove_any(&dir.join("var-upper"))?;
+                }
             }
             Backend::Overlay => {
                 fs::create_dir(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -84,6 +102,9 @@ impl Staging {
                 for tree in OVERLAID {
                     layer_dirs(&dir, tree, &base.join(tree))?;
                 }
+                if unapplied {
+                    carried = Some(base.join("var-upper"));
+                }
             }
         }
         for tree in COPIED {
@@ -91,7 +112,14 @@ impl Staging {
                 fs::create_dir(dir.join(tree)).with_context(|| format!("creating {}", dir.join(tree).display()))?;
             }
         }
-        layer_dirs(&dir, "var", &store.root().join("var"))?;
+        let var_lower = dir.join(VAR_LOWER);
+        private_var(
+            &store.root().join("var"),
+            &crate::system::activate::package_owned(&base.join("pacman")),
+            &var_lower,
+        )?;
+        layer_dirs(&dir, "var", &var_lower)?;
+        let var_lowers = carried.iter().cloned().chain([var_lower]).collect();
         Ok(Staging {
             store: store.clone(),
             number,
@@ -99,6 +127,8 @@ impl Staging {
             base,
             dir,
             lock,
+            var_lowers,
+            carried,
         })
     }
 
@@ -145,12 +175,23 @@ impl Staging {
 
     /// The staging root with live paths bound in, each at an absolute path of the view.
     pub fn transaction_with(&self, binds: &[(PathBuf, PathBuf)]) -> Result<Transaction> {
+        self.view(binds, false)
+    }
+
+    /// The staging root with the signing keys readable, for the boot build's ukify; never for package scriptlets.
+    pub fn signing_transaction(&self) -> Result<Transaction> {
+        self.view(&[], true)
+    }
+
+    fn view(&self, binds: &[(PathBuf, PathBuf)], signing: bool) -> Result<Transaction> {
         mark("deploy-transact");
         Transaction::new(&Layout {
+            signing,
             backend: self.store.backend(),
             root: self.store.root(),
             base: &self.base,
             staging: &self.dir,
+            var_lowers: &self.var_lowers,
             binds,
         })
     }
@@ -180,14 +221,24 @@ impl Staging {
             }
         }
         let var = self.dir.join(".upper/var");
-        for bind in VAR_BINDS {
+        for bind in VAR_BINDS.iter().chain(VAR_LIVE_IF_PRESENT) {
             remove_any(&var.join(bind))?;
         }
         let var_upper = self.dir.join("var-upper");
-        fs::rename(&var, &var_upper).with_context(|| format!("moving {} to {}", var.display(), var_upper.display()))?;
-        for scratch in [".upper", ".work"] {
+        match &self.carried {
+            Some(base_upper) => super::flatten::flatten(base_upper, &var, &var_upper)?,
+            None => fs::rename(&var, &var_upper)
+                .with_context(|| format!("moving {} to {}", var.display(), var_upper.display()))?,
+        }
+        for scratch in [".upper", ".work", VAR_LOWER, VAR_BASE] {
             remove_any(&self.dir.join(scratch))?;
         }
+        let carried_record = self.base.join(crate::system::activate::VAR_BACKUP);
+        crate::system::activate::write_var_backup(
+            &self.dir,
+            &self.base.join("pacman"),
+            self.carried.is_some().then_some(carried_record.as_path()),
+        )?;
         let staged = Staged {
             number: self.number,
             dir: self.dir,
@@ -222,6 +273,71 @@ fn layer_dirs(dir: &Path, tree: &str, lower: &Path) -> Result<()> {
         std::os::unix::fs::PermissionsExt::from_mode(meta.mode() & 0o7777),
     )?;
     super::flatten::set_times(&upper, &meta)
+}
+
+/// Whether a boot of deployment `number` applied its var-upper to the live /var.
+fn var_applied(store: &Store, deployment: &Path, number: u32) -> bool {
+    let state = crate::paths::Paths::under(store.root()).state;
+    crate::system::activate::deployment_id(deployment, number).is_ok_and(|id| state.join("activated").join(id).exists())
+}
+
+fn has_entries(dir: &Path) -> bool {
+    fs::read_dir(dir).is_ok_and(|mut entries| entries.next().is_some())
+}
+
+/// Builds `out`, the view's /var lower layer: a private copy of the entries `owned` names under the live /var and of their parents, so the overlay's lower never changes while it's mounted, as overlayfs requires.
+pub fn private_var(live: &Path, owned: &Owned, out: &Path) -> Result<()> {
+    fs::create_dir(out).with_context(|| format!("creating {}", out.display()))?;
+    copy_entry_meta(live, out)?;
+    for rel in owned.keys() {
+        let mut at = PathBuf::new();
+        for part in rel.iter() {
+            at.push(part);
+            let (from, to) = (live.join(&at), out.join(&at));
+            if let Ok(meta) = fs::symlink_metadata(&to) {
+                if meta.is_dir() {
+                    continue;
+                }
+                break;
+            }
+            let Ok(meta) = fs::symlink_metadata(&from) else { break };
+            let kind = meta.file_type();
+            if kind.is_dir() {
+                fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
+            } else if at != *rel {
+                break;
+            } else if kind.is_symlink() {
+                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)
+                    .with_context(|| format!("creating {}", to.display()))?;
+            } else if kind.is_file() {
+                fs::copy(&from, &to).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+            } else {
+                break;
+            }
+            copy_entry_meta(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Owner, mode, extended attributes and times of `from` onto `to`, neither followed if a symlink.
+fn copy_entry_meta(from: &Path, to: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(from).with_context(|| format!("stat {}", from.display()))?;
+    std::os::unix::fs::lchown(to, Some(meta.uid()), Some(meta.gid()))
+        .with_context(|| format!("chown {}", to.display()))?;
+    if !meta.file_type().is_symlink() {
+        fs::set_permissions(to, std::os::unix::fs::PermissionsExt::from_mode(meta.mode() & 0o7777))
+            .with_context(|| format!("chmod {}", to.display()))?;
+    }
+    for name in super::xattr::list(from).unwrap_or_default() {
+        if super::xattr::is_overlay_private(&name) {
+            continue;
+        }
+        if let Ok(Some(value)) = super::xattr::get(from, &name) {
+            let _ = super::xattr::set(to, &name, &value);
+        }
+    }
+    super::flatten::set_times(to, &meta)
 }
 
 /// The deployment tree an absolute path is in, and the rest of it: /etc/x is ("etc", "x").

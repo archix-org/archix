@@ -41,6 +41,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
                 keep,
                 booted: crate::system::boot::booted_deployment(&paths.root),
                 current: deployments.current()?,
+                chosen: deployments.chosen()?,
                 ..Keep::default()
             },
         };

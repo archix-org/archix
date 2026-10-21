@@ -142,6 +142,35 @@ fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_opt_and_boot_
     );
     // As systemd-remount-fs does after switch_root, for a command line with `ro`.
     sh("mount", &["-o", "remount,rw", sysroot.root().to_str().unwrap()]);
+    let previous = sysroot.root().join("archix/deploy/1/usr");
+    let which = previous.join("which");
+    let before = fs::symlink_metadata(&which).unwrap();
+    for (program, args) in [
+        ("chmod", vec!["-R", "700"]),
+        ("chown", vec!["-R", "nobody"]),
+        ("setfacl", vec!["-R", "-m", "u:nobody:rwx"]),
+        ("setcap", vec!["cap_net_raw+ep"]),
+        ("touch", vec![]),
+    ] {
+        let target = if program == "setcap" || program == "touch" {
+            &which
+        } else {
+            &previous
+        };
+        let out = Command::new(program).args(&args).arg(target).output().unwrap();
+        assert!(
+            !out.status.success() && text(&out).contains("Read-only file system"),
+            "{program} through /archix: {}",
+            text(&out)
+        );
+    }
+    let after = fs::symlink_metadata(&which).unwrap();
+    assert_eq!(
+        (after.mode(), after.uid(), after.ctime(), after.ctime_nsec()),
+        (before.mode(), before.uid(), before.ctime(), before.ctime_nsec())
+    );
+    assert!(xattr_names(&which).is_empty(), "{:?}", xattr_names(&which));
+    assert_eq!(fs::read_to_string(&which).unwrap(), "1");
     for at in ["etc", "var/lib/pacman/local", "var/lib/dkms"] {
         fs::write(sysroot.root().join(at).join("written"), "x").unwrap_or_else(|e| panic!("{at} is writable: {e}"));
     }
@@ -413,6 +442,200 @@ fn two_accounts_sharing_an_id_stop_activation_before_anything_is_applied() {
         "edited live after the commit"
     );
     assert!(!root.join("var/lib/archix/activated").exists());
+}
+
+fn activate(root: &Path, env: &[(&str, &str)]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["deploy-activate", "--root", root.to_str().unwrap()])
+        .envs(env.iter().copied())
+        .output()
+        .unwrap()
+}
+
+#[test]
+#[ignore]
+fn a_backup_listed_var_file_changed_live_is_kept_and_the_packages_version_written_as_pacnew() {
+    let dir = staged_root();
+    let root = dir.path().join("root");
+    let var = root.join("var");
+    let deployment = root.join("archix/deploy/2");
+    let md5 = |text: &str| archix::capture::md5_bytes(text.as_bytes());
+    fs::write(
+        deployment.join("pacman/app-1-1/desc"),
+        "%NAME%\napp\n\n%VERSION%\n1-1\n\n",
+    )
+    .unwrap();
+    fs::write(
+        deployment.join("pacman/app-1-1/files"),
+        format!(
+            "%FILES%\nvar/\nvar/lib/\nvar/lib/app/\nvar/lib/app/helper\nvar/lib/app/seed\nvar/lib/app/pristine\nvar/spool/\n\
+             var/spool/cups/\nvar/spool/cups/tmp/\n\n%BACKUP%\nvar/lib/app/seed\t{}\nvar/lib/app/pristine\t{}\n\n",
+            md5("from the package"),
+            md5("shipped pristine")
+        ),
+    )
+    .unwrap();
+    fs::write(deployment.join("var-upper/lib/app/pristine"), "shipped pristine").unwrap();
+    fs::write(var.join("lib/app/pristine"), "original pristine").unwrap();
+    fs::write(
+        deployment.join("var-backup"),
+        format!(
+            "lib/app/seed\t{}\nlib/app/pristine\t{}\n",
+            md5("original seed"),
+            md5("original pristine")
+        ),
+    )
+    .unwrap();
+    let out = activate(&root, &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(var.join("lib/app/seed")).unwrap(),
+        "edited live after the commit",
+        "an edit made here wins, as pacman keeps it"
+    );
+    assert_eq!(
+        fs::read_to_string(var.join("lib/app/seed.pacnew")).unwrap(),
+        "from the package"
+    );
+    let pacnew = fs::metadata(var.join("lib/app/seed.pacnew")).unwrap();
+    assert_eq!((pacnew.mode() & 0o7777, pacnew.gid()), (0o640, 209));
+    assert_eq!(
+        fs::read_to_string(var.join("lib/app/pristine")).unwrap(),
+        "shipped pristine",
+        "an unchanged one is replaced"
+    );
+    assert!(!var.join("lib/app/pristine.pacnew").exists());
+    assert!(
+        text(&out).contains("/var/lib/app/seed was changed on this machine"),
+        "{}",
+        text(&out)
+    );
+}
+
+/// Every entry under `var` but archix's own state, with type, mode, owner, content and link target.
+fn var_state(var: &Path) -> Vec<String> {
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("find . -path ./lib/archix -prune -o -printf '%p %y %m %U %G %s %l\\n' | sort; find . -path ./lib/archix -prune -o -type f -exec md5sum {} + | sort")
+        .current_dir(var)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn a_power_cut_at_any_step_of_the_var_apply_is_finished_by_the_next_boot() {
+    let reference = staged_root();
+    let out = activate(&reference.path().join("root"), &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let want = var_state(&reference.path().join("root/var"));
+    let mut cut = 0;
+    for step in 1.. {
+        let dir = staged_root();
+        let root = dir.path().join("root");
+        let point = format!("activate-step-{step}");
+        let first = activate(&root, &[("ARCHIX_TEST_CRASH", &point)]);
+        if first.status.success() {
+            break;
+        }
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&first.status),
+            Some(libc::SIGKILL),
+            "{point}: {}",
+            text(&first)
+        );
+        cut += 1;
+        assert!(!root.join("var/lib/archix/activated").exists(), "{point}: marked done");
+        assert!(
+            root.join("var/lib/archix/activating").is_dir(),
+            "{point}: no progress marker"
+        );
+        let again = activate(&root, &[]);
+        assert!(again.status.success(), "{point}: {}", text(&again));
+        assert!(
+            text(&again).contains("cut off at an earlier boot"),
+            "{point}: {}",
+            text(&again)
+        );
+        assert_eq!(var_state(&root.join("var")), want, "after a cut at {point} and a boot");
+        assert_eq!(fs::read_dir(root.join("var/lib/archix/activated")).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(root.join("var/lib/archix/activating")).unwrap().count(), 0);
+    }
+    assert!(cut >= 6, "only {cut} steps were cut");
+}
+
+#[test]
+#[ignore]
+fn failing_hooks_rerun_at_three_boots_then_wait_for_archix_hooks() {
+    let dir = staged_root();
+    let root = dir.path().join("root");
+    let pending = root.join("var/lib/archix/pending-hooks");
+    fs::create_dir_all(&pending).unwrap();
+    fs::write(pending.join("2.json"), r#"{"hooks": {"h": {"run": "false"}}}"#).unwrap();
+    let notes = || fs::read_to_string(root.join("var/lib/archix/notes")).unwrap_or_default();
+    for boot in 1..=3 {
+        let out = activate(&root, &[]);
+        assert!(out.status.success(), "{}", text(&out));
+        assert!(text(&out).contains("hook h"), "boot {boot}: {}", text(&out));
+    }
+    assert!(
+        notes().contains("try 1 of 3") && notes().contains("try 2 of 3"),
+        "{}",
+        notes()
+    );
+    assert!(notes().contains("failed at 3 boots"), "{}", notes());
+    assert!(notes().contains("archix hooks retry"), "{}", notes());
+    let fourth = activate(&root, &[]);
+    assert!(fourth.status.success());
+    assert!(
+        !text(&fourth).contains("hook h") && text(&fourth).contains("don't run at boot any more"),
+        "{}",
+        text(&fourth)
+    );
+    assert!(
+        pending.join("2.json").exists(),
+        "they wait for archix hooks retry or skip"
+    );
+}
+
+#[test]
+#[ignore]
+fn a_failing_sysusers_stops_the_first_boot_until_the_third_try() {
+    let dir = staged_root();
+    let root = dir.path().join("root");
+    // The container's /tmp is noexec, so the failing stand-in lives in /var/tmp.
+    let bin = tempfile::tempdir_in("/var/tmp").unwrap();
+    let sysusers = bin.path().join("systemd-sysusers");
+    fs::write(&sysusers, "#!/bin/sh\necho 'cannot create users' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&sysusers, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", bin.path().display(), std::env::var("PATH").unwrap());
+    let activate = |root: &Path, env: &[(&str, &str)]| {
+        let mut env = env.to_vec();
+        env.push(("PATH", &path));
+        activate(root, &env)
+    };
+    let seed = root.join("var/lib/app/seed");
+    for tried in 1..=2 {
+        let out = activate(&root, &[]);
+        assert!(!out.status.success(), "try {tried}: {}", text(&out));
+        assert!(text(&out).contains(&format!("try {tried} of 3")), "{}", text(&out));
+        assert!(!root.join("var/lib/archix/activated").exists());
+        assert_eq!(fs::read_to_string(&seed).unwrap(), "edited live after the commit");
+    }
+    let notes = fs::read_to_string(root.join("var/lib/archix/notes")).unwrap();
+    assert!(
+        notes.contains("systemd-sysusers failed for deployment 2 (try 2 of 3)"),
+        "{notes}"
+    );
+    let third = activate(&root, &[]);
+    assert!(third.status.success(), "{}", text(&third));
+    assert_eq!(fs::read_dir(root.join("var/lib/archix/activated")).unwrap().count(), 1);
+    let notes = fs::read_to_string(root.join("var/lib/archix/notes")).unwrap();
+    assert!(notes.contains("failed at 3 boots of deployment 2"), "{notes}");
 }
 
 /// A root with systemd's units, a stand-in for the initrd's generated sysroot.mount, archix and the deployment files.
