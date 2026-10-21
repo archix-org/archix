@@ -230,6 +230,12 @@ fn system_on(loop_fs: LoopFs, fs_type: &str) -> (LoopFs, Store) {
     fs::write(dep.join("etc/hostname"), "deployment-1\n").unwrap();
     fs::write(dep.join("etc/passwd"), "root:x:0:0::/root:/bin/sh\n").unwrap();
     fs::write(dep.join("pacman/base-1/desc"), "%NAME%\nbase\n").unwrap();
+    fs::write(
+        dep.join("pacman/base-1/files"),
+        "%FILES%\nvar/\nvar/lib/\nvar/lib/oldstate\nvar/log/\nvar/cache/\nvar/cache/pacman/\nvar/cache/pacman/pkg/\n\
+         var/lib/pacman/\nvar/lib/dkms/\n\n",
+    )
+    .unwrap();
     fs::write(dep.join("boot/archix.efi"), "uki-1").unwrap();
     std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
     esp_with_deployment_1(&root.join("efi"));
@@ -1159,7 +1165,7 @@ fn mounts_under_the_live_var_log_and_cache_are_bound_live_and_others_stay_behind
     let staging = Staging::new(&store, 2).unwrap();
     let script = "grep -qx old /var/log/live.log; echo new >> /var/log/live.log; grep -qx journal /var/log/journal/j; \
         echo fc > /var/cache/fontconfig-probe; echo line >> /var/log/pacman.log; \
-        test ! -e /var/lib/docker/state; echo staged > /var/lib/docker/staged";
+        test ! -e /var/lib/docker/state; mkdir -p /var/lib/docker; echo staged > /var/lib/docker/staged";
     let output = staging.transaction().unwrap().output(&["sh", "-ec", script]).unwrap();
     assert!(output.status.success(), "{}", stderr(&output));
     let staged = staging.finish().unwrap().dir;
@@ -1593,4 +1599,308 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
     assert!(left.is_empty(), "the failed build left {left:?}: {err:#}");
     assert_eq!(store.deployments().unwrap(), vec![1]);
     assert_eq!(store.current().unwrap(), Some(1));
+}
+
+/// Runs `script` in the view with sh -ec and returns its stdout, failing the test when it fails.
+fn in_view(tx: &archix::deploy::Transaction, script: &str) -> String {
+    let output = tx.output(&["sh", "-ec", script]).unwrap();
+    assert!(output.status.success(), "{script}: {}", stderr(&output));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn commit(store: &Store, staging: Staging) {
+    let esp = store.root().join("efi");
+    let boot = SystemdBoot {
+        esp: esp.clone(),
+        uki: PathBuf::from("boot/archix.efi"),
+    };
+    staging.finish().unwrap().commit(store, &esp, &boot).unwrap();
+}
+
+fn kernel_log() -> Option<Vec<String>> {
+    let output = Command::new("dmesg").output().ok()?;
+    output.status.success().then(|| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+#[test]
+#[ignore]
+fn the_views_var_lower_is_a_private_copy_of_what_packages_own_so_a_busy_live_var_never_reaches_it() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let (_fs, store) = system(fs_type);
+        let root = store.root().to_path_buf();
+        fs::write(root.join("var/lib/unowned"), "service state\n").unwrap();
+        let before = kernel_log();
+        let mut busy = Command::new("sh")
+            .arg("-c")
+            .arg(
+                "i=0; while :; do echo $i >> var/log/busy.log; mkdir -p var/lib/busy; echo $i > var/lib/busy/f$i; \
+                 rm -f var/lib/busy/f$((i-3)) var/lib/unowned.$((i-1)); echo $i > var/lib/unowned.$i; i=$((i+1)); done",
+            )
+            .current_dir(&root)
+            .spawn()
+            .unwrap();
+        let staging = Staging::new(&store, 2).unwrap();
+        let tx = staging.transaction().unwrap();
+        let mounts = in_view(&tx, "grep ' /var ' /proc/self/mountinfo");
+        let listing = in_view(
+            &tx,
+            "for i in $(seq 300); do mkdir -p /var/lib/pkgstate; echo $i > /var/lib/pkgstate/f$i; ls /var/lib > /dev/null; done; \
+             test ! -e /var/lib/unowned; test ! -e /var/lib/busy; test ! -e /var/log/busy.log; rm /var/lib/oldstate; ls -A /var/lib",
+        );
+        busy.kill().unwrap();
+        busy.wait().unwrap();
+        let staged = staging.finish().unwrap().dir;
+
+        assert!(
+            mounts.contains(".var-lower") && !mounts.contains(&format!("lowerdir={}/var,", root.display())),
+            "{fs_type}: the live /var is a lower layer: {mounts}"
+        );
+        assert!(
+            !listing.contains("unowned") && !listing.contains("busy"),
+            "{fs_type}: {listing}"
+        );
+        let upper = staged.join("var-upper");
+        assert_eq!(
+            fs::read_dir(upper.join("lib/pkgstate")).unwrap().count(),
+            300,
+            "{fs_type}"
+        );
+        for live in ["lib/busy", "log/busy.log", "lib/unowned"] {
+            assert!(
+                upper.join(live).symlink_metadata().is_err(),
+                "{fs_type}: var-upper has {live}"
+            );
+        }
+        let whiteout = fs::symlink_metadata(upper.join("lib/oldstate")).unwrap();
+        assert!(
+            whiteout.file_type().is_char_device() && whiteout.rdev() == 0,
+            "{fs_type}"
+        );
+        assert!(root.join("var/lib/oldstate").exists() && root.join("var/lib/unowned").exists());
+        assert!(
+            !staged.join(".var-lower").exists(),
+            "{fs_type}: the lower copy is scratch"
+        );
+        if let (Some(before), Some(after)) = (&before, kernel_log()) {
+            let new: Vec<&String> = after
+                .iter()
+                .filter(|line| !before.contains(line) && line.contains("overlay"))
+                .collect();
+            assert!(new.is_empty(), "{fs_type}: overlayfs complained: {new:?}");
+        } else {
+            eprintln!("dmesg can't be read here, so overlayfs warnings go unchecked");
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn a_second_switch_before_the_reboot_builds_on_the_pending_deployment_and_carries_its_var_changes() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let (_fs, store) = system(fs_type);
+        let root = store.root().to_path_buf();
+        let files = store.path(1).join("pacman/base-1/files");
+        let listed = fs::read_to_string(&files).unwrap();
+        fs::write(&files, format!("{listed}%BACKUP%\nvar/lib/conf\told-md5\n\n")).unwrap();
+        fs::write(root.join("var/lib/conf"), "conf\n").unwrap();
+
+        let two = Staging::new(&store, 2).unwrap();
+        let tx = two.transaction().unwrap();
+        in_view(
+            &tx,
+            "mkdir -p /var/lib/two; echo 2 > /var/lib/two/f; echo two > /usr/lib/two; echo deployment-2 > /etc/hostname",
+        );
+        drop(tx);
+        let staged_files = two.tree("pacman").join("base-1/files");
+        let text = fs::read_to_string(&staged_files).unwrap().replace("old-md5", "two-md5");
+        fs::write(&staged_files, text).unwrap();
+        commit(&store, two);
+        assert_eq!(store.current().unwrap(), Some(2));
+        assert_eq!(
+            fs::read_to_string(store.path(2).join("var-backup")).unwrap(),
+            "lib/conf\told-md5\n",
+            "{fs_type}"
+        );
+
+        let three = Staging::new(&store, 3).unwrap();
+        assert_eq!(
+            three.base(),
+            2,
+            "{fs_type}: staged from the pending deployment, not the running one"
+        );
+        let tx = three.transaction().unwrap();
+        in_view(
+            &tx,
+            "test \"$(cat /var/lib/two/f)\" = 2; test -e /usr/lib/two; grep -qx deployment-2 /etc/hostname; \
+             mkdir -p /var/lib/three; echo 3 > /var/lib/three/f",
+        );
+        drop(tx);
+        commit(&store, three);
+        let upper = store.path(3).join("var-upper");
+        assert_eq!(
+            fs::read_to_string(upper.join("lib/two/f")).unwrap(),
+            "2\n",
+            "{fs_type}: 2's /var changes are lost"
+        );
+        assert_eq!(
+            fs::read_to_string(upper.join("lib/three/f")).unwrap(),
+            "3\n",
+            "{fs_type}"
+        );
+        assert_eq!(
+            fs::read_to_string(store.path(3).join("var-backup")).unwrap(),
+            "lib/conf\told-md5\n",
+            "{fs_type}: the hash the live file was installed with, not the pending one's"
+        );
+        assert_eq!(
+            fs::read_to_string(store.path(2).join("var-upper/lib/two/f")).unwrap(),
+            "2\n"
+        );
+
+        let id = archix::system::activate::deployment_id(&store.path(3), 3).unwrap();
+        let state = archix::paths::Paths::under(&root).state;
+        fs::create_dir_all(state.join("activated")).unwrap();
+        fs::write(state.join("activated").join(id), "").unwrap();
+        let four = Staging::new(&store, 4).unwrap();
+        let tx = four.transaction().unwrap();
+        in_view(&tx, "test ! -e /var/lib/two/f; test ! -e /var/lib/three/f");
+        drop(tx);
+        commit(&store, four);
+        assert!(
+            !store.path(4).join("var-upper/lib/two").exists(),
+            "{fs_type}: a booted deployment's /var changes are live already"
+        );
+        assert!(store.path(4).join("var-upper").is_dir());
+    }
+}
+
+#[test]
+#[ignore]
+fn signing_keys_are_hidden_from_everything_in_the_view_but_the_boot_builds_signing_step() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let (_fs, store) = system(fs_type);
+        let root = store.root().to_path_buf();
+        let dep = store.path(1);
+        let files = dep.join("pacman/base-1/files");
+        let listed = fs::read_to_string(&files)
+            .unwrap()
+            .replace("%FILES%\n", "%FILES%\nvar/lib/sbctl/keys/db/db.key\n");
+        fs::write(&files, listed).unwrap();
+        for (path, secret) in [
+            (root.join("var/lib/sbctl/keys/db/db.key"), "SBCTL-SECRET"),
+            (dep.join("usr/share/secureboot/keys/db/db.key"), "OLD-SBCTL-SECRET"),
+            (dep.join("etc/systemd/tpm2-pcr-private-key.pem"), "PCR-SECRET"),
+        ] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, secret).unwrap();
+        }
+        let staging = Staging::new(&store, 2).unwrap();
+        let tx = staging.transaction().unwrap();
+        let script = "for f in /var/lib/sbctl/keys/db/db.key /usr/share/secureboot/keys/db/db.key /etc/systemd/tpm2-pcr-private-key.pem; do \
+                      cat $f 2>/dev/null || true; cp $f /tmp/stolen 2>/dev/null && cat /tmp/stolen || true; done; \
+                      umount /var/lib/sbctl/keys 2>/dev/null || true; umount /etc/systemd/tpm2-pcr-private-key.pem 2>/dev/null || true; \
+                      cat /var/lib/sbctl/keys/db/db.key /etc/systemd/tpm2-pcr-private-key.pem 2>/dev/null || true";
+        let seen = in_view(&tx, script);
+        assert!(!seen.contains("SECRET"), "{fs_type}: a scriptlet read a key: {seen}");
+        let signing = staging.signing_transaction().unwrap();
+        assert_eq!(
+            in_view(&signing, "cat /etc/systemd/tpm2-pcr-private-key.pem"),
+            "PCR-SECRET",
+            "{fs_type}: ukify reads the PCR key"
+        );
+        drop((tx, signing));
+        staging.discard().unwrap();
+    }
+}
+
+/// rename(2) with its errno as the exit status, unlike mv, which copies when a rename crosses devices.
+const RENAME: &str = r#"
+#include <errno.h>
+#include <stdio.h>
+int main(int argc, char **argv) { return rename(argv[1], argv[2]) == 0 ? 0 : errno; }
+"#;
+
+#[test]
+#[ignore]
+fn overlay_quirks_on_ext4_hardlinks_directory_renames_and_flushing() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let usr = store.path(1).join("usr");
+    fs::write(usr.join("lib/hl-a"), "a\n").unwrap();
+    fs::hard_link(usr.join("lib/hl-a"), usr.join("lib/hl-b")).unwrap();
+    fs::write(usr.join("lib/kept-a"), "k\n").unwrap();
+    fs::hard_link(usr.join("lib/kept-a"), usr.join("lib/kept-b")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("rename.c"), RENAME).unwrap();
+    sh(Command::new("cc")
+        .args(["-static", "-O", "-o"])
+        .arg(usr.join("bin/rename2"))
+        .arg(dir.path().join("rename.c")));
+
+    let staging = Staging::new(&store, 2).unwrap();
+    let fsid = |path: &Path| {
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::statfs(c.as_ptr(), &mut stat) }, 0);
+        unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(stat.f_fsid) }
+    };
+    assert_eq!(
+        fsid(&staging.dir().join(".upper")),
+        fsid(store.dir()),
+        "the commit's syncfs of the store flushes the upper layer, which overlayfs itself never fsyncs"
+    );
+    let tx = staging.transaction().unwrap();
+    let status = tx
+        .output(&["rename2", "/usr/share/doc", "/usr/share/doc2"])
+        .unwrap()
+        .status;
+    assert_eq!(
+        status.code(),
+        Some(libc::EXDEV),
+        "renaming a lower directory with redirect_dir=off"
+    );
+    in_view(
+        &tx,
+        "mv /usr/share/doc /usr/share/doc3; echo n > /usr/lib/new-a; ln /usr/lib/new-a /usr/lib/new-b; echo more >> /usr/lib/hl-a",
+    );
+    drop(tx);
+    let new = staging.finish().unwrap().dir;
+    let old = store.path(1);
+    assert!(!new.join("usr/share/doc").exists() && !new.join("usr/share/doc2").exists());
+    assert_eq!(
+        fs::read_to_string(new.join("usr/share/doc3/a")).unwrap(),
+        "a\n",
+        "mv copies instead"
+    );
+    assert_eq!(
+        ino(&new.join("usr/lib/new-a")),
+        ino(&new.join("usr/lib/new-b")),
+        "links made in staging stay links"
+    );
+    assert_eq!(
+        ino(&new.join("usr/lib/kept-a")),
+        ino(&new.join("usr/lib/kept-b")),
+        "untouched links stay links"
+    );
+    assert_eq!(fs::read_to_string(new.join("usr/lib/hl-a")).unwrap(), "a\nmore\n");
+    assert_eq!(
+        fs::read_to_string(new.join("usr/lib/hl-b")).unwrap(),
+        "a\n",
+        "copy-up breaks a hardlink, as the merged overlay showed it, unlike an in-place write on a plain root"
+    );
+    assert_eq!(ino(&new.join("usr/lib/hl-b")), ino(&old.join("usr/lib/hl-b")));
+    assert_eq!(
+        fs::read_to_string(old.join("usr/lib/hl-a")).unwrap(),
+        "a\n",
+        "deployment 1 is untouched"
+    );
+    assert!(old.join("usr/share/doc/a").exists());
 }

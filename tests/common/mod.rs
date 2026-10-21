@@ -71,9 +71,18 @@ fn template() -> PathBuf {
           | tar -C "$t" --xattrs --xattrs-include='*' -xpf -
         install -Dm755 {STATIC_BUILD} "$t/usr/lib/archix/archix-static"
         install -Dm755 {archix} "$t{archix}"
-        touch "$t/.done""#,
+        ln -s /var/lib/pacman/local "$t/pacman""#,
         archix = env!("CARGO_BIN_EXE_archix"),
     ));
+    // The image's layers lost some owners and modes its packages give (setgid tty, setuid dbus), which `archix verify` would rightly report.
+    for problem in archix::deploy::verify::check(Path::new(TEMPLATE)).unwrap() {
+        let path = Path::new(TEMPLATE).join(&problem.path);
+        if problem.what.starts_with("owner") || problem.what.starts_with("mode") {
+            std::os::unix::fs::lchown(&path, Some(problem.uid as u32), Some(problem.gid as u32)).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(problem.mode)).unwrap();
+        }
+    }
+    sh(&format!("rm {TEMPLATE}/pacman; touch {TEMPLATE}/.done"));
     PathBuf::from(TEMPLATE)
 }
 
@@ -219,6 +228,10 @@ impl Machine {
         for (_, at) in archix::system::deploy_boot::TREES {
             Machine::unmount_all(&self.root.join(at));
         }
+        let store = self.root.join("archix");
+        while Machine::mounts_under(&store).contains(&store) {
+            sh(&format!("umount {}", store.display()));
+        }
         let efivar = self.root.join("run/test-efivar");
         match entry {
             Some(entry) => {
@@ -248,6 +261,15 @@ impl Machine {
         assert!(output.status.success(), "deploy-mount failed:\n{text}");
         *self.booted.borrow_mut() = entry.map(str::to_string);
         text
+    }
+
+    /// Makes the machine's /archix, which its boot bound read-only, writable or read-only again, as a test that edits a deployment by hand needs.
+    pub fn store_writable(&self, writable: bool) {
+        let store = self.root.join("archix");
+        if Machine::mounts_under(&store).contains(&store) {
+            let mode = if writable { "rw" } else { "ro" };
+            sh(&format!("mount -o remount,bind,{mode} {}", store.display()));
+        }
     }
 
     /// Runs plain pacman against the machine's running deployment, as `pacman -U` or yay would there, with /usr, /opt and /boot made writable for it.
@@ -497,11 +519,28 @@ pub fn installed(name: &str) -> Option<String> {
 pub fn system_path(path: &str) -> PathBuf {
     let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
     let rel = path.trim_start_matches('/');
+    let booted = fs::read_to_string(root.join("run/archix/deployment")).unwrap_or_default();
     match fs::read_link(root.join("archix/current")) {
+        Ok(target) if target.to_str() == Some(&format!("deploy/{}", booted.trim())) => root.join(rel),
         Ok(target) if archix::system::apply::deployment_tree(path).is_some() => {
             root.join("archix").join(target).join(rel)
         }
         _ => root.join(rel),
+    }
+}
+
+/// Writes `path` of the active machine where `system_path` puts it, by hand as a user would, through /archix when it's in a deployment that isn't running.
+pub fn write_system_path(path: &str, contents: &str) {
+    let file = system_path(path);
+    let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
+    let store = root.join("archix");
+    let protected = file.starts_with(&store) && Machine::mounts_under(&store).contains(&store);
+    if protected {
+        sh(&format!("mount -o remount,bind,rw {}", store.display()));
+    }
+    fs::write(&file, contents).unwrap();
+    if protected {
+        sh(&format!("mount -o remount,bind,ro {}", store.display()));
     }
 }
 

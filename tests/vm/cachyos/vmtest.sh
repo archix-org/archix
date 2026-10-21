@@ -138,7 +138,9 @@ case $stage in
     unchanged "staging the switch adding tree" "$(recall new)"
     [ -d "/archix/deploy/$(recall old)" ] && fail "keep = 2 should have dropped deployment $(recall old)"
     # From here on CachyOS's mirror is unreachable, in every deployment, and pacman's cache is empty, as when a repo has dropped old builds.
-    for hosts in /archix/deploy/*/etc/hosts; do echo "127.0.0.1 mirror.cachyos.org" >> "$hosts"; done
+    # /archix is read-only outside archix's own mount namespace, so the edit gets one too.
+    unshare -m sh -c 'mount -o remount,bind,rw /archix && for hosts in /archix/deploy/*/etc/hosts; do echo "127.0.0.1 mirror.cachyos.org" >> "$hosts"; done' \
+      || fail "editing every deployment's /etc/hosts"
     curl -sf -m 10 -o /dev/null https://mirror.cachyos.org/ && fail "mirror.cachyos.org should be unreachable now"
     rm -f /var/cache/pacman/pkg/*
     say "PASS: CachyOS's mirror is now unreachable and pacman's cache empty"
