@@ -637,6 +637,9 @@ fn after_commit(
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
+    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
+        soft_failures.push(format!("creating home directories: {e:#}"));
+    }
     write_live_files(
         paths,
         number,
@@ -645,9 +648,6 @@ fn after_commit(
         &live_on_change,
         &mut soft_failures,
     );
-    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
-        soft_failures.push(format!("creating home directories: {e:#}"));
-    }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
@@ -1461,10 +1461,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
     }
     let accounts = Accounts::read(&deployment.join("etc"));
-    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
+    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
         flatpak::drop_pending(&paths.state, None);
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));

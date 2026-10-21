@@ -713,6 +713,7 @@ struct Writer {
     uid: u32,
     gid: u32,
     groups: Vec<u32>,
+    home: PathBuf,
 }
 
 /// The owner of `file` at `target` when it's in that owner's own home, or None for a file root writes.
@@ -734,6 +735,7 @@ fn writer(paths: &Paths, target: &Path, file: &ManagedFile, accounts: &Accounts)
         uid,
         gid,
         groups,
+        home,
     }))
 }
 
@@ -854,6 +856,11 @@ fn as_owner(
     let Some(writer) = writer else {
         return work(&saves, None);
     };
+    if fs::symlink_metadata(&writer.home).is_err() {
+        fs::create_dir_all(&writer.home).with_context(|| format!("creating {}", writer.home.display()))?;
+        std::os::unix::fs::lchown(&writer.home, Some(writer.uid), Some(writer.gid))?;
+        fs::set_permissions(&writer.home, fs::Permissions::from_mode(0o700))?;
+    }
     let content = match file.link.is_none() && file.merge.is_none() && !file.sha256.is_empty() {
         true => {
             let blob = blobs::path(paths, &file.sha256);
@@ -1422,6 +1429,22 @@ mod tests {
         );
         drop(held);
         assert!(!lock.exists());
+    }
+
+    #[test]
+    fn a_kde_lock_held_by_a_live_process_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("kdeglobals");
+        let lock = dir.path().join("kdeglobals.lock");
+        let mut holder = Command::new("sleep").arg("1").spawn().unwrap();
+        let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        fs::write(&lock, format!("{}\nkwin\n{}\n", holder.id(), host.trim())).unwrap();
+        let started = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || KdeLock::take(&target).map(drop));
+        holder.wait().unwrap();
+        fs::remove_file(&lock).unwrap();
+        waiter.join().unwrap().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900));
     }
 
     #[test]

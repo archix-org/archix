@@ -306,7 +306,8 @@ fn an_app_writing_a_merged_file_during_the_switch_keeps_its_write() {
     let save = |theme: &str| {
         format!("printf '[General]\\nColorScheme=Old\\n\\n[Icons]\\nTheme={theme}\\n' > {f}.new && mv {f}.new {f}")
     };
-    let hook = mark_hook(&root, "app.sh", "merge-read", &save("Papirus"));
+    let once = format!("[ -e {f}.saved ] && exit 0; touch {f}.saved; {}", save("Papirus"));
+    let hook = mark_hook(&root, "app.sh", "merge-read", &once);
     setup.set_body(
         &[],
         r#"users = { homeuser = {} }, home = { user = "homeuser", files = { [".config/kdeglobals"] = { merge = { format = "kconfig", values = { General = { ColorScheme = "Breeze" } } } } } }"#,
@@ -323,8 +324,8 @@ fn an_app_writing_a_merged_file_during_the_switch_keeps_its_write() {
 
     fs::write(&kde, "[General]\nColorScheme=Old\n").unwrap();
     let holder = format!(
-        "sleep 3 > /dev/null 2>&1 &\nholder=$!\nprintf '%s\\nkwriteconfig6\\n%s\\n' $holder \"$(cat /proc/sys/kernel/hostname)\" > {f}.lock\n\
-         (while kill -0 $holder 2>/dev/null; do sleep 0.1; done; {}; rm -f {f}.lock) > /dev/null 2>&1 &",
+        "(sleep 3; {}; rm -f {f}.lock) > /dev/null 2>&1 &\n\
+         printf '%s\\nkwriteconfig6\\n%s\\n' $! \"$(cat /proc/sys/kernel/hostname)\" > {f}.lock",
         save("Breath")
     );
     let hook = mark_hook(&root, "holder.sh", "merge-start", &holder);
