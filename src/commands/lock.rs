@@ -89,12 +89,24 @@ pub(super) fn current_lock(
         )
     };
     let mut new = resolve_with(&declared.prefer)?;
-    // A DKMS module that came in as a dependency still needs the boot kernel's headers, which only the resolution shows.
-    if let Some(boot) = &declared.boot {
-        let headers = format!("{}-headers", boot.kernel);
-        if new.packages.contains_key("dkms") && !new.packages.contains_key(&headers) {
+    // DKMS builds its modules for every kernel in the staging root that has headers, and only the resolution shows a DKMS module that came in as a dependency.
+    if let Some(boot) = &declared.boot
+        && new.packages.contains_key("dkms")
+    {
+        let (_, db) = archix::resolve::snapshot_conf(&archive, &user_cache()?, date, &declared.repos)?;
+        let in_repos: BTreeSet<String> = declared
+            .repos
+            .iter()
+            .filter_map(|repo| archix::pacman::read_sync_db(&db.join("sync").join(format!("{}.db", repo.name))).ok())
+            .flat_map(|packages| packages.into_keys())
+            .collect();
+        let headers: Vec<String> = kernel_headers(&boot.kernel, new.packages.keys(), &in_repos)
+            .into_iter()
+            .filter(|headers| !new.packages.contains_key(headers))
+            .collect();
+        if !headers.is_empty() {
             let mut prefer = declared.prefer.clone();
-            prefer.push(headers);
+            prefer.extend(headers);
             new = resolve_with(&prefer)?;
             new.prefer = declared.prefer.clone();
         }
@@ -113,6 +125,21 @@ pub(super) fn current_lock(
     review(&git, old.as_ref(), &new, declared.aur_review && !noconfirm, &confirm)?;
     save_lock(target, &mut lockfile, old.as_ref(), &new)?;
     Ok((new, true))
+}
+
+/// The headers DKMS needs: the boot kernel's, and those of every other kernel among `packages` (a linux* package with a -headers package in the repos).
+fn kernel_headers<'a>(
+    boot_kernel: &str,
+    packages: impl Iterator<Item = &'a String>,
+    in_repos: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let others = packages
+        .filter(|name| name.starts_with("linux") && !name.ends_with("-headers") && *name != boot_kernel)
+        .map(|name| format!("{name}-headers"))
+        .filter(|headers| in_repos.contains(headers));
+    std::iter::once(format!("{boot_kernel}-headers"))
+        .chain(others)
+        .collect()
 }
 
 pub(super) fn save_lock(
@@ -548,5 +575,35 @@ mod tests {
             "a file in directories not made yet"
         );
         assert_eq!(mapped("home/config/init.lua"), None);
+    }
+
+    #[test]
+    fn dkms_gets_the_headers_of_every_kernel_not_just_the_boot_one() {
+        let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        let packages = names(&[
+            "linux",
+            "linux-lts",
+            "linux-firmware",
+            "linux-api-headers",
+            "dkms",
+            "glibc",
+        ]);
+        let in_repos: BTreeSet<String> = names(&["linux-headers", "linux-lts-headers", "linux-zen-headers"])
+            .into_iter()
+            .collect();
+        let headers: Vec<String> = kernel_headers("linux", packages.iter(), &in_repos)
+            .into_iter()
+            .collect();
+        assert_eq!(headers, ["linux-headers", "linux-lts-headers"]);
+        let cachyos = names(&["linux-cachyos", "linux-cachyos-lts"]);
+        let in_repos: BTreeSet<String> = names(&["linux-cachyos-headers"]).into_iter().collect();
+        let headers: Vec<String> = kernel_headers("linux-cachyos", cachyos.iter(), &in_repos)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            headers,
+            ["linux-cachyos-headers"],
+            "a kernel without headers in the repos gets none"
+        );
     }
 }
