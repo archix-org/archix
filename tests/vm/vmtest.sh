@@ -228,6 +228,64 @@ case $stage in
     [ "$(ls /efi/loader/entries)" = "$entries" ] || fail "the refused eject changed the boot entries: $(ls /efi/loader/entries)"
     [ -e /etc/systemd/system/archix-boot.service ] || fail "the refused eject removed archix-boot.service"
     say "PASS: eject refuses a system that boots through deployments and changes nothing"
+    next etc-merge
+    systemctl reboot
+    ;;
+  etc-merge)
+    # zsh's install scriptlet appends to /etc/shells in the staged /etc, so a live edit to it is a conflict.
+    archix --host archix-vm install zsh --noconfirm > /dev/console 2>&1 || fail "archix install zsh"
+    pending=$(current)
+    [ "$pending" != "$booted" ] || fail "installing zsh should leave a deployment pending"
+    grep -qx /bin/zsh "/archix/deploy/$pending/etc/shells" || fail "zsh's scriptlet should add it to the staged /etc/shells"
+    for _ in $(seq 50); do systemctl is-active -q archix-etc-merge.service && break; sleep 0.2; done
+    systemctl is-active -q archix-etc-merge.service || fail "the commit should start archix-etc-merge.service: $(systemctl status archix-etc-merge.service --no-pager | tail -5)"
+    echo 'root:etc-merge-vmtest' | chpasswd || fail "chpasswd"
+    grep '^root:' /etc/shadow > "$state/root-shadow"
+    mkdir -p /etc/NetworkManager/system-connections
+    (umask 077 && printf '[connection]\nid=vmtest\ntype=wifi\n\n[wifi-security]\npsk=vmtest-secret\n' > /etc/NetworkManager/system-connections/.vmtest.nmconnection.T3MP)
+    mv /etc/NetworkManager/system-connections/.vmtest.nmconnection.T3MP /etc/NetworkManager/system-connections/vmtest.nmconnection
+    mkdir -p /etc/vmtest-dir/sub && echo "made after the switch" > /etc/vmtest-dir/sub/file
+    echo /bin/vmtest-shell >> /etc/shells
+    for _ in $(seq 50); do grep -qx /bin/vmtest-shell "/archix/deploy/$pending/etc/shells" && break; sleep 0.2; done
+    status=$(archix --host archix-vm status 2>&1)
+    echo "$status" | grep -q "/etc changes carried into the pending deployment $pending" && echo "$status" | grep -q "/etc/shells: changed on the running system" \
+      || fail "status should count the carried changes and the conflict: $status"
+    say "PASS: the watcher carried a password, a connection, a new directory and a conflicting edit into deployment $pending within seconds"
+    echo "$pending" > "$state/pending"
+    next etc-merge-2
+    systemctl reboot
+    ;;
+  etc-merge-2)
+    pending=$(cat "$state/pending")
+    [ "$booted" = "$pending" ] || fail "the restart should boot deployment $pending"
+    grep -qxF "$(cat "$state/root-shadow")" /etc/shadow || fail "the password changed after the switch didn't reach deployment $pending"
+    nm=/etc/NetworkManager/system-connections/vmtest.nmconnection
+    grep -qx psk=vmtest-secret "$nm" && [ "$(stat -c %a "$nm")" = 600 ] || fail "the connection should arrive whole and 0600: $(stat -c %a "$nm" 2>&1)"
+    [ "$(cat /etc/vmtest-dir/sub/file 2>/dev/null)" = "made after the switch" ] || fail "the new directory didn't reach deployment $pending"
+    grep -qx /bin/vmtest-shell /etc/shells || fail "the live edit to /etc/shells should win"
+    grep -qx /bin/zsh /etc/shells.pacnew || fail "deployment $pending's /etc/shells should be /etc/shells.pacnew: $(ls /etc/shells* 2>&1)"
+    status=$(archix --host archix-vm status 2>&1)
+    echo "$status" | grep -q "were carried from deployment" || fail "status should report the merge after the boot: $status"
+    grep -q "didn't shut down cleanly" /var/lib/archix/notes 2>/dev/null && fail "a clean reboot shouldn't leave the power-cut note"
+    say "PASS: after a clean reboot deployment $pending has the password, the connection, the directory and the live /etc/shells, with its own as .pacnew"
+    archix --host archix-vm install bc --noconfirm > /dev/console 2>&1 || fail "archix install bc"
+    pending=$(current)
+    for _ in $(seq 50); do systemctl is-active -q archix-etc-merge.service && break; sleep 0.2; done
+    echo "$pending" > "$state/pending"
+    next etc-merge-3
+    echo "written just before the power went" > /etc/vmtest-power-cut
+    sync -f /etc
+    say "cutting the power inside the /etc merge's window"
+    echo 1 > /proc/sys/kernel/sysrq
+    echo b > /proc/sysrq-trigger
+    ;;
+  etc-merge-3)
+    pending=$(cat "$state/pending")
+    [ "$booted" = "$pending" ] || fail "after the power cut deployment $pending should boot"
+    [ "$(cat /etc/vmtest-power-cut 2>/dev/null)" = "written just before the power went" ] || fail "the boot should carry what the old /etc held on disk"
+    grep -q "didn't shut down cleanly before deployment $pending first booted" /var/lib/archix/notes || fail "the login note should name the window: $(cat /var/lib/archix/notes)"
+    archix --host archix-vm status 2>&1 | grep -q "didn't shut down cleanly" || fail "status should name the window"
+    say "PASS: a power cut inside the window left a login note, and the boot carried the old /etc's last change"
     next done
     say "OK"
     systemctl poweroff
