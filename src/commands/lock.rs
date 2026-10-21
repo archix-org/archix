@@ -408,6 +408,19 @@ pub fn status(target: &Target) -> Result<()> {
             for line in archix::system::activate::boot_failures(&paths.root) {
                 println!("{line}");
             }
+            if let Some(pending) = archix::system::sleep::pending(&paths.root)
+                && archix::system::sleep::drop_in(&paths.root).exists()
+            {
+                println!("{}", archix::system::sleep::note(pending));
+            }
+            if let Some(fallback) = super::switch::read_fallback(&paths).filter(|f| f.to == number) {
+                println!("{}", fallback.note);
+            }
+            if let Some(entry) = archix::system::boot::default_override() {
+                println!(
+                    "warning: systemd-boot's LoaderEntryDefault variable (the boot menu's default, or `bootctl set-default`) names {entry} and overrides archix's default; the next switch clears it, or `sudo bootctl set-default ''` now"
+                );
+            }
         }
         None => println!("no generation yet; `archix switch` creates the first one"),
     }

@@ -127,7 +127,11 @@ impl Staged {
         })();
         if let Err(e) = committed {
             if store.current().ok().flatten() == Some(self.number) {
-                return Err(e);
+                eprintln!(
+                    "warning: deployment {} is committed; flushing failed: {e:#}",
+                    self.number
+                );
+                return Ok(path);
             }
             if let Err(undo) = step.abandon(self.number, previous) {
                 eprintln!(
@@ -143,7 +147,15 @@ impl Staged {
                 )),
             });
         }
-        durable::sync_filesystems_checked(&[store.dir()])?;
+        // Past this point the deployment is committed: a failed flush is a warning, not a failed switch.
+        let flushed = crate::testhooks::fail_at("deploy-commit-final-flush")
+            .and_then(|()| durable::sync_filesystems_checked(&[store.dir()]));
+        if let Err(e) = flushed {
+            eprintln!(
+                "warning: deployment {} is committed; flushing failed: {e:#}",
+                self.number
+            );
+        }
         mark("deploy-done");
         Ok(path)
     }

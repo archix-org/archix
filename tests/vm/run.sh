@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix deployments in QEMU with OVMF; `run.sh` tests the first layout on a booted system, deployments, boot entries, boot counting and Secure Boot, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos.
+# Boots archix deployments in QEMU with OVMF; `run.sh` tests the first layout on a booted system, deployments, boot entries, boot counting and Secure Boot, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` refusing hibernation while a deployment is pending and boot.health_check's fallbacks (a firewall that blocks the network, a pulled cable).
 set -euo pipefail
 suite=${1:-boot}
 case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; it waits for a second release with deployments" >&2; exit 2 ;; esac
@@ -25,4 +25,5 @@ archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" archix-arch-test /vm/build-image.sh
 if [ "$suite" = rollback ] || [ "$suite" = nvidia ] || [ "$suite" = cachyos ] || [ "$suite" = atomic ]; then mounts+=(-e VM_TIMEOUT="${VM_TIMEOUT:-14400}" -e VM_MEM="${VM_MEM:-8192}" -e VM_CPUS="${VM_CPUS:-6}"); fi
 if [ "$suite" = upgrade ]; then mounts+=(-e VM_TIMEOUT=7200); fi
+if [ "$suite" = health ]; then mounts+=(-e VM_TIMEOUT=5400); fi
 docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh

@@ -177,6 +177,9 @@ enum Command {
     /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: make its generation the default
     #[command(hide = true)]
     BootComplete,
+    /// Run by archix-health-check.service before boot-complete.target: check a new deployment's counted boot, and mark its entry bad if it fails
+    #[command(hide = true)]
+    HealthCheck,
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
@@ -464,11 +467,20 @@ fn run() -> Result<ExitCode> {
     // Both run before the root is fully up, so they skip archix's locks and pending-state checks.
     let command = match command {
         Command::DeployMount { root, efivar, run_dir } => {
-            archix::system::deploy_boot::mount(&root, &efivar, &run_dir)?;
+            if let Err(e) = archix::system::deploy_boot::mount(&root, &efivar, &run_dir) {
+                if efivar == std::path::Path::new(archix::system::boot::SELECTED_ENTRY_VAR) {
+                    archix::system::boot::mount_efivars();
+                }
+                archix::system::boot::reboot_counted_try("mounting this boot's deployment", &e, &root, true);
+                return Err(e);
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Command::DeployActivate { root } => {
-            archix::system::activate::activate(&root)?;
+            if let Err(e) = archix::system::activate::activate(&root) {
+                archix::system::boot::reboot_counted_try("activating this boot's deployment", &e, &root, false);
+                return Err(e);
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Command::PruneHidden { root } => {
@@ -506,7 +518,7 @@ fn run() -> Result<ExitCode> {
     let changes_things = needs_root(&command).is_some()
         || matches!(
             command,
-            Command::BootCheck { .. } | Command::BootComplete | Command::DeployFlatpak
+            Command::BootCheck { .. } | Command::BootComplete | Command::DeployFlatpak | Command::HealthCheck
         );
     if needs_root(&command).is_some() {
         leave_login_session();
@@ -577,6 +589,10 @@ fn run() -> Result<ExitCode> {
         Command::DeployFlatpak => {
             commands::deploy_flatpak()?;
             return Ok(ExitCode::SUCCESS);
+        }
+        Command::HealthCheck => {
+            let passed = archix::system::health::run_boot(&archix::paths::Paths::system())?;
+            return Ok(if passed { ExitCode::SUCCESS } else { ExitCode::FAILURE });
         }
         Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
             commands::secure_boot_setup(!no_microsoft)?;
@@ -731,6 +747,7 @@ fn run() -> Result<ExitCode> {
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::BootComplete
+        | Command::HealthCheck
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
