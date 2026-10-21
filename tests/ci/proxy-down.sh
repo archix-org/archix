@@ -10,6 +10,7 @@ for outcome in HIT MISS PASS NOCACHE BAD; do
   printf '%s %s\n' "$outcome" "$(grep -c " $outcome " "$log" || true)"
 done | tee "$state/summary"
 grep ' BAD ' "$log" | sed 's/^/::warning::archive proxy: /' || true
-new=$(sort -u "$state/new" 2> /dev/null | wc -l)
+new=0
+[ ! -f "$state/new" ] || new=$(sort -u "$state/new" | wc -l)
 echo "newly cached files: $new"
 [ "$new" -eq 0 ] || echo "new=true" >> "${GITHUB_OUTPUT:-/dev/null}"

@@ -349,7 +349,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
             .into_iter()
             .filter(|(name, _)| *name != plan.kernel && !name.contains('+')),
     );
-    let in_view = |argv: &[&str], what: &str| -> Result<String> {
+    let in_tx = |tx: &Transaction, argv: &[&str], what: &str| -> Result<String> {
         let output = tx.output(argv)?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -362,6 +362,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     };
+    let in_view = |argv: &[&str], what: &str| in_tx(tx, argv, what);
     in_view(&["rm", "-rf", BUILT], "clearing /boot/archix")?;
     in_view(&["mkdir", "-p", BUILT], "creating /boot/archix")?;
     let os_release = in_view(&["cat", "/etc/os-release"], "reading /etc/os-release")?;
@@ -456,7 +457,10 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
                     }
                 }
                 let argv: Vec<&str> = ukify.iter().map(String::as_str).collect();
-                in_view(&argv, "ukify build")?;
+                match pcr_key {
+                    Some(_) => in_tx(&staging.signing_transaction()?, &argv, "ukify build")?,
+                    None => in_view(&argv, "ukify build")?,
+                };
                 if secure_boot {
                     let file = staging.read_path(Path::new(&output))?;
                     run(

@@ -7,6 +7,7 @@ pub mod keep;
 pub mod layout;
 pub mod stage;
 pub mod store;
+pub mod verify;
 pub mod view;
 pub mod xattr;
 

@@ -16,6 +16,9 @@ use super::{Backend, OVERLAID, OVERLAY_OPTIONS};
 /// Paths inside the view's /var that are bound live or from the staging tree instead of overlaid, so its upper layer never carries them.
 pub const VAR_BINDS: &[&str] = &["log/pacman.log", "cache/pacman/pkg", "lib/pacman/local", "lib/dkms"];
 
+/// Live /var directories bound into the view when they exist: archix's package and build caches, which pacman installs from, and pacman's sync databases.
+pub const VAR_LIVE_IF_PRESENT: &[&str] = &["cache/archix", "lib/pacman/sync"];
+
 /// Mounts at or below these directories of the live /var, such as CachyOS's @log and @cache subvolumes, are bound live into the view; others stay behind the overlay, so their changes wait for activation.
 pub const LIVE_VAR_MOUNTS: &[&str] = &["log", "cache", "tmp"];
 
@@ -30,14 +33,26 @@ pub struct Transaction {
 /// What a staging view is made of, for `Transaction::new`.
 pub struct Layout<'a> {
     pub backend: Backend,
-    /// The real root of the system: its top-level directories and symlinks are mirrored, its var/ is the lower layer of the view's /var.
+    /// The real root of the system: its top-level directories and symlinks are mirrored, its /var mounts and caches are bound live.
     pub root: &'a Path,
+    /// The lower layers of the view's /var, top first; never the live /var, which keeps changing under a mounted overlay.
+    pub var_lowers: &'a [PathBuf],
     /// The deployment being staged from, the lower layer of usr, opt and boot on the overlay backend.
     pub base: &'a Path,
     pub staging: &'a Path,
     /// Live directories or files bound in last, each at an absolute path of the view.
     pub binds: &'a [(PathBuf, PathBuf)],
+    /// Whether `SECRETS` stay readable, for the boot build's own signing step; package scriptlets never run with it.
+    pub signing: bool,
 }
+
+/// Signing keys, relative to the view's root, that nothing run in the view may read but the boot build's signing: sbctl's Secure Boot keys and the PCR policy key.
+pub const SECRETS: &[&str] = &[
+    "var/lib/sbctl/keys",
+    "usr/share/secureboot/keys",
+    "etc/systemd/tpm2-pcr-private-key.pem",
+    "etc/kernel/secure-boot-private-key.pem",
+];
 
 impl Transaction {
     pub fn new(layout: &Layout) -> Result<Transaction> {
@@ -122,6 +137,10 @@ enum Op {
     Touch {
         path: CString,
     },
+    /// Covers a directory with an empty read-only tmpfs, or a file with /dev/null, when it exists.
+    Hide {
+        path: CString,
+    },
 }
 
 struct Step {
@@ -178,7 +197,7 @@ impl Plan {
             }
         }
         plan.bind(&layout.staging.join("etc"), &at("etc"))?;
-        plan.overlay(&live_var, layout.staging, "var", &at("var"))?;
+        plan.overlay_layers(layout.var_lowers, layout.staging, "var", &at("var"))?;
 
         let live_mounts = live_var_mounts(&live_var)?;
         for rel in &live_mounts {
@@ -198,7 +217,11 @@ impl Plan {
         }
 
         prepare_live_var(&live_var)?;
-        for bind in VAR_BINDS {
+        let present = VAR_LIVE_IF_PRESENT
+            .iter()
+            .copied()
+            .filter(|rel| live_var.join(rel).is_dir());
+        for bind in VAR_BINDS.iter().copied().chain(present) {
             if live_mounts.iter().any(|live| Path::new(bind).starts_with(live)) {
                 continue;
             }
@@ -209,7 +232,7 @@ impl Plan {
                 dir.push(part);
                 plan.mkdir(&dir, 0o755, None)?;
             }
-            let source = match *bind {
+            let source = match bind {
                 "lib/pacman/local" => layout.staging.join("pacman"),
                 "lib/dkms" => layout.staging.join("dkms"),
                 live => live_var.join(live),
@@ -268,6 +291,12 @@ impl Plan {
             }
             plan.bind(source, &target)?;
         }
+        if !layout.signing {
+            for secret in SECRETS {
+                let path = view.join(secret);
+                plan.push(Op::Hide { path: c(&path)? }, &format!("hiding {}", path.display()))?;
+            }
+        }
         Ok(plan)
     }
 
@@ -309,9 +338,14 @@ impl Plan {
     }
 
     fn overlay(&mut self, lower: &Path, staging: &Path, tree: &str, target: &Path) -> Result<()> {
+        self.overlay_layers(&[lower.to_path_buf()], staging, tree, target)
+    }
+
+    fn overlay_layers(&mut self, lowers: &[PathBuf], staging: &Path, tree: &str, target: &Path) -> Result<()> {
+        let lowers = lowers.iter().map(|lower| layer(lower)).collect::<Result<Vec<_>>>()?;
         let data = format!(
             "lowerdir={},upperdir={},workdir={},{OVERLAY_OPTIONS}",
-            layer(lower)?,
+            lowers.join(":"),
             layer(&staging.join(".upper").join(tree))?,
             layer(&staging.join(".work").join(tree))?
         );
@@ -486,6 +520,10 @@ impl Plan {
             }
             let command = fork_forwarding()?;
             if command == 0 {
+                // Without it nothing the command runs can mount or unmount, so the covers over SECRETS stay.
+                if libc::prctl(libc::PR_CAPBSET_DROP, CAP_SYS_ADMIN, 0, 0, 0) != 0 {
+                    return Err(say_failed(b"archix: can't drop CAP_SYS_ADMIN in the staging root\n"));
+                }
                 for signal in FORWARDED {
                     libc::signal(signal, libc::SIG_DFL);
                 }
@@ -509,6 +547,9 @@ impl Plan {
 }
 
 const FORWARDED: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
+
+/// The kernel's number for CAP_SYS_ADMIN, which the libc crate doesn't define.
+const CAP_SYS_ADMIN: libc::c_ulong = 21;
 
 static FORWARD_TO: AtomicI32 = AtomicI32::new(0);
 
@@ -644,6 +685,31 @@ impl Step {
                     }
                     libc::close(fd);
                     Ok(())
+                }
+                Op::Hide { path } => {
+                    let mut stat: libc::stat = std::mem::zeroed();
+                    if libc::lstat(path.as_ptr(), &mut stat) != 0 {
+                        return Ok(());
+                    }
+                    if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+                        check(libc::mount(
+                            c"tmpfs".as_ptr(),
+                            path.as_ptr(),
+                            c"tmpfs".as_ptr(),
+                            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC,
+                            c"mode=0700,size=4k".as_ptr().cast(),
+                        ))
+                    } else if stat.st_mode & libc::S_IFMT == libc::S_IFREG {
+                        check(libc::mount(
+                            c"/dev/null".as_ptr(),
+                            path.as_ptr(),
+                            std::ptr::null(),
+                            libc::MS_BIND,
+                            std::ptr::null(),
+                        ))
+                    } else {
+                        Ok(())
+                    }
                 }
             }
         }
