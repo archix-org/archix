@@ -180,6 +180,12 @@ enum Command {
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
+    /// Called by archix's PreTransaction pacman hook: fail, pointing to archix, when plain pacman would change a deployment
+    #[command(hide = true)]
+    PacmanGuard,
+    /// Run by archix-flatpak.service once the network is up: install the Flatpak apps a switch left for this deployment's first boot
+    #[command(hide = true)]
+    DeployFlatpak,
     /// Run by the initramfs: mount the deployment this boot belongs to over the root
     #[command(hide = true)]
     DeployMount {
@@ -449,6 +455,13 @@ fn run() -> Result<ExitCode> {
             archix::integration::write_all(&paths, &exec, &|path| Ok(paths.root.join(path.strip_prefix("/")?)))?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::PacmanGuard => {
+            if archix::integration::pacman_allowed(std::path::Path::new("/")) {
+                return Ok(ExitCode::SUCCESS);
+            }
+            println!("{}", archix::integration::PACMAN_REFUSAL);
+            return Ok(ExitCode::FAILURE);
+        }
         Command::Recover { .. } => anyhow::bail!(
             "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
         ),
@@ -465,8 +478,11 @@ fn run() -> Result<ExitCode> {
             with_sudo()
         );
     }
-    let changes_things =
-        needs_root(&command).is_some() || matches!(command, Command::BootCheck { .. } | Command::BootComplete);
+    let changes_things = needs_root(&command).is_some()
+        || matches!(
+            command,
+            Command::BootCheck { .. } | Command::BootComplete | Command::DeployFlatpak
+        );
     if needs_root(&command).is_some() {
         leave_login_session();
     }
@@ -516,6 +532,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::BootComplete => {
             archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::DeployFlatpak => {
+            commands::deploy_flatpak()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
@@ -661,6 +681,8 @@ fn run() -> Result<ExitCode> {
         Command::Recover { .. }
         | Command::Init { .. }
         | Command::HookRecord
+        | Command::PacmanGuard
+        | Command::DeployFlatpak
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc

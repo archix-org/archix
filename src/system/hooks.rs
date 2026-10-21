@@ -76,6 +76,14 @@ pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeMap<Stri
         .collect()
 }
 
+/// Splits due on_change scripts into those run right after the switch writes their file, on the live system under `root` (files outside the deployment trees whose user exists there), and those left for the deployment's first boot.
+pub fn split_live(due: BTreeMap<String, Hook>, root: &Path) -> (BTreeMap<String, Hook>, BTreeMap<String, Hook>) {
+    due.into_iter().partition(|(path, hook)| {
+        super::apply::deployment_tree(path).is_none()
+            && hook.user.as_ref().is_none_or(|user| account(root, user).is_some())
+    })
+}
+
 /// The on_change scripts and hooks waiting for one deployment's boot, whose activation runs them once its users exist.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Pending {
@@ -337,6 +345,40 @@ mod tests {
         assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
         assert!(run_pending(Path::new("/"), &state, 7).is_empty(), "nothing runs twice");
         assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
+    }
+
+    #[test]
+    fn on_change_of_files_written_live_runs_now_unless_its_user_is_new() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("etc")).unwrap();
+        fs::write(
+            root.path().join("etc/passwd"),
+            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n",
+        )
+        .unwrap();
+        let script = |user: Option<&str>| Hook {
+            run: "true".into(),
+            user: user.map(str::to_string),
+            after: Vec::new(),
+        };
+        let due = BTreeMap::from([
+            ("/etc/a.conf".to_string(), script(None)),
+            ("/usr/local/bin/b".to_string(), script(None)),
+            ("/srv/c".to_string(), script(None)),
+            ("/home/alice/.config/d".to_string(), script(Some("alice"))),
+            ("/home/bob/.config/e".to_string(), script(Some("bob"))),
+        ]);
+        let (live, at_boot) = split_live(due, root.path());
+        assert_eq!(
+            live.keys().collect::<Vec<_>>(),
+            ["/home/alice/.config/d", "/srv/c"],
+            "files written at the switch whose user exists run now"
+        );
+        assert_eq!(
+            at_boot.keys().collect::<Vec<_>>(),
+            ["/etc/a.conf", "/home/bob/.config/e", "/usr/local/bin/b"],
+            "deployment files, and a user only the new deployment has, wait for the boot"
+        );
     }
 
     #[test]

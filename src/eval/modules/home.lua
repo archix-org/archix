@@ -33,7 +33,7 @@ return {
           on_change = archix.option {
             type = t.nullable(t.lines),
             default = archix.null,
-            description = "A bash script run as home.user after a switch or rollback that changed this file, before the hooks.",
+            description = "A bash script run as home.user right after a switch or rollback writes a change to this file, which it does once the deployment is committed, so a reload signal reaches the running app; when the same switch creates home.user, it runs at the new deployment's first boot instead.",
           },
           mutable = archix.option {
             type = t.nullable(t.bool),
@@ -50,7 +50,7 @@ return {
           },
         }),
         default = {},
-        description = "Files in the user's home, keyed by path relative to it (a leading ~/ is allowed).",
+        description = "Files in the user's home, keyed by path relative to it (a leading ~/ is allowed); written once a switch commits, without waiting for the boot.",
       },
       systemd = archix.option {
         type = t.attrs_of(t.attrs_of(t.any)),

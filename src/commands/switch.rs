@@ -261,6 +261,13 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
+    if !flatpak::available() && lock.packages.contains_key("flatpak") {
+        flatpak_lines = declared
+            .flatpak_apps
+            .iter()
+            .map(|(_, id)| format!("flatpak    install {id} at the new deployment's first boot, which brings flatpak"))
+            .collect();
+    }
 
     let (mut changes, warned, kept) = select_changes(
         &lock.packages,
@@ -511,8 +518,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         };
         first_layout(&paths, &boot, &first)?;
         if nothing_changes {
-            let due = system::hooks::due(&system_change, &rewritten);
-            if let Err(e) = system::hooks::defer(&paths.state, 1, &due, &system_change.to.hooks) {
+            let (live, at_boot) =
+                system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
+            if let Err(e) = system::hooks::defer(&paths.state, 1, &at_boot, &system_change.to.hooks) {
                 soft_failures.push(format!("recording the hooks for deployment 1's boot: {e:#}"));
             }
             return after_commit(
@@ -524,6 +532,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
                 1,
                 &system_change,
                 &previous_flatpak,
+                live,
                 Vec::new(),
                 soft_failures,
             );
@@ -544,7 +553,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     if system::boot::booted_deployment(&paths.root) != Some(base) {
         due.extend(system::hooks::pending(&paths.state, base).on_change);
     }
-    due.extend(system::hooks::due(&system_change, &rewritten));
+    let (live, at_boot) = system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
+    due.extend(at_boot);
     system::hooks::defer(&paths.state, number, &due, &system_change.to.hooks)?;
     eprintln!(":: building deployment {number} from deployment {base}");
     let made = deploy::build::build(
@@ -578,9 +588,34 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         number,
         &system_change,
         &previous_flatpak,
+        live,
         made.users,
         soft_failures,
     )
+}
+
+/// Writes the managed files outside the deployment trees, then runs the on_change scripts of those that changed; when the write fails, the scripts wait for the deployment's boot instead.
+fn write_live_files(
+    paths: &Paths,
+    number: u32,
+    change: &SystemChange,
+    accounts: &Accounts,
+    on_change: &BTreeMap<String, system::Hook>,
+    soft_failures: &mut Vec<String>,
+) {
+    if let Err(e) = system::apply::files(paths, change, &live_place(paths), accounts) {
+        soft_failures.push(format!("writing files outside the deployment: {e:#}"));
+        if let Err(e) = system::hooks::defer(&paths.state, number, on_change, &change.to.hooks) {
+            soft_failures.push(format!(
+                "recording on_change scripts for deployment {number}'s boot: {e:#}"
+            ));
+        }
+        return;
+    }
+    if !on_change.is_empty() {
+        eprintln!(":: running the on_change scripts of files written now");
+    }
+    soft_failures.extend(system::hooks::run(&paths.root, on_change, &BTreeMap::new()));
 }
 
 /// Everything a switch does once its deployment is committed: config writes, files outside the deployment, homes, Flatpak apps, hooks and gc; failures here are soft.
@@ -594,6 +629,7 @@ fn after_commit(
     number: u32,
     system_change: &SystemChange,
     previous_flatpak: &BTreeMap<String, LockedApp>,
+    live_on_change: BTreeMap<String, system::Hook>,
     users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
@@ -601,9 +637,14 @@ fn after_commit(
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
-    if let Err(e) = system::apply::files(paths, system_change, &live_place(paths), &accounts) {
-        soft_failures.push(format!("writing files outside the deployment: {e:#}"));
-    }
+    write_live_files(
+        paths,
+        number,
+        system_change,
+        &accounts,
+        &live_on_change,
+        &mut soft_failures,
+    );
     if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
@@ -622,7 +663,15 @@ fn after_commit(
             eprintln!("warning: couldn't download {}.db for pacman: {e:#}", repo.name);
         }
     }
-    soft_failures.extend(finish_flatpak(target, declared, lock, store, number, previous_flatpak)?);
+    soft_failures.extend(finish_flatpak(
+        target,
+        declared,
+        lock,
+        store,
+        &deployment,
+        number,
+        previous_flatpak,
+    )?);
     super::lock::write_deferred()?;
     if let Err(e) = carry_config(target.config_dir, paths, &deployment) {
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
@@ -864,18 +913,45 @@ fn broken_builds(
         .collect())
 }
 
-/// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
+/// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them; when flatpak comes only with the new deployment, leaves that to its first boot.
 fn finish_flatpak(
     target: &Target,
     declared: &Declared,
     lock: &mut HostLock,
     store: &Store,
+    deployment: &Path,
     number: u32,
     previous: &BTreeMap<String, LockedApp>,
 ) -> Result<Vec<String>> {
+    let state = &Paths::system().state;
     if declared.flatpak_apps.is_empty() && previous.is_empty() {
+        flatpak::drop_pending(state, None);
         return Ok(Vec::new());
     }
+    if !flatpak::available() && deployment.join("usr/bin/flatpak").exists() {
+        let remotes = declared
+            .flatpak_remotes
+            .iter()
+            .filter(|(name, _)| declared.flatpak_apps.iter().any(|(remote, _)| remote == *name))
+            .map(|(name, remote)| (name.clone(), remote.clone()))
+            .collect();
+        let pending = flatpak::Pending {
+            config_dir: std::path::absolute(target.config_dir)?,
+            host: target.host.to_string(),
+            apps: declared.flatpak_apps.clone(),
+            remotes,
+            locked: lock.flatpak.clone(),
+            previous: previous.clone(),
+        };
+        flatpak::defer(state, number, &pending)?;
+        let ids: Vec<&str> = declared.flatpak_apps.iter().map(|(_, id)| id.as_str()).collect();
+        println!(
+            "flatpak comes with deployment {number}, so deployment {number}'s first boot installs them once the network is up: {}",
+            ids.join(", ")
+        );
+        return Ok(Vec::new());
+    }
+    flatpak::drop_pending(state, None);
     ensure_flatpak_remotes(declared)?;
     let mut failures = settle_flatpak(target, declared, lock, true, false)?;
     let mut generation = store.get(number)?;
@@ -1375,12 +1451,8 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.extend(made.failures);
         users = made.users;
     }
-    let hooks = system::hooks::defer(
-        &paths.state,
-        number,
-        &system::hooks::due(&current_change, &BTreeSet::new()),
-        &generation.system.hooks,
-    );
+    let (live, at_boot) = system::hooks::split_live(system::hooks::due(&current_change, &BTreeSet::new()), &paths.root);
+    let hooks = system::hooks::defer(&paths.state, number, &at_boot, &generation.system.hooks);
     if let Err(e) = hooks {
         soft_failures.push(format!("recording the hooks for deployment {number}'s boot: {e:#}"));
     }
@@ -1389,13 +1461,12 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
     }
     let accounts = Accounts::read(&deployment.join("etc"));
-    if let Err(e) = system::apply::files(&paths, &current_change, &live_place(&paths), &accounts) {
-        soft_failures.push(format!("writing files outside the deployment: {e:#}"));
-    }
+    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
+        flatpak::drop_pending(&paths.state, None);
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
@@ -1529,6 +1600,65 @@ pub fn hook_record() {
         Ok(None) => {}
         Err(e) => println!("archix: could not record this transaction: {e:#}"),
     }
+}
+
+/// Run by archix-flatpak.service once the network is up: installs the Flatpak apps left for the booted deployment, records their commits in its generation and in archix.lock, and keeps the record for the next boot if anything failed.
+pub fn deploy_flatpak() -> Result<()> {
+    let paths = Paths::system();
+    let Some(number) = system::boot::booted_deployment(&paths.root) else {
+        return Ok(());
+    };
+    let Some(mut pending) = flatpak::pending(&paths.state, number) else {
+        return Ok(());
+    };
+    let ids: Vec<&str> = pending.apps.iter().map(|(_, id)| id.as_str()).collect();
+    println!(
+        "archix: installing deployment {number}'s Flatpak apps: {}",
+        ids.join(", ")
+    );
+    let (locked, mut failures) = flatpak::install_pending(&pending);
+    let store = Store::new(&paths);
+    if let Ok(mut generation) = store.get(number)
+        && generation.flatpak != locked
+    {
+        generation.flatpak = locked.clone();
+        if let Err(e) = store.update(&generation) {
+            failures.push(format!("recording the commits in generation {number}: {e:#}"));
+        }
+    }
+    let lock_path = pending.config_dir.join(archix::lock::LOCK_FILE);
+    let newly: Vec<(&String, &LockedApp)> = locked
+        .iter()
+        .filter(|(id, _)| !pending.locked.contains_key(*id))
+        .collect();
+    if !newly.is_empty()
+        && let Err(e) = archix::lock::Lockfile::load(&lock_path).and_then(|mut lockfile| {
+            let Some(host) = lockfile.hosts.get_mut(&pending.host) else {
+                return Ok(());
+            };
+            for (id, app) in &newly {
+                host.flatpak.entry((*id).clone()).or_insert_with(|| (*app).clone());
+            }
+            super::lock::write_config(&lock_path, lockfile.render().as_bytes())
+        })
+    {
+        failures.push(format!("writing the commits to {}: {e:#}", lock_path.display()));
+    }
+    if failures.is_empty() {
+        flatpak::drop_pending(&paths.state, Some(number));
+        return Ok(());
+    }
+    pending.locked = locked;
+    let _ = flatpak::defer(&paths.state, number, &pending);
+    let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+    for failure in &failures {
+        println!("archix: flatpak: {failure}; it's tried again at the next boot");
+        notes.push_str(&format!(
+            "archix: at boot, flatpak: {failure}; it's tried again at the next boot\n"
+        ));
+    }
+    let _ = archix::durable::write(&paths.notes(), notes.as_bytes());
+    bail!("installing deployment {number}'s Flatpak apps failed")
 }
 
 /// Run by `archix prune-hidden` in its own mount namespace.

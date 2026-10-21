@@ -57,6 +57,103 @@ fn installed_commit() -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Hides the container's flatpak, which plays the running system's, until dropped.
+struct NoFlatpak;
+
+impl NoFlatpak {
+    fn new() -> NoFlatpak {
+        sh("mount --bind /dev/null /usr/bin/flatpak");
+        NoFlatpak
+    }
+}
+
+impl Drop for NoFlatpak {
+    fn drop(&mut self) {
+        let _ = Command::new("umount").arg("/usr/bin/flatpak").status();
+    }
+}
+
+#[test]
+#[ignore]
+fn apps_declared_with_flatpak_itself_install_at_the_new_deployments_first_boot() {
+    let _system = lock_system();
+    pacman(&["-S", "--needed", "flatpak"]);
+    pacman(&["-D", "--asdeps", "flatpak"]);
+    let first = publish_hello(1);
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    assert!(
+        !setup
+            .machine
+            .deployment(setup.machine.current().unwrap())
+            .join("usr/bin/flatpak")
+            .exists(),
+        "the running deployment has no flatpak"
+    );
+
+    let hidden = NoFlatpak::new();
+    let body = format!(
+        "flatpak = {{ apps = {{ \"local:org.archix.Hello\" }}, remotes = {{ [\"local\"] = {{ url = \"file://{REPO}/repo\", gpg_verify = false }} }} }}"
+    );
+    setup.set_body(&[], &body);
+    let output = setup.run(&["switch", "--noconfirm"]);
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{out}");
+    let number = setup.machine.current().unwrap();
+    assert!(
+        out.contains("flatpak    install org.archix.Hello at the new deployment's first boot")
+            && out.contains(&format!("deployment {number}'s first boot installs them")),
+        "the switch says when the app comes: {out}"
+    );
+    assert!(setup.machine.deployment(number).join("usr/bin/flatpak").exists());
+    drop(hidden);
+    assert_eq!(installed_commit(), None, "nothing is installed before the boot");
+
+    let unit = setup
+        .machine
+        .deployment(number)
+        .join("etc/systemd/system/archix-flatpak.service");
+    let unit = std::fs::read_to_string(&unit).unwrap_or_default();
+    assert!(
+        unit.contains("After=network-online.target") && unit.contains("deploy-flatpak"),
+        "{unit}"
+    );
+    setup.machine.reboot(Some(&format!("archix-{number}.conf")));
+    setup.ok(&["deploy-activate", "--root", setup.machine.root.to_str().unwrap()]);
+    let out = setup.ok(&["deploy-flatpak"]);
+    assert!(out.contains("org.archix.Hello"), "{out}");
+    assert_eq!(installed_commit().as_deref(), Some(first.as_str()));
+    assert_eq!(
+        setup.lock().flatpak["org.archix.Hello"].commit,
+        first,
+        "the boot locks the commit it installed"
+    );
+    assert!(
+        setup
+            .ok(&["diff"])
+            .contains("the system matches the lock and the config"),
+        "the generation records it too"
+    );
+    publish_hello(2);
+    setup.ok(&["deploy-flatpak"]);
+    assert_eq!(
+        installed_commit().as_deref(),
+        Some(first.as_str()),
+        "it runs once per deployment"
+    );
+
+    sh(&format!(
+        "flatpak uninstall --system -y --noninteractive --all >/dev/null || true
+         flatpak remote-delete --system --force local || true
+         flatpak remote-delete --system --force build || true
+         rm -rf {REPO}"
+    ));
+}
+
 #[test]
 #[ignore]
 fn flatpak_apps_are_locked_to_commits_and_roll_back() {

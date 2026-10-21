@@ -711,6 +711,90 @@ fn upgrade_lemon_behind_archix(machine: &Machine) {
     machine.pacman(&["-U", file.to_str().unwrap()]);
 }
 
+/// Plain pacman on the machine's running deployment as it is, read-only /usr and all, through `sudo` as yay runs it; returns whether it succeeded and what it printed.
+fn plain_pacman(machine: &Machine, args: &[&str]) -> (bool, String) {
+    let root = machine.root.display().to_string();
+    let output = Command::new("sudo")
+        .args(["pacman", "--root", &root, "--dbpath", &format!("{root}/var/lib/pacman")])
+        .args(["--config", &format!("{root}/etc/pacman.conf")])
+        .args(["--hookdir", &format!("{root}/etc/pacman.d/hooks")])
+        .args(args)
+        .arg("--noconfirm")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.success(), text)
+}
+
+#[test]
+#[ignore]
+fn plain_pacman_on_a_deployment_points_to_archix_and_reading_still_works() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], "");
+    let conf = setup.machine.root.join("etc/pacman.conf");
+    let arch_default = fs::read_to_string(&conf).unwrap().replace("#CheckSpace", "CheckSpace");
+    fs::write(&conf, arch_default).unwrap();
+    setup.lay_out();
+    let laid_out = fs::read_to_string(system_path("/etc/pacman.conf")).unwrap();
+    assert!(
+        !laid_out.lines().any(|line| line.trim() == "CheckSpace"),
+        "alpm's space check would stop at the read-only /usr before the hook: {laid_out}"
+    );
+    let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");
+    if !file.exists() {
+        assert!(
+            archix::archive::Archive::new(archix::archive::ARCHIVE_URL)
+                .fetch(LEMON_URL, &file)
+                .unwrap()
+        );
+    }
+    let status = Command::new("cp")
+        .args(["-a", "/var/lib/pacman/sync"])
+        .arg(setup.machine.root.join("var/lib/pacman/"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for args in [&["-U", file.to_str().unwrap()][..], &["-R", "lemon"], &["-S", "tree"]] {
+        let (ok, out) = plain_pacman(&setup.machine, args);
+        assert!(!ok, "pacman {args:?} changed a deployment: {out}");
+        assert!(
+            out.contains("archix install <package>")
+                && out.contains("archix upgrade")
+                && out.contains("archix switch")
+                && !out.contains("mounted read only"),
+            "pacman {args:?}: {out}"
+        );
+    }
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
+    assert!(installed("tree").is_none());
+
+    let downloads = tempfile::tempdir().unwrap();
+    fs::set_permissions(downloads.path(), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let cachedir = downloads.path().to_str().unwrap();
+    for args in [
+        &["-Q", "lemon"][..],
+        &["-Qi", "lemon"],
+        &["-Ss", "^lemon$"],
+        &["-Si", "lemon"],
+        &["-Sw", "--cachedir", cachedir, "lemon"],
+    ] {
+        let (ok, out) = plain_pacman(&setup.machine, args);
+        assert!(ok && !out.contains("archix install"), "pacman {args:?}: {out}");
+    }
+    assert!(fs::read_dir(downloads.path()).unwrap().count() > 0, "-Sw downloaded");
+
+    setup.set_body(&["lemon", "tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        installed("tree").is_some(),
+        "archix's own pacman runs in the staging root, which the hook lets through"
+    );
+}
+
 #[test]
 #[ignore]
 fn manual_upgrades_are_recorded_and_adopted_as_pins() {

@@ -1,12 +1,14 @@
 //! System-wide Flatpak apps locked to exact commits, driven through the flatpak CLI.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Remote {
     pub url: String,
     pub gpg_verify: bool,
@@ -219,6 +221,82 @@ pub fn sync(target: &BTreeMap<String, LockedApp>, previous: &BTreeMap<String, Lo
         attempt(&["uninstall", "--system", "-y", "--noninteractive", "--unused"]);
     }
     failures
+}
+
+/// Where switches leave Flatpak apps for a deployment that brings flatpak itself, which archix-flatpak.service installs at its first boot.
+pub const PENDING_DIR: &str = "/var/lib/archix/pending-flatpak";
+
+/// The Flatpak apps a deployment's first boot installs, as the switch that built it declared them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    /// The config directory and host whose archix.lock gets the commits of apps locked at the boot.
+    pub config_dir: PathBuf,
+    pub host: String,
+    /// Every declared app as (remote, id).
+    pub apps: Vec<(String, String)>,
+    pub remotes: BTreeMap<String, Remote>,
+    /// The apps locked already; the boot locks the rest at their remote's current commit.
+    pub locked: BTreeMap<String, LockedApp>,
+    /// What the generation before had, whose apps the new one dropped are uninstalled.
+    pub previous: BTreeMap<String, LockedApp>,
+}
+
+pub fn pending_path(state: &Path, number: u32) -> PathBuf {
+    state.join("pending-flatpak").join(format!("{number}.json"))
+}
+
+/// What deployment `number`'s first boot installs; an unreadable record is kept aside and installs nothing.
+pub fn pending(state: &Path, number: u32) -> Option<Pending> {
+    let path = pending_path(state, number);
+    let text = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&text)
+        .inspect_err(|e| {
+            eprintln!(
+                "warning: {} is unreadable ({e}); it's kept as .unreadable",
+                path.display()
+            );
+            let _ = fs::rename(&path, path.with_extension("unreadable"));
+        })
+        .ok()
+}
+
+pub fn defer(state: &Path, number: u32, pending: &Pending) -> Result<()> {
+    let path = pending_path(state, number);
+    crate::durable::write(&path, serde_json::to_string_pretty(pending)?.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Drops what waits for deployment `number`'s boot, or for every deployment's: a switch or rollback that syncs the apps itself supersedes it.
+pub fn drop_pending(state: &Path, number: Option<u32>) {
+    match number {
+        Some(number) => {
+            let _ = fs::remove_file(pending_path(state, number));
+        }
+        None => {
+            let _ = fs::remove_dir_all(state.join("pending-flatpak"));
+        }
+    }
+}
+
+/// At the first boot: adds the remotes, locks the apps not locked yet and installs and pins them all; returns the apps as locked and what failed.
+pub fn install_pending(pending: &Pending) -> (BTreeMap<String, LockedApp>, Vec<String>) {
+    let mut failures = Vec::new();
+    if let Err(e) = ensure_remotes(&pending.remotes) {
+        failures.push(format!("{e:#}"));
+    }
+    let mut locked = pending.locked.clone();
+    for (remote, id) in &pending.apps {
+        if !locked.contains_key(id) {
+            match latest(remote, id) {
+                Ok(app) => {
+                    locked.insert(id.clone(), app);
+                }
+                Err(e) => failures.push(format!("{id}: {e:#}")),
+            }
+        }
+    }
+    failures.extend(sync(&locked, &pending.previous));
+    (locked, failures)
 }
 
 #[cfg(test)]

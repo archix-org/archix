@@ -496,6 +496,23 @@ fn the_units_verify_without_ordering_cycles() {
     assert!(boot.starts_with("exit Some(0)") && !boot.contains("cycle"), "{boot}");
     assert!(!boot.contains("archix"), "{boot}");
 
+    let (path, flatpak) = archix::integration::boot_files(Path::new("/usr/bin/archix"))
+        .into_iter()
+        .find(|(path, _)| path.ends_with("archix-flatpak.service"))
+        .expect("a unit installs Flatpak apps at a deployment's first boot");
+    let unit = dir.path().join(path.strip_prefix("/").unwrap());
+    sh("chmod", &["-R", "u+w", dir.path().to_str().unwrap()]);
+    fs::write(&unit, flatpak).unwrap();
+    sh("chmod", &["-R", "go-w", dir.path().to_str().unwrap()]);
+    let online = verify(
+        dir.path(),
+        &[path.to_str().unwrap(), "/usr/lib/systemd/system/multi-user.target"],
+    );
+    assert!(
+        online.starts_with("exit Some(0)") && !online.contains("cycle"),
+        "{online}"
+    );
+
     // The prototype's first unit: ordered before systemd-sysusers.service, which runs before local-fs.target.
     let cyclic = unit_root(|unit| {
         unit.replace(

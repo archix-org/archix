@@ -16,7 +16,7 @@ local text_file = t.submodule {
   on_change = archix.option {
     type = t.nullable(t.lines),
     default = archix.null,
-    description = "A bash script run as root after a switch or rollback that changed this file, before the hooks.",
+    description = "A bash script run as root when a switch or rollback changed this file: for a file in /etc, /usr, /opt or /boot, at the new deployment's first boot, before networking and before the hooks; for a file elsewhere, which is written right away, right after it's written.",
   },
   mutable = archix.option {
     type = t.nullable(t.bool),
@@ -38,7 +38,7 @@ return {
     files = archix.option {
       type = t.attrs_of(text_file),
       default = {},
-      description = "Files archix writes, keyed by absolute path; give one of text, source, link, url or merge. Files archix replaces are backed up and restored when they leave the config.",
+      description = "Files archix writes, keyed by absolute path; give one of text, source, link, url or merge. Files in /etc, /usr, /opt and /boot go into the new deployment and take effect at the next boot; files elsewhere are written once the switch commits. Files archix replaces are backed up and restored when they leave the config.",
     },
     mutable_files = archix.option {
       type = t.bool,
@@ -52,7 +52,7 @@ return {
       default = {},
       description = "System units to enable (true) or disable (false) in the next deployment; they start or stop at the next boot.",
     },
-    user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user." },
+    user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user in the next deployment; they start or stop at the next boot." },
     sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf and applied at the next boot." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules." },
     modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf." },

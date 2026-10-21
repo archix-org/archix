@@ -153,6 +153,11 @@ fn mount_flags(path: &Path) -> Result<libc::c_ulong> {
     Ok(stat.f_flag)
 }
 
+/// Whether the mount holding `path` is read-only; an unreadable one counts as writable.
+pub fn read_only(path: &Path) -> bool {
+    mount_flags(path).is_ok_and(|flags| flags & libc::ST_RDONLY != 0)
+}
+
 /// The kernel's statvfs flag for relatime, which the libc crate defines only for glibc and the static binary is musl.
 const ST_RELATIME: libc::c_ulong = 0x1000;
 

@@ -11,7 +11,7 @@ return {
       enable = archix.option {
         type = t.bool,
         default = false,
-        description = "An nftables firewall in its own `inet archix` table, loaded by archix-firewall.service. Incoming traffic is dropped unless it answers outgoing traffic or something below allows it; other tables (Docker's, Tailscale's) are left alone.",
+        description = "An nftables firewall in its own `inet archix` table, loaded by archix-firewall.service; like every change to it, it applies at the next boot. Incoming traffic is dropped unless it answers outgoing traffic or something below allows it; other tables (Docker's, Tailscale's) are left alone.",
       },
       allowed_tcp_ports = archix.option { type = t.list_of(t.int), default = {}, description = "TCP ports open to everyone." },
       allowed_udp_ports = archix.option { type = t.list_of(t.int), default = {}, description = "UDP ports open to everyone." },
