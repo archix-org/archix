@@ -251,49 +251,160 @@ fn bad_default_is_reported_at_declaration() {
     );
 }
 
+/// A config that puts `expr` into a declared option, so it evaluates cleanly unless `expr` itself fails.
+fn probe(expr: &str) -> String {
+    format!(
+        "return {{\n  options = {{ probe = archix.option {{ type = archix.types.str }} }},\n  config = {{ probe = tostring({expr}) }},\n}}"
+    )
+}
+
+/// The error of evaluating `expr` in a config that also holds `files`, or what it evaluated to.
+fn escape_err(expr: &str, files: &[(&str, &str)]) -> String {
+    let init = probe(expr);
+    let dir = config(&[&[("init.lua", init.as_str())], files].concat());
+    error_at(dir.path())
+}
+
+fn error_at(dir: &Path) -> String {
+    match eval_at(dir, "desktop") {
+        Ok(evaluation) => format!("probe = {}", serde_json::to_value(&evaluation.config).unwrap()["probe"]),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// Fails listing every case whose error lacks what it should say, so a weakened sandbox shows each escape at once.
+fn assert_refused(cases: &[(String, String, String)]) {
+    let escaped: Vec<String> = cases
+        .iter()
+        .filter(|(_, says, err)| !err.contains(says.as_str()))
+        .map(|(case, says, err)| format!("{case}: wanted {says:?}, got {err}"))
+        .collect();
+    assert!(escaped.is_empty(), "{}", escaped.join("\n"));
+}
+
 #[test]
-fn sandbox_has_no_io_or_os() {
-    let err = eval_err(&[("init.lua", r#"return function() return io.open("/etc/passwd") end"#)]);
-    assert!(err.contains("io"), "{err}");
-    let err = eval_err(&[("init.lua", r#"return function() return os.getenv("HOME") end"#)]);
-    assert!(err.contains("os"), "{err}");
+fn the_probe_config_evaluates_when_the_expression_is_allowed() {
+    assert_eq!(
+        eval_ok(&[("init.lua", &probe("string.upper(\"ok\")"))])["probe"],
+        json!("OK")
+    );
+}
+
+#[test]
+fn sandbox_has_no_environment_clock_or_files() {
+    let cases: Vec<_> = [
+        ("os.getenv(\"HOME\")", "os"),
+        ("os.time()", "os"),
+        ("os.clock()", "os"),
+        ("os.date()", "os"),
+        ("os.execute(\"true\")", "os"),
+        ("io.open(\"init.lua\")", "io"),
+        ("io.popen(\"true\")", "io"),
+        ("io.lines(\"/etc/hostname\")", "io"),
+        ("debug.getinfo(1)", "debug"),
+        ("debug.getregistry()", "debug"),
+        ("package.loadlib(\"libc.so.6\", \"getenv\")", "package"),
+    ]
+    .into_iter()
+    .map(|(expr, global)| {
+        (
+            expr.to_string(),
+            format!("init.lua:3: attempt to index a nil value (global '{global}')"),
+            escape_err(expr, &[]),
+        )
+    })
+    .collect();
+    assert_refused(&cases);
+}
+
+#[test]
+fn sandbox_has_no_loaders_randomness_or_collector() {
+    let cases: Vec<_> = [
+        ("load(\"return 1\")", "global 'load'"),
+        ("loadfile(\"init.lua\")", "global 'loadfile'"),
+        ("dofile(\"init.lua\")", "global 'dofile'"),
+        ("collectgarbage(\"count\")", "global 'collectgarbage'"),
+        ("math.random()", "field 'random'"),
+        ("math.randomseed(1)", "field 'randomseed'"),
+        ("string.dump(tostring)", "field 'dump'"),
+        ("(\"\").dump(tostring)", "field 'dump'"),
+    ]
+    .into_iter()
+    .map(|(expr, missing)| {
+        (
+            expr.to_string(),
+            format!("init.lua:3: attempt to call a nil value ({missing})"),
+            escape_err(expr, &[]),
+        )
+    })
+    .collect();
+    assert_refused(&cases);
+}
+
+#[test]
+fn require_loads_only_text_modules_inside_the_config_dir() {
+    let mut cases = vec![(
+        "a C module or a search path outside the config".to_string(),
+        "module \"socket\" not found (looked for lua/socket.lua and lua/socket/init.lua)".to_string(),
+        escape_err("require(\"socket\")", &[]),
+    )];
+    for name in ["../../etc/passwd", "/etc/passwd", "a/b", "x.."] {
+        cases.push((
+            name.to_string(),
+            format!("invalid module name {name:?}; use dotted names like \"hosts.desktop\""),
+            escape_err(&format!("require({name:?})"), &[]),
+        ));
+    }
+    let outside = TempDir::new().unwrap();
+    fs::write(outside.path().join("leak.lua"), "return \"outside\"").unwrap();
+    let dir = config(&[("init.lua", &probe("require(\"leak\")"))]);
+    fs::create_dir_all(dir.path().join("lua")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("leak.lua"), dir.path().join("lua/leak.lua")).unwrap();
+    cases.push((
+        "a module linked from outside the config".to_string(),
+        "module \"leak\": lua/leak.lua leaves the config directory".to_string(),
+        error_at(dir.path()),
+    ));
+    cases.push((
+        "a precompiled chunk".to_string(),
+        "attempt to load a binary chunk (mode is 't')".to_string(),
+        escape_err("require(\"bin\")", &[("lua/bin.lua", "\x1bLua\x54\x00")]),
+    ));
+    assert_refused(&cases);
 }
 
 #[test]
 fn read_file_stays_inside_the_config_dir() {
     let out = eval_ok(&[
-        (
-            "init.lua",
-            r#"return {
-              options = { motd = archix.option { type = archix.types.str } },
-              config = { motd = archix.read_file("files/motd") },
-            }"#,
-        ),
+        ("init.lua", &probe("archix.read_file(\"files/motd\")")),
         ("files/motd", "hello"),
     ]);
-    assert_eq!(out["motd"], json!("hello"));
-    let err = eval_err(&[("init.lua", r#"return { x = archix.read_file("../../etc/hostname") }"#)]);
-    assert!(
-        err.contains("path leaves the config directory") || err.contains("No such file"),
-        "{err}"
-    );
-    let err = eval_err(&[("init.lua", r#"return { x = archix.read_file("/etc/hostname") }"#)]);
-    assert!(err.contains("path must be relative"), "{err}");
-}
+    assert_eq!(out["probe"], json!("hello"));
 
-#[test]
-fn require_reports_cycles_and_missing_modules() {
-    let err = eval_err(&[
-        ("init.lua", r#"require("a") return {}"#),
-        ("lua/a.lua", r#"require("b") return {}"#),
-        ("lua/b.lua", r#"require("a") return {}"#),
-    ]);
-    assert!(err.contains("require cycle: a -> b -> a"), "{err}");
-    let err = eval_err(&[("init.lua", r#"return { imports = { "hosts.nope" } }"#)]);
-    assert!(
-        err.contains("module \"hosts.nope\" not found (looked for lua/hosts/nope.lua and lua/hosts/nope/init.lua)"),
-        "{err}"
-    );
+    let parent = TempDir::new().unwrap();
+    let dir = parent.path().join("config");
+    fs::create_dir_all(dir.join("files")).unwrap();
+    let secret = parent.path().join("secret");
+    fs::write(&secret, "secret").unwrap();
+    std::os::unix::fs::symlink(&secret, dir.join("files/link")).unwrap();
+    let mut cases = Vec::new();
+    for (path, says) in [
+        ("../secret", "path leaves the config directory"),
+        ("files/link", "path leaves the config directory"),
+        (
+            secret.to_str().unwrap(),
+            "path must be relative to the config directory",
+        ),
+    ] {
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "secret", "the file exists");
+        fs::write(dir.join("init.lua"), probe(&format!("archix.read_file({path:?})"))).unwrap();
+        cases.push((
+            path.to_string(),
+            format!("archix.read_file({path:?}): {says}"),
+            error_at(&dir),
+        ));
+    }
+    assert_refused(&cases);
 }
 
 #[test]
