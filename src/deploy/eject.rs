@@ -325,6 +325,8 @@ pub fn here(root: &Path, paths: &Paths) -> Result<Vec<String>> {
     let Some(mut state) = read_state(&paths.state)? else {
         bail!("no eject is under way");
     };
+    // Hardlinks can't cross the boot's read-only self-bind of /archix, so this private namespace reaches it through the root's own mount.
+    detach(&root.join("archix"))?;
     let store = Store::open(root)?;
     if state.phase < Phase::Copied {
         if !running_on_deployment(root) {
