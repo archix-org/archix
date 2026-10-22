@@ -804,6 +804,7 @@ fn deploy_helper() {
                 anticheat: false,
                 tries: 3,
                 revoke_unused: false,
+                health_check: None,
             };
             let built = Built::single("test", &name, &format!("archix {number}"));
             let entries = Entries {
