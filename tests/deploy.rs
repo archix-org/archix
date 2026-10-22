@@ -1007,6 +1007,8 @@ fn a_kill_at_any_switch_step_leaves_only_complete_deployments_named_and_the_next
             }
             fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-1.conf\n").unwrap();
         }
+        // Unbound before its loop device goes, which otherwise detaches later and under the next test's losetup -f.
+        sh(Command::new("umount").arg(&esp));
     }
 }
 
