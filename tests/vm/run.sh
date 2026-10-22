@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Boots archix deployments in QEMU with OVMF; `run.sh` tests the first layout on a booted system, deployments, boot entries, boot counting and Secure Boot, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` refusing hibernation while a deployment is pending and boot.health_check's fallbacks (a firewall that blocks the network, a pulled cable), `run.sh pcr` signed PCR policies unlocking a LUKS volume with swtpm, `run.sh dkms2` DKMS with two kernels, `run.sh selfupgrade` archix upgrading itself from ARCHIX_OLD (HEAD~1 by default), `run.sh firewall` the firewall over ssh, `run.sh churn` a year of weekly switches.
+# Boots archix deployments in QEMU with OVMF; `run.sh` tests the first layout on a booted system, deployments, boot entries, boot counting and Secure Boot, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` refusing hibernation while a deployment is pending and boot.health_check's fallbacks (a firewall that blocks the network, a pulled cable), `run.sh pcr` signed PCR policies unlocking a LUKS volume with swtpm, `run.sh dkms2` DKMS with two kernels, `run.sh selfupgrade` archix upgrading itself from ARCHIX_OLD (HEAD~1 by default), `run.sh firewall` the firewall over ssh, `run.sh churn` a year of weekly switches, `run.sh powercut` the dm-log-writes power-cut replay (tests/vm/powercut/run.sh).
 set -euo pipefail
 suite=${1:-boot}
 case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; tests/vm/run.sh selfupgrade replaces it" >&2; exit 2 ;; esac
 root=$(cd "$(dirname "$0")/../.." && pwd)
+[ "$suite" != powercut ] || exec "$root/tests/vm/powercut/run.sh"
 # One build volume per checkout, as in tests/arch/run.sh.
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm

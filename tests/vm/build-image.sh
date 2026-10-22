@@ -13,6 +13,8 @@ elif [ "$suite" = nvidia ]; then
   dir=/vm/nvidia date=2026-06-01 size=24G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 elif [ "$suite" = upgrade ]; then
   dir=/vm/upgrade packages=(base linux mkinitcpio systemd-ukify)
+elif [ "$suite" = powercut ]; then
+  dir=/vm/powercut date=${DATE:-2026-10-03} size=${SIZE:-8G} packages=(base linux mkinitcpio systemd-ukify) archix=/work/archix-static
 elif [ "$suite" = health ]; then
   dir=/vm/health packages=(base linux mkinitcpio systemd-ukify openssh)
 elif [ "$suite" = cachyos ]; then
@@ -151,7 +153,9 @@ printf 'timeout 2\nconsole-mode keep\n' > /mnt/efi/loader/loader.conf
 
 mkdir -p /mnt/etc/archix
 rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs='"btrfs-progs", '
-sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" "$dir/config.lua" > /mnt/etc/archix/init.lua
+extra=$(for package in ${TARGET_PACKAGES:-}; do printf '"%s", ' "$package"; done)
+sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" \
+  -e "s|@EXTRA_PACKAGES@|$extra|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
@@ -176,5 +180,9 @@ if [ "$suite" = boot ]; then
 fi
 arch-chroot /mnt archix --host archix-vm switch --noconfirm
 ls /mnt/archix/deploy /mnt/efi/loader/entries /mnt/efi/EFI/archix
+if [ "$suite" = powercut ]; then
+  ESP_DEV=$esp ROOT_DEV=$root ARCHIVE=$archive /vm/powercut/prepare-target.sh
+  exit 0
+fi
 # Inside the VM the host-side mirror has another address; each deployment has its own /etc.
 sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/archix/deploy/*/etc/archix/init.lua /mnt/archix/deploy/*/etc/pacman.d/mirrorlist /mnt/var/lib/archix/archive-url

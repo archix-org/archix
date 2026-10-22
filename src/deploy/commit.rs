@@ -114,6 +114,9 @@ impl Staged {
         mark("deploy-commit-rename");
         let previous = store.current()?;
         let path = store.path(self.number);
+        if crate::testhooks::broken("entry-before-rename") {
+            step.install(self.number, &self.dir)?;
+        }
         rename_noreplace(&self.dir, &path)?;
         let committed = (|| {
             durable::sync_dir(&path)?;

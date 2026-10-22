@@ -433,6 +433,28 @@ pub fn drop_entries(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
     crate::durable::sync_filesystems_checked(&[esp])
 }
 
+/// Removes the entry records whose entry isn't on the ESP, which a power cut between a record and its entry leaves; an unreadable ESP prunes nothing.
+pub fn prune_records(paths: &Paths, esp: &Path) -> Result<Vec<String>> {
+    let Ok(listed) = fs::read_dir(entries_dir(esp)) else {
+        return Ok(Vec::new());
+    };
+    let ids: BTreeSet<String> = listed
+        .flatten()
+        .map(|entry| entry_id(&entry.file_name().to_string_lossy()))
+        .collect();
+    let records = entry_records(paths);
+    let mut removed = Vec::new();
+    for record in fs::read_dir(&records).into_iter().flatten().flatten() {
+        let name = record.file_name().to_string_lossy().into_owned();
+        if !ids.contains(&name) {
+            fs::remove_file(record.path()).with_context(|| format!("removing {}", record.path().display()))?;
+            removed.push(name);
+        }
+    }
+    removed.sort();
+    Ok(removed)
+}
+
 /// Deletes shared UKIs no entry names, except `keep`, which entries are about to name.
 fn remove_unused_ukis_but(esp: &Path, keep: &[PathBuf]) -> Result<()> {
     let used: BTreeSet<PathBuf> = entries(esp)
@@ -500,6 +522,21 @@ struct Uki {
 pub struct Built {
     pub version: String,
     ukis: Vec<Uki>,
+}
+
+impl Built {
+    /// A deployment's one normal UKI, `name`, already in its /boot/archix, as the commit tests stage it without a kernel.
+    pub fn single(version: &str, name: &str, title: &str) -> Built {
+        Built {
+            version: version.to_string(),
+            ukis: vec![Uki {
+                suffix: String::new(),
+                title: title.to_string(),
+                name: name.to_string(),
+                built: true,
+            }],
+        }
+    }
 }
 
 /// Builds a staged deployment's initramfs and UKIs inside its staging root, from its own kernels and /etc, signing them when Secure Boot signing is on; UKIs the ESP already has are reused. boot.kernel gets the normal entry, every other installed kernel an extra one.
@@ -684,7 +721,7 @@ fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
         let _ = fs::remove_file(&tmp);
     }
     signed?;
-    crate::durable::sync_dir(path)
+    crate::durable::sync_renamed(path)
 }
 
 /// The ESP step of a commit: copies the UKIs a deployment built, writes its entries and their records, and makes it systemd-boot's default; entries of `droppable` deployments go first when the ESP is short of room.
@@ -1311,6 +1348,29 @@ mod tests {
         }
         fs::write(dir.path().join("loader/loader.conf"), loader).unwrap();
         dir
+    }
+
+    #[test]
+    fn records_without_their_entry_are_pruned_and_an_unreadable_esp_prunes_nothing() {
+        let esp = esp_with(&["archix-2+1-2.conf", "archix-3.conf"], "default archix-3.conf\n");
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let records = entry_records(&paths);
+        fs::create_dir_all(&records).unwrap();
+        for name in ["archix-2.conf", "archix-3.conf", "archix-4.conf", "archix-5.conf.tmp"] {
+            fs::write(records.join(name), "title t\n").unwrap();
+        }
+        assert!(prune_records(&paths, &root.path().join("no-esp")).unwrap().is_empty());
+        assert_eq!(
+            prune_records(&paths, esp.path()).unwrap(),
+            ["archix-4.conf", "archix-5.conf.tmp"]
+        );
+        let mut left: Vec<String> = fs::read_dir(&records)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["archix-2.conf", "archix-3.conf"]);
     }
 
     #[test]

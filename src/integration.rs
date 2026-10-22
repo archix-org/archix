@@ -199,12 +199,17 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
 
 /// Where this archix was started from, also after a switch had pacman replace it, when Linux appends " (deleted)".
 pub fn own_path() -> Result<PathBuf> {
+    static OWN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(path) = OWN.get() {
+        return Ok(path.clone());
+    }
     let exe = std::env::current_exe().context("finding the archix binary")?;
     let text = exe.to_string_lossy();
-    Ok(match text.strip_suffix(" (deleted)") {
+    let path = match text.strip_suffix(" (deleted)") {
         Some(path) => PathBuf::from(path),
         None => exe,
-    })
+    };
+    Ok(OWN.get_or_init(|| path).clone())
 }
 
 /// Writes every integration file and boot link that's missing or out of date where `place` puts each absolute path: into a staging root, or onto the live root before its first layout.

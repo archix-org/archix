@@ -215,6 +215,8 @@ pub fn writable_store(root: &Path) -> Result<()> {
     if !read_only_mount_point(&archix)? {
         return Ok(());
     }
+    // In a chroot, the binary's path resolves through the old namespace after the unshare, chroot prefix and all.
+    crate::integration::own_path()?;
     if unsafe { libc::unshare(libc::CLONE_NEWNS) } != 0 {
         return Err(io::Error::last_os_error()).context("making a mount namespace to write the deployments in");
     }

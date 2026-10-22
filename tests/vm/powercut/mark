@@ -1,0 +1,6 @@
+#!/bin/sh
+# mark STEP: logs a numbered dm-log-writes mark for STEP and lists it beside this script, so the replay knows the step every point falls in; archix runs it at each named step through ARCHIX_TEST_MARK.
+dir=$(dirname "$0")
+name="$(wc -l < "$dir/marks")-$1"
+dmsetup message logw 0 mark "$name" || exit 1
+echo "$name" >> "$dir/marks"

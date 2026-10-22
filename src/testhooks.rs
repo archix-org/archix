@@ -17,6 +17,11 @@ pub fn mark(step: &str) {
     crash_at(step);
 }
 
+/// Whether ARCHIX_TEST_BREAK names `rule` in a debug build, so the power-cut harness can be seen catching a commit that breaks it.
+pub fn broken(rule: &str) -> bool {
+    cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_BREAK").as_deref() == Ok(rule)
+}
+
 /// Fails with an error when ARCHIX_TEST_FAIL names `step` in a debug build, as a write error there would.
 pub fn fail_at(step: &str) -> anyhow::Result<()> {
     if cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_FAIL").as_deref() == Ok(step) {

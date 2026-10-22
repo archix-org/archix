@@ -1,0 +1,8 @@
+#!/bin/bash
+# var-manifest ROOT N: the live /var under ROOT as activation of deployment N leaves it, by type, mode, owner and content, then N's account files; logs, caches and what systemd and archix's lock rewrite at every boot are left out.
+cd "$1" || exit 1
+find var -xdev \( -path var/log -o -path var/tmp -o -path var/cache -o -path var/lib/systemd -o -path var/lib/archix/running \
+  -o -path var/lib/pacman/local -o -path var/lib/pacman/sync -o -path var/lib/dkms \) -prune -o -printf '%y %m %U:%G %p %l\n' | sort
+find var -xdev \( -path var/log -o -path var/tmp -o -path var/cache -o -path var/lib/systemd -o -path var/lib/archix/running \
+  -o -path var/lib/pacman/local -o -path var/lib/pacman/sync -o -path var/lib/dkms \) -prune -o -type f -print0 | sort -z | xargs -0r sha256sum
+sha256sum "archix/deploy/$2/etc/"{passwd,group,shadow,gshadow} | sed "s|archix/deploy/$2/||"

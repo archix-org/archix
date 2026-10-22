@@ -58,6 +58,9 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
             crate::flatpak::drop_pending(&paths.state, Some(number));
             report.deployments.push(number);
         }
+        if let Some(esp) = &esp {
+            crate::system::boot::prune_records(paths, esp)?;
+        }
         deployed.extend(deployments.deployments()?);
     }
     let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
