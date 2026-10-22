@@ -193,7 +193,74 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path, root: &Pa
             shown.join("\n  ")
         );
     }
-    check_mounts(root, &incoming)
+    check_mounts(root, &incoming)?;
+    check_inodes(root, local_db, &incoming)
+}
+
+/// Refuses a transaction when the root filesystem has fewer free inodes than staging a deployment from `root` takes: copies of etc, the database and DKMS state, new directories for the hardlinked usr, opt and boot and their overlay uppers, the incoming files, and a margin; btrfs allocates inodes as it goes and reports none.
+pub fn check_inodes(root: &Path, local_db: &Path, incoming: &[Contents]) -> Result<()> {
+    let Some((free, total, used)) = inodes(root) else {
+        return Ok(());
+    };
+    let files: u64 = incoming.iter().map(|c| c.files.len() as u64).sum();
+    // Before the first layout, deployment 1 is laid out from the live root before the next one is staged from it.
+    let layouts = if local_db == root.join("var/lib/pacman/local") {
+        2
+    } else {
+        1
+    };
+    let margin = |n: u64| n + n / 20 + INODE_SPARE.min(total / 20);
+    if free >= margin(used * (layouts + 1) + files) {
+        return Ok(());
+    }
+    let mut staged = files;
+    for tree in ["etc", "dkms"] {
+        staged += count_entries(&root.join(tree), false) * layouts;
+    }
+    staged += count_entries(local_db, false) * layouts;
+    for tree in ["usr", "opt", "boot"] {
+        staged += count_entries(&root.join(tree), true) * (layouts + 1);
+    }
+    let needed = margin(staged);
+    if free < needed {
+        bail!(
+            "{} has {free} free inodes, but staging this deployment takes about {needed}; nothing was changed. Free some (`archix gc`, or delete many small files), or give the filesystem more inodes",
+            root.display()
+        );
+    }
+    Ok(())
+}
+
+/// Inodes a switch keeps free beyond its estimate, for pacman's temporary files and the initramfs build.
+const INODE_SPARE: u64 = 4096;
+
+/// Entries under `dir`, or only its directories (itself included) with `dirs_only`.
+fn count_entries(dir: &Path, dirs_only: bool) -> u64 {
+    let mut count = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        count += 1;
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                stack.push(entry.path());
+            } else if !dirs_only {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Free inodes for unprivileged users, the filesystem's total and how many are used, or None where it doesn't count them.
+fn inodes(path: &Path) -> Option<(u64, u64, u64)> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 || stat.f_files == 0 {
+        return None;
+    }
+    let (total, free) = (stat.f_files as u64, stat.f_favail as u64);
+    Some((free, total, total - (stat.f_ffree as u64).min(total)))
 }
 
 /// Like pacman's disk space check: what each mount gains from the incoming files; the replaced versions free nothing, as the deployment staged from keeps them.

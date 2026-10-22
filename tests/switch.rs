@@ -492,6 +492,279 @@ fn a_deployment_that_fails_its_tries_falls_back_and_the_one_that_booted_becomes_
 
 #[test]
 #[ignore]
+fn a_failed_health_check_falls_back_says_why_and_names_unsafe_downgrades_and_hibernation_waits_for_the_reboot() {
+    let _system = lock_system();
+    let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&["lemon"], "");
+    let machine = &setup.machine;
+    let body = format!(
+        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", health_check = {{ listening = {{ 1 }}, timeout = 1 }} }}, kernel_params = {{ "root=/dev/vda2 rw" }}, unsafe_downgrades = {{ lemon = {{ "3.54" }} }}"#,
+        machine.esp().display()
+    );
+    setup.set_body(&["lemon"], &body);
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let good = machine.current().unwrap();
+    let entries_dir = machine.esp().join("loader/entries");
+    fs::rename(
+        entries_dir.join(format!("archix-{good}+3.conf")),
+        entries_dir.join(format!("archix-{good}.conf")),
+    )
+    .unwrap();
+    machine.reboot(Some(&format!("archix-{good}.conf")));
+    setup.ok_env(&[counting], &["boot-complete"]);
+    setup.ok_env(&[counting], &["boot-check"]);
+    let guard = machine
+        .root
+        .join("run/systemd/sleep.conf.d/zz-archix-pending-deployment.conf");
+    assert!(!guard.exists(), "nothing is pending on the deployment that booted");
+
+    setup.set_body(&["lemon", "tree"], &body);
+    let out = setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    assert!(
+        out.contains(&format!("hibernation is off until you reboot into deployment {new}")),
+        "{out}"
+    );
+    let text = fs::read_to_string(&guard).unwrap_or_default();
+    assert!(
+        text.contains("AllowHibernation=no") && !text.contains("AllowSuspend="),
+        "{text}"
+    );
+    assert!(setup.ok(&["status"]).contains("hibernation is off"));
+    let desc = machine.deployment(new).join("pacman/lemon-3.53.4-1/desc");
+    let migrated = fs::read_to_string(&desc).unwrap().replace("3.53.4-1", "3.54.0-1");
+    machine.store_writable(true);
+    fs::write(&desc, migrated).unwrap();
+    machine.store_writable(false);
+
+    machine.reboot(Some(&format!("archix-{new}.conf")));
+    setup.ok_env(&[counting], &["boot-check"]);
+    assert!(!guard.exists(), "the next boot allows hibernation again");
+    let checked = setup.run_env(&[counting], &["health-check"]);
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&checked.stdout),
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    assert!(!checked.status.success(), "{out}");
+    assert!(
+        out.contains(&format!(
+            "deployment {new} failed its health check \"TCP port 1 listening\""
+        )),
+        "{out}"
+    );
+    assert!(
+        machine.entries().contains(&format!("archix-{new}+0-3.conf")),
+        "the failed deployment's entry has no tries left: {:?}",
+        machine.entries()
+    );
+
+    machine.reboot(Some(&format!("archix-{good}.conf")));
+    let out = setup.ok_env(&[counting], &["boot-check"]);
+    let why =
+        format!("deployment {new} fell back to {good} because the health check \"TCP port 1 listening\" failed at ");
+    let risky = "lemon 3.54.0-1 -> 3.53.4-1 crosses 3.54";
+    assert!(out.contains(&why) && out.contains(risky), "{out}");
+    assert_eq!(machine.current(), Some(good));
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(notes.contains(&why) && notes.contains(risky), "{notes}");
+    let status = setup.ok(&["status"]);
+    assert!(status.contains(&why) && status.contains(risky), "{status}");
+}
+
+fn efivar(entry: &str) -> Vec<u8> {
+    let mut bytes = vec![6, 0, 0, 0];
+    bytes.extend(entry.encode_utf16().flat_map(u16::to_le_bytes));
+    bytes.extend([0, 0]);
+    bytes
+}
+
+#[test]
+#[ignore]
+fn a_default_picked_in_the_boot_menu_is_cleared_at_the_commit_and_status_warns_until_then() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let vars = tempfile::tempdir().unwrap();
+    let var = |name: &str| vars.path().join(format!("{name}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
+    fs::write(var("LoaderEntryDefault"), efivar("archix-1.conf")).unwrap();
+    fs::write(var("LoaderEntryOneShot"), efivar("archix-1.conf")).unwrap();
+    let env = [("ARCHIX_TEST_EFIVARS", vars.path().to_str().unwrap())];
+    let status = setup.ok_env(&env, &["status"]);
+    assert!(
+        status.contains(
+            "LoaderEntryDefault variable (the boot menu's default, or `bootctl set-default`) names archix-1.conf"
+        ),
+        "{status}"
+    );
+    setup.set_body(&["tree"], "");
+    let out = setup.ok_env(&env, &["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    assert!(
+        out.contains(&format!(
+            "cleared LoaderEntryDefault (archix-1.conf), set in the boot menu or with bootctl, which overrode loader.conf and would have kept archix-{new}.conf from booting"
+        )),
+        "{out}"
+    );
+    assert!(!var("LoaderEntryDefault").exists());
+    assert!(out.contains("the next boot starts archix-1.conf once"), "{out}");
+    assert!(
+        var("LoaderEntryOneShot").exists(),
+        "a one-shot boot is the user's to make"
+    );
+    assert!(!setup.ok_env(&env, &["status"]).contains("LoaderEntryDefault"));
+}
+
+fn run(command: &mut Command) -> String {
+    let out = command.output().unwrap();
+    assert!(
+        out.status.success(),
+        "{command:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// The machine's ESP moved onto a FAT image, mounted at the same place until dropped.
+struct FatEsp {
+    _dir: tempfile::TempDir,
+    dev: String,
+    at: PathBuf,
+}
+
+impl FatEsp {
+    fn new(machine: &Machine, size: &str) -> FatEsp {
+        let dir = tempfile::tempdir().unwrap();
+        let img = dir.path().join("esp.img");
+        run(Command::new("truncate").args(["-s", size]).arg(&img));
+        let dev = run(Command::new("losetup").args(["--show", "-f"]).arg(&img))
+            .trim()
+            .to_string();
+        let esp = FatEsp {
+            _dir: dir,
+            dev,
+            at: machine.esp(),
+        };
+        run(Command::new("mkfs.fat").args(["-F", "32"]).arg(&esp.dev));
+        let staged = esp._dir.path().join("mnt");
+        fs::create_dir(&staged).unwrap();
+        run(Command::new("mount").arg(&esp.dev).arg(&staged));
+        run(Command::new("cp").arg("-rT").arg(&esp.at).arg(&staged));
+        run(Command::new("umount").arg(&staged));
+        run(Command::new("mount").arg(&esp.dev).arg(&esp.at));
+        esp
+    }
+
+    /// Fills the FAT until `leave` bytes are free.
+    fn fill(&self, leave: u64) {
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let path = std::ffi::CString::new(self.at.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::statvfs(path.as_ptr(), &mut stat) }, 0);
+        let free = stat.f_bavail * stat.f_frsize;
+        // FAT can't fallocate, so the filler is written out.
+        let blocks = free.saturating_sub(leave) / 65536;
+        run(Command::new("dd")
+            .args(["if=/dev/zero", "bs=64K", "status=none", &format!("count={blocks}")])
+            .arg(format!("of={}", self.at.join("filler").display())));
+    }
+}
+
+impl Drop for FatEsp {
+    fn drop(&mut self) {
+        let _ = Command::new("umount").arg("-l").arg(&self.at).status();
+        let _ = Command::new("losetup").arg("-d").arg(&self.dev).status();
+    }
+}
+
+#[test]
+#[ignore]
+fn a_rollback_that_rebuilds_is_refused_before_anything_changes_when_the_esp_cant_hold_its_entry() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 1 }";
+    let setup = Setup::new(&["tree"], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let with_tree = machine.current().unwrap();
+    setup.set_body(&["lemon"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    let with_lemon = machine.current().unwrap();
+    machine.reboot(Some(&format!("archix-{with_lemon}.conf")));
+    setup.set_body(&[], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(!machine.deployments().contains(&with_tree));
+    let esp = FatEsp::new(machine, "160M");
+    esp.fill(1 << 20);
+    let before = (
+        machine.deployments(),
+        machine.current(),
+        machine.entries(),
+        machine.loader_conf(),
+    );
+    let output = setup.run(&["rollback", &with_tree.to_string(), "--noconfirm"]);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a rollback onto a full ESP wasn't refused");
+    assert!(
+        err.contains("the ESP at") && err.contains("nothing was changed"),
+        "{err}"
+    );
+    assert_eq!(
+        (
+            machine.deployments(),
+            machine.current(),
+            machine.entries(),
+            machine.loader_conf()
+        ),
+        before
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+}
+
+#[test]
+#[ignore]
+fn a_switch_rollback_or_gc_is_refused_while_no_fat_filesystem_is_mounted_at_the_esp() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    setup.set_body(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], "");
+    let check = [("ARCHIX_TEST_CHECK_ESP", "1")];
+    let state = || {
+        (
+            machine.deployments(),
+            machine.current(),
+            machine.entries(),
+            machine.loader_conf(),
+        )
+    };
+    let before = state();
+    for args in [
+        &["switch", "--noconfirm"][..],
+        &["rollback", "1", "--noconfirm"],
+        &["gc"],
+    ] {
+        let output = setup.run_env(&check, args);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{args:?} ran with no ESP mounted");
+        assert!(
+            err.contains("no FAT filesystem is mounted there") && err.contains("nothing was changed"),
+            "{args:?}: {err}"
+        );
+        assert_eq!(state(), before, "{args:?} changed something");
+    }
+    let _esp = FatEsp::new(machine, "160M");
+    setup.ok_env(&check, &["switch", "--noconfirm"]);
+    assert_ne!(
+        machine.current(),
+        before.1,
+        "with the ESP mounted the switch goes ahead"
+    );
+}
+
+#[test]
+#[ignore]
 fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_staged() {
     let _system = lock_system();
     let setup = Setup::new(&["tree"], "");
@@ -1338,7 +1611,7 @@ fn archix_writes_its_config_into_the_deployment_waiting_for_the_next_boot_too() 
     let pending = machine.current().unwrap();
     assert!(
         out.contains(&format!(
-            "deployment {pending} is committed and boots at the next restart; changes to /etc made before then don't carry over"
+            "deployment {pending} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
         )),
         "{out}"
     );
