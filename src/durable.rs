@@ -15,6 +15,11 @@ pub fn write_executable(path: &Path, contents: &[u8]) -> Result<()> {
     write_mode(path, contents, Some(0o755))
 }
 
+/// Like `write`, for a key only root may read: mode 0600 before anything is written.
+pub fn write_secret(path: &Path, contents: &[u8]) -> Result<()> {
+    write_mode(path, contents, Some(0o600))
+}
+
 fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -24,11 +29,11 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     let tmp = path.with_file_name(tmp_name);
     removing_on_error(&tmp, || {
         let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("writing {}", tmp.display()))?;
         if let Some(mode) = mode {
             file.set_permissions(fs::Permissions::from_mode(mode))?;
         }
+        file.write_all(contents)
+            .with_context(|| format!("writing {}", tmp.display()))?;
         file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
     })?;
