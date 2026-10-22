@@ -279,17 +279,84 @@ pub fn check_packages(packages: &Packages) -> Result<()> {
         .context("running pacman")?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let errors: Vec<&str> = stderr.lines().filter(|line| line.starts_with("error:")).collect();
+        let mut errors: Vec<String> = stderr
+            .lines()
+            .filter(|line| line.starts_with("error:"))
+            .map(str::to_string)
+            .collect();
+        if errors.is_empty() {
+            errors.push(stderr.trim().to_string());
+        }
+        let gnupg = trial
+            .as_ref()
+            .map_or_else(|| PathBuf::from("/etc/pacman.d/gnupg"), TrialKeyring::gnupg);
+        errors.extend(packages.install.iter().filter_map(|file| signer_problem(file, &gnupg)));
         bail!(
             "pacman refuses these packages, so nothing was changed:\n  {}",
-            if errors.is_empty() {
-                stderr.trim().to_string()
-            } else {
-                errors.join("\n  ")
-            }
+            errors.join("\n  ")
         );
     }
     Ok(())
+}
+
+/// What's wrong with the key that signed `file`, in words, since pacman says only "required key missing from keyring" for an expired one.
+fn signer_problem(file: &Path, gnupg: &Path) -> Option<String> {
+    let mut sig = file.as_os_str().to_os_string();
+    sig.push(".sig");
+    if !Path::new(&sig).is_file() {
+        return None;
+    }
+    let output = Command::new("gpg")
+        .arg("--homedir")
+        .arg(gnupg)
+        .args([
+            "--batch",
+            "--no-auto-key-retrieve",
+            "--no-auto-check-trustdb",
+            "--status-fd",
+            "1",
+            "--verify",
+        ])
+        .arg(&sig)
+        .arg(file)
+        .output()
+        .ok()?;
+    let name = file.file_name()?.to_string_lossy();
+    signer_problem_in(&name, &String::from_utf8_lossy(&output.stdout))
+}
+
+fn signer_problem_in(name: &str, status: &str) -> Option<String> {
+    let mut expired_at = None;
+    for line in status.lines() {
+        let Some(line) = line.strip_prefix("[GNUPG:] ") else {
+            continue;
+        };
+        let (word, rest) = line.split_once(' ').unwrap_or((line, ""));
+        let signer = || rest.split_once(' ').map_or(rest, |(_, uid)| uid).to_string();
+        match word {
+            "KEYEXPIRED" => expired_at = rest.trim().parse::<u64>().ok(),
+            "EXPKEYSIG" => {
+                let when = expired_at.map_or_else(
+                    || "already".to_string(),
+                    |at| crate::date::Date::from_unix(at).to_string(),
+                );
+                return Some(format!(
+                    "{name} is signed by {}, whose key expired on {when}; a newer keyring package from its repo (archlinux-keyring for Arch's) renews it",
+                    signer()
+                ));
+            }
+            "REVKEYSIG" => return Some(format!("{name} is signed by {}, whose key was revoked", signer())),
+            "BADSIG" => return Some(format!("{name} doesn't match its signature by {}", signer())),
+            "NO_PUBKEY" => {
+                return Some(format!(
+                    "{name} is signed by key {}, which pacman's keyring doesn't have",
+                    rest.trim()
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Hard links to package files without the .sig beside them, for a rollback: each was verified by pacman when first installed and is checked against its pinned sha256, while today's keyring may have revoked its packager since.
@@ -381,6 +448,21 @@ pub fn mismatches(db: &Path, packages: &Packages) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpg_status_names_an_expired_or_revoked_signer() {
+        let expired = "[GNUPG:] NEWSIG\n[GNUPG:] KEYEXPIRED 1792571807\n[GNUPG:] EXPKEYSIG A0052EA5F41EF1EE t <t@t>\n[GNUPG:] VALIDSIG E764\n";
+        assert_eq!(
+            signer_problem_in("x.pkg.tar.zst", expired).unwrap(),
+            "x.pkg.tar.zst is signed by t <t@t>, whose key expired on 2026-10-21; a newer keyring package from its repo (archlinux-keyring for Arch's) renews it"
+        );
+        let revoked = "[GNUPG:] REVKEYSIG A0052EA5F41EF1EE t <t@t>\n";
+        assert_eq!(
+            signer_problem_in("x", revoked).unwrap(),
+            "x is signed by t <t@t>, whose key was revoked"
+        );
+        assert_eq!(signer_problem_in("x", "[GNUPG:] GOODSIG A t <t@t>\n"), None);
+    }
 
     #[test]
     fn a_lock_counts_as_held_only_while_a_process_has_it_open() {

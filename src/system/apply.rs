@@ -117,6 +117,18 @@ impl Accounts {
             .map(|account| (PathBuf::from(&account.home), account.gid))
     }
 
+    /// The ids of the groups `name` belongs to, its primary group included.
+    pub fn groups_of(&self, name: &str) -> Vec<u32> {
+        let mut ids: Vec<u32> = self
+            .groups
+            .values()
+            .filter(|(_, members)| members.iter().any(|member| member == name))
+            .map(|(gid, _)| *gid)
+            .collect();
+        ids.extend(self.users.get(name).map(|account| account.gid));
+        ids
+    }
+
     fn uid_taken(&self, id: u32) -> bool {
         self.users.values().any(|account| account.uid == id)
     }
@@ -624,7 +636,7 @@ pub fn check(paths: &Paths, change: &SystemChange, locate: Locate) -> Result<()>
                 .with_context(|| format!("{path} can't take its merged keys; nothing was changed"))?;
         }
     }
-    for path in change.to.files.keys() {
+    for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
         if on_disk(&target)? != OnDisk::Other {
             continue;
@@ -633,7 +645,8 @@ pub fn check(paths: &Paths, change: &SystemChange, locate: Locate) -> Result<()>
         if !directory || change.from.files.contains_key(path) {
             bail!("{path} exists and is not a file or symlink; archix won't replace it");
         }
-        if fs::symlink_metadata(under(&backups, path)).is_ok() {
+        let users = paths.state.join("users").join(&want.owner).join("backups");
+        if fs::symlink_metadata(under(&backups, path)).is_ok() || fs::symlink_metadata(under(&users, path)).is_ok() {
             bail!("{path} is a directory and an earlier backup of it exists; move one of them away");
         }
     }
@@ -679,58 +692,198 @@ fn copy_preserving(from: &Path, to: &Path) -> Result<()> {
     } else {
         fs::copy(from, to)?;
     }
-    std::os::unix::fs::lchown(to, Some(meta.uid()), Some(meta.gid()))?;
+    keep_owner(to, &meta)
+}
+
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Gives `path` the owner in `meta`; run as a home's user, what archix makes is already theirs.
+fn keep_owner(path: &Path, meta: &fs::Metadata) -> Result<()> {
+    if is_root() {
+        std::os::unix::fs::lchown(path, Some(meta.uid()), Some(meta.gid()))?;
+    }
     Ok(())
 }
 
-/// Writes, replaces and unmanages the files `locate` places, backing up originals and hand edits instead of losing them; owners come from `accounts`.
+/// The user a home file is written as, so links in that home can't lead archix anywhere its user couldn't write.
+struct Writer {
+    name: String,
+    uid: u32,
+    gid: u32,
+    groups: Vec<u32>,
+    home: PathBuf,
+}
+
+/// The owner of `file` at `target` when it's in that owner's own home, or None for a file root writes.
+fn writer(paths: &Paths, target: &Path, file: &ManagedFile, accounts: &Accounts) -> Result<Option<Writer>> {
+    let Some((home, _)) = accounts.home(&file.owner) else {
+        return Ok(None);
+    };
+    let home = under(&paths.root, &home.to_string_lossy());
+    if file.owner == "root" || home == paths.root || !target.starts_with(&home) {
+        return Ok(None);
+    }
+    let (uid, gid) = owner(file, accounts)?;
+    let mut groups = accounts.groups_of(&file.owner);
+    groups.push(gid);
+    groups.sort_unstable();
+    groups.dedup();
+    Ok(Some(Writer {
+        name: file.owner.clone(),
+        uid,
+        gid,
+        groups,
+        home,
+    }))
+}
+
+/// Where originals and hand-edited copies of managed files are kept.
+struct Saves {
+    backups: PathBuf,
+    edited: PathBuf,
+}
+
+/// archix's state for root's files; for a home's files, a directory there that belongs to its user, who writes them.
+fn saves(paths: &Paths, stamp: &str, writer: Option<&Writer>) -> Result<Saves> {
+    let base = match writer {
+        None => paths.state.clone(),
+        Some(writer) => {
+            let users = paths.state.join("users");
+            fs::create_dir_all(&users)?;
+            let base = users.join(&writer.name);
+            match fs::symlink_metadata(&base) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => bail!("{} isn't a directory", base.display()),
+                Err(_) => fs::create_dir(&base).with_context(|| format!("creating {}", base.display()))?,
+            }
+            std::os::unix::fs::lchown(&base, Some(writer.uid), Some(writer.gid))?;
+            fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
+            base
+        }
+    };
+    Ok(Saves {
+        backups: base.join("backups"),
+        edited: base.join("edited").join(stamp),
+    })
+}
+
+/// Runs `work` in a child with `writer`'s uid, gid and groups and returns its error; archix runs no other threads here, so the child may allocate.
+fn run_as(writer: &Writer, work: impl FnOnce() -> Result<()>) -> Result<()> {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    if unsafe { libc::geteuid() } == writer.uid {
+        return work();
+    }
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("making a pipe");
+    }
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fds[0]);
+            libc::close(fds[1]);
+        }
+        return Err(e).context("forking");
+    }
+    if pid == 0 {
+        unsafe { libc::close(fds[0]) };
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            become_user(writer).and_then(|()| work())
+        }));
+        let failed = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(format!("{e:#}")),
+            Err(_) => Some("panicked".to_string()),
+        };
+        if let Some(message) = &failed {
+            let mut pipe = unsafe { fs::File::from_raw_fd(fds[1]) };
+            let _ = pipe.write_all(message.as_bytes());
+        }
+        unsafe { libc::_exit(i32::from(failed.is_some())) };
+    }
+    unsafe { libc::close(fds[1]) };
+    let mut message = String::new();
+    let _ = unsafe { fs::File::from_raw_fd(fds[0]) }.read_to_string(&mut message);
+    let mut status = 0;
+    while unsafe { libc::waitpid(pid, &mut status, 0) } < 0 {
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            break;
+        }
+    }
+    if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+        return Ok(());
+    }
+    if message.is_empty() {
+        bail!("writing as {} failed (wait status {status})", writer.name);
+    }
+    Err(anyhow::anyhow!(message))
+}
+
+fn become_user(writer: &Writer) -> Result<()> {
+    let failed =
+        |call: &str| Err(std::io::Error::last_os_error()).with_context(|| format!("{call} for {}", writer.name));
+    unsafe {
+        if libc::setgroups(writer.groups.len(), writer.groups.as_ptr()) != 0 {
+            return failed("setgroups");
+        }
+        if libc::setresgid(writer.gid, writer.gid, writer.gid) != 0 {
+            return failed("setresgid");
+        }
+        if libc::setresuid(writer.uid, writer.uid, writer.uid) != 0 {
+            return failed("setresuid");
+        }
+    }
+    Ok(())
+}
+
+/// Runs `work` on the managed `file` at `target`, as its user when it's in their home, with where its originals go; a user's content is read from archix's store beforehand.
+fn as_owner(
+    paths: &Paths,
+    stamp: &str,
+    target: &Path,
+    file: &ManagedFile,
+    accounts: &Accounts,
+    work: impl FnOnce(&Saves, Option<&[u8]>) -> Result<()>,
+) -> Result<()> {
+    let writer = writer(paths, target, file, accounts)?;
+    let saves = saves(paths, stamp, writer.as_ref())?;
+    let Some(writer) = writer else {
+        return work(&saves, None);
+    };
+    if fs::symlink_metadata(&writer.home).is_err() {
+        fs::create_dir_all(&writer.home).with_context(|| format!("creating {}", writer.home.display()))?;
+        std::os::unix::fs::lchown(&writer.home, Some(writer.uid), Some(writer.gid))?;
+        fs::set_permissions(&writer.home, fs::Permissions::from_mode(0o700))?;
+    }
+    let content = match file.link.is_none() && file.merge.is_none() && !file.sha256.is_empty() {
+        true => {
+            let blob = blobs::path(paths, &file.sha256);
+            Some(fs::read(&blob).with_context(|| format!("reading {}", blob.display()))?)
+        }
+        false => None,
+    };
+    run_as(&writer, || work(&saves, content.as_deref()))
+}
+
+/// Writes, replaces and unmanages the files `locate` places, backing up originals and hand edits instead of losing them; owners come from `accounts`, and a home's files are written as its user.
 pub fn files(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
-    let backups = paths.state.join("backups");
-    let edited = paths.state.join("edited").join(now().to_string());
+    let stamp = now().to_string();
+    let mut failures = Vec::new();
     for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
-        let target = target.as_path();
-        let disk = on_disk(target)?;
-        if want.link.is_some() && mount_point(target) && !matches(target, &disk, want, accounts) {
-            eprintln!(
-                "warning: {path} is mounted over here (a container or arch-chroot does that), so it's left alone; the next switch outside replaces it"
-            );
-            continue;
+        let previous = change.from.files.get(path);
+        let result = as_owner(paths, &stamp, &target, want, accounts, |saves, content| {
+            apply_file(paths, saves, path, &target, want, previous, accounts, content)
+        });
+        if let Err(e) = result {
+            failures.push(format!("{e:#}"));
         }
-        if let Some(merge) = &want.merge {
-            if !matches(target, &disk, want, accounts) {
-                write_merged(target, want, merge, accounts).with_context(|| format!("setting keys in {path}"))?;
-            }
-            continue;
-        }
-        if matches(target, &disk, want, accounts) {
-            if disk != OnDisk::Missing && !change.from.files.contains_key(path) {
-                keep_original(target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
-            }
-            continue;
-        }
-        if disk != OnDisk::Missing {
-            match change.from.files.get(path) {
-                None => {
-                    let backup = under(&backups, path);
-                    if fs::symlink_metadata(&backup).is_err() {
-                        fs::create_dir_all(backup.parent().expect("absolute path"))?;
-                        move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
-                    }
-                }
-                Some(previous) if !matches(target, &disk, previous, accounts) => {
-                    let copy = under(&edited, path);
-                    fs::create_dir_all(copy.parent().expect("absolute path"))?;
-                    fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
-                    eprintln!(
-                        "warning: {path} was edited outside archix; that version is saved at {}",
-                        copy.display()
-                    );
-                }
-                Some(_) => {}
-            }
-        }
-        write(paths, target, want, accounts).with_context(|| format!("writing {path}"))?;
     }
     for (path, previous) in change
         .from
@@ -739,42 +892,143 @@ pub fn files(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Ac
         .filter(|(path, previous)| !change.to.files.contains_key(*path) && previous.merge.is_none())
     {
         let Some(target) = locate(path) else { continue };
-        let target = target.as_path();
-        let backup = under(&backups, path);
-        let disk = on_disk(target)?;
-        if fs::symlink_metadata(&backup).is_ok() {
-            if disk != OnDisk::Missing && !matches(target, &disk, previous, accounts) {
-                eprintln!(
-                    "warning: {path} was edited outside archix; restoring the original anyway, see {}",
-                    backup.display()
-                );
+        if previous.owner != "root" && accounts.uid(&previous.owner).is_none() {
+            continue;
+        }
+        let root_backup = under(&paths.state.join("backups"), path);
+        let as_user = matches!(writer(paths, &target, previous, accounts), Ok(Some(_)));
+        let legacy = (as_user && fs::symlink_metadata(&root_backup).is_ok()).then_some(root_backup.as_path());
+        let result = as_owner(paths, &stamp, &target, previous, accounts, |saves, _| {
+            unmanage(saves, legacy, path, &target, previous, accounts)
+        });
+        match result {
+            Ok(()) if legacy.is_some() => {
+                let removed = match fs::symlink_metadata(&root_backup).is_ok_and(|meta| meta.is_dir()) {
+                    true => fs::remove_dir_all(&root_backup),
+                    false => fs::remove_file(&root_backup),
+                };
+                if let Err(e) = removed {
+                    failures.push(format!("removing the restored {}: {e}", root_backup.display()));
+                }
             }
-            if fs::symlink_metadata(&backup).is_ok_and(|meta| meta.is_dir())
-                && matches!(disk, OnDisk::Link(_) | OnDisk::File { .. })
-            {
-                fs::remove_file(target).with_context(|| format!("removing {path}"))?;
-            }
-            move_path(&backup, target).with_context(|| format!("restoring {path}"))?;
-        } else if matches(target, &disk, previous, accounts) {
-            fs::remove_file(target).with_context(|| format!("removing {path}"))?;
+            Ok(()) => {}
+            Err(e) => failures.push(format!("{e:#}")),
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!("{}", failures.join("\n"))
+    }
+}
+
+/// Brings one managed file to what `want` says, keeping an original or a hand-edited copy in `saves`.
+#[allow(clippy::too_many_arguments)]
+fn apply_file(
+    paths: &Paths,
+    saves: &Saves,
+    path: &str,
+    target: &Path,
+    want: &ManagedFile,
+    previous: Option<&ManagedFile>,
+    accounts: &Accounts,
+    content: Option<&[u8]>,
+) -> Result<()> {
+    let disk = on_disk(target)?;
+    if want.link.is_some() && mount_point(target) && !matches(target, &disk, want, accounts) {
+        eprintln!(
+            "warning: {path} is mounted over here (a container or arch-chroot does that), so it's left alone; the next switch outside replaces it"
+        );
+        return Ok(());
+    }
+    if let Some(merge) = &want.merge {
+        if !matches(target, &disk, want, accounts) {
+            write_merged(target, want, merge, accounts).with_context(|| format!("setting keys in {path}"))?;
+        }
+        return Ok(());
+    }
+    if matches(target, &disk, want, accounts) {
+        if disk != OnDisk::Missing && previous.is_none() {
+            keep_original(target, &under(&saves.backups, path)).with_context(|| format!("backing up {path}"))?;
+        }
+        return Ok(());
+    }
+    if disk != OnDisk::Missing {
+        match previous {
+            None => {
+                let backup = under(&saves.backups, path);
+                if fs::symlink_metadata(&backup).is_err() {
+                    fs::create_dir_all(backup.parent().expect("absolute path"))?;
+                    move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
+                }
+            }
+            Some(previous) if !matches(target, &disk, previous, accounts) => {
+                let copy = under(&saves.edited, path);
+                fs::create_dir_all(copy.parent().expect("absolute path"))?;
+                fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
+                eprintln!(
+                    "warning: {path} was edited outside archix; that version is saved at {}",
+                    copy.display()
+                );
+            }
+            Some(_) => {}
+        }
+    }
+    write(paths, target, want, accounts, content).with_context(|| format!("writing {path}"))
+}
+
+/// Puts back the original of a file archix stops managing, from `saves` or an older backup in `legacy`, or removes the file archix wrote.
+fn unmanage(
+    saves: &Saves,
+    legacy: Option<&Path>,
+    path: &str,
+    target: &Path,
+    previous: &ManagedFile,
+    accounts: &Accounts,
+) -> Result<()> {
+    let backup = under(&saves.backups, path);
+    let disk = on_disk(target)?;
+    let source = match fs::symlink_metadata(&backup) {
+        Ok(_) => Some(backup.as_path()),
+        Err(_) => legacy,
+    };
+    let Some(source) = source else {
+        if matches(target, &disk, previous, accounts) {
+            fs::remove_file(target).with_context(|| format!("removing {path}"))?;
+        }
+        return Ok(());
+    };
+    if disk != OnDisk::Missing && !matches(target, &disk, previous, accounts) {
+        eprintln!(
+            "warning: {path} was edited outside archix; restoring the original anyway, see {}",
+            source.display()
+        );
+    }
+    if matches!(disk, OnDisk::Link(_) | OnDisk::File { .. }) {
+        fs::remove_file(target).with_context(|| format!("removing {path}"))?;
+    }
+    match source == backup {
+        true => move_path(source, target),
+        false => copy_preserving(source, target),
+    }
+    .with_context(|| format!("restoring {path}"))
 }
 
 /// Backs up every file the target manages that's already on disk exactly as wanted, for a switch that writes no files.
 pub fn keep_originals(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
-    let backups = paths.state.join("backups");
+    let stamp = now().to_string();
     for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
-        let disk = on_disk(&target)?;
-        if want.merge.is_none()
-            && disk != OnDisk::Missing
-            && matches(&target, &disk, want, accounts)
-            && !change.from.files.contains_key(path)
-        {
-            keep_original(&target, &under(&backups, path)).with_context(|| format!("backing up {path}"))?;
+        if want.merge.is_some() || change.from.files.contains_key(path) {
+            continue;
         }
+        as_owner(paths, &stamp, &target, want, accounts, |saves, _| {
+            let disk = on_disk(&target)?;
+            if disk != OnDisk::Missing && matches(&target, &disk, want, accounts) {
+                keep_original(&target, &under(&saves.backups, path)).with_context(|| format!("backing up {path}"))?;
+            }
+            Ok(())
+        })?;
     }
     Ok(())
 }
@@ -791,8 +1045,7 @@ fn keep_original(target: &Path, backup: &Path) -> Result<()> {
     } else {
         fs::copy(target, backup)?;
     }
-    std::os::unix::fs::lchown(backup, Some(meta.uid()), Some(meta.gid()))?;
-    Ok(())
+    keep_owner(backup, &meta)
 }
 
 fn owner(want: &ManagedFile, accounts: &Accounts) -> Result<(u32, u32)> {
@@ -802,35 +1055,252 @@ fn owner(want: &ManagedFile, accounts: &Accounts) -> Result<(u32, u32)> {
     }
 }
 
-/// Sets a merged file's keys in place, keeping the app's other keys, mode and owner; a new file gets the managed mode and owner.
-fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge, accounts: &Accounts) -> Result<()> {
-    let existing = fs::metadata(target).ok();
-    let text = match &existing {
-        Some(_) => fs::read_to_string(target)?,
-        None => String::new(),
+/// A fresh name beside `target` for a file being written, which nobody can guess to plant a link at.
+fn temp_beside(target: &Path) -> Result<PathBuf> {
+    let dir = target.parent().context("file has no parent directory")?;
+    let name = target.file_name().context("file has no name")?.to_string_lossy();
+    let mut bytes = [0u8; 8];
+    if unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) } != bytes.len() as isize {
+        return Err(std::io::Error::last_os_error()).context("getrandom");
+    }
+    let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(dir.join(format!(".{name}.archix.{suffix}")))
+}
+
+/// A new file at an unguessable name beside `target`, created exclusively, so never through a link.
+fn create_temp(target: &Path) -> Result<(PathBuf, fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    loop {
+        let tmp = temp_beside(target)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
+        }
+    }
+}
+
+/// Fills a new temporary file and gives it its owner, then its mode, as chown drops setuid bits; the file is removed if that fails.
+fn finish_temp(
+    tmp: &Path,
+    file: &mut fs::File,
+    fill: impl FnOnce(&mut fs::File) -> Result<()>,
+    owner: Option<(u32, u32)>,
+    mode: u32,
+) -> Result<()> {
+    let result = (|| {
+        fill(file)?;
+        if let Some((u, g)) = owner
+            && is_root()
+        {
+            std::os::unix::fs::fchown(&*file, Some(u), Some(g))?;
+        }
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
+    result
+}
+
+/// What identifies one version of a file: a rename-over gives a new inode, an in-place write a new size or mtime; not ctime, which a rename changes.
+#[derive(PartialEq)]
+struct Version(u64, u64, u64, i64, i64);
+
+impl Version {
+    fn of(meta: &fs::Metadata) -> Version {
+        Version(meta.dev(), meta.ino(), meta.size(), meta.mtime(), meta.mtime_nsec())
+    }
+}
+
+fn read_version(path: &Path) -> Result<Option<(String, Version)>> {
+    use std::io::Read;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let merged = merge.apply(&text)?;
+    let version = Version::of(&file.metadata()?);
+    let mut text = String::new();
+    file.read_to_string(&mut text)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some((text, version)))
+}
+
+fn renameat2(from: &Path, to: &Path, flags: libc::c_uint) -> std::io::Result<()> {
+    let (from, to) = (
+        CString::new(from.as_os_str().as_encoded_bytes())?,
+        CString::new(to.as_os_str().as_encoded_bytes())?,
+    );
+    match unsafe { libc::renameat2(libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), flags) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// Puts `tmp` at `target` only if `target` is still the version read, None for no file; otherwise returns what's there now to merge again, and `tmp` is gone either way.
+fn replace_if_unchanged(
+    tmp: &Path,
+    target: &Path,
+    read: Option<&Version>,
+    ours: Version,
+) -> Result<Option<(String, Option<Version>)>> {
+    let again = || -> Result<Option<(String, Option<Version>)>> {
+        let _ = fs::remove_file(tmp);
+        Ok(Some(match read_version(target)? {
+            Some((text, version)) => (text, Some(version)),
+            None => (String::new(), None),
+        }))
+    };
+    let Some(read) = read else {
+        return match renameat2(tmp, target, libc::RENAME_NOREPLACE) {
+            Ok(()) => Ok(None),
+            Err(e) if e.raw_os_error() == Some(libc::EEXIST) => again(),
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) && fs::symlink_metadata(target).is_err() => {
+                fs::rename(tmp, target)?;
+                Ok(None)
+            }
+            Err(e) if e.raw_os_error() == Some(libc::EINVAL) => again(),
+            Err(e) => {
+                let _ = fs::remove_file(tmp);
+                Err(e.into())
+            }
+        };
+    };
+    match renameat2(tmp, target, libc::RENAME_EXCHANGE) {
+        Ok(()) => {
+            let displaced = read_version(tmp)?;
+            let _ = fs::remove_file(tmp);
+            match displaced {
+                Some((_, version)) if version == *read => Ok(None),
+                Some((text, _)) => Ok(Some((text, Some(ours)))),
+                None => Ok(Some((String::new(), Some(ours)))),
+            }
+        }
+        Err(e) if e.raw_os_error() == Some(libc::ENOENT) => {
+            let _ = fs::remove_file(tmp);
+            Ok(Some((String::new(), None)))
+        }
+        Err(e) if e.raw_os_error() == Some(libc::EINVAL) => match fs::metadata(target).map(|meta| Version::of(&meta)) {
+            Ok(now) if now == *read => {
+                fs::rename(tmp, target)?;
+                Ok(None)
+            }
+            _ => again(),
+        },
+        Err(e) => {
+            let _ = fs::remove_file(tmp);
+            Err(e.into())
+        }
+    }
+}
+
+/// KDE's lock on a config file, `<file>.lock` in QLockFile's format, held while archix sets keys so a KDE app saving meanwhile waits for it.
+struct KdeLock(PathBuf);
+
+impl KdeLock {
+    fn take(target: &Path) -> Result<KdeLock> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut name = target.as_os_str().to_os_string();
+        name.push(".lock");
+        let path = PathBuf::from(name);
+        let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+        let host = host.trim();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o644)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let boot = fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+                    let held = KdeLock(path);
+                    file.write_all(format!("{}\narchix\n{host}\n{}\n", std::process::id(), boot.trim()).as_bytes())?;
+                    return Ok(held);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let holder = fs::read_to_string(&path).unwrap_or_default();
+                    let mut lines = holder.lines();
+                    let pid = lines.next().and_then(|pid| pid.trim().parse::<i32>().ok());
+                    let on = lines.nth(1).unwrap_or_default().trim();
+                    let gone = pid.is_some_and(|pid| {
+                        (on.is_empty() || on == host)
+                            && unsafe { libc::kill(pid, 0) } != 0
+                            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+                    });
+                    if gone {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if std::time::Instant::now() > deadline {
+                        bail!(
+                            "{} is held by {}; nothing in the file was changed, so switch again once that program saved it",
+                            path.display(),
+                            pid.map_or_else(|| "another program".to_string(), |pid| format!("process {pid}"))
+                        );
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => return Err(e).with_context(|| format!("locking {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for KdeLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Sets a merged file's keys, keeping the app's other keys, mode and owner; a new file gets the managed mode and owner. KDE files are locked as KDE locks them, and an app's save between the read and the rename is merged again instead of lost.
+fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge, accounts: &Accounts) -> Result<()> {
+    use std::io::Write;
+    crate::testhooks::mark("merge-start");
     let dir = target.parent().context("file has no parent directory")?;
     create_parents(dir, want, accounts)?;
-    let name = target.file_name().context("file has no name")?.to_string_lossy();
-    let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
-    fs::write(&tmp, merged)?;
-    let (mode, owner) = match &existing {
-        Some(meta) => (meta.mode() & 0o7777, (meta.uid(), meta.gid())),
-        None => match owner(want, accounts) {
-            Ok(owner) => (want.mode, owner),
-            Err(e) => {
-                let _ = fs::remove_file(&tmp);
-                return Err(e);
-            }
-        },
+    let _lock = match merge.format.as_str() {
+        "kconfig" => Some(KdeLock::take(target)?),
+        _ => None,
     };
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-    std::os::unix::fs::chown(&tmp, Some(owner.0), Some(owner.1))?;
-    fs::rename(&tmp, target).inspect_err(|_| {
-        let _ = fs::remove_file(&tmp);
-    })?;
-    Ok(())
+    let (mode, owner) = match fs::metadata(target) {
+        Ok(meta) => (meta.mode() & 0o7777, (meta.uid(), meta.gid())),
+        Err(_) => (want.mode, owner(want, accounts)?),
+    };
+    let (mut text, mut read) = match read_version(target)? {
+        Some((text, version)) => (text, Some(version)),
+        None => (String::new(), None),
+    };
+    for _ in 0..20 {
+        let merged = merge.apply(&text)?;
+        crate::testhooks::mark("merge-read");
+        let (tmp, mut file) = create_temp(target)?;
+        finish_temp(
+            &tmp,
+            &mut file,
+            |file| Ok(file.write_all(merged.as_bytes())?),
+            Some(owner),
+            mode,
+        )?;
+        let ours = Version::of(&file.metadata()?);
+        drop(file);
+        match replace_if_unchanged(&tmp, target, read.as_ref(), ours)? {
+            None => return Ok(()),
+            Some((now, version)) => (text, read) = (now, version),
+        }
+    }
+    bail!("another program kept rewriting the file while archix set its keys; switch again")
 }
 
 /// Creates missing parent directories; ones archix creates for a user's file belong to that user.
@@ -854,35 +1324,47 @@ fn create_parents(dir: &Path, want: &ManagedFile, accounts: &Accounts) -> Result
     Ok(())
 }
 
-fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts) -> Result<()> {
+/// Writes `want` at `target` through a new file at an unguessable name renamed over it; `content` stands in for the blob store, which a home's user can't read.
+fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts, content: Option<&[u8]>) -> Result<()> {
     let dir = target.parent().context("file has no parent directory")?;
     create_parents(dir, want, accounts)?;
-    let name = target.file_name().context("file has no name")?.to_string_lossy();
-    let tmp = dir.join(format!(".{name}.archix.{}", std::process::id()));
-    let _ = fs::remove_file(&tmp);
-    match &want.link {
+    let tmp = match &want.link {
         Some(link) => {
-            symlink(link, &tmp)?;
+            let tmp = loop {
+                let tmp = temp_beside(target)?;
+                match symlink(link, &tmp) {
+                    Ok(()) => break tmp,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            };
             if want.owner != "root"
+                && is_root()
                 && let Ok((u, g)) = owner(want, accounts)
             {
                 std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
             }
+            tmp
         }
         None => {
-            let blob = blobs::path(paths, &want.sha256);
-            fs::copy(&blob, &tmp).with_context(|| format!("copying {}", blob.display()))?;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(want.mode))?;
-            let (u, g) = match owner(want, accounts) {
-                Ok(owner) => owner,
-                Err(e) => {
-                    let _ = fs::remove_file(&tmp);
-                    return Err(e);
+            let owner = owner(want, accounts)?;
+            let (tmp, mut file) = create_temp(target)?;
+            let fill = |file: &mut fs::File| -> Result<()> {
+                use std::io::Write;
+                match content {
+                    Some(bytes) => file.write_all(bytes)?,
+                    None => {
+                        let blob = blobs::path(paths, &want.sha256);
+                        let mut from = fs::File::open(&blob).with_context(|| format!("copying {}", blob.display()))?;
+                        std::io::copy(&mut from, file).with_context(|| format!("copying {}", blob.display()))?;
+                    }
                 }
+                Ok(())
             };
-            std::os::unix::fs::chown(&tmp, Some(u), Some(g))?;
+            finish_temp(&tmp, &mut file, fill, Some(owner), want.mode)?;
+            tmp
         }
-    }
+    };
     match fs::rename(&tmp, target) {
         Err(e) if e.raw_os_error() == Some(libc::EBUSY) && want.link.is_none() => {
             // A bind-mounted file (like /etc/resolv.conf inside arch-chroot) can't be replaced, only rewritten.
@@ -901,6 +1383,80 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_app_save_between_the_read_and_the_rename_is_merged_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings");
+        fs::write(&target, "old").unwrap();
+        let (_, read) = read_version(&target).unwrap().unwrap();
+        fs::write(dir.path().join("app.tmp"), "app").unwrap();
+        fs::rename(dir.path().join("app.tmp"), &target).unwrap();
+        let (tmp, file) = create_temp(&target).unwrap();
+        fs::write(&tmp, "merged from old").unwrap();
+        let ours = Version::of(&file.metadata().unwrap());
+        let (text, read) = replace_if_unchanged(&tmp, &target, Some(&read), ours).unwrap().unwrap();
+        assert_eq!(text, "app");
+        assert!(!tmp.exists());
+        let (tmp, _) = create_temp(&target).unwrap();
+        fs::write(&tmp, "merged from app").unwrap();
+        let ours = Version::of(&fs::metadata(&tmp).unwrap());
+        assert!(
+            replace_if_unchanged(&tmp, &target, read.as_ref(), ours)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "merged from app");
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "no temporary file is left"
+        );
+    }
+
+    #[test]
+    fn a_kde_lock_left_by_a_dead_process_is_taken_over_and_ours_goes_when_done() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("kdeglobals");
+        let lock = dir.path().join("kdeglobals.lock");
+        let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        fs::write(&lock, format!("{}\nkwin\n{}\n", i32::MAX, host.trim())).unwrap();
+        let held = KdeLock::take(&target).unwrap();
+        assert!(
+            fs::read_to_string(&lock)
+                .unwrap()
+                .starts_with(&format!("{}\narchix\n", std::process::id()))
+        );
+        drop(held);
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn a_kde_lock_held_by_a_live_process_is_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("kdeglobals");
+        let lock = dir.path().join("kdeglobals.lock");
+        let mut holder = Command::new("sleep").arg("1").spawn().unwrap();
+        let host = fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+        fs::write(&lock, format!("{}\nkwin\n{}\n", holder.id(), host.trim())).unwrap();
+        let started = std::time::Instant::now();
+        let waiter = std::thread::spawn(move || KdeLock::take(&target).map(drop));
+        holder.wait().unwrap();
+        fs::remove_file(&lock).unwrap();
+        waiter.join().unwrap().unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(900));
+    }
+
+    #[test]
+    fn temporary_names_are_unguessable_and_never_follow_a_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("x");
+        let (a, b) = (temp_beside(&target).unwrap(), temp_beside(&target).unwrap());
+        assert_ne!(a, b);
+        assert!(a.file_name().unwrap().to_string_lossy().starts_with(".x.archix."));
+        let (tmp, _) = create_temp(&target).unwrap();
+        assert_eq!(fs::symlink_metadata(&tmp).unwrap().mode() & 0o777, 0o600);
+    }
 
     #[test]
     fn managed_paths_split_into_deployment_trees_and_the_live_system() {

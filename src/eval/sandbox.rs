@@ -70,6 +70,8 @@ impl Sandbox {
         let math: Table = globals.raw_get("math")?;
         math.raw_set("random", LuaValue::Nil)?;
         math.raw_set("randomseed", LuaValue::Nil)?;
+        let string: Table = globals.raw_get("string")?;
+        string.raw_set("dump", LuaValue::Nil)?;
         globals.raw_set("print", lua.create_function(trace)?)?;
         globals.raw_set(
             "require",
@@ -106,8 +108,7 @@ impl Sandbox {
 
     pub fn load_init(&self) -> mlua::Result<(LuaValue, Rc<str>)> {
         let root = self.lua.app_data_ref::<Modules>().expect("modules state").root.clone();
-        let code = fs::read_to_string(root.join("init.lua"))
-            .map_err(|e| mlua::Error::runtime(format!("reading init.lua: {e}")))?;
+        let code = read_inside(&root, "init.lua").map_err(mlua::Error::runtime)?;
         let value = run_chunk(&self.lua, code, "init.lua")?;
         Ok((value, "init.lua".into()))
     }
@@ -166,8 +167,9 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
             };
             let code = match overlay.get(source.as_str()) {
                 Some(text) => text.clone(),
-                None => fs::read_to_string(root.join(source))
-                    .map_err(|e| mlua::Error::runtime(format!("reading {source}: {e}")))?,
+                None => {
+                    read_inside(&root, source).map_err(|e| mlua::Error::runtime(format!("module {name:?}: {e}")))?
+                }
             };
             (source.clone(), code)
         }
@@ -186,6 +188,18 @@ fn require(lua: &Lua, name: &str) -> mlua::Result<(LuaValue, Rc<str>)> {
         .cache
         .insert(name.to_string(), entry.clone());
     Ok(entry)
+}
+
+/// Reads `rel` under the canonical config directory `root`, refusing a link that leads out of it, as `archix.read_file` does.
+fn read_inside(root: &Path, rel: &str) -> Result<String, String> {
+    let full = root
+        .join(rel)
+        .canonicalize()
+        .map_err(|e| format!("reading {rel}: {e}"))?;
+    if !full.starts_with(root) {
+        return Err(format!("{rel} leaves the config directory"));
+    }
+    fs::read_to_string(full).map_err(|e| format!("reading {rel}: {e}"))
 }
 
 fn run_chunk(lua: &Lua, code: String, display: &str) -> mlua::Result<LuaValue> {
