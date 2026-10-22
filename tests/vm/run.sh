@@ -20,8 +20,10 @@ if [ "$suite" = selfupgrade ]; then
   rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old"
   git -C "$root" archive "$old" | tar -x -C "$work/old-src"
   git -C "$root" rev-parse --short "$old" > "$work/old/commit"
-  docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR=/target/old archix-arch-test bash -c 'set -e
-    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/old/x86_64-unknown-linux-musl/release/archix /work/old/archix-static'
+  # git archive dates every file at its commit, so one target dir shared by two old commits would keep the first one's build.
+  old_target=/target/old-$(cat "$work/old/commit")
+  docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR="$old_target" archix-arch-test bash -c 'set -e
+    cargo build --locked --release --target x86_64-unknown-linux-musl && cp "$CARGO_TARGET_DIR"/x86_64-unknown-linux-musl/release/archix /work/old/archix-static'
 fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
