@@ -763,7 +763,7 @@ fn a_switch_rollback_or_gc_is_refused_while_no_fat_filesystem_is_mounted_at_the_
         );
         assert_eq!(state(), before, "{args:?} changed something");
     }
-    let _esp = FatEsp::new(machine, "160M");
+    let _esp = FatEsp::new(machine, "256M");
     setup.ok_env(&check, &["switch", "--noconfirm"]);
     assert_ne!(
         machine.current(),
