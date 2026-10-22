@@ -1610,6 +1610,7 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
         anticheat: false,
         tries: 0,
         revoke_unused: false,
+        pcr_key: None,
         health_check: None,
     };
     let packages = archix::packages::Packages {

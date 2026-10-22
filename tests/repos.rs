@@ -5,6 +5,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use archix::lock::AUR_REPO;
 use common::*;
@@ -180,6 +181,62 @@ fn a_package_signed_by_a_key_an_incoming_keyring_adds_installs_in_the_same_switc
     assert_eq!(installed("archix-test-signed").as_deref(), Some("1.0-1"));
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
+}
+
+#[test]
+#[ignore]
+fn a_package_signed_by_an_expired_key_is_refused_at_prepare() {
+    let _system = lock_system();
+    run(Command::new("pacman-key").arg("--init"));
+    let signer = TempDir::new().unwrap();
+    let gpg = |args: &[&str]| {
+        Command::new("gpg")
+            .arg("--homedir")
+            .arg(signer.path())
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let packager = "archix expired packager <expired@archix.test>";
+    let made = gpg(&["--quick-gen-key", packager, "ed25519", "sign", "seconds=40"]);
+    let expired = Instant::now() + Duration::from_secs(42);
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let listing = String::from_utf8_lossy(&gpg(&["--with-colons", "--list-keys"]).stdout).into_owned();
+    let fingerprint = listing
+        .lines()
+        .find(|line| line.starts_with("fpr:"))
+        .and_then(|line| line.split(':').nth(9))
+        .unwrap()
+        .to_string();
+    let key = signer.path().join("packager.gpg");
+    fs::write(&key, gpg(&["--export"]).stdout).unwrap();
+    run(Command::new("pacman-key").arg("--add").arg(&key));
+    run(Command::new("pacman-key").args(["--lsign-key", &fingerprint]));
+    let repo = LocalRepo::new("archix-signed");
+    repo.publish_full("archix-test-expired", "1.0", "", "", Some(signer.path()));
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-signed\", servers = {{ {:?} }} }} }}",
+        repo.server()
+    );
+    let setup = Setup::new(&["archix-test-expired"], &body);
+    std::thread::sleep(expired.saturating_duration_since(Instant::now()));
+
+    let out = setup.run(&["switch", "--noconfirm"]);
+    let _ = Command::new("pacman-key").args(["--delete", &fingerprint]).output();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("pacman refuses these packages, so nothing was changed")
+            && text.contains(&format!(
+                "archix-test-expired-1.0-1-any.pkg.tar.zst is signed by {packager}, whose key expired on"
+            )),
+        "prepare names the package and the expired key: {text}"
+    );
+    assert!(!text.contains("in the staging root"), "{text}");
+    assert!(setup.machine.deployments().is_empty(), "{text}");
+    assert_eq!(setup.machine.current(), None);
+    assert!(installed("archix-test-expired").is_none());
 }
 
 #[test]

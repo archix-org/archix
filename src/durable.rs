@@ -15,6 +15,11 @@ pub fn write_executable(path: &Path, contents: &[u8]) -> Result<()> {
     write_mode(path, contents, Some(0o755))
 }
 
+/// Like `write`, for a key only root may read: mode 0600 before anything is written.
+pub fn write_secret(path: &Path, contents: &[u8]) -> Result<()> {
+    write_mode(path, contents, Some(0o600))
+}
+
 fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -24,11 +29,11 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     let tmp = path.with_file_name(tmp_name);
     removing_on_error(&tmp, || {
         let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
-        file.write_all(contents)
-            .with_context(|| format!("writing {}", tmp.display()))?;
         if let Some(mode) = mode {
             file.set_permissions(fs::Permissions::from_mode(mode))?;
         }
+        file.write_all(contents)
+            .with_context(|| format!("writing {}", tmp.display()))?;
         file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
     })?;
@@ -109,36 +114,79 @@ pub fn sync_filesystems_checked<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
 
 /// Writes a file in the user's config like `write`, keeping its owner and mode, or giving a new one its directory's owner and 0644, so a run under sudo leaves nothing root-owned there.
 pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
-    let before = fs::metadata(path)
+    let before = fs::symlink_metadata(path)
         .ok()
+        .filter(|meta| meta.is_file())
         .map(|meta| (meta.uid(), meta.gid(), meta.mode() & 0o7777));
-    if let Some(dir) = path.parent() {
-        create_config_dirs(dir)?;
-    }
-    write(path, contents)?;
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    create_config_dirs(dir)?;
     let (uid, gid, mode) = match before {
         Some(owner) => owner,
         None => {
-            let dir = fs::metadata(path.parent().unwrap_or(Path::new("/")))?;
+            let dir = fs::metadata(dir)?;
             (dir.uid(), dir.gid(), 0o644)
         }
     };
-    std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("chown {}", path.display()))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).with_context(|| format!("chmod {}", path.display()))
+    let (tmp, mut file) = new_file_beside(path)?;
+    removing_on_error(&tmp, || {
+        file.write_all(contents)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::os::unix::fs::fchown(&file, Some(uid), Some(gid)).with_context(|| format!("chown {}", tmp.display()))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .with_context(|| format!("chmod {}", tmp.display()))?;
+        file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    })?;
+    sync_dir(path)
 }
 
-/// Creates `dir` and its missing parents owned like the nearest one that exists, 0755 whatever the umask.
+/// A new file beside `path` at a random name, created exclusively so a link someone planted in a user's config directory is never followed.
+fn new_file_beside(path: &Path) -> Result<(std::path::PathBuf, File)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    loop {
+        let mut bytes = [0u8; 8];
+        if unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) } != bytes.len() as isize {
+            return Err(std::io::Error::last_os_error()).context("getrandom");
+        }
+        let suffix: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let tmp = path.with_file_name(format!(".{name}.{suffix}.tmp"));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&tmp)
+        {
+            Ok(file) => return Ok((tmp, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("writing {}", tmp.display())),
+        }
+    }
+}
+
+/// Creates `dir` and its missing parents owned like the nearest one that exists, 0755 whatever the umask; owners are set without following links.
 pub fn create_config_dirs(dir: &Path) -> Result<()> {
     let Some(existing) = dir.ancestors().find(|a| a.exists()) else {
         return Ok(());
     };
     let owner = fs::metadata(existing)?;
     let missing: Vec<&Path> = dir.ancestors().take_while(|a| !a.exists()).collect();
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    for created in missing {
-        std::os::unix::fs::chown(created, Some(owner.uid()), Some(owner.gid()))
+    for created in missing.into_iter().rev() {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir(created).with_context(|| format!("creating {}", created.display()))?;
+        let opened = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(created)
+            .with_context(|| format!("opening {}", created.display()))?;
+        std::os::unix::fs::fchown(&opened, Some(owner.uid()), Some(owner.gid()))
             .with_context(|| format!("chown {}", created.display()))?;
-        fs::set_permissions(created, fs::Permissions::from_mode(0o755))
+        opened
+            .set_permissions(fs::Permissions::from_mode(0o755))
             .with_context(|| format!("chmod {}", created.display()))?;
     }
     Ok(())
@@ -159,6 +207,34 @@ mod tests {
         fs::write(dir.path().join("source"), "s").unwrap();
         assert!(copy(&dir.path().join("source"), &target).is_err());
         assert!(!dir.path().join("target.tmp").exists(), "copy");
+    }
+
+    #[test]
+    fn a_config_write_follows_no_link_its_directorys_owner_planted() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        fs::write(&victim, "secret").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+        let config = dir.path().join("config");
+        fs::create_dir(&config).unwrap();
+        std::os::unix::fs::symlink(&victim, config.join("archix.lock.tmp")).unwrap();
+        write_config(&config.join("archix.lock"), b"lock").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "secret");
+        assert_eq!(fs::metadata(&victim).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::read_to_string(config.join("archix.lock")).unwrap(), "lock");
+        assert_eq!(fs::metadata(config.join("archix.lock")).unwrap().mode() & 0o777, 0o644);
+        write_config(&config.join("hosts/box/installed.lua"), b"x").unwrap();
+        assert_eq!(fs::metadata(config.join("hosts")).unwrap().mode() & 0o777, 0o755);
+        let mut names: Vec<_> = fs::read_dir(&config)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            ["archix.lock", "archix.lock.tmp", "hosts"],
+            "no temporary file is left"
+        );
     }
 
     #[test]

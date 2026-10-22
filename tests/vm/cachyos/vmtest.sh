@@ -35,6 +35,19 @@ baseline() { findings "$1" > "$state/baseline-$1"; }
 unchanged() { findings "$2" | diff "$state/baseline-$2" - > "$state/diff-$2" || fail "$1 changed deployment $2's files: $(head -c 600 "$state/diff-$2")"; }
 # Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
+# Fails unless log $2 ends in a refusal by the root preflight (conflicts.rs check_space; on btrfs also btrfs.rs ensure_metadata_room), with nothing downloaded or built first.
+preflight_refused() {
+  local space='/ has [0-9]+ MiB free, but this needs about [0-9]+ MiB; nothing was changed\.'
+  local metadata='btrfs on / has room for data but almost none for metadata \([0-9]+ MiB of metadata free, [0-9]+ MiB unallocated\), so writes would fail halfway; nothing was changed\.'
+  local re="^error: $space" refusal
+  [ "$(findmnt -no FSTYPE /)" = btrfs ] && re="^error: ($space|$metadata)"
+  refusal=$(grep '^error: ' "$2" | tail -1)
+  [[ $refusal =~ $re ]] || fail "$1 should be refused by the root free-space preflight, but this refused it: ${refusal:-no error line; the run ended with $(tail -5 "$2" | tr '\n' '|')}"
+  ! grep -qE '^downloading |^:: (re)?building ' "$2" || fail "$1 should have found everything cached and stopped before staging, but it downloaded, built or staged: $(grep -E '^downloading |^:: (re)?building ' "$2" | head -5 | tr '\n' '|')"
+}
+system_state() { current; listing; echo; pacman -Q; cat "$lock"; }
+remember_system() { system_state > "$state/system-before"; }
+system_unchanged() { system_state | diff "$state/system-before" - > "$state/system-diff" || fail "$1 changed the current deployment, /archix/deploy, the running system's packages or the lock: $(head -c 600 "$state/system-diff" | tr '\n' '|')"; }
 cut_power() { echo 1 > /proc/sys/kernel/sysrq; echo b > /proc/sysrq-trigger; for _ in 1 2 3 4 5 6 7 8 9 10; do nap; done; }
 nap() { read -rt 1 <> <(:) || :; }
 kill_comm() { local p c; for p in /proc/[0-9]*; do read -r c < "$p/comm" 2>/dev/null && [ "$c" = "$1" ] && kill -9 "${p#/proc/}" 2>/dev/null; done; }
@@ -79,17 +92,23 @@ case $stage in
     sed -i 's|"htop", "jq" }, -- packages|"git", "vim" }, -- packages|' "$config"
     ax update --to 2026-10-18 --noconfirm > /dev/console 2>&1 || fail "archix update --to 2026-10-18"
     kept=$(deployments)
+    baseline "$(recall old)"
+    say "staging the switch once and killing it, so its downloads are cached before the disk fills"
+    interrupt_after kill 1 switch --noconfirm
+    [ "$(current)" = "$(recall old)" ] && [ "$(deployments)" = "$kept" ] || fail "the killed switch committed: $(listing); deployments before $kept, now $(deployments)"
+    remember_system
     fill_disk $((20 * 1024 * 1024))
-    ax switch --noconfirm > /run/archix-vmtest-full.log 2>&1 && fail "a switch with 20 MB free should fail"
-    say "the switch on a full disk said: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
-    grep -q "nothing was changed" /run/archix-vmtest-full.log || fail "the full-disk refusal should say nothing was changed"
+    ax switch --noconfirm > /run/archix-vmtest-full.log 2>&1
+    refused=$?
     rm -f /var/tmp/archix-fill
-    [ "$(current)" = "$(recall old)" ] || fail "the failed switch on a full disk changed the current deployment"
-    [ "$(deployments)" = "$kept" ] && ! staging_left || fail "the failed switch on a full disk left something behind: $(listing); deployments before $kept, now $(deployments)"
-    say "PASS: a full disk stops the switch before it changes anything"
+    say "the switch on a full disk said: $(tail -5 /run/archix-vmtest-full.log | tr '\n' '|')"
+    [ "$refused" != 0 ] || fail "a switch with 20 MB free should fail"
+    preflight_refused "the switch on a full disk" /run/archix-vmtest-full.log
+    system_unchanged "the switch refused on a full disk"
+    unchanged "the killed switch and the one refused on a full disk" "$(recall old)"
+    say "PASS: with its downloads cached, a switch on a full disk is stopped by the root free-space check before it changes anything"
 
     remember kept "$kept"
-    baseline "$(recall old)"
     next 2
     say "cutting the power in the middle of the switch"
     interrupt_after power 4 switch --noconfirm

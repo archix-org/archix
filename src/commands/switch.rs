@@ -219,6 +219,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let mut packages = lock.packages.clone();
     carry_aur_hashes(&mut packages, current.as_ref());
     let mut generation = Generation {
+        format: archix::generations::FORMAT,
         number: 0,
         created: now(),
         host: target.host.to_string(),
@@ -305,6 +306,15 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     if repos_stale {
         println!("update     /etc/pacman.conf (custom repos)");
     }
+    if current
+        .as_ref()
+        .and_then(|current| current.settings.boot.as_ref())
+        .is_some_and(|before| before.pcr_key != boot.pcr_key)
+    {
+        println!(
+            "update     the PCR policy key: the new deployment's UKIs carry policies signed with the one in /etc/systemd"
+        );
+    }
     let nothing_changes = changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() && !repos_stale;
     if laid_out && nothing_changes && unchanged {
         let current = current.expect("unchanged needs a current generation");
@@ -360,7 +370,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     };
     let kernel = boot::owned_version(&db, &boot.kernel)
         .map(|version| here.join("usr/lib/modules").join(version).join("vmlinuz"));
-    system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot.anticheat)?;
+    system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot::uki_count(&boot, &db))?;
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
         noconfirm,
@@ -644,6 +654,9 @@ fn after_commit(
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
+    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
+        soft_failures.push(format!("creating home directories: {e:#}"));
+    }
     write_live_files(
         paths,
         number,
@@ -652,9 +665,6 @@ fn after_commit(
         &live_on_change,
         &mut soft_failures,
     );
-    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
-        soft_failures.push(format!("creating home directories: {e:#}"));
-    }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
     system::reboot::refresh_note(&paths.root);
@@ -1363,6 +1373,9 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     let base = match kept {
         true => number,
         false => {
+            if let Some(why) = generation.too_new() {
+                bail!("{why}; its deployment was dropped, so rolling back would rebuild it; nothing was changed");
+            }
             if generation.before_archix {
                 bail!(
                     "generation {number} is the system as archix found it, and its deployment was dropped, so it can't be rebuilt; nothing was changed"
@@ -1458,7 +1471,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                 .join(version)
                 .join("vmlinuz")
         });
-        system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot.anticheat)?;
+        system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot::uki_count(&boot, &base_db))?;
     }
     guard_downgrades(&risky, noconfirm, allow_unsafe)?;
     if !noconfirm && !confirm(&format!("roll back to {name}?"))? {
@@ -1530,10 +1543,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
     }
     let accounts = Accounts::read(&deployment.join("etc"));
-    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
+    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
         flatpak::drop_pending(&paths.state, None);
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));

@@ -104,7 +104,7 @@ impl Machine {
         let root = dir.path().join("root");
         sh(&format!(
             r#"r={root}; t={template}; umask 022
-            mkdir -p "$r"
+            mkdir -p "$r"; chmod 755 "$(dirname "$r")"
             cp -al "$t/usr" "$r/usr"
             cp -al "$t/target" "$r/target"
             cp -a /etc "$r/etc"
@@ -119,7 +119,7 @@ impl Machine {
             : > "$r/var/log/pacman.log"
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
-            cd /var/lib/archix && rm -rf generations boot backups edited id-map.json id-registry.json etc-merge outside-changes.json \
+            cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json id-registry.json etc-merge outside-changes.json \
               pending-hooks notes layout-pruned eject"#,
             root = root.display(),
             template = template.display(),

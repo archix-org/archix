@@ -3,8 +3,10 @@
 mod common;
 
 use std::fs;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
-use std::path::PathBuf;
+use std::os::unix::fs::{MetadataExt, PermissionsExt, lchown, symlink};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use common::*;
 
@@ -72,6 +74,8 @@ fn live_link_over_a_directory(home: &str) {
     setup.ok(&["switch", "--noconfirm"]);
     fs::create_dir_all(at(&format!("{home}/.config/app"))).unwrap();
     fs::write(at(&format!("{home}/.config/app/old.conf")), "old\n").unwrap();
+    let (uid, gid) = ids(&at(home));
+    give(&at(&format!("{home}/.config")), uid, gid);
     fs::create_dir_all(setup.dir.path().join("dot/app")).unwrap();
     fs::write(setup.dir.path().join("dot/app/new.conf"), "new\n").unwrap();
 
@@ -172,4 +176,173 @@ fn merged_keys_and_read_only_files() {
         read_text("/home/homeuser/.config/kdeglobals").contains("ColorScheme[$i]=Breeze"),
         "a merged file leaving the config keeps its keys"
     );
+}
+
+/// Gives a tree in a home to its user, as files the user made themselves would be.
+fn give(path: &Path, uid: u32, gid: u32) {
+    let status = Command::new("chown")
+        .arg("-hR")
+        .arg(format!("{uid}:{gid}"))
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// A program for ARCHIX_TEST_MARK, which archix runs at its named steps, that runs `script` at `step` only.
+fn mark_hook(root: &Path, name: &str, step: &str, script: &str) -> PathBuf {
+    let path = root.join("tmp").join(name);
+    write_executable(&path, &format!("#!/bin/sh\n[ \"$1\" = {step} ] || exit 0\n{script}\n"));
+    path
+}
+
+fn ids(path: &Path) -> (u32, u32) {
+    let meta = fs::symlink_metadata(path).unwrap();
+    (meta.uid(), meta.gid())
+}
+
+fn output_text(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+}
+
+#[test]
+#[ignore]
+fn a_users_links_never_make_archix_write_or_move_files_outside_the_home() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "users = { homeuser = {} }");
+    setup.ok(&["switch", "--noconfirm"]);
+    let root = setup.machine.root.clone();
+    let home = at("/home/homeuser");
+    let (uid, gid) = ids(&home);
+    let victim = root.join("srv/victim");
+    fs::write(&victim, "secret\n").unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o600)).unwrap();
+    let victim_dir = root.join("srv/victim-dir");
+    fs::create_dir_all(&victim_dir).unwrap();
+    let config = home.join(".config");
+    fs::create_dir_all(config.join("gone")).unwrap();
+    fs::write(config.join("gone/old.conf"), "mine\n").unwrap();
+    symlink(&victim_dir, config.join("linked")).unwrap();
+    give(&config, uid, gid);
+    let plant = format!(
+        "ln -s {} {}/.kdeglobals.archix.$PPID",
+        victim.display(),
+        config.display()
+    );
+    let hook = mark_hook(&root, "plant.sh", "merge-read", &plant);
+    let files = r#"[".config/kdeglobals"] = { merge = { format = "kconfig", values = { General = { ColorScheme = "Breeze" } } } },
+        [".config/linked/app.conf"] = { text = "x\n" },
+        [".config/gone/old.conf"] = { text = "managed\n" }"#;
+    setup.set_body(
+        &[],
+        &format!(r#"users = {{ homeuser = {{}} }}, home = {{ user = "homeuser", files = {{ {files} }} }}"#),
+    );
+    let out = setup.run_env(
+        &[("ARCHIX_TEST_MARK", hook.to_str().unwrap())],
+        &["switch", "--noconfirm"],
+    );
+    let text = output_text(&out);
+    let untouched = |why: &str, text: &str| {
+        let meta = fs::metadata(&victim).unwrap();
+        assert_eq!(
+            (
+                fs::read_to_string(&victim).unwrap().as_str(),
+                meta.uid(),
+                meta.mode() & 0o7777
+            ),
+            ("secret\n", 0, 0o600),
+            "{why}:\n{text}"
+        );
+        let entries: Vec<_> = fs::read_dir(&victim_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert!(entries.is_empty(), "{why}: {entries:?}\n{text}");
+    };
+    untouched(
+        "a link at archix's temporary name or on a home file's path leads out of the home",
+        &text,
+    );
+    assert!(
+        text.contains(".config/linked/app.conf") && text.contains("Permission denied"),
+        "the file behind the user's link out of the home fails as it would for the user:\n{text}"
+    );
+    let kde = config.join("kdeglobals");
+    assert!(fs::symlink_metadata(&kde).unwrap().is_file(), "{text}");
+    assert!(
+        fs::read_to_string(&kde).unwrap().contains("ColorScheme=Breeze"),
+        "{text}"
+    );
+    assert_eq!(ids(&kde), (uid, gid), "a new merged file belongs to the user");
+    assert_eq!(fs::read_to_string(config.join("gone/old.conf")).unwrap(), "managed\n");
+    assert_eq!(ids(&config.join("gone/old.conf")), (uid, gid));
+
+    fs::remove_dir_all(config.join("gone")).unwrap();
+    symlink(&victim_dir, config.join("gone")).unwrap();
+    lchown(config.join("gone"), Some(uid), Some(gid)).unwrap();
+    setup.set_body(&[], "users = { homeuser = {} }");
+    let out = setup.run(&["switch", "--noconfirm"]);
+    untouched(
+        "restoring the original of a file whose directory became a link out of the home",
+        &output_text(&out),
+    );
+}
+
+#[test]
+#[ignore]
+fn an_app_writing_a_merged_file_during_the_switch_keeps_its_write() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "users = { homeuser = {} }");
+    setup.ok(&["switch", "--noconfirm"]);
+    let root = setup.machine.root.clone();
+    let home = at("/home/homeuser");
+    let (uid, gid) = ids(&home);
+    let kde = home.join(".config/kdeglobals");
+    fs::create_dir_all(kde.parent().unwrap()).unwrap();
+    fs::write(&kde, "[General]\nColorScheme=Old\n").unwrap();
+    give(&home.join(".config"), uid, gid);
+    let f = kde.display();
+    let save = |theme: &str| {
+        format!("printf '[General]\\nColorScheme=Old\\n\\n[Icons]\\nTheme={theme}\\n' > {f}.new && mv {f}.new {f}")
+    };
+    let once = format!("[ -e {f}.saved ] && exit 0; touch {f}.saved; {}", save("Papirus"));
+    let hook = mark_hook(&root, "app.sh", "merge-read", &once);
+    setup.set_body(
+        &[],
+        r#"users = { homeuser = {} }, home = { user = "homeuser", files = { [".config/kdeglobals"] = { merge = { format = "kconfig", values = { General = { ColorScheme = "Breeze" } } } } } }"#,
+    );
+    setup.ok_env(
+        &[("ARCHIX_TEST_MARK", hook.to_str().unwrap())],
+        &["switch", "--noconfirm"],
+    );
+    let text = fs::read_to_string(&kde).unwrap();
+    assert!(
+        text.contains("ColorScheme=Breeze") && text.contains("Theme=Papirus"),
+        "an app saving between archix's read and its rename keeps its write, with archix's key set on top:\n{text}"
+    );
+
+    fs::write(&kde, "[General]\nColorScheme=Old\n").unwrap();
+    let holder = format!(
+        "(sleep 3; {}; rm -f {f}.lock) > /dev/null 2>&1 &\n\
+         printf '%s\\nkwriteconfig6\\n%s\\n' $! \"$(cat /proc/sys/kernel/hostname)\" > {f}.lock",
+        save("Breath")
+    );
+    let hook = mark_hook(&root, "holder.sh", "merge-start", &holder);
+    setup.ok_env(
+        &[("ARCHIX_TEST_MARK", hook.to_str().unwrap())],
+        &["switch", "--noconfirm"],
+    );
+    let lock = PathBuf::from(format!("{f}.lock"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while lock.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let text = fs::read_to_string(&kde).unwrap();
+    assert!(
+        text.contains("ColorScheme=Breeze") && text.contains("Theme=Breath"),
+        "archix waits for KDE's lock on the file, then sets its key on what the app saved:\n{text}"
+    );
+    assert!(!lock.exists(), "archix leaves no lock behind");
+    assert_eq!(ids(&kde), (uid, gid));
 }

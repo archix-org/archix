@@ -251,6 +251,22 @@ fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_pa
             .iter()
             .all(|e| !e.starts_with(&format!("archix-{with_tree}")))
     );
+    let record = setup
+        .paths
+        .state
+        .join(format!("generations/{with_tree}/generation.json"));
+    let text = fs::read_to_string(&record).unwrap();
+    let field = format!("\"format\": {},", archix::generations::FORMAT);
+    assert!(text.contains(&field), "records carry their format:\n{text}");
+    fs::write(&record, text.replace(&field, "\"format\": 99,")).unwrap();
+    let refused = setup.fails(&["rollback", &with_tree.to_string(), "--noconfirm"]);
+    assert!(
+        refused.contains("written by a newer archix (record format 99") && refused.contains("nothing was changed"),
+        "{refused}"
+    );
+    assert_eq!(machine.current(), Some(newest));
+    assert!(setup.ok(&["generations"]).contains(&format!("{with_tree:>4}")));
+    fs::write(&record, &text).unwrap();
 
     let out = setup.ok(&["rollback", &with_tree.to_string(), "--noconfirm"]);
     assert!(out.contains("rebuilding it from deployment"), "{out}");

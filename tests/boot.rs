@@ -192,6 +192,108 @@ fn with_systemds_pcr_key_every_uki_carries_a_signed_pcr_policy() {
         signed.contains(".pcrsig") && signed.contains(".pcrpkey"),
         "{signed}\n{out}"
     );
+
+    let embedded = |entry: &str| {
+        let out = std::env::temp_dir().join("archix-pcrpkey");
+        let copied = Command::new("objcopy")
+            .args(["-O", "binary", "--only-section=.pcrpkey"])
+            .arg(uki(machine, entry))
+            .arg(&out)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+        fs::read(&out).unwrap()
+    };
+    let old_key = fs::read(&public).unwrap();
+    let before = machine.current().unwrap();
+    assert_eq!(embedded(&format!("archix-{before}.conf")), old_key);
+    let rotated = setup.ok(&["secure-boot", "rotate-pcr-key"]);
+    let new_key = fs::read(&public).unwrap();
+    assert_ne!(new_key, old_key, "{rotated}");
+    for n in machine.deployments() {
+        let etc = machine.deployment(n).join("etc/systemd");
+        assert_eq!(
+            fs::read(etc.join("tpm2-pcr-public-key.pem")).unwrap(),
+            new_key,
+            "deployment {n}"
+        );
+        let mode = fs::metadata(etc.join("tpm2-pcr-private-key.pem"))
+            .unwrap()
+            .permissions();
+        assert_eq!(
+            std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+            0o600,
+            "deployment {n}"
+        );
+    }
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("update     the PCR policy key"), "{out}");
+    let after = machine.current().unwrap();
+    assert!(after > before, "a new key makes a new deployment:\n{out}");
+    assert_eq!(embedded(&format!("archix-{after}.conf")), new_key);
+    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
+}
+
+#[test]
+#[ignore]
+fn every_installed_kernel_gets_its_own_entry_and_dkms_gets_every_kernels_headers() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 1 }";
+    let setup = Setup::new(&["linux-lts"], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let first = machine.current().unwrap();
+    let lts = format!("archix-{first}-linux-lts.conf");
+    assert!(
+        entries(machine).contains(&format!("archix-{first}.conf")) && entries(machine).contains(&lts),
+        "{:?}",
+        entries(machine)
+    );
+    let info = inspect(machine, &lts);
+    assert!(info.contains("-lts"), "the extra entry boots linux-lts:\n{info}");
+    assert!(!inspect(machine, &format!("archix-{first}.conf")).contains("-lts"));
+    let menu = fs::read_to_string(entry_file(machine, &lts)).unwrap();
+    assert!(menu.contains(&format!("generation {first}, linux-lts")), "{menu}");
+    let mounted = machine.reboot(Some(&lts));
+    assert!(
+        mounted.contains(&format!("booting deployment {first} (the boot entry {lts})")),
+        "{mounted}"
+    );
+
+    setup.set_body(&["linux-lts", "tree"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    let second = machine.current().unwrap();
+    machine.reboot(Some(&format!("archix-{second}.conf")));
+    setup.set_body(&["linux-lts"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(!machine.deployments().contains(&first), "{:?}", machine.deployments());
+    assert!(
+        entries(machine)
+            .iter()
+            .all(|e| !e.starts_with(&format!("archix-{first}"))),
+        "both of a dropped deployment's entries go: {:?}",
+        entries(machine)
+    );
+    for n in machine.deployments() {
+        assert!(
+            entries(machine).contains(&format!("archix-{n}-linux-lts.conf")),
+            "{n}: {:?}",
+            entries(machine)
+        );
+    }
+    let used: BTreeSet<PathBuf> = machine.entries().iter().map(|entry| uki(machine, entry)).collect();
+    let on_esp: BTreeSet<PathBuf> = fs::read_dir(machine.esp().join("EFI/archix"))
+        .unwrap()
+        .flatten()
+        .map(|file| file.path())
+        .collect();
+    assert_eq!(used, on_esp, "every UKI left is one an entry starts");
+
+    setup.set_body(&["linux-lts", "v4l2loopback-dkms"], keep);
+    let lock = setup.lock();
+    for headers in ["linux-headers", "linux-lts-headers"] {
+        assert!(lock.packages.contains_key(headers), "a DKMS module needs {headers}");
+    }
 }
 
 #[test]
