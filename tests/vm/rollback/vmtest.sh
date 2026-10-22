@@ -265,7 +265,8 @@ case $stage in
     remember bad "$bad"
     [ -f "/efi/loader/entries/archix-$bad+3.conf" ] || fail "the new entry should count three boot tries: $(ls /efi/loader/entries)"
     lib=$(readlink -f "/archix/deploy/$bad/usr/lib/libc.so.6")
-    head -c 4096 /dev/urandom > "$lib.broken" && mv "$lib.broken" "$lib" || fail "breaking deployment $bad's glibc"
+    # /archix is mounted read-only outside archix's own namespace.
+    unshare -m sh -c 'mount -o remount,bind,rw /archix && head -c 4096 /dev/urandom > "$1.broken" && mv "$1.broken" "$1"' sh "$lib" || fail "breaking deployment $bad's glibc"
     [ "$(glibc)" = 2.44 ] && archix --version > /dev/null || fail "breaking deployment $bad's glibc touched the running one"
     unchanged "breaking deployment $bad's glibc" "$good"
     say "broke glibc in deployment $bad; rebooting into it"
