@@ -44,7 +44,8 @@ if [ "$esp" = 1 ] || { [ -n "$SAMPLE" ] && [ $((point % SAMPLE)) = 0 ]; }; then
     -drive file=/dev/mapper/snap,format=raw,if=virtio,cache=none -nic none -display none -serial file:/dev/shm/boot.log -monitor none > /dev/null 2>&1
   real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
   if [ -z "$real" ]; then
-    problems+=("the real boot didn't finish: $(grep -a -v '^\s*$' /dev/shm/boot.log | tail -4 | tr -d '\r' | tr '\n' '|' | cut -c1-400)")
+    cp /dev/shm/boot.log "$state/boot-$point.log"
+    problems+=("the real boot didn't finish: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | grep -av '^\s*$' | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
   else
     [[ $real == *" missing=0 "* ]] || problems+=("the real boot found files missing: $real")
   fi
