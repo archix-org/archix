@@ -517,7 +517,9 @@ fn a_failed_health_check_falls_back_says_why_and_names_unsafe_downgrades_and_hib
     assert!(setup.ok(&["status"]).contains("hibernation is off"));
     let desc = machine.deployment(new).join("pacman/lemon-3.53.4-1/desc");
     let migrated = fs::read_to_string(&desc).unwrap().replace("3.53.4-1", "3.54.0-1");
+    machine.store_writable(true);
     fs::write(&desc, migrated).unwrap();
+    machine.store_writable(false);
 
     machine.reboot(Some(&format!("archix-{new}.conf")));
     setup.ok_env(&[counting], &["boot-check"]);
