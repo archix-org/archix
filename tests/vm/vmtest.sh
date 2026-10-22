@@ -258,8 +258,12 @@ case $stage in
     echo /bin/vmtest-shell >> /etc/shells
     for _ in $(seq 50); do grep -qx /bin/vmtest-shell "/archix/deploy/$pending/etc/shells" && break; sleep 0.2; done
     status=$(archix --host archix-vm status 2>&1)
-    echo "$status" | grep -q "/etc changes carried into the pending deployment $pending" && echo "$status" | grep -q "/etc/shells: changed on the running system" \
-      || fail "status should count the carried changes and the conflict: $status"
+    if ! { echo "$status" | grep -q "/etc changes carried into the pending deployment $pending" && echo "$status" | grep -q "/etc/shells: changed on the running system"; }; then
+      echo "$status" | while IFS= read -r line; do say "status: $line"; done
+      journalctl -b -u archix-etc-merge.service --no-pager | tail -30 | while IFS= read -r line; do say "journal: $line"; done
+      ls -la /var/lib/archix/etc-merge 2>&1 | while IFS= read -r line; do say "state: $line"; done
+      fail "status should count the carried changes and the conflict"
+    fi
     say "PASS: the watcher carried a password, a connection, a new directory and a conflicting edit into deployment $pending within seconds"
     echo "$pending" > "$state/pending"
     next etc-merge-2

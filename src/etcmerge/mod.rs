@@ -203,9 +203,10 @@ pub fn start(paths: &Paths) -> Result<()> {
         return Ok(());
     }
     if !Path::new("/run/systemd/system").exists() {
-        anyhow::bail!(
-            "systemd isn't running, so nothing carries /etc changes into the new deployment until the reboot"
+        println!(
+            ":: systemd isn't running here (a container or an install), so there's no running system whose /etc changes need carrying; the /etc merge isn't started"
         );
+        return Ok(());
     }
     let unit = unit_name(&paths.root);
     let installed = !test_root && Path::new("/etc/systemd/system").join(&unit).is_file();

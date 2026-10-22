@@ -698,3 +698,84 @@ fn a_switch_carries_edits_made_during_its_transaction_and_until_shutdown_but_not
     );
     assert_eq!(read(&machine.root.join("etc/during-transaction")), "edited\n");
 }
+
+#[test]
+#[ignore]
+fn an_install_with_the_config_in_etc_shows_the_carried_changes_and_the_conflict_in_status() {
+    let _system = lock_system();
+    let mut setup = Setup::new(&[], "");
+    setup.lay_out();
+    setup.move_config_to_etc();
+    let machine = &setup.machine;
+    let booted = machine.current().unwrap();
+    setup.ok_env(&[("ARCHIX_TEST_ETC_MERGE", "1")], &["install", "tree", "--noconfirm"]);
+    let pending = machine.current().unwrap();
+    assert_ne!(pending, booted);
+    let unit = etcmerge::unit_name(&machine.root);
+    let etc = machine.deployment(pending).join("etc");
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let started = Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "waited for {what}: {}",
+                sh(&format!("journalctl -u {unit} --no-pager | tail -20"))
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    wait("the watcher's first pass", &|| {
+        etcmerge::load(&Paths::under(&machine.root), pending).is_some_and(|s| s.last_pass > 0)
+    });
+    machine.store_writable(true);
+    fs::write(etc.join("shells"), "/bin/sh\n/bin/zsh\n").unwrap();
+    machine.store_writable(false);
+    fs::write(machine.root.join("etc/shells"), "/bin/sh\n/bin/vmtest-shell\n").unwrap();
+    fs::create_dir_all(machine.root.join("etc/vmtest-dir/sub")).unwrap();
+    fs::write(machine.root.join("etc/vmtest-dir/sub/file"), "made after the switch\n").unwrap();
+    wait("the live edit", &|| {
+        read(&etc.join("shells")).contains("/bin/vmtest-shell")
+    });
+    let status = setup.ok(&["status"]);
+    sh(&format!("systemctl stop {unit}"));
+    assert!(
+        status.contains(&format!("/etc changes carried into the pending deployment {pending}"))
+            && status.contains("/etc/shells: changed on the running system"),
+        "{status}"
+    );
+}
+
+#[test]
+#[ignore]
+fn a_switch_without_systemd_running_commits_without_an_etc_merge_or_a_failed_step() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let booted = setup.machine.current().unwrap();
+    setup.set_body(&[], r#"files = { ["/etc/archix-test-chroot"] = { text = "1" } }"#);
+    let out = Command::new("unshare")
+        .args(["-m", "--propagation", "private", "sh", "-c"])
+        .arg("mount -t tmpfs tmpfs /run/systemd && exec \"$@\"")
+        .arg("sh")
+        .arg(env!("CARGO_BIN_EXE_archix"))
+        .args([
+            "--config",
+            setup.config.to_str().unwrap(),
+            "--host",
+            "box",
+            "switch",
+            "--noconfirm",
+        ])
+        .envs(setup.machine.env())
+        .env("ARCHIX_TEST_ETC_MERGE", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success() && !text(&out).contains("failed"), "{}", text(&out));
+    assert_ne!(setup.machine.current().unwrap(), booted);
+    let unit = etcmerge::unit_name(&setup.machine.root);
+    let active = Command::new("systemctl")
+        .args(["is-active", "--quiet", &unit])
+        .status()
+        .unwrap();
+    assert!(!active.success(), "{unit} shouldn't run");
+}
