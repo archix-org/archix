@@ -607,11 +607,13 @@ fn the_fallback_uki_boots_the_current_deployment_under_its_own_title_and_follows
         format!("uki /EFI/Linux/{gone}\n"),
     )
     .unwrap();
+    machine.store_writable(true);
     fs::rename(
         machine.deployment(newest),
         machine.root.join("archix/deploy/.deleting-x"),
     )
     .unwrap();
+    machine.store_writable(false);
     let out = machine.reboot(Some(&gone));
     assert!(
         out.contains(&format!("booting deployment {older} (current;")),

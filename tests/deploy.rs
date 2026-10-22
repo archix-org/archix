@@ -765,6 +765,7 @@ fn deploy_helper() {
         return;
     }
     if action == "eject" {
+        archix::system::deploy_boot::writable_store(&root).unwrap();
         let paths = archix::paths::Paths::under(&root);
         archix::deploy::eject::eject(&paths, Path::new(env!("CARGO_BIN_EXE_archix")), false).unwrap();
         return;
