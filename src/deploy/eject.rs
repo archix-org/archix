@@ -165,9 +165,9 @@ fn cp(args: &[&str], from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Fills `root`'s own usr, etc, opt, boot, pacman database and DKMS state from deployment `number`, emptying them first: hardlinks for usr, opt and boot on ext4 (the deployment's files outlive /archix through them) and real copies of the rest, reflinks on btrfs; archix's built UKIs stay behind.
+/// Fills the usr, etc, opt, boot, pacman database and DKMS state under `root`, a bind of the root filesystem without its submounts, from deployment `number` there, emptying them first: hardlinks for usr, opt and boot on ext4 (the deployment's files outlive /archix through them) and real copies of the rest, reflinks on btrfs; archix's built UKIs stay behind.
 fn copy_trees(root: &Path, store: &Store, number: u32) -> Result<()> {
-    let deployment = store.path(number);
+    let deployment = root.join("archix/deploy").join(number.to_string());
     for (i, (tree, at)) in TREES.iter().enumerate() {
         let target = root.join(at);
         fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
@@ -325,8 +325,6 @@ pub fn here(root: &Path, paths: &Paths) -> Result<Vec<String>> {
     let Some(mut state) = read_state(&paths.state)? else {
         bail!("no eject is under way");
     };
-    // Hardlinks can't cross the boot's read-only self-bind of /archix, so this private namespace reaches it through the root's own mount.
-    detach(&root.join("archix"))?;
     let store = Store::open(root)?;
     if state.phase < Phase::Copied {
         if !running_on_deployment(root) {
@@ -335,16 +333,17 @@ pub fn here(root: &Path, paths: &Paths) -> Result<Vec<String>> {
                 root.display()
             );
         }
-        unbind(root)?;
-        copy_trees(root, &store, state.deployment)?;
-        strip(root, paths, state.deployment, state.restore_originals)?;
+        // The deployment's binds stay while the copy runs, since cp and its libraries come from them; the root's own /usr may be empty.
+        in_plain_view(root, |view| {
+            copy_trees(view, &store, state.deployment)?;
+            strip(view, paths, state.deployment, state.restore_originals)
+        })?;
         crate::durable::sync_filesystems_checked(&[root])?;
         state.phase = Phase::Copied;
         write_state(&paths.state, &state)?;
         mark("eject-copied");
-    } else {
-        unbind(root)?;
     }
+    unbind(root)?;
     let mut written = Vec::new();
     if state.phase < Phase::Plain {
         let esp = esp(paths).context("archix doesn't know the ESP, so there's no boot entry to hand over")?;
@@ -418,6 +417,31 @@ fn remove_store(root: &Path) -> Result<()> {
         }
     }
     fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))
+}
+
+/// Runs `work` on a bind of `root`'s filesystem without its submounts, so it reaches the root's own trees under the deployment binds and /archix's self-bind, on one mount that hardlinks and reflinks can't cross out of.
+fn in_plain_view(root: &Path, work: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let view = std::env::temp_dir().join(format!("archix-eject-root-{}", std::process::id()));
+    fs::create_dir_all(&view).with_context(|| format!("creating {}", view.display()))?;
+    let (root_c, view_c) = (c_path(root)?, c_path(&view)?);
+    if unsafe {
+        libc::mount(
+            root_c.as_ptr(),
+            view_c.as_ptr(),
+            std::ptr::null(),
+            libc::MS_BIND,
+            std::ptr::null(),
+        )
+    } != 0
+    {
+        let e = io::Error::last_os_error();
+        let _ = fs::remove_dir(&view);
+        return Err(e).with_context(|| format!("binding {} to {}", root.display(), view.display()));
+    }
+    let done = work(&view);
+    unsafe { libc::umount2(view_c.as_ptr(), libc::MNT_DETACH) };
+    let _ = fs::remove_dir(&view);
+    done
 }
 
 /// Detaches every mount at `path` in this mount namespace.
