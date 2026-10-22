@@ -10,7 +10,7 @@ use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use archix::archive::Archive;
 use archix::aur;
@@ -135,6 +135,7 @@ struct BootSettings {
     protected_entry: bool,
     tries: u32,
     revoke_unused: bool,
+    health_check: Option<archix::system::health::HealthCheck>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -155,6 +156,7 @@ impl BootSettings {
             anticheat: self.protected_entry,
             tries: self.tries,
             revoke_unused: self.revoke_unused,
+            health_check: self.health_check.clone(),
         }
     }
 }
@@ -163,6 +165,9 @@ impl Declared {
     /// How deployments boot, which every switch needs.
     fn boot_plan(&self) -> Result<archix::system::boot::BootPlan> {
         match &self.boot {
+            Some(boot) if boot.health_check.is_some() && boot.tries == 0 => bail!(
+                "boot.health_check needs boot.tries > 0: a failed check falls back by systemd-boot's boot counting; nothing was changed"
+            ),
             Some(boot) => Ok(boot.plan()),
             None => bail!(
                 "archix boots every generation as its own deployment from a systemd-boot entry, so it needs boot.loader = \"systemd-boot\" (with boot.esp and kernel_params); nothing was changed"
@@ -177,6 +182,52 @@ impl Declared {
     fn repo(&self, name: &str) -> Option<&Repo> {
         self.repos.iter().find(|repo| repo.name == name)
     }
+}
+
+/// `boot.health_check`, None when it names no target.
+fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::HealthCheck>> {
+    let Some(Value::Map(check)) = value else {
+        return Ok(None);
+    };
+    let strings = |key: &str| -> Vec<String> {
+        match check.get(key) {
+            Some(Value::List(items)) => items
+                .iter()
+                .filter_map(|item| match item {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    let listening = match check.get("listening") {
+        Some(Value::List(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::Int(port) => Some(
+                    u16::try_from(*port)
+                        .ok()
+                        .filter(|port| *port > 0)
+                        .with_context(|| format!("boot.health_check.listening: {port} isn't a TCP port")),
+                ),
+                _ => None,
+            })
+            .collect::<Result<Vec<u16>>>()?,
+        _ => Vec::new(),
+    };
+    let parsed = archix::system::health::HealthCheck {
+        units: strings("units"),
+        listening,
+        reachable: strings("reachable"),
+        login: check.get("login") == Some(&Value::Bool(true)),
+        timeout: match check.get("timeout") {
+            Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
+            _ => 120,
+        },
+        reboot_on_failure: check.get("reboot_on_failure") == Some(&Value::Bool(true)),
+    };
+    Ok(parsed.is_set().then_some(parsed))
 }
 
 /// Which version to take when a locked AUR version can't be built any more.
@@ -364,6 +415,7 @@ fn declared(config: &Value) -> Result<Declared> {
                         _ => 3,
                     },
                     revoke_unused: boot.get("revoke_unused") == Some(&Value::Bool(true)),
+                    health_check: health_check(boot.get("health_check"))?,
                 })
             }
             _ => None,
@@ -897,6 +949,30 @@ mod tests {
         })
         .unwrap_or_else(|errors| panic!("{errors}"));
         declared(&evaluation.config).unwrap()
+    }
+
+    #[test]
+    fn a_health_check_is_off_by_default_parsed_into_the_boot_plan_and_needs_boot_counting() {
+        let with = |check: &str, tries: u32| {
+            declared_from(&format!(
+                r#"return {{ packages = {{ "base" }}, boot = {{ loader = "systemd-boot", tries = {tries}, health_check = {{ {check} }} }}, kernel_params = {{ "root=/dev/vda2" }} }}"#
+            ))
+            .boot_plan()
+        };
+        assert_eq!(with("", 3).unwrap().health_check, None, "off by default");
+        let plan = with(
+            r#"units = { "sshd.service" }, listening = { 22 }, reachable = { "gateway", "example.org:443" }, reboot_on_failure = true"#,
+            3,
+        )
+        .unwrap();
+        let check = plan.health_check.unwrap();
+        assert_eq!(check.units, ["sshd.service"]);
+        assert_eq!(check.listening, [22]);
+        assert_eq!(check.reachable, ["gateway", "example.org:443"]);
+        assert_eq!(check.timeout, 120);
+        assert!(check.reboot_on_failure && !check.login);
+        let err = with("login = true", 0).unwrap_err().to_string();
+        assert!(err.contains("boot.health_check needs boot.tries > 0"), "{err}");
     }
 
     #[test]

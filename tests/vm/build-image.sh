@@ -13,6 +13,8 @@ elif [ "$suite" = nvidia ]; then
   dir=/vm/nvidia date=2026-06-01 size=24G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
 elif [ "$suite" = upgrade ]; then
   dir=/vm/upgrade packages=(base linux mkinitcpio systemd-ukify)
+elif [ "$suite" = health ]; then
+  dir=/vm/health packages=(base linux mkinitcpio systemd-ukify openssh)
 elif [ "$suite" = cachyos ]; then
   dir=/vm/cachyos date=2026-10-16 size=12G packages=(base linux-cachyos mkinitcpio systemd-ukify cachyos-keyring htop jq) archix=/work/archix-static
 fi
