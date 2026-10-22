@@ -43,7 +43,7 @@ preflight_refused() {
   [ "$(findmnt -no FSTYPE /)" = btrfs ] && re="^error: ($space|$metadata)"
   refusal=$(grep '^error: ' "$2" | tail -1)
   [[ $refusal =~ $re ]] || fail "$1 should be refused by the root free-space preflight, but this refused it: ${refusal:-no error line; the run ended with $(tail -5 "$2" | tr '\n' '|')}"
-  ! grep -qE '^downloading |^:: (re)?building ' "$2" || fail "$1 should have found everything cached and stopped before staging, but it downloaded, built or staged: $(grep -E '^downloading |^:: (re)?building ' "$2" | head -5 | tr '\n' '|')"
+  ! grep -qE '^downloading |^:: building |^:: rebuilding deployment ' "$2" || fail "$1 should have found everything cached and stopped before staging, but it downloaded, built or staged: $(grep -E '^downloading |^:: building |^:: rebuilding deployment ' "$2" | head -5 | tr '\n' '|')"
 }
 system_state() { current; listing; echo; pacman -Q; cat "$lock"; }
 remember_system() { system_state > "$state/system-before"; }
