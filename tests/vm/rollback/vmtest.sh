@@ -65,10 +65,10 @@ unchanged() {
 }
 # Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
-# Fails unless log $2 ends in a refusal by the root preflight (conflicts.rs check_space; on btrfs also btrfs.rs ensure_metadata_room), with nothing downloaded or built first.
+# Fails unless log $2 ends in a refusal by the root preflight on /archix, the root filesystem's bind the deployment stages on (conflicts.rs check_space; on btrfs also btrfs.rs ensure_metadata_room), with nothing downloaded or built first.
 preflight_refused() {
-  local space='/ has [0-9]+ MiB free, but this needs about [0-9]+ MiB; nothing was changed\.'
-  local metadata='btrfs on / has room for data but almost none for metadata \([0-9]+ MiB of metadata free, [0-9]+ MiB unallocated\), so writes would fail halfway; nothing was changed\.'
+  local space='/archix has [0-9]+ MiB free, but this needs about [0-9]+ MiB; nothing was changed\.'
+  local metadata='btrfs on /archix has room for data but almost none for metadata \([0-9]+ MiB of metadata free, [0-9]+ MiB unallocated\), so writes would fail halfway; nothing was changed\.'
   local re="^error: $space" refusal
   [ "$(findmnt -no FSTYPE /)" = btrfs ] && re="^error: ($space|$metadata)"
   refusal=$(grep '^error: ' "$2" | tail -1)
