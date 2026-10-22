@@ -424,7 +424,8 @@ fn remove_store(root: &Path) -> Result<()> {
 fn detach(path: &Path) -> Result<()> {
     let c = c_path(path)?;
     for _ in 0..8 {
-        let mountinfo = fs::read("/proc/self/mountinfo").context("reading /proc/self/mountinfo")?;
+        // unshare(CLONE_NEWNS) moves only the calling thread, and /proc/self is the main thread's.
+        let mountinfo = fs::read("/proc/thread-self/mountinfo").context("reading /proc/thread-self/mountinfo")?;
         if !super::view::mount_points(&mountinfo).contains(&path.to_path_buf()) {
             return Ok(());
         }
@@ -438,7 +439,7 @@ fn detach(path: &Path) -> Result<()> {
 /// Runs `work` in the mount namespace of PID 1, where the running system's mounts are, since archix works in a copy of its own; in this process when it's that one.
 fn in_init_namespace(work: impl FnOnce() -> Result<()>) -> Result<()> {
     let ns = |pid: &str| fs::read_link(format!("/proc/{pid}/ns/mnt")).ok();
-    if ns("1").is_none() || ns("1") == ns("self") {
+    if ns("1").is_none() || ns("1") == ns("thread-self") {
         return work();
     }
     let init = fs::File::open("/proc/1/ns/mnt").context("opening PID 1's mount namespace")?;

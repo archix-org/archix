@@ -226,7 +226,7 @@ pub fn read_only_mount_point(path: &Path) -> Result<bool> {
         return Ok(false);
     };
     // A chroot without /proc, as pacman runs its hooks in, has no mounts of its own to look at.
-    let Ok(mountinfo) = fs::read("/proc/self/mountinfo") else {
+    let Ok(mountinfo) = fs::read("/proc/thread-self/mountinfo") else {
         return Ok(false);
     };
     if !crate::deploy::view::mount_points(&mountinfo).contains(&canonical) {
