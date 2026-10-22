@@ -353,12 +353,15 @@ impl Builder<'_> {
             }
             eprintln!(":: creating the build chroot at the {date} snapshot");
             self.prefetch(date, repos, &["base-devel".to_string()])?;
+            // pacstrap's pacman runs the host's /etc/pacman.d/hooks chrooted into the empty root, where a deployment's guard hook can't exec /bin/sh.
+            let bootstrap = chroot.join("pacstrap.conf");
+            fs::write(&bootstrap, bootstrap_conf(&fs::read_to_string(&conf)?, &root))?;
             with_retries("creating the build chroot", || {
                 if root.exists() {
                     fs::remove_dir_all(&root)?;
                 }
                 run(
-                    devtools("mkarchroot").arg("-C").arg(&conf).arg(&root).arg("base-devel"),
+                    devtools("mkarchroot").arg("-C").arg(&bootstrap).arg(&root).arg("base-devel"),
                     "mkarchroot",
                 )
             })?;
@@ -756,6 +759,12 @@ fn devtools_chroot_version() -> Option<String> {
         .lines()
         .find_map(|line| line.trim().strip_prefix("CHROOT_VERSION="))
         .map(|value| value.trim_matches(['\'', '"']).to_string())
+}
+
+/// `conf` with pacman's hooks taken from the new root's own /etc/pacman.d/hooks instead of the host's.
+fn bootstrap_conf(conf: &str, root: &Path) -> String {
+    let hooks = format!("[options]\nHookDir = {}\n", root.join("etc/pacman.d/hooks").display());
+    conf.replacen("[options]\n", &hooks, 1)
 }
 
 /// The chroot only gets the official repos; custom repos would need their signing keys inside it too.

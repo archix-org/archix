@@ -10,6 +10,9 @@ use archix::lock::AUR_REPO;
 use common::*;
 use tempfile::TempDir;
 
+/// On the container itself, whose pacman mkarchroot runs; zz-archix-test- keeps it out of the machines' /etc.
+const GUARD_HOOK: &str = "/etc/pacman.d/hooks/zz-archix-test-guard.hook";
+
 /// A file of the system that boots next.
 fn read(path: &str) -> String {
     fs::read_to_string(system_path(path))
@@ -118,7 +121,24 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
     aur.publish(TestPkg::new("archix-test-lib", "1.3"));
     // As after a devtools upgrade that bumps CHROOT_VERSION: arch-nspawn would refuse the old chroot.
     fs::write("/var/lib/archix/chroot/root/.arch-chroot", "v1\n").unwrap();
-    let out = setup.ok(&["switch", "--noconfirm"]);
+    // As a deployment's pacman guard: a host hook that needs /bin/sh, which the new chroot doesn't have yet.
+    fs::create_dir_all("/etc/pacman.d/hooks").unwrap();
+    fs::write(
+        GUARD_HOOK,
+        "[Trigger]\nOperation = Install\nType = Package\nTarget = *\n\n[Action]\nWhen = PreTransaction\nExec = /bin/sh -c true\nAbortOnFail\n",
+    )
+    .unwrap();
+    let output = setup.run(&["switch", "--noconfirm"]);
+    fs::remove_file(GUARD_HOOK).unwrap();
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.status.success() && !out.contains("creating the build chroot failed"),
+        "the host's hooks stay out of the new chroot's bootstrap:\n{out}"
+    );
     assert!(out.contains("recreating the build chroot"), "{out}");
     assert!(out.contains("archix-test-lib 1.2-1 can't be built"), "{out}");
     assert_eq!(
