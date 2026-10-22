@@ -62,7 +62,10 @@ invariants() {
   [ "$entries" -le 3 ] || fail "deployments.keep = 2 should leave at most 3 entries, not $entries"
   esp_mb=$(du -sm /efi | cut -f1)
   biggest=$(( $(ls -l /efi/EFI/archix | awk 'NR > 1 { print $5 }' | sort -n | tail -1) / 1048576 + 1 ))
-  [ "$esp_mb" -le $((3 * biggest + 8)) ] || fail "the ESP holds $esp_mb MiB, more than three UKIs of $biggest MiB"
+  [ "$(ls /efi/EFI/Linux | grep -c '^archix-fallback-')" = 1 ] || fail "the ESP should hold one fallback UKI: $(ls /efi/EFI/Linux | tr '\n' ' ')"
+  [ -f "/efi/EFI/Linux/archix-fallback-$(current).efi" ] || fail "the fallback UKI should boot the current deployment $(current): $(ls /efi/EFI/Linux | tr '\n' ' ')"
+  # Three entries' UKIs and the fallback's copy of one.
+  [ "$esp_mb" -le $((4 * biggest + 8)) ] || fail "the ESP holds $esp_mb MiB, more than four UKIs of $biggest MiB"
   remember esp-max "$(max "$esp_mb" "$(recall esp-max || echo 0)")"
   [ "$(ours_in_dbx)" -le 128 ] || fail "archix has $(ours_in_dbx) entries in dbx, more than its cap of 128"
   if [ $((week % 4)) = 0 ] || [ "$week" -gt "$weeks" ]; then

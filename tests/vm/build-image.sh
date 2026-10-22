@@ -35,9 +35,10 @@ rm -f "$img" /work/vars.fd /work/data.img
 truncate -s "$size" "$img"
 # The pcr suite's LUKS volume, a second virtual disk.
 [ "$suite" != pcr ] || truncate -s 64M /work/data.img
+# 1 GiB, as the Arch installation guide suggests: keep = 1 holds the booted, current and new deployments' UKIs and protected twins, the fallback copy and the plain UKI.
 sfdisk --quiet "$img" <<SFDISK
 label: gpt
-size=600M, type=uefi
+size=1G, type=uefi
 type=linux
 SFDISK
 

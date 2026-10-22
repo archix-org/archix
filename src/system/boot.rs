@@ -797,11 +797,19 @@ impl EspStep for Entries<'_> {
         }
         crate::durable::write(&self.paths.state.join("boot").join("esp"), self.plan.esp.as_bytes())?;
         let made: Vec<&Uki> = self.built.ukis.iter().filter(|uki| uki.built).collect();
-        let needed: u64 = made
+        let size = |uki: &Uki| {
+            fs::metadata(deployment.join("boot/archix").join(&uki.name))
+                .or_else(|_| fs::metadata(uki_dir(esp).join(&uki.name)))
+                .map_or(0, |m| m.len())
+        };
+        let fallback: u64 = self
+            .built
+            .ukis
             .iter()
-            .map(|uki| fs::metadata(deployment.join("boot/archix").join(&uki.name)).map_or(0, |m| m.len()))
-            .sum::<u64>()
-            + MARGIN;
+            .filter(|uki| uki.suffix.is_empty())
+            .map(size)
+            .sum();
+        let needed: u64 = made.iter().map(|uki| size(uki)).sum::<u64>() + fallback + MARGIN;
         let reused: Vec<PathBuf> = self.built.ukis.iter().map(|uki| uki_dir(esp).join(&uki.name)).collect();
         for gone in &self.droppable {
             if free_bytes(&uki_dir(esp))? >= needed {
@@ -1188,13 +1196,13 @@ pub fn counting_off() -> Option<String> {
     })
 }
 
-/// How many UKIs a deployment of `plan` built from pacman database `local_db` gets: one per kernel, and the protected twin.
+/// How many UKIs a deployment of `plan` built from pacman database `local_db` puts on the ESP: one per kernel, the protected twin, and the fallback copy, written while the previous fallback is still there.
 pub fn uki_count(plan: &BootPlan, local_db: &Path) -> u64 {
     let others = kernels_in(local_db)
         .iter()
         .filter(|(name, _)| *name != plan.kernel)
         .count();
-    1 + u64::from(plan.anticheat) + others as u64
+    2 + u64::from(plan.anticheat) + others as u64
 }
 
 /// Checked before a switch changes anything: the `ukis` new UKIs must fit in what's free plus what dropping the entries of deployments outside `pinned` would free; `kernel` stands in for a UKI when the ESP has none yet.
