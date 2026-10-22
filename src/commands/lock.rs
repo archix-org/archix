@@ -226,7 +226,7 @@ pub(super) fn stage_deferred(paths: &Paths, etc: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, which nothing merges the running /etc into.
+/// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, so it's there before the /etc merge carries it.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
     archix::durable::write_config(path, text)?;
     let paths = Paths::system();
@@ -246,7 +246,7 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 /// What a deployment waiting for the next boot means for /etc until then.
 pub(super) fn pending_note(number: u32) -> String {
     format!(
-        "deployment {number} is committed and boots at the next restart; changes to /etc made before then don't carry over to it, except archix's own config"
+        "deployment {number} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
     )
 }
 
@@ -420,6 +420,9 @@ pub fn status(target: &Target) -> Result<()> {
                 println!(
                     "warning: systemd-boot's LoaderEntryDefault variable (the boot menu's default, or `bootctl set-default`) names {entry} and overrides archix's default; the next switch clears it, or `sudo bootctl set-default ''` now"
                 );
+            }
+            for line in archix::etcmerge::status_lines(&paths) {
+                println!("{line}");
             }
         }
         None => println!("no generation yet; `archix switch` creates the first one"),

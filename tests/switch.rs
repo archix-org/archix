@@ -1595,7 +1595,7 @@ fn archix_writes_its_config_into_the_deployment_waiting_for_the_next_boot_too() 
     let pending = machine.current().unwrap();
     assert!(
         out.contains(&format!(
-            "deployment {pending} is committed and boots at the next restart; changes to /etc made before then don't carry over"
+            "deployment {pending} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
         )),
         "{out}"
     );

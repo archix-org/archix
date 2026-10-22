@@ -144,8 +144,28 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
          [Install]\nRequiredBy=boot-complete.target\n",
         archix.display()
     );
+    let etc_merge = format!(
+        "[Unit]\nDescription=archix: carry /etc changes into the deployment that boots next\n{}\n\n\
+         [Service]\nExecStart={} etc-merge\n{}\nStandardOutput=journal\n\n[Install]\nWantedBy=basic.target\n",
+        crate::etcmerge::UNIT_ORDER.join("\n"),
+        archix.display(),
+        crate::etcmerge::STOP_TIMEOUT
+    );
+    let etc_merge_boot = format!(
+        "[Unit]\nDescription=archix: carry what a power cut kept from the /etc merge\nDefaultDependencies=no\n\
+         After=systemd-remount-fs.service\nBefore=systemd-sysusers.service archix-deploy-activate.service sysinit.target shutdown.target\n\
+         Conflicts=shutdown.target\nConditionDirectoryNotEmpty={}/etc-merge\n\n\
+         [Service]\nType=oneshot\nExecStart={} etc-merge --boot\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
+        Paths::system().state.display(),
+        archix.display()
+    );
     let root = Path::new("/");
     let mut files = vec![
+        (root.join("etc/systemd/system/archix-etc-merge.service"), etc_merge),
+        (
+            root.join("etc/systemd/system/archix-etc-merge-boot.service"),
+            etc_merge_boot,
+        ),
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
         (root.join("etc/systemd/system/archix-flatpak.service"), flatpak),
@@ -163,6 +183,8 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
         ("multi-user.target.wants", "archix-boot-complete.service"),
         ("multi-user.target.wants", "archix-flatpak.service"),
         ("boot-complete.target.requires", HEALTH_UNIT),
+        ("basic.target.wants", "archix-etc-merge.service"),
+        ("sysinit.target.wants", "archix-etc-merge-boot.service"),
     ]
     .map(|(dir, unit)| {
         (
