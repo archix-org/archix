@@ -142,7 +142,7 @@ def boot(root, entry):
             f.write(b"\x06\0\0\0" + (entry.id + "\0").encode("utf-16-le"))
         run = os.path.join(tmp, "run")
         out = subprocess.run(["archix", "deploy-mount", root, "--efivar", efivar, "--run-dir", run], capture_output=True, text=True)
-        for _, at in reversed(TREES):
+        for at in [at for _, at in reversed(TREES)] + ["archix"]:
             subprocess.run(["umount", os.path.join(root, at)], capture_output=True)
         if out.returncode != 0:
             return None, (out.stderr or out.stdout).strip().replace("\n", " | ")[:300]
