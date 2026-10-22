@@ -15,6 +15,8 @@ elif [ "$suite" = upgrade ]; then
   dir=/vm/upgrade packages=(base linux mkinitcpio systemd-ukify)
 elif [ "$suite" = powercut ]; then
   dir=/vm/powercut date=${DATE:-2026-10-03} size=${SIZE:-8G} packages=(base linux mkinitcpio systemd-ukify) archix=/work/archix-static
+elif [ "$suite" = health ]; then
+  dir=/vm/health packages=(base linux mkinitcpio systemd-ukify openssh)
 elif [ "$suite" = cachyos ]; then
   dir=/vm/cachyos date=2026-10-16 size=12G packages=(base linux-cachyos mkinitcpio systemd-ukify cachyos-keyring htop jq) archix=/work/archix-static
 fi

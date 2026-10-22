@@ -60,6 +60,34 @@ pub fn loader_features() -> u64 {
     crate::system::boot::read_loader_features()
 }
 
+/// Where systemd-boot's EFI variables are: ARCHIX_TEST_EFIVARS in a debug build, none in a chroot or on a test root, whose variables would be the host's.
+pub fn efivars() -> Option<std::path::PathBuf> {
+    if cfg!(debug_assertions)
+        && let Some(dir) = std::env::var_os("ARCHIX_TEST_EFIVARS")
+    {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    if crate::system::secureboot::in_chroot() || root() != std::path::Path::new("/") {
+        return None;
+    }
+    Some(std::path::PathBuf::from("/sys/firmware/efi/efivars"))
+}
+
+/// Whether boot.esp must be a mounted FAT filesystem: always, but on a test root, whose ESP is a plain directory, only with ARCHIX_TEST_CHECK_ESP.
+pub fn check_esp() -> bool {
+    root() == std::path::Path::new("/") || std::env::var_os("ARCHIX_TEST_CHECK_ESP").is_some()
+}
+
+/// Whether systemd-boot is counting this boot's tries (it sets LoaderBootCountPath then), or ARCHIX_TEST_COUNTED_BOOT in a debug build.
+pub fn counted_boot() -> bool {
+    if cfg!(debug_assertions)
+        && let Ok(value) = std::env::var("ARCHIX_TEST_COUNTED_BOOT")
+    {
+        return value == "1";
+    }
+    std::path::Path::new("/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").exists()
+}
+
 /// The boot entry systemd-boot started, or ARCHIX_TEST_ENTRY in a debug build, where empty means the variable is missing.
 pub fn selected_entry() -> Option<String> {
     if cfg!(debug_assertions)

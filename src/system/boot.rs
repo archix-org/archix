@@ -29,6 +29,9 @@ pub struct BootPlan {
     /// Revoke the UKIs no entry uses after each switch or rollback that commits a deployment.
     #[serde(default)]
     pub revoke_unused: bool,
+    /// What a new deployment's counted boot must reach before it counts as good.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check: Option<super::health::HealthCheck>,
 }
 
 /// The entries one generation gets: the normal one and a protected twin.
@@ -94,6 +97,170 @@ pub fn failed_to_boot(paths: &Paths, generation: u32) -> bool {
     entries(Path::new(esp.trim())).iter().any(|(number, extra, path)| {
         *number == generation && !extra && is_bad(&path.file_name().unwrap_or_default().to_string_lossy())
     })
+}
+
+/// statfs's f_type for FAT, which every ESP is.
+const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
+
+/// Checked before a switch, rollback or gc changes anything: `esp` must be a mounted FAT filesystem, and the partition systemd-boot started from when it says which (LoaderDevicePartUUID), else entries would land in a bare directory or on a disk the firmware never reads.
+pub fn require_esp(esp: &Path) -> Result<()> {
+    if !crate::testhooks::check_esp() {
+        return Ok(());
+    }
+    let c_path = CString::new(esp.as_os_str().as_encoded_bytes())?;
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
+        bail!(
+            "boot.esp is {}, which can't be read ({}); mount the ESP there, then try again; nothing was changed",
+            esp.display(),
+            io::Error::last_os_error()
+        );
+    }
+    if stat.f_type as u64 != MSDOS_SUPER_MAGIC {
+        bail!(
+            "boot.esp is {}, but no FAT filesystem is mounted there, so boot entries would go into a directory the firmware never reads; mount the ESP (`mount {}` with its fstab line), then try again; nothing was changed",
+            esp.display(),
+            esp.display()
+        );
+    }
+    let Some(loader) = loader_var_entry("LoaderDevicePartUUID") else {
+        return Ok(());
+    };
+    let Some(mounted) = partuuid_of(esp) else {
+        return Ok(());
+    };
+    if !mounted.eq_ignore_ascii_case(loader.trim()) {
+        bail!(
+            "the FAT filesystem at {} is partition {mounted}, but systemd-boot started from partition {}, so its entries would go where the firmware doesn't look; mount that ESP at {}, then try again; nothing was changed",
+            esp.display(),
+            loader.trim(),
+            esp.display()
+        );
+    }
+    Ok(())
+}
+
+/// The partition UUID of the device the filesystem at `path` is on, from /dev/disk/by-partuuid.
+fn partuuid_of(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let dev = fs::metadata(path).ok()?.dev();
+    fs::read_dir("/dev/disk/by-partuuid").ok()?.flatten().find_map(|link| {
+        (fs::metadata(link.path()).ok()?.rdev() == dev).then(|| link.file_name().to_string_lossy().into_owned())
+    })
+}
+
+/// fstab text with the ESP's line mounting it on access and unmounting it after a minute idle, so a forced reboot rarely finds the FAT mounted (systemd-bless-boot's renames and archix's writes mount it again); None when there's no line for `esp` or it already automounts or is noauto.
+pub fn automount_esp(fstab: &str, esp: &str) -> Option<String> {
+    let esp = esp.trim_end_matches('/');
+    let mut changed = false;
+    let lines: Vec<String> = fstab
+        .lines()
+        .map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let ours = !line.trim_start().starts_with('#')
+                && fields.len() >= 4
+                && fields[1].trim_end_matches('/') == esp
+                && !fields[3]
+                    .split(',')
+                    .any(|option| option == "noauto" || option == "x-systemd.automount");
+            if !ours {
+                return line.to_string();
+            }
+            changed = true;
+            let mut fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+            fields[3].push_str(",x-systemd.automount,x-systemd.idle-timeout=60");
+            fields.join(" ")
+        })
+        .collect();
+    changed.then(|| lines.join("\n") + "\n")
+}
+
+/// Makes a staged deployment's fstab automount the ESP, unless the config manages /etc/fstab, which only gets a warning.
+pub fn automount_esp_in(etc: &Path, esp: &str, managed: bool) -> Result<()> {
+    let path = etc.join("fstab");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Some(changed) = automount_esp(&text, esp) else {
+        return Ok(());
+    };
+    if managed {
+        eprintln!(
+            "warning: the config's /etc/fstab keeps the ESP at {esp} mounted all the time, where a forced reboot can corrupt it; add x-systemd.automount,x-systemd.idle-timeout=60 to its options"
+        );
+        return Ok(());
+    }
+    crate::durable::write(&path, changed.as_bytes())?;
+    println!(
+        "fstab      the ESP at {esp} mounts on access and unmounts after a minute idle, so a forced reboot rarely catches it mounted"
+    );
+    Ok(())
+}
+
+/// After deploy-mount or activation failed on a boot systemd-boot is counting, reboots after a pause so the next try or the fallback happens with nobody at the machine; on other boots it returns, leaving the halt or emergency shell for whoever is there, since a reboot would only start the same entry again.
+pub fn reboot_counted_try(what: &str, error: &anyhow::Error, root: &Path, initrd: bool) {
+    if !crate::testhooks::counted_boot() {
+        return;
+    }
+    println!(
+        "archix: {what} failed ({error:#}) on one of a new deployment's counted boot tries; rebooting in 10 seconds so systemd-boot tries it again or falls back to the previous deployment"
+    );
+    if cfg!(debug_assertions) && std::env::var_os("ARCHIX_TEST_COUNTED_BOOT").is_some() {
+        println!("archix: rebooting (skipped in a test)");
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    if !initrd {
+        let _ = Command::new("systemctl")
+            .args([
+                "--no-block",
+                "--job-mode=replace-irreversibly",
+                "start",
+                "reboot.target",
+            ])
+            .status();
+        return;
+    }
+    if let Ok(dir) = fs::File::open(root) {
+        unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+    }
+    unsafe { libc::reboot(libc::RB_AUTOBOOT) };
+}
+
+/// Whether systemd-boot still counts a generation's boot tries: its entry has counters and isn't bad yet.
+pub fn counting(esp: &Path, generation: u32) -> bool {
+    entries(esp).iter().any(|(number, extra, path)| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        *number == generation && !extra && name.contains('+') && !is_bad(&name)
+    })
+}
+
+/// Leaves a generation's counted entry no tries, as `systemd-bless-boot bad` does, so systemd-boot passes over it at the next boot; false when it has no counters.
+pub fn mark_bad(esp: &Path, generation: u32) -> Result<bool> {
+    for (number, extra, path) in entries(esp) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let Some((stem, counters)) = name.strip_suffix(".conf").and_then(|n| n.split_once('+')) else {
+            continue;
+        };
+        if number != generation || extra {
+            continue;
+        }
+        let parse = |n: &str| {
+            n.parse::<u32>()
+                .with_context(|| format!("{name} has a malformed boot counter"))
+        };
+        let (left, done) = match counters.split_once('-') {
+            Some((left, done)) => (parse(left)?, parse(done)?),
+            None => (parse(counters)?, 0),
+        };
+        let bad = path.with_file_name(format!("{stem}+0-{}.conf", left + done));
+        if bad != path {
+            fs::rename(&path, &bad).with_context(|| format!("renaming {}", path.display()))?;
+            crate::durable::sync_filesystems_checked(&[esp])?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// An entry systemd-boot has given up on: no tries left.
@@ -603,19 +770,56 @@ fn write_loader(esp: &Path, default: Option<&str>, preferred: Option<&str>) -> R
     lines.extend(default.map(|id| format!("default {id}")));
     lines.extend(preferred.map(|id| format!("preferred {id}")));
     crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())?;
-    // In a chroot, such as an image build, or on a test root, the EFI variables are the host's.
-    if super::secureboot::in_chroot() || crate::testhooks::root() != Path::new("/") {
-        return Ok(());
-    }
-    // EFI variables set by `bootctl set-default` or `set-preferred` would override loader.conf.
-    for verb in ["set-default", "set-preferred"] {
-        let _ = Command::new("bootctl")
-            .args([verb, ""])
+    clear_overrides(preferred.or(default));
+    Ok(())
+}
+
+const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+/// systemd-boot's EFI variable `name`, where the test hooks put it in a debug build.
+fn loader_var(name: &str) -> Option<PathBuf> {
+    crate::testhooks::efivars().map(|dir| dir.join(format!("{name}-{LOADER_GUID}")))
+}
+
+/// The entry an EFI variable such as LoaderEntryDefault names, if it's set.
+fn loader_var_entry(name: &str) -> Option<String> {
+    efivar_string(&fs::read(loader_var(name)?).ok()?).filter(|entry| !entry.is_empty())
+}
+
+/// The default picked in the boot menu or with `bootctl set-default`, which overrides loader.conf's.
+pub fn default_override() -> Option<String> {
+    loader_var_entry("LoaderEntryDefault")
+}
+
+/// Removes systemd-boot's LoaderEntryDefault and LoaderEntryPreferred, which override loader.conf (the boot menu's `d` key and `bootctl set-default` set them), so the entry archix just made the default is the one that boots; a one-shot entry is only reported.
+fn clear_overrides(wanted: Option<&str>) {
+    let wanted_name = wanted.unwrap_or("archix's entry");
+    for name in ["LoaderEntryDefault", "LoaderEntryPreferred"] {
+        let (Some(path), Some(entry)) = (loader_var(name), loader_var_entry(name)) else {
+            continue;
+        };
+        // efivarfs makes variables immutable; chattr fails harmlessly elsewhere.
+        let _ = Command::new("chattr")
+            .arg("-i")
+            .arg(&path)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
+        match fs::remove_file(&path) {
+            Ok(()) if Some(entry_id(&entry).as_str()) != wanted => println!(
+                "archix: cleared {name} ({entry}), set in the boot menu or with bootctl, which overrode loader.conf and would have kept {wanted_name} from booting"
+            ),
+            Ok(()) => {}
+            Err(e) => eprintln!(
+                "warning: systemd-boot's {name} variable names {entry} and overrides loader.conf, and archix couldn't clear it ({e}), so {wanted_name} may not boot; run `sudo bootctl set-default ''`"
+            ),
+        }
     }
-    Ok(())
+    if let Some(entry) = loader_var_entry("LoaderEntryOneShot")
+        && Some(entry_id(&entry).as_str()) != wanted
+    {
+        println!("archix: the next boot starts {entry} once (bootctl set-oneshot); the one after starts {wanted_name}");
+    }
 }
 
 /// Installed kernel packages by pkgbase, each with the version of the modules directory it owns.
@@ -1193,6 +1397,68 @@ mod tests {
             Some(12)
         );
         assert_eq!(booted_generation("root=/dev/vda2"), None);
+    }
+
+    #[test]
+    fn a_failed_health_check_leaves_the_counted_entry_no_tries() {
+        let esp = esp_with(
+            &[
+                "archix-4.conf",
+                "archix-5+2-1.conf",
+                "archix-5-protected.conf",
+                "archix-6+3.conf",
+            ],
+            "",
+        );
+        assert!(counting(esp.path(), 5) && counting(esp.path(), 6) && !counting(esp.path(), 4));
+        assert!(mark_bad(esp.path(), 5).unwrap());
+        assert!(mark_bad(esp.path(), 6).unwrap());
+        assert!(
+            !mark_bad(esp.path(), 4).unwrap(),
+            "an entry without counters can't be marked"
+        );
+        let mut names: Vec<String> = fs::read_dir(entries_dir(esp.path()))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "archix-4.conf",
+                "archix-5+0-3.conf",
+                "archix-5-protected.conf",
+                "archix-6+0-3.conf"
+            ]
+        );
+        assert!(!counting(esp.path(), 5), "a bad entry isn't counting any more");
+    }
+
+    #[test]
+    fn the_esp_mounts_on_access_and_unmounts_when_idle() {
+        let fstab = "# /dev/vda2\nUUID=a / ext4 rw,relatime 0 1\n\n# esp\nUUID=b\t/efi/\tvfat\tdefaults\t0 2\n";
+        assert_eq!(
+            automount_esp(fstab, "/efi").unwrap(),
+            "# /dev/vda2\nUUID=a / ext4 rw,relatime 0 1\n\n# esp\nUUID=b /efi/ vfat defaults,x-systemd.automount,x-systemd.idle-timeout=60 0 2\n"
+        );
+        let once = automount_esp(fstab, "/efi").unwrap();
+        assert_eq!(automount_esp(&once, "/efi"), None, "already automounted");
+        assert_eq!(
+            automount_esp("UUID=b /efi vfat noauto 0 2\n", "/efi"),
+            None,
+            "noauto is the user's call"
+        );
+        assert_eq!(automount_esp(fstab, "/boot/efi"), None, "no line for that ESP");
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("fstab"), fstab).unwrap();
+        automount_esp_in(dir.path(), "/efi", true).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("fstab")).unwrap(),
+            fstab,
+            "a managed fstab is left alone"
+        );
+        automount_esp_in(dir.path(), "/efi", false).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("fstab")).unwrap(), once);
     }
 
     #[test]

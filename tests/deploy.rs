@@ -41,6 +41,10 @@ impl LoopFs {
     }
 
     fn sized(fs: &str, size: &str) -> LoopFs {
+        LoopFs::made(fs, size, &[])
+    }
+
+    fn made(fs: &str, size: &str, mkfs_args: &[&str]) -> LoopFs {
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("fs.img");
         sh(Command::new("truncate").args(["-s", size]).arg(&img));
@@ -54,7 +58,7 @@ impl LoopFs {
         if fs != "vfat" {
             mkfs.arg("-q");
         }
-        sh(mkfs.arg(&loop_fs.dev));
+        sh(mkfs.args(mkfs_args).arg(&loop_fs.dev));
         sh(Command::new("mount").arg(&loop_fs.dev).arg(&loop_fs.mnt));
         loop_fs
     }
@@ -1173,6 +1177,32 @@ fn a_failed_flush_stops_the_commit_before_anything_is_renamed_or_pointed() {
     assert!(format!("{err:#}").contains("flushing"), "{err:#}");
 }
 
+#[test]
+#[ignore]
+fn a_flush_that_fails_once_current_names_the_new_deployment_is_a_warning_not_a_failed_switch() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let out = helper(
+        "switch",
+        store.root(),
+        &[("ARCHIX_TEST_FAIL", "deploy-commit-final-flush")],
+    )
+    .output()
+    .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        out.status.success(),
+        "a committed deployment failed the switch:\n{text}"
+    );
+    assert!(text.contains("deployment 2 is committed; flushing failed"), "{text}");
+    assert_eq!(store.current().unwrap(), Some(2));
+    assert_eq!(store.deployments().unwrap(), vec![1, 2]);
+}
+
 fn free_bytes(path: &Path) -> u64 {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -1653,6 +1683,7 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
         anticheat: false,
         tries: 0,
         revoke_unused: false,
+        health_check: None,
     };
     let packages = archix::packages::Packages {
         install: Vec::new(),
@@ -1988,4 +2019,47 @@ fn overlay_quirks_on_ext4_hardlinks_directory_renames_and_flushing() {
         "deployment 1 is untouched"
     );
     assert!(old.join("usr/share/doc/a").exists());
+}
+
+#[test]
+#[ignore]
+fn a_switch_is_refused_before_staging_when_the_root_has_too_few_inodes_left() {
+    let _serial = serial();
+    let (loop_fs, store) = system_on(LoopFs::made("ext4", "64M", &["-N", "8192"]), "ext4");
+    let dep = store.path(1);
+    let db = dep.join("pacman");
+    archix::conflicts::check(&[], &[], &db, &dep).unwrap();
+    let filler = loop_fs.mnt.join("filler");
+    fs::create_dir(&filler).unwrap();
+    let mut made = 0;
+    loop {
+        match fs::File::create(filler.join(made.to_string())) {
+            Ok(_) => made += 1,
+            Err(e) => {
+                assert_eq!(e.raw_os_error(), Some(libc::ENOSPC), "{e}");
+                break;
+            }
+        }
+    }
+    for n in 0..64 {
+        fs::remove_file(filler.join(n.to_string())).unwrap();
+    }
+    let listing = || -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(store.deploy_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing();
+    let err =
+        archix::conflicts::check(&[], &[], &db, &dep).expect_err("a root without inodes to stage passed the preflight");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("free inodes") && text.contains("nothing was changed"),
+        "{text}"
+    );
+    assert_eq!(listing(), before, "the refused check left something in the store");
+    assert_eq!(store.current().unwrap(), Some(1));
 }

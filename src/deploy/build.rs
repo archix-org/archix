@@ -63,6 +63,19 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let paths = plan.paths;
     let staging = Staging::from(store, plan.number, plan.base)?;
     let tx = staging.transaction()?;
+    let declared = crate::etcmerge::ids::Declared {
+        names: plan
+            .system
+            .to
+            .users
+            .keys()
+            .chain(plan.system.to.groups.keys())
+            .cloned()
+            .collect(),
+        uids: plan.system.to.users.values().filter_map(|user| user.uid).collect(),
+        gids: plan.system.to.groups.values().filter_map(|group| group.gid).collect(),
+    };
+    crate::etcmerge::ids::hold(&paths.state, &staging.tree("etc"), &declared)?;
     let log = store.root().join("var/log/pacman.log");
     let logged = std::fs::metadata(&log).map_or(0, |meta| meta.len());
     crate::packages::transact(&tx, plan.packages, &staging.tree("pacman")).map_err(|e| exdev_hint(e, &log, logged))?;
@@ -79,6 +92,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     };
     let etc = staging.tree("etc");
     let users = crate::system::apply::users(plan.system, &etc, &run, &paths.state)?;
+    crate::etcmerge::ids::release(&paths.state, &etc)?;
     let accounts = Accounts::read(&etc);
     let mut failures = crate::system::apply::disable_services(plan.system, &run);
     let in_etc = |path: &str| (deployment_tree(path) == Some("etc")).then(|| etc.join(&path["/etc/".len()..]));
@@ -86,6 +100,8 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     failures.extend(crate::system::apply::enable_services(plan.system, &run));
     crate::integration::write_staged(&staging, &crate::integration::own_path()?)?;
     crate::integration::sync_pacman_conf(&etc.join("pacman.conf"), plan.repos)?;
+    let fstab_managed = plan.system.to.files.contains_key("/etc/fstab");
+    boot::automount_esp_in(&etc, &plan.boot.esp, fstab_managed)?;
     (plan.config)(staging.dir())?;
     let built = boot::build(paths, plan.boot, plan.number, &staging, &tx)?;
     drop(tx);

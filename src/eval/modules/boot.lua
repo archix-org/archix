@@ -39,6 +39,38 @@ return {
         default = false,
         description = "Also write an 'archix protected' entry for each deployment with the kernel command line Easy Anti-Cheat Linux v2 asks for (integrity lockdown, kexec off, the BPF LSM, IOMMU without passthrough). It can't make the kernel well-known-signed; `archix secure-boot check --anticheat` shows what's still missing.",
       },
+      health_check = {
+        units = archix.option {
+          type = t.list_of(t.str),
+          default = {},
+          description = "For servers and headless machines, off by default: systemd units that must be active, such as \"sshd.service\", before a new deployment's boot counts as good. Every target here needs boot.tries > 0. A target that still fails after boot.health_check.timeout marks the deployment's entry bad, so the next boot starts the previous deployment, and the login notes and `archix status` say which target failed and when.",
+        },
+        listening = archix.option {
+          type = t.list_of(t.int),
+          default = {},
+          description = "TCP ports something on this machine must listen on, such as 22 for sshd, before a new deployment's boot counts as good.",
+        },
+        reachable = archix.option {
+          type = t.list_of(t.str),
+          default = {},
+          description = "Hosts that must answer before a new deployment's boot counts as good: \"host:port\" must accept a TCP connection, a bare host must answer a ping, and \"gateway\" is the default IPv4 gateway. A host that's down for a reason outside the deployment (the router, a captive portal, a laptop on a train) fails the check just the same and falls back from a good update, so list only what is always up when this machine boots; switching again once it answers brings the update back.",
+        },
+        login = archix.option {
+          type = t.bool,
+          default = false,
+          description = "Each user archix declares must be able to log in: `su -s <shell> <user> -c true` must succeed. Without it, a new deployment's boot still doesn't count as good while a declared user's login shell is missing or not in /etc/shells.",
+        },
+        timeout = archix.option {
+          type = t.int,
+          default = 120,
+          description = "Seconds the health check keeps retrying its targets after boot before it fails.",
+        },
+        reboot_on_failure = archix.option {
+          type = t.bool,
+          default = false,
+          description = "Reboot as soon as the health check fails, so the previous deployment starts with nobody at the machine; otherwise the failed deployment keeps running until the next restart.",
+        },
+      },
       revoke_unused = archix.option {
         type = t.bool,
         default = false,

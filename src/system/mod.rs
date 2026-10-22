@@ -6,11 +6,13 @@ pub mod boot;
 pub mod btrfs;
 pub mod deploy_boot;
 pub mod firewall;
+pub mod health;
 pub mod hooks;
 pub mod merge;
 pub mod reboot;
 pub mod revoke;
 pub mod secureboot;
+pub mod sleep;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -378,6 +380,12 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             }
             b.text(&format!("{esp}/loader/entries/{}", unit_name(name)?), &lines(text));
         }
+        if !strings(get(boot, "health_check").and_then(|check| get(check, "reachable"))).is_empty() {
+            b.text(
+                &format!("/etc/systemd/system/{}.d/network.conf", crate::integration::HEALTH_UNIT),
+                "[Unit]\nWants=network-online.target\nAfter=network-online.target\n",
+            );
+        }
     }
     if let Some(rules) = firewall::ruleset(root("firewall").unwrap_or(&Value::Null))? {
         b.text(firewall::RULES, &rules);
@@ -623,6 +631,22 @@ mod tests {
             }
         }
         convert(json)
+    }
+
+    #[test]
+    fn a_health_check_with_hosts_to_reach_waits_for_the_network_first() {
+        let dropin = "/etc/systemd/system/archix-health-check.service.d/network.conf";
+        let with = |check: serde_json::Value| {
+            render(
+                &config(serde_json::json!({ "boot": { "health_check": check } })),
+                Path::new("/"),
+            )
+            .unwrap()
+            .state
+            .files
+        };
+        assert!(with(serde_json::json!({ "reachable": ["gateway"] })).contains_key(dropin));
+        assert!(!with(serde_json::json!({ "reachable": [], "listening": [22] })).contains_key(dropin));
     }
 
     #[test]
