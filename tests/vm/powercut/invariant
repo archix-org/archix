@@ -228,6 +228,12 @@ def orphans(root, esp):
         if not os.path.isfile(os.path.join(state, "boot/entries", e.id)):
             found.append(f"ORPHAN: {e.name} has no record of archix writing it")
     records = os.path.join(state, "boot/entries")
+    linux = os.path.join(esp, "EFI/Linux")
+    for name in sorted(os.listdir(linux)) if os.path.isdir(linux) else []:
+        if re.fullmatch(r"archix-fallback-[1-9][0-9]*\.efi", name):
+            ids.add(name)
+            if not os.path.isfile(os.path.join(records, name)):
+                found.append(f"ORPHAN: the fallback EFI/Linux/{name} has no record of archix writing it")
     for name in sorted(os.listdir(records)) if os.path.isdir(records) else []:
         if name not in ids:
             found.append(f"ORPHAN: the record {name} has no entry on the ESP")
