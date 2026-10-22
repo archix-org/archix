@@ -72,6 +72,14 @@ fn assert_bootable(machine: &Machine, what: &str) {
             None => name,
         });
     }
+    let fallbacks = archix::system::boot::fallbacks(&machine.esp());
+    assert!(!fallbacks.is_empty(), "{what}: no fallback UKI");
+    for number in fallbacks {
+        assert!(
+            complete(number),
+            "{what}: the fallback UKI names deployment {number}, which isn't complete"
+        );
+    }
     let loader = machine.loader_conf();
     let default = loader
         .lines()
@@ -388,6 +396,7 @@ fn a_kill_at_any_step_of_a_switch_leaves_a_bootable_machine_and_the_next_switch_
         "deploy-esp-uki",
         "deploy-esp-entry",
         "deploy-esp-loader",
+        "deploy-esp-fallback",
         "deploy-commit-current",
         "deploy-done",
     ];
@@ -754,7 +763,7 @@ fn a_switch_rollback_or_gc_is_refused_while_no_fat_filesystem_is_mounted_at_the_
         );
         assert_eq!(state(), before, "{args:?} changed something");
     }
-    let _esp = FatEsp::new(machine, "160M");
+    let _esp = FatEsp::new(machine, "256M");
     setup.ok_env(&check, &["switch", "--noconfirm"]);
     assert_ne!(
         machine.current(),

@@ -41,9 +41,35 @@ pub fn refuse_without_hook(root: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The generation a boot entry id belongs to, whatever its variant or boot counters.
+/// The generation a boot entry id belongs to, whatever its variant or boot counters, or the fallback UKI's.
 pub fn generation_of_entry(id: &str) -> Option<u32> {
-    boot::parse_entry(&boot::entry_id(id)).map(|(number, _)| number)
+    boot::parse_entry(&boot::entry_id(id))
+        .map(|(number, _)| number)
+        .or_else(|| boot::parse_fallback(id))
+}
+
+/// systemd-stub's StubImageIdentifier, the path of the UKI it started, beside LoaderEntrySelected.
+const STUB_IMAGE_VAR: &str = "StubImageIdentifier-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
+/// A UKI path from an entry or from systemd-stub, compared as FAT does: case-blind, either slash.
+fn esp_path(path: &str) -> String {
+    path.trim().replace('\\', "/").trim_start_matches('/').to_lowercase()
+}
+
+/// Whether the UKI systemd-stub reports starting is the one archix recorded for entry `id`; true when the stub reports none.
+fn started_recorded(root: &Path, id: &str, stub: Option<&str>) -> bool {
+    let Some(stub) = stub else {
+        return true;
+    };
+    let record =
+        fs::read_to_string(boot::entry_records(&Paths::under(root)).join(boot::entry_id(id))).unwrap_or_default();
+    record
+        .lines()
+        .find_map(|line| match line.split_once(char::is_whitespace) {
+            Some(("efi" | "uki", path)) => Some(esp_path(path)),
+            _ => None,
+        })
+        .is_some_and(|recorded| recorded == esp_path(stub))
 }
 
 #[derive(Debug, PartialEq)]
@@ -95,10 +121,16 @@ fn recorded(root: &Path, id: &str) -> bool {
 
 /// The deployment to boot from `root`: the selected entry's if archix recorded that entry and its deployment is committed, else `current`; None on a root without deployments.
 pub fn choose(root: &Path, selected: Option<&str>) -> Result<Option<Chosen>> {
+    choose_started(root, selected, None)
+}
+
+/// `choose`, where the selected entry also has to have started the UKI archix recorded for it when systemd-stub says which it started.
+pub fn choose_started(root: &Path, selected: Option<&str>, stub: Option<&str>) -> Result<Option<Chosen>> {
     let archix = root.join("archix");
     if let Some(entry) = selected
         && let Some(generation) = generation_of_entry(entry)
         && recorded(root, entry)
+        && started_recorded(root, entry, stub)
         && complete(&archix, generation)
     {
         return Ok(Some(Chosen {
@@ -194,7 +226,7 @@ pub fn read_only_mount_point(path: &Path) -> Result<bool> {
         return Ok(false);
     };
     // A chroot without /proc, as pacman runs its hooks in, has no mounts of its own to look at.
-    let Ok(mountinfo) = fs::read("/proc/self/mountinfo") else {
+    let Ok(mountinfo) = fs::read("/proc/thread-self/mountinfo") else {
         return Ok(false);
     };
     if !crate::deploy::view::mount_points(&mountinfo).contains(&canonical) {
@@ -283,7 +315,11 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
         boot::mount_efivars();
     }
     let selected = fs::read(efivar).ok().and_then(|bytes| boot::efivar_string(&bytes));
-    let Some(chosen) = choose(root, selected.as_deref())? else {
+    let stub = efivar
+        .parent()
+        .and_then(|dir| fs::read(dir.join(STUB_IMAGE_VAR)).ok())
+        .and_then(|bytes| boot::efivar_string(&bytes));
+    let Some(chosen) = choose_started(root, selected.as_deref(), stub.as_deref())? else {
         bail!("{} has no deployments", archix.display());
     };
     let deployment = archix.join("deploy").join(chosen.generation.to_string());
@@ -298,7 +334,10 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     let why = match (&selected, chosen.selected) {
         (Some(entry), true) => format!("the boot entry {entry}"),
         (Some(entry), false) => {
-            format!("current; the boot entry {entry} isn't one archix recorded for a committed deployment")
+            format!(
+                "current; the boot entry {entry} isn't one archix recorded for a committed deployment, or it started another UKI ({}) than archix recorded for it",
+                stub.as_deref().unwrap_or("unknown")
+            )
         }
         (None, _) => "current".to_string(),
     };
@@ -450,6 +489,72 @@ mod tests {
         );
         assert_eq!(choose(root, Some("arch-linux.efi")).unwrap(), chosen(1, false));
         assert_eq!(choose(root, None).unwrap(), chosen(1, false));
+    }
+
+    #[test]
+    fn the_fallback_uki_boots_its_deployment_while_it_exists_and_current_once_it_is_gone() {
+        let dir = layout();
+        let root = dir.path();
+        assert_eq!(generation_of_entry("archix-fallback-2.efi"), Some(2));
+        assert_eq!(generation_of_entry("archix-fallback-02.efi"), None);
+        assert_eq!(
+            choose(root, Some("archix-fallback-2.efi")).unwrap(),
+            chosen(1, false),
+            "no record of the fallback yet"
+        );
+        record(root, "archix-fallback-2.efi");
+        assert_eq!(choose(root, Some("archix-fallback-2.efi")).unwrap(), chosen(2, true));
+        fs::remove_dir_all(root.join("archix/deploy/2")).unwrap();
+        assert_eq!(
+            choose(root, Some("archix-fallback-2.efi")).unwrap(),
+            chosen(1, false),
+            "deployment 2 was collected, so current boots"
+        );
+    }
+
+    #[test]
+    fn an_entry_that_started_another_uki_than_archix_recorded_falls_back_to_current() {
+        let dir = layout();
+        let root = dir.path();
+        let records = boot::entry_records(&Paths::under(root));
+        fs::write(
+            records.join("archix-2.conf"),
+            "title archix\nversion 2\nefi /EFI/archix/7.2.9-arch1-1-aaaa.efi\n",
+        )
+        .unwrap();
+        fs::write(
+            records.join("archix-fallback-2.efi"),
+            "uki /EFI/Linux/archix-fallback-2.efi\n",
+        )
+        .unwrap();
+        let started = |entry: &str, stub: Option<&str>| choose_started(root, Some(entry), stub).unwrap();
+        assert_eq!(
+            started("archix-2.conf", Some("\\EFI\\archix\\7.2.9-arch1-1-aaaa.efi")),
+            chosen(2, true)
+        );
+        assert_eq!(
+            started("archix-2.conf", Some("\\EFI\\ARCHIX\\7.2.9-ARCH1-1-AAAA.EFI")),
+            chosen(2, true),
+            "FAT is case-blind"
+        );
+        assert_eq!(
+            started("archix-2.conf", Some("\\EFI\\archix\\7.2.9-arch1-1-bbbb.efi")),
+            chosen(1, false),
+            "the entry was edited to start another UKI"
+        );
+        assert_eq!(
+            started("archix-2.conf", None),
+            chosen(2, true),
+            "a stub that reports nothing"
+        );
+        assert_eq!(
+            started("archix-fallback-2.efi", Some("\\EFI\\Linux\\archix-fallback-2.efi")),
+            chosen(2, true)
+        );
+        assert_eq!(
+            started("archix-fallback-2.efi", Some("\\EFI\\Linux\\archix-fallback-1.efi")),
+            chosen(1, false)
+        );
     }
 
     #[test]

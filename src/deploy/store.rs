@@ -190,6 +190,9 @@ impl Store {
         if pins.boot_default == Some(number) {
             bail!("deployment {number} is the boot default; it can't be deleted");
         }
+        if pins.fallbacks.contains(&number) {
+            bail!("deployment {number} is what the fallback UKI boots; it can't be deleted");
+        }
         if pins.chosen == Some(number) {
             bail!("deployment {number} is the one the last switch or rollback chose; it can't be deleted");
         }
@@ -408,9 +411,10 @@ mod tests {
             booted: Some(3),
             current: Some(5),
             boot_default: Some(4),
+            fallbacks: [1].into(),
             ..Keep::default()
         };
-        for pinned in [3, 4, 5] {
+        for pinned in [1, 3, 4, 5] {
             assert!(store.delete(pinned, &pins).is_err(), "{pinned}");
         }
         store.delete(2, &pins).unwrap();

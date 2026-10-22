@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
+use archix::deploy::eject as eject_deployments;
 use archix::generations::Store;
 use archix::integration;
 use archix::paths::Paths;
@@ -12,12 +13,15 @@ use archix::system::{SystemState, boot};
 
 use super::{check_pacman_free, confirm, require_root};
 
-/// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off.
+/// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off; a system on deployments becomes plain Arch first.
 pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()> {
     require_root("eject")?;
     let paths = Paths::system();
-    archix::system::deploy_boot::refuse_without_hook(&paths.root, "ejecting")?;
     check_pacman_free(&paths)?;
+    let under_way = eject_deployments::read_state(&paths.state)?;
+    if under_way.is_some() || archix::system::deploy_boot::uses_deployments(&paths.root) {
+        return from_deployments(&paths, under_way, noconfirm, restore_originals, purge);
+    }
     let store = Store::new(&paths);
     let current = match store.current()? {
         Some(number) => Some(store.get(number)?),
@@ -105,17 +109,98 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
         }
     }
     if purge {
-        for dir in [&paths.cache, &paths.state] {
-            match fs::remove_dir_all(dir) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    eprintln!("warning: couldn't delete all of {}: {e}", dir.display());
-                }
-                _ => {}
-            }
-        }
+        purge_state(&paths);
     }
     println!(
         "archix no longer manages this machine. `pacman -Rns archix` removes archix itself; `archix switch` would take the machine back"
+    );
+    Ok(())
+}
+
+fn purge_state(paths: &Paths) {
+    for dir in [&paths.cache, &paths.state] {
+        match fs::remove_dir_all(dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                eprintln!("warning: couldn't delete all of {}: {e}", dir.display());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Ejects a system that boots through deployments, or finishes an eject a crash cut off: the running deployment becomes the root's own trees, the ESP boots them through a plain UKI, and /archix goes.
+fn from_deployments(
+    paths: &Paths,
+    under_way: Option<eject_deployments::State>,
+    noconfirm: bool,
+    restore_originals: bool,
+    purge: bool,
+) -> Result<()> {
+    let restore_originals = under_way
+        .as_ref()
+        .map_or(restore_originals, |state| state.restore_originals);
+    match &under_way {
+        Some(state) => println!(
+            "archix eject: finishing the eject to plain Arch from deployment {} that was cut off",
+            state.deployment
+        ),
+        None => {
+            let deployment = eject_deployments::deployment_to_eject(&paths.root)?;
+            println!("archix eject: archix stops managing this machine, which becomes plain Arch");
+            println!(
+                "  system    deployment {deployment}, which runs now, becomes the root's own /usr, /etc, /opt, /boot and pacman database; the running system switches to them at once"
+            );
+            println!(
+                "  boot      a UKI that mkinitcpio's preset writes to EFI/Linux{}, the default instead of archix's entries, which go with the fallback UKI",
+                if boot::sbctl_has_keys() {
+                    ", signed with sbctl"
+                } else {
+                    ""
+                }
+            );
+            println!("  deletes   /archix and every deployment in it");
+            println!(
+                "  removes   archix's boot units, the deployment initramfs hook and units, the pacman hooks and the login notices; pacman.conf's CheckSpace is back on"
+            );
+            if restore_originals {
+                println!(
+                    "  files     puts back the files archix replaced and deletes the ones it created, except /etc/kernel/cmdline"
+                );
+            } else {
+                println!(
+                    "  files     stay as they are, made writable again (--restore-originals puts the originals back)"
+                );
+            }
+            println!("  keeps     packages, users, groups, services and pacman.conf");
+        }
+    }
+    if purge {
+        println!("  deletes   /var/lib/archix and /var/cache/archix");
+    } else {
+        println!("  keeps     /var/lib/archix and /var/cache/archix (--purge deletes them)");
+    }
+    if !noconfirm && !confirm("eject?")? {
+        bail!("aborted; nothing was changed");
+    }
+    let archix = archix::integration::own_path()?;
+    let written = eject_deployments::eject(paths, &archix, restore_originals).map_err(|e| {
+        e.context(
+            "the eject stopped partway; the machine still boots, and running `sudo archix eject` again finishes it",
+        )
+    })?;
+    for line in written {
+        println!("boot: {line}");
+    }
+    if paths.root == std::path::Path::new("/") {
+        let _ = Command::new("systemctl").arg("daemon-reload").status();
+    }
+    if purge {
+        purge_state(paths);
+    } else {
+        eject_deployments::clear_state(&paths.state)?;
+    }
+    println!(
+        "this machine is plain Arch now and archix no longer manages it; restart when convenient. `pacman -Rns archix` removes archix itself; `archix switch` would lay the machine out as deployments again"
     );
     Ok(())
 }

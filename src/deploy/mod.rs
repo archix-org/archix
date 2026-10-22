@@ -2,6 +2,7 @@
 
 pub mod build;
 pub mod commit;
+pub mod eject;
 pub mod flatten;
 pub mod keep;
 pub mod layout;

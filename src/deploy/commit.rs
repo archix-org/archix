@@ -70,6 +70,7 @@ impl EspStep for SystemdBoot {
 pub fn clean_esp(esp: &Path) -> Result<()> {
     for (dir, prefix) in [
         ("EFI/archix", ""),
+        ("EFI/Linux", "archix-fallback-"),
         ("loader/entries", "archix-"),
         ("loader", "loader.conf"),
         ("EFI/systemd", "systemd-bootx64.efi"),

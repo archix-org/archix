@@ -215,6 +215,13 @@ enum Command {
     /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
     #[command(hide = true)]
     PruneHidden { root: PathBuf },
+    /// Run by `archix eject` in a private mount namespace: lay the deployment out as the root's own trees and hand the ESP over
+    #[command(hide = true)]
+    EjectHere {
+        root: PathBuf,
+        #[arg(long)]
+        state: PathBuf,
+    },
     /// Run by archix inside a new deployment's staging root: write archix's integration files there, with units that run `exec`
     #[command(hide = true)]
     DeployIntegrate {
@@ -501,6 +508,17 @@ fn run() -> Result<ExitCode> {
             commands::prune_hidden(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::EjectHere { root, state } => {
+            let paths = archix::paths::Paths {
+                root: root.clone(),
+                state,
+                ..archix::paths::Paths::system()
+            };
+            for line in archix::deploy::eject::here(&root, &paths)? {
+                println!("{line}");
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::EtcMerge { root, boot: true } => {
             archix::etcmerge::boot(&root)?;
             return Ok(ExitCode::SUCCESS);
@@ -777,6 +795,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
+        | Command::EjectHere { .. }
         | Command::EtcMerge { .. }
         | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)

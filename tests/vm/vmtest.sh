@@ -15,11 +15,13 @@ hidden_usr() { mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root && l
 # What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
 findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
 efivar=/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f
-# systemd-boot names the entry it started in LoaderEntrySelected: 4 attribute bytes, then archix-N.conf in UTF-16.
-booted=$(tr -d '\000' < "$efivar" 2>/dev/null | grep -ao 'archix-[0-9]*' | head -1 | cut -d- -f2)
+# systemd-boot names the entry it started in LoaderEntrySelected: 4 attribute bytes, then archix-N.conf or archix-fallback-N.efi in UTF-16.
+selected=$(tail -c +5 "$efivar" 2>/dev/null | tr -d '\000')
+booted=$(echo "$selected" | grep -aoE 'archix-(fallback-)?[0-9]+' | head -1 | grep -oE '[0-9]+$')
 running=$(cat /run/archix/deployment 2>/dev/null)
-say "stage $stage: booted entry $booted, mounted deployment $running, current $(current), deployments $(deployments)"
-[ "$booted" = "$running" ] || fail "the initramfs mounted deployment $running, but systemd-boot started archix-$booted"
+say "stage $stage: booted entry $selected, mounted deployment $running, current $(current), deployments $(deployments)"
+# Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.
+[ "$stage" = 10 ] || [ "$booted" = "$running" ] || fail "the initramfs mounted deployment $running, but systemd-boot started $selected"
 config=/etc/archix/init.lua
 loader=/efi/loader/loader.conf
 
@@ -226,18 +228,12 @@ case $stage in
     systemctl reboot
     ;;
   8)
-    selected=$(tail -c +5 "$efivar" | tr -d '\000')
     [ "$selected" = revoketest.conf ] && fail "the firmware should refuse the revoked UKI"
     [ "$(current)" = "$(cat "$state/before-revoked")" ] || fail "the refused boot shouldn't change the current deployment"
     bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
     say "PASS: the firmware refused the revoked UKI and archix's entry booted instead ($selected)"
     rm -rf /efi/EFI/revoketest /efi/loader/entries/revoketest.conf
     sed -i '/^reboot-on-error/d' "$loader"
-    entries=$(ls /efi/loader/entries)
-    archix eject --noconfirm > /dev/console 2>&1 && fail "eject should refuse a system laid out as deployments"
-    [ "$(ls /efi/loader/entries)" = "$entries" ] || fail "the refused eject changed the boot entries: $(ls /efi/loader/entries)"
-    [ -e /etc/systemd/system/archix-boot.service ] || fail "the refused eject removed archix-boot.service"
-    say "PASS: eject refuses a system that boots through deployments and changes nothing"
     next etc-merge
     systemctl reboot
     ;;
@@ -300,6 +296,81 @@ case $stage in
     grep -q "didn't shut down cleanly before deployment $pending first booted" /var/lib/archix/notes || fail "the login note should name the window: $(cat /var/lib/archix/notes)"
     archix --host archix-vm status 2>&1 | grep -q "didn't shut down cleanly" || fail "status should name the window"
     say "PASS: a power cut inside the window left a login note, and the boot carried the old /etc's last change"
+    next fallback
+    systemctl reboot
+    ;;
+  fallback)
+    c=$(current)
+    [ "$(ls /efi/EFI/Linux | grep '^archix-fallback-')" = "archix-fallback-$c.efi" ] \
+      || fail "only deployment $c's fallback UKI should be on the ESP: $(ls /efi/EFI/Linux | tr '\n' ' ')"
+    sbctl verify 2>&1 | grep "archix-fallback-$c.efi" | grep -q "is signed" || fail "the fallback UKI should be signed: $(sbctl verify 2>&1 | grep fallback)"
+    rm -rf /efi/loader/entries
+    sync -f /efi
+    say "deleted /efi/loader/entries; deployment $c should boot through its fallback UKI"
+    next 9
+    systemctl reboot
+    ;;
+  9)
+    [ "$selected" = "archix-fallback-$(current).efi" ] || fail "without loader/entries systemd-boot should start the fallback UKI of deployment $(current), not $selected"
+    [ "$running" = "$(current)" ] || fail "the fallback UKI should boot deployment $(current), not $running"
+    command -v tree > /dev/null || fail "deployment $(current) should have tree"
+    say "PASS: with /efi/loader/entries gone, the fallback UKI booted the current deployment $(current)"
+    # The fallback of a deployment gc collected: deployment 999 doesn't exist, though archix recorded the UKI.
+    cp "/efi/EFI/Linux/archix-fallback-$(current).efi" /efi/EFI/Linux/archix-fallback-999.efi
+    printf 'uki /EFI/Linux/archix-fallback-999.efi\n' > /var/lib/archix/boot/entries/archix-fallback-999.efi
+    sync -f /efi
+    bootctl set-oneshot archix-fallback-999.efi || fail "bootctl set-oneshot archix-fallback-999.efi"
+    next 10
+    systemctl reboot
+    ;;
+  10)
+    [ "$selected" = archix-fallback-999.efi ] || fail "systemd-boot should have started archix-fallback-999.efi, not $selected"
+    [ "$running" = "$(current)" ] || fail "the fallback of a deployment that's gone should boot current, $(current), not $running"
+    journalctl -b --no-pager | grep -q "booting deployment $(current) (current;" || fail "deploy-mount should say it booted current instead"
+    rm /efi/EFI/Linux/archix-fallback-999.efi /var/lib/archix/boot/entries/archix-fallback-999.efi
+    say "PASS: the fallback UKI of a collected deployment booted current"
+    pacman -Q > "$state/packages"
+    pacman -Qkk > "$state/qkk" 2>&1
+    archix eject --noconfirm > /dev/console 2>&1 &
+    for _ in $(seq 3000); do grep -qx 'phase copied' /var/lib/archix/eject 2> /dev/null && break; sleep 0.1; done
+    grep -qx 'phase copied' /var/lib/archix/eject || fail "the eject never finished copying the trees: $(cat /var/lib/archix/eject 2>&1)"
+    pkill -9 -f 'archix eject'
+    sync -f /efi
+    sync -f /
+    [ -d /archix/deploy ] || fail "the killed eject shouldn't have got as far as deleting /archix"
+    say "killed the eject after it copied the trees ($(tr '\n' ' ' < /var/lib/archix/eject)); loader.conf: $(tr '\n' ' ' < "$loader")"
+    next 11
+    systemctl reboot
+    ;;
+  11)
+    say "after the killed eject systemd-boot started $selected"
+    archix eject --noconfirm > /dev/console 2>&1 || fail "running eject again should finish it"
+    [ -e /archix ] && fail "eject should delete /archix: $(ls -A /archix)"
+    findmnt -no SOURCE /usr | grep -q archix && fail "/usr should be the root's own now: $(findmnt -no SOURCE /usr)"
+    grep -qx "default arch-linux.efi" "$loader" || fail "eject should make the plain UKI the default: $(cat "$loader")"
+    ls /efi/loader/entries/archix-* /efi/EFI/Linux/archix-fallback-* > /dev/null 2>&1 && fail "eject left archix's boot entries"
+    [ -e /var/lib/archix/eject ] && fail "the finished eject left its state"
+    command -v tree > /dev/null || fail "the running system lost tree"
+    say "PASS: eject finished after the kill and the restart"
+    next 12
+    systemctl reboot
+    ;;
+  12)
+    [ "$selected" = arch-linux.efi ] || fail "plain Arch should boot through arch-linux.efi, not $selected"
+    [ -z "$running" ] && [ ! -e /archix ] || fail "a plain boot mounts no deployment"
+    findmnt -no SOURCE /usr | grep -q archix && fail "/usr should be the root's own"
+    bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should still be enforcing"
+    pacman -Q | diff "$state/packages" - > "$state/packages-diff" || fail "plain Arch has other packages than the deployment had: $(head -c 600 "$state/packages-diff")"
+    pacman -Qkk 2>&1 | diff "$state/qkk" - > "$state/qkk-diff" || fail "pacman -Qkk differs from the deployment's: $(head -c 600 "$state/qkk-diff")"
+    systemctl is-active -q archix-protected.service || fail "the ProtectSystem=strict service should run on plain Arch"
+    for unit in archix-boot archix-boot-complete archix-deploy-activate archix-flatpak; do
+      [ -e "/etc/systemd/system/$unit.service" ] && fail "eject should remove $unit.service"
+    done
+    say "PASS: plain Arch booted with the deployment's packages, pacman -Qkk as before"
+    pacman -Syu --noconfirm > /dev/console 2>&1 || fail "plain pacman -Syu after the eject"
+    pacman -S --noconfirm cowsay > /dev/console 2>&1 || fail "plain pacman -S after the eject"
+    command -v cowsay > /dev/null || fail "pacman -S cowsay should install it"
+    say "PASS: plain pacman -Syu and -S work after the eject"
     next done
     say "OK"
     systemctl poweroff
