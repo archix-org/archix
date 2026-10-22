@@ -198,10 +198,6 @@ pub fn start(paths: &Paths) -> Result<()> {
     if test_root && !(cfg!(debug_assertions) && std::env::var_os("ARCHIX_TEST_ETC_MERGE").is_some()) {
         return Ok(());
     }
-    // An image build or an install from a live system runs in a chroot, where no running system edits this /etc.
-    if !test_root && crate::system::secureboot::in_chroot() {
-        return Ok(());
-    }
     if !Path::new("/run/systemd/system").exists() {
         anyhow::bail!(
             "systemd isn't running, so nothing carries /etc changes into the new deployment until the reboot"
