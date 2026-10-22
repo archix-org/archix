@@ -65,15 +65,15 @@ unchanged() {
 }
 # Output of runs on a full disk goes to tmpfs: a log on that disk would fail to write, and archix with it.
 fill_disk() { fallocate -l "$(( $(df --output=avail -B1 / | tail -1) - $1 ))" /var/tmp/archix-fill; }
-# Fails unless log $2 ends in a refusal by the root preflight (conflicts.rs check_space; on btrfs also btrfs.rs ensure_metadata_room), with nothing downloaded or built first.
+# Fails unless log $2 ends in a refusal by the root preflight on /archix, the root filesystem's bind the deployment stages on (conflicts.rs check_space; on btrfs also btrfs.rs ensure_metadata_room), with nothing downloaded or built first.
 preflight_refused() {
-  local space='/ has [0-9]+ MiB free, but this needs about [0-9]+ MiB; nothing was changed\.'
-  local metadata='btrfs on / has room for data but almost none for metadata \([0-9]+ MiB of metadata free, [0-9]+ MiB unallocated\), so writes would fail halfway; nothing was changed\.'
+  local space='/archix has [0-9]+ MiB free, but this needs about [0-9]+ MiB; nothing was changed\.'
+  local metadata='btrfs on /archix has room for data but almost none for metadata \([0-9]+ MiB of metadata free, [0-9]+ MiB unallocated\), so writes would fail halfway; nothing was changed\.'
   local re="^error: $space" refusal
   [ "$(findmnt -no FSTYPE /)" = btrfs ] && re="^error: ($space|$metadata)"
   refusal=$(grep '^error: ' "$2" | tail -1)
   [[ $refusal =~ $re ]] || fail "$1 should be refused by the root free-space preflight, but this refused it: ${refusal:-no error line; the run ended with $(tail -5 "$2" | tr '\n' '|')}"
-  ! grep -qE '^downloading |^:: (re)?building ' "$2" || fail "$1 should have found everything cached and stopped before staging, but it downloaded, built or staged: $(grep -E '^downloading |^:: (re)?building ' "$2" | head -5 | tr '\n' '|')"
+  ! grep -qE '^downloading |^:: building |^:: rebuilding deployment ' "$2" || fail "$1 should have found everything cached and stopped before staging, but it downloaded, built or staged: $(grep -E '^downloading |^:: building |^:: rebuilding deployment ' "$2" | head -5 | tr '\n' '|')"
 }
 system_state() { current; listing; echo; pacman -Q; cat "$lock"; }
 remember_system() { system_state > "$state/system-before"; }
@@ -265,7 +265,8 @@ case $stage in
     remember bad "$bad"
     [ -f "/efi/loader/entries/archix-$bad+3.conf" ] || fail "the new entry should count three boot tries: $(ls /efi/loader/entries)"
     lib=$(readlink -f "/archix/deploy/$bad/usr/lib/libc.so.6")
-    head -c 4096 /dev/urandom > "$lib.broken" && mv "$lib.broken" "$lib" || fail "breaking deployment $bad's glibc"
+    # /archix is mounted read-only outside archix's own namespace.
+    unshare -m sh -c 'mount -o remount,bind,rw /archix && head -c 4096 /dev/urandom > "$1.broken" && mv "$1.broken" "$1"' sh "$lib" || fail "breaking deployment $bad's glibc"
     [ "$(glibc)" = 2.44 ] && archix --version > /dev/null || fail "breaking deployment $bad's glibc touched the running one"
     unchanged "breaking deployment $bad's glibc" "$good"
     say "broke glibc in deployment $bad; rebooting into it"
