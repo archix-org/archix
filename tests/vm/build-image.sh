@@ -17,12 +17,24 @@ elif [ "$suite" = health ]; then
   dir=/vm/health packages=(base linux mkinitcpio systemd-ukify openssh)
 elif [ "$suite" = cachyos ]; then
   dir=/vm/cachyos date=2026-10-16 size=12G packages=(base linux-cachyos mkinitcpio systemd-ukify cachyos-keyring htop jq) archix=/work/archix-static
+elif [ "$suite" = pcr ]; then
+  dir=/vm/pcr packages=(base linux mkinitcpio systemd-ukify tpm2-tss tpm2-tools python-cryptography binutils)
+elif [ "$suite" = dkms2 ]; then
+  dir=/vm/dkms2 date=2026-06-01 size=16G packages=(base linux linux-lts mkinitcpio systemd-ukify) archix=/work/archix-static
+elif [ "$suite" = selfupgrade ]; then
+  dir=/vm/selfupgrade size=12G packages=(base linux mkinitcpio systemd-ukify)
+elif [ "$suite" = firewall ]; then
+  dir=/vm/firewall packages=(base linux mkinitcpio systemd-ukify openssh nftables)
+elif [ "$suite" = churn ]; then
+  dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
 fi
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
 img=/work/disk.img
-rm -f "$img" /work/vars.fd
+rm -f "$img" /work/vars.fd /work/data.img
 truncate -s "$size" "$img"
+# The pcr suite's LUKS volume, a second virtual disk.
+[ "$suite" != pcr ] || truncate -s 64M /work/data.img
 sfdisk --quiet "$img" <<SFDISK
 label: gpt
 size=600M, type=uefi
@@ -91,9 +103,46 @@ if [ "$suite" = upgrade ]; then
   cp /mnt/srv/archix-next/archix-1-1-x86_64.pkg.tar.zst /mnt/srv/archix-repo/
   repo-add -q /mnt/srv/archix-repo/archix-self.db.tar.gz /mnt/srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst
   arch-chroot /mnt pacman -U --noconfirm /srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst >/dev/null
+elif [ "$suite" = selfupgrade ]; then
+  # archix is a package from a local repo: 1 is built from ARCHIX_OLD and installed, 2 from this tree waits in archix-next for the test to publish.
+  useradd -r builder 2>/dev/null || true
+  mkdir -p /mnt/srv/archix-repo /mnt/srv/archix-next
+  for version in 1 2; do
+    build=$(mktemp -d)
+    binary=/work/archix-static; [ "$version" = 1 ] && binary=/work/old/archix-static
+    sed "s/^pkgver=.*/pkgver=$version/" "$dir/PKGBUILD" > "$build/PKGBUILD"
+    cp "$binary" "$build/archix-static"
+    chown -R builder "$build"
+    runuser -u builder -- bash -c "cd $build && makepkg --nodeps >/dev/null"
+    cp "$build/archix-$version-1-x86_64.pkg.tar.zst" /mnt/srv/archix-next/
+  done
+  cp /work/old/commit /mnt/srv/archix-next/old-commit
+  cp /mnt/srv/archix-next/archix-1-1-x86_64.pkg.tar.zst /mnt/srv/archix-repo/
+  repo-add -q /mnt/srv/archix-repo/archix-self.db.tar.gz /mnt/srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst
+  arch-chroot /mnt pacman -U --noconfirm /srv/archix-repo/archix-1-1-x86_64.pkg.tar.zst >/dev/null
 else
   install -Dm755 "$archix" /mnt/usr/bin/archix
   install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
+fi
+if [ "$suite" = churn ]; then
+  # A package whose version goes up every simulated week: 1 is in the local repo, the rest wait in churn-pkgs.
+  useradd -r builder 2>/dev/null || true
+  mkdir -p /mnt/srv/churn-repo /mnt/srv/churn-pkgs
+  build=$(mktemp -d)
+  chown builder "$build"
+  for version in $(seq 1 60); do
+    printf 'pkgname=archix-churn\npkgver=%s\npkgrel=1\npkgdesc="archix churn test"\narch=(any)\nlicense=(MIT)\npackage() { install -Dm644 /dev/null "$pkgdir/usr/share/archix-churn/%s"; }\n' "$version" "$version" > "$build/PKGBUILD"
+    runuser -u builder -- bash -c "cd $build && makepkg --nodeps >/dev/null 2>&1"
+  done
+  mv "$build"/archix-churn-*.pkg.tar.zst /mnt/srv/churn-pkgs/
+  cp /mnt/srv/churn-pkgs/archix-churn-1-1-any.pkg.tar.zst /mnt/srv/churn-repo/
+  repo-add -q /mnt/srv/churn-repo/churn.db.tar.gz /mnt/srv/churn-repo/archix-churn-1-1-any.pkg.tar.zst
+fi
+if [ "$suite" = firewall ]; then
+  # The host's probe logs in as root with this key; the private half stays outside the image.
+  arch-chroot /mnt ssh-keygen -q -t ed25519 -N '' -f /root/vmtest-key
+  mv /mnt/root/vmtest-key /work/ssh-key && chmod 600 /work/ssh-key
+  install -Dm600 /mnt/root/vmtest-key.pub /mnt/root/.ssh/authorized_keys && rm /mnt/root/vmtest-key.pub
 fi
 bootctl --esp-path=/mnt/efi --no-variables install >/dev/null
 # The ESP in fstab, as on any real install: early boot units must not wait on it in a cycle.

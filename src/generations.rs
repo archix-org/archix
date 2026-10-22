@@ -14,9 +14,14 @@ use crate::system::SystemState;
 
 const GENERATION_FILE: &str = "generation.json";
 
+/// The generation record format this archix writes; 0 is a record written before records had one.
+pub const FORMAT: u32 = 1;
+
 /// Everything one switch applied, so the system can be put back exactly that way later.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Generation {
+    #[serde(default)]
+    pub format: u32,
     pub number: u32,
     pub created: u64,
     pub host: String,
@@ -62,6 +67,16 @@ impl Generation {
             && self.settings == other.settings
             && self.system == other.system
             && self.flatpak == other.flatpak
+    }
+
+    /// Why this archix mustn't rewrite or rebuild this record: a newer archix wrote it, in a format whose fields this one would drop.
+    pub fn too_new(&self) -> Option<String> {
+        (self.format > FORMAT).then(|| {
+            format!(
+                "generation {}'s record was written by a newer archix (record format {}; this archix knows up to {FORMAT}); boot a deployment whose archix is as new, or upgrade archix",
+                self.number, self.format
+            )
+        })
     }
 }
 
@@ -191,6 +206,12 @@ impl Store {
 
     /// Rewrites a stored generation, such as after its Flatpak apps were locked.
     pub fn update(&self, generation: &Generation) -> Result<()> {
+        if let Some(why) = read(&self.path(generation.number))
+            .ok()
+            .and_then(|stored| stored.too_new())
+        {
+            bail!("{why}");
+        }
         let path = self.path(generation.number).join(GENERATION_FILE);
         crate::durable::write(&path, serde_json::to_string_pretty(generation)?.as_bytes())
             .with_context(|| format!("updating generation {}", generation.number))
@@ -250,6 +271,7 @@ mod tests {
 
     fn generation(number: u32, created: u64) -> Generation {
         Generation {
+            format: FORMAT,
             number,
             created,
             host: "box".into(),
@@ -309,6 +331,33 @@ mod tests {
         fs::remove_file(dir.path().join("archix/current")).unwrap();
         symlink("generations/4", dir.path().join("archix/current")).unwrap();
         assert!(store.current().is_err());
+    }
+
+    #[test]
+    fn records_carry_their_format_and_a_newer_one_is_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(&Paths::under(dir.path()));
+        store.save(&generation(1, 1)).unwrap();
+        let file = store.path(1).join(GENERATION_FILE);
+        let text = fs::read_to_string(&file).unwrap();
+        let field = format!("\"format\": {FORMAT},");
+        assert!(text.contains(&field), "{text}");
+        fs::write(&file, text.replace(&field, "")).unwrap();
+        assert_eq!(
+            store.get(1).unwrap().format,
+            0,
+            "a record from before formats reads as format 0"
+        );
+        store.update(&generation(1, 1)).unwrap();
+        let newer = text.replace(&field, "\"format\": 99, \"from_the_future\": true,");
+        fs::write(&file, &newer).unwrap();
+        let read = store.get(1).unwrap();
+        assert!(read.too_new().is_some_and(|why| why.contains("format 99")));
+        assert!(
+            store.update(&read).is_err(),
+            "rewriting it would drop what this archix doesn't know"
+        );
+        assert_eq!(fs::read_to_string(&file).unwrap(), newer);
     }
 
     #[test]

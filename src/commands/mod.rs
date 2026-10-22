@@ -156,6 +156,7 @@ impl BootSettings {
             anticheat: self.protected_entry,
             tries: self.tries,
             revoke_unused: self.revoke_unused,
+            pcr_key: archix::system::boot::pcr_key_fingerprint(&switch::current_root(&Paths::system()).join("etc")),
             health_check: self.health_check.clone(),
         }
     }

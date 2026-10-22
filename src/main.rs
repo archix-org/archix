@@ -287,6 +287,11 @@ enum SecureBoot {
         #[arg(long)]
         noconfirm: bool,
     },
+    /// Replace systemd's PCR policy signing key in every deployment and bind the TPM2 slot of each LUKS volume given to the new one; the next switch builds UKIs whose policies it signs, and UKIs built before no longer unlock those volumes
+    RotatePcrKey {
+        /// LUKS2 volumes to re-enroll, such as /dev/nvme0n1p2; systemd-cryptenroll asks for each one's passphrase or recovery key, or reads $PASSWORD
+        devices: Vec<PathBuf>,
+    },
 }
 
 /// Turns pacman-style `-S` operations into the native command they mean.
@@ -397,6 +402,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
         Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
+        Command::SecureBoot(SecureBoot::RotatePcrKey { .. }) => Some("secure-boot rotate-pcr-key"),
         _ => None,
     }
 }
@@ -616,6 +622,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::SecureBoot(SecureBoot::Revoke { dry_run, noconfirm }) => {
             commands::secure_boot_revoke(dry_run, noconfirm)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::SecureBoot(SecureBoot::RotatePcrKey { devices }) => {
+            archix::system::boot::rotate_pcr_key(&archix::paths::Paths::system(), &devices)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SecureBoot(SecureBoot::Check { anticheat }) => {
