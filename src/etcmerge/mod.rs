@@ -507,12 +507,28 @@ impl Merge<'_> {
                     eprintln!("archix: /etc merge: stopped carrying the account files: {clash}");
                 }
                 self.note(&format!(
-                    "archix: the /etc merge stopped carrying users and groups into deployment {target}: {clash}. Give the running system's account another number (usermod -u, groupmod -g) and the merge goes on; until then deployment {target} boots without the accounts added since the switch"
+                    "archix: the /etc merge stopped carrying users and groups into deployment {target}: {clash}. Give the running system's account another number (usermod -u, groupmod -g) and the merge goes on; until then deployment {target} boots without the accounts added since the switch, though password changes to the accounts it has still reach it"
                 ));
                 self.state.clash = Some(clash);
+                let passwords = accounts::merge_passwords(&self.state.accounts, &live, &theirs);
+                self.write_accounts(&passwords, &theirs);
                 return;
             }
         };
+        if !self.write_accounts(&merged, &theirs) {
+            return;
+        }
+        if let Some(dir) = &self.state_dir {
+            let _ = ids::record(dir, &live);
+            let _ = ids::record(dir, &merged);
+        }
+        self.state.accounts = live;
+        self.state.clash = None;
+    }
+
+    /// Writes each account file `merged` changed from `theirs`; false once one fails.
+    fn write_accounts(&mut self, merged: &accounts::Texts, theirs: &accounts::Texts) -> bool {
+        let target = self.state.target;
         for (i, file) in FILES.iter().enumerate() {
             let (Some(text), Some(before)) = (&merged[i], &theirs[i]) else {
                 continue;
@@ -524,7 +540,7 @@ impl Merge<'_> {
             if let Err(e) = tree::write_like(&path, text.as_bytes(), &path) {
                 eprintln!("archix: /etc merge: /etc/{file}: {e:#}");
                 self.state.failed.insert(file.to_string(), format!("{e:#}"));
-                return;
+                return false;
             }
             self.state.carried.insert(file.to_string());
             self.state.failed.remove(*file);
@@ -532,12 +548,7 @@ impl Merge<'_> {
                 "archix: /etc merge: carried the running system's changes to /etc/{file} into deployment {target}"
             );
         }
-        if let Some(dir) = &self.state_dir {
-            let _ = ids::record(dir, &live);
-            let _ = ids::record(dir, &merged);
-        }
-        self.state.accounts = live;
-        self.state.clash = None;
+        true
     }
 }
 
@@ -956,6 +967,49 @@ mod tests {
             fs::read_to_string(t.join("machine-id")).unwrap(),
             "theirs",
             "unchanged live, left alone"
+        );
+    }
+
+    #[test]
+    fn a_password_changed_during_a_clash_still_reaches_the_pending_deployment() {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, t) = (dir.path().join("live"), dir.path().join("theirs"));
+        let passwd = "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n";
+        let shadow = "root:$r:20000::::::\nalice:$a1:20000:0:99999:7:::\n";
+        for etc in [&l, &t] {
+            fs::create_dir_all(etc).unwrap();
+            fs::write(etc.join("passwd"), passwd).unwrap();
+            fs::write(etc.join("shadow"), shadow).unwrap();
+        }
+        let mut state = snapshot(&l, 2, 1);
+        fs::write(
+            t.join("passwd"),
+            format!("{passwd}pkguser:x:960:960::/:/usr/bin/nologin\n"),
+        )
+        .unwrap();
+        fs::write(t.join("shadow"), format!("{shadow}pkguser:!*:20050::::::\n")).unwrap();
+        let with_carol = format!("{passwd}carol:x:960:960::/home/carol:/bin/bash\n");
+        fs::write(l.join("passwd"), &with_carol).unwrap();
+        fs::write(
+            l.join("shadow"),
+            format!("{}carol:$c:20100::::::\n", shadow.replace("$a1:20000", "$a2:20100")),
+        )
+        .unwrap();
+        let mut merge = merge(&l, &t, &mut state, &[]);
+        merge.pass(None, None);
+        assert!(merge.state.clash.as_deref().is_some_and(|c| c.contains("UID 960")));
+        assert!(!fs::read_to_string(t.join("passwd")).unwrap().contains("carol"));
+        assert_eq!(
+            fs::read_to_string(t.join("shadow")).unwrap(),
+            "root:$r:20000::::::\nalice:$a2:20100:0:99999:7:::\npkguser:!*:20050::::::\n"
+        );
+        fs::write(l.join("passwd"), with_carol.replace("960:960", "1002:1002")).unwrap();
+        merge.pass(None, None);
+        assert_eq!(merge.state.clash, None);
+        let shadow = fs::read_to_string(t.join("shadow")).unwrap();
+        assert!(
+            shadow.contains("alice:$a2:20100:") && shadow.contains("carol:$c:"),
+            "{shadow}"
         );
     }
 

@@ -701,6 +701,75 @@ fn a_switch_carries_edits_made_during_its_transaction_and_until_shutdown_but_not
 
 #[test]
 #[ignore]
+fn a_password_changed_after_a_switch_boots_with_the_pending_deployment_though_a_uid_clash_stops_the_accounts() {
+    let _system = lock_system();
+    let body = |n: u32| format!(r#"files = {{ ["/etc/archix-test-merge"] = {{ text = "{n}" }} }}"#);
+    let setup = Setup::new(&[], &body(0));
+    setup.lay_out();
+    let machine = &setup.machine;
+    let booted = machine.current().unwrap();
+    setup.set_body(&[], &body(1));
+    setup.ok_env(&[("ARCHIX_TEST_ETC_MERGE", "1")], &["switch", "--noconfirm"]);
+    let pending = machine.current().unwrap();
+    assert_ne!(pending, booted);
+    let unit = etcmerge::unit_name(&machine.root);
+    let (live, etc) = (machine.root.join("etc"), machine.deployment(pending).join("etc"));
+    let state = || etcmerge::load(&Paths::under(&machine.root), pending);
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let started = Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "waited for {what}: {}",
+                sh(&format!("journalctl -u {unit} --no-pager | tail -20"))
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let passwd = read(&live.join("passwd"));
+    assert!(passwd.contains("\nnobody:x:65534:"), "{passwd}");
+    write_renamed(
+        &live,
+        "passwd",
+        &format!("{passwd}clash:x:65534:65534::/:/usr/bin/nologin\n"),
+        0o644,
+    );
+    wait("the clash", &|| state().is_some_and(|s| s.clash.is_some()));
+
+    let shadow = read(&live.join("shadow"));
+    let old = shadow.lines().find(|l| l.starts_with("root:")).unwrap().to_string();
+    let new = "root:$6$archixtest$leakedpasswordreplaced:20100:0:99999:7:::";
+    write_renamed(&live, "shadow", &shadow.replace(&old, new), 0o600);
+    wait("the new password in the pending deployment", &|| {
+        read(&etc.join("shadow")).lines().any(|l| l == new)
+    });
+    assert!(!read(&etc.join("shadow")).lines().any(|l| l == old));
+    assert_eq!(fs::metadata(etc.join("shadow")).unwrap().mode() & 0o7777, 0o600);
+    assert!(!read(&etc.join("passwd")).contains("clash:"));
+    let clash = state().unwrap().clash.unwrap();
+    assert!(clash.contains("UID 65534 would be both clash's"), "{clash}");
+
+    sh(&format!("systemctl stop {unit}"));
+    machine.reboot(Some(&format!("archix-{pending}.conf")));
+    let out = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["etc-merge", "--boot", "--root"])
+        .arg(&machine.root)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success() && text(&out).contains("weren't carried into deployment"),
+        "{}",
+        text(&out)
+    );
+    let shadow = read(&live.join("shadow"));
+    assert!(
+        shadow.lines().any(|l| l == new) && !shadow.lines().any(|l| l == old),
+        "deployment {pending} boots with the new password: {shadow}"
+    );
+}
+
+#[test]
+#[ignore]
 fn an_install_with_the_config_in_etc_shows_the_carried_changes_and_the_conflict_in_status() {
     let _system = lock_system();
     let mut setup = Setup::new(&[], "");

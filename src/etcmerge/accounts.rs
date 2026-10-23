@@ -192,6 +192,43 @@ pub fn merge_all(base: &Texts, live: &Texts, theirs: &Texts, target: u32) -> Res
     }
 }
 
+/// What still carries while an ID clash holds passwd and group back: live's password and aging changes to accounts theirs has by the same name; new accounts and group admins and members wait with the clash.
+pub fn merge_passwords(base: &Texts, live: &Texts, theirs: &Texts) -> Texts {
+    let mut out = theirs.clone();
+    for i in [2, 3] {
+        let (Some(live), Some(theirs)) = (&live[i], &theirs[i]) else {
+            continue;
+        };
+        let (base, live) = (entries(base[i].as_deref().unwrap_or(theirs)), entries(live));
+        let lines: Vec<Line> = parse(theirs)
+            .into_iter()
+            .map(|line| match line {
+                Line::Entry(name, fields) if live.contains_key(&name) => {
+                    let merged = merge_fields(FILES[i], base.get(&name), &live[&name], &fields);
+                    let fields = match i {
+                        2 => merged,
+                        _ => fields
+                            .iter()
+                            .enumerate()
+                            .map(|(n, field)| {
+                                if n == 1 {
+                                    merged.get(1).cloned().unwrap_or_default()
+                                } else {
+                                    field.clone()
+                                }
+                            })
+                            .collect(),
+                    };
+                    Line::Entry(name, fields)
+                }
+                line => line,
+            })
+            .collect();
+        out[i] = Some(render(&lines));
+    }
+    out
+}
+
 /// Whether an ID belongs to a person rather than a package: root and the regular range, not nobody.
 fn regular(id: Option<&String>) -> bool {
     id.and_then(|id| id.parse::<u32>().ok())
@@ -395,6 +432,45 @@ mod tests {
             merged[0].as_ref().unwrap().contains("bob:x:961") && merged[0].as_ref().unwrap().contains("pkguser:x:960")
         );
         assert_eq!(merged[2].as_deref(), Some("bob:!:1::::::\n"));
+    }
+
+    #[test]
+    fn a_clash_still_carries_the_passwords_and_aging_of_accounts_both_sides_have() {
+        let group = "root:x:0:\nwheel:x:998:alice\nalice:x:1000:\n";
+        let base = texts(
+            PASSWD,
+            group,
+            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:$a1:20000:0:99999:7:::\n",
+            "root:::\nwheel:::alice\nalice:!::\n",
+        );
+        let live = texts(
+            &format!("{PASSWD}carol:x:960:960::/home/carol:/bin/bash\n"),
+            &format!("{}carol:x:960:\n", group.replace("alice\n", "alice,carol\n")),
+            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:$a2:20100:1:60:14:30:20500:\ncarol:$c:20100::::::\n",
+            "root:::\nwheel:$w:root:alice,carol\nalice:!::\ncarol:!::\n",
+        );
+        let theirs = texts(
+            &format!("{PASSWD}pkguser:x:960:960::/:/usr/bin/nologin\n"),
+            &format!("{group}pkguser:x:960:\n"),
+            "root:$r9:20050::::::\nalpm:!*:20000::::::\nalice:$a1:20000:0:99999:7:::\npkguser:!*:20050::::::\n",
+            "root:::\nwheel:::alice\nalice:!::\npkguser:!::\n",
+        );
+        assert!(merge_all(&base, &live, &theirs, 3).is_err());
+        let carried = merge_passwords(&base, &live, &theirs);
+        assert_eq!(carried[0], theirs[0]);
+        assert_eq!(carried[1], theirs[1]);
+        assert_eq!(
+            carried[2].as_deref(),
+            Some(
+                "root:$r9:20050::::::\nalpm:!*:20000::::::\nalice:$a2:20100:1:60:14:30:20500:\npkguser:!*:20050::::::\n"
+            ),
+            "live's change wins, theirs' own change stays, and carol waits with the clash"
+        );
+        assert_eq!(
+            carried[3].as_deref(),
+            Some("root:::\nwheel:$w::alice\nalice:!::\npkguser:!::\n"),
+            "the group password carries; members and admins wait with the group file"
+        );
     }
 
     #[test]
