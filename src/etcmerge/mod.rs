@@ -189,24 +189,24 @@ pub const UNIT_ORDER: &[&str] = &[
 /// Longer than the pass at shutdown may take, so systemd never kills it in the middle of one.
 pub const STOP_TIMEOUT: &str = "TimeoutStopSec=40";
 
-/// Starts the watcher after a commit made a deployment pending, through its unit or, on a system whose /etc predates it, as a transient one; a test root gets one only when ARCHIX_TEST_ETC_MERGE asks.
-pub fn start(paths: &Paths) -> Result<()> {
+/// Starts the watcher after a commit made a deployment pending, through its unit or, on a system whose /etc predates it, as a transient one; a test root gets one only when ARCHIX_TEST_ETC_MERGE asks. True when a watcher now carries /etc changes.
+pub fn start(paths: &Paths) -> Result<bool> {
     if pending(&paths.root).is_none() {
-        return Ok(());
+        return Ok(false);
     }
     let test_root = paths.root != Path::new("/");
     if test_root && !(cfg!(debug_assertions) && std::env::var_os("ARCHIX_TEST_ETC_MERGE").is_some()) {
-        return Ok(());
+        return Ok(false);
     }
     // An image build or install from a live USB has no running system whose /etc edits the new deployment could miss.
     if crate::system::secureboot::in_chroot() {
-        return Ok(());
+        return Ok(false);
     }
     if !Path::new("/run/systemd/system").exists() {
         println!(
             ":: systemd isn't running here (a container or an install), so there's no running system whose /etc changes need carrying; the /etc merge isn't started"
         );
-        return Ok(());
+        return Ok(false);
     }
     let unit = unit_name(&paths.root);
     let installed = !test_root && Path::new("/etc/systemd/system").join(&unit).is_file();
@@ -214,12 +214,8 @@ pub fn start(paths: &Paths) -> Result<()> {
     if installed {
         command.args(["start", "--no-block", &unit]);
     } else {
-        let active = std::process::Command::new("systemctl")
-            .args(["is-active", "--quiet", &unit])
-            .status()
-            .is_ok_and(|s| s.success());
-        if active {
-            return Ok(());
+        if running(paths) {
+            return Ok(true);
         }
         command.args(["--no-block", "--quiet", "--collect", &format!("--unit={unit}")]);
         command.arg("--description=archix: carry /etc changes into the deployment that boots next");
@@ -237,7 +233,15 @@ pub fn start(paths: &Paths) -> Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(())
+    Ok(true)
+}
+
+/// Whether the watcher for `paths`' root is active or on its way up.
+pub fn running(paths: &Paths) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", &unit_name(&paths.root)])
+        .output()
+        .is_ok_and(|out| matches!(String::from_utf8_lossy(&out.stdout).trim(), "active" | "activating"))
 }
 
 /// Managed /etc files whose content the target's generation changed from the running one's; archix writes those into the target itself.

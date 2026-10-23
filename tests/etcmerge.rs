@@ -747,6 +747,43 @@ fn an_install_with_the_config_in_etc_shows_the_carried_changes_and_the_conflict_
 
 #[test]
 #[ignore]
+fn a_temporary_install_carries_later_etc_edits_and_holds_off_hibernation() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let booted = machine.current().unwrap();
+    let out = setup.ok_env(
+        &[("ARCHIX_TEST_ETC_MERGE", "1")],
+        &["install", "--temp", "tree", "--noconfirm"],
+    );
+    let pending = machine.current().unwrap();
+    assert_ne!(pending, booted);
+    assert!(out.contains("are carried over to it"), "{out}");
+    assert!(
+        machine
+            .root
+            .join("run/systemd/sleep.conf.d/zz-archix-pending-deployment.conf")
+            .exists(),
+        "{out}"
+    );
+    let unit = etcmerge::unit_name(&machine.root);
+    let etc = machine.deployment(pending).join("etc");
+    fs::write(machine.root.join("etc/after-the-temp-install"), "later\n").unwrap();
+    let started = Instant::now();
+    while read(&etc.join("after-the-temp-install")) != "later\n" {
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "waited for the edit after the commit: {}",
+            sh(&format!("journalctl -u {unit} --no-pager | tail -20"))
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    sh(&format!("systemctl stop {unit}"));
+}
+
+#[test]
+#[ignore]
 fn a_switch_without_systemd_running_commits_without_an_etc_merge_or_a_failed_step() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");

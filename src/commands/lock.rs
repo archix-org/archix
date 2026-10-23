@@ -270,11 +270,17 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
     std::fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
 }
 
-/// What a deployment waiting for the next boot means for /etc until then.
-pub(super) fn pending_note(number: u32) -> String {
-    format!(
-        "deployment {number} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
-    )
+/// What a deployment waiting for the next boot means for /etc until then, by whether an /etc merge is carrying changes into it.
+pub(super) fn pending_note(number: u32, carried: bool) -> String {
+    if carried {
+        format!(
+            "deployment {number} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
+        )
+    } else {
+        format!(
+            "deployment {number} is committed and boots at the next restart; no /etc merge is running, so changes to /etc made before then don't reach it"
+        )
+    }
 }
 
 /// The /etc of the deployment that boots next, when it isn't the one the running /etc belongs to.
@@ -426,7 +432,7 @@ pub fn status(target: &Target) -> Result<()> {
                 _ => {}
             }
             if pending_etc(&paths).is_some() {
-                println!("{}", pending_note(number));
+                println!("{}", pending_note(number, archix::etcmerge::running(&paths)));
             }
             if let Some(waiting) = archix::system::reboot::waiting(&paths.root) {
                 println!("{}", archix::system::reboot::line(&waiting));

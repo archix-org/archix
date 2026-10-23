@@ -230,6 +230,11 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         from: generation.system.clone(),
         to: generation.system.clone(),
     };
+    if let Err(e) = archix::etcmerge::prepare(&paths, number) {
+        eprintln!(
+            "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
+        );
+    }
     eprintln!(":: building deployment {number} from deployment {current}");
     deploy::build::build(
         &deployments,
@@ -245,11 +250,21 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             keep: declared.deployments_keep as usize,
             config: &|staged: &Path| super::switch::carry_config(target.config_dir, &paths, staged),
         },
-    )?;
+    )
+    .inspect_err(|_| archix::etcmerge::discard(&paths, number))?;
+    archix::system::reboot::refresh_note(&paths.root);
+    archix::system::sleep::after_commit(&paths.root);
+    let merging = archix::etcmerge::start(&paths);
     println!(
         "installed {} without declaring it, in deployment {number}, which boots at the next restart; the next `archix switch` drops it unless it's declared",
         names.join(" ")
     );
+    if let Err(e) = &merging {
+        eprintln!("warning: starting the /etc merge into deployment {number} failed: {e:#}");
+    }
+    if super::lock::pending_etc(&paths).is_some() {
+        println!("{}", super::lock::pending_note(number, merging.unwrap_or(false)));
+    }
     Ok(())
 }
 

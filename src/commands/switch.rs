@@ -669,9 +669,10 @@ fn after_commit(
     let _ = fs::remove_file(paths.notes());
     system::reboot::refresh_note(&paths.root);
     system::sleep::after_commit(&paths.root);
-    if let Err(e) = archix::etcmerge::start(paths) {
+    let merging = archix::etcmerge::start(paths).unwrap_or_else(|e| {
         soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-    }
+        false
+    });
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
     let sync = paths.root.join("var/lib/pacman/sync");
@@ -708,7 +709,7 @@ fn after_commit(
         lock.date
     );
     if super::lock::pending_etc(paths).is_some() {
-        println!("{}", super::lock::pending_note(number));
+        println!("{}", super::lock::pending_note(number, merging));
     }
     push_to_cache(declared);
     report_soft_failures(
@@ -1554,9 +1555,10 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     let _ = fs::remove_file(paths.notes());
     system::reboot::refresh_note(&paths.root);
     system::sleep::after_commit(&paths.root);
-    if let Err(e) = archix::etcmerge::start(&paths) {
+    let merging = archix::etcmerge::start(&paths).unwrap_or_else(|e| {
         soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-    }
+        false
+    });
     if !kept {
         collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
     }
@@ -1564,7 +1566,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         "rolled back to {name}; it boots at the next restart. archix.lock is unchanged, so the next `archix switch` returns to the config"
     );
     if super::lock::pending_etc(&paths).is_some() {
-        println!("{}", super::lock::pending_note(number));
+        println!("{}", super::lock::pending_note(number, merging));
     }
     report_soft_failures(
         &soft_failures,

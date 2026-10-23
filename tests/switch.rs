@@ -1620,15 +1620,15 @@ fn archix_writes_its_config_into_the_deployment_waiting_for_the_next_boot_too() 
     let pending = machine.current().unwrap();
     assert!(
         out.contains(&format!(
-            "deployment {pending} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
-        )),
-        "{out}"
+            "deployment {pending} is committed and boots at the next restart; no /etc merge is running, so changes to /etc made before then don't reach it"
+        )) && !out.contains("carried over"),
+        "a test root gets no /etc merge, so nothing may claim one carries changes: {out}"
     );
     let status = setup.ok(&["status"]);
     assert!(
         status.contains(&format!(
-            "deployment {pending} is committed and boots at the next restart"
-        )),
+            "deployment {pending} is committed and boots at the next restart; no /etc merge is running"
+        )) && !status.contains("carried over"),
         "{status}"
     );
 
