@@ -496,6 +496,8 @@ fn declared(config: &Value) -> Result<Declared> {
             boot.kernel.clone(),
             "mkinitcpio".to_string(),
             "systemd-ukify".to_string(),
+            // Without fsck.vfat no unit checks the ESP at boot, and the first broken cluster chain a power cut left makes the kernel remount it read-only.
+            "dosfstools".to_string(),
         ];
         if boot.secure_boot == Some(true) {
             needed.push("sbctl".to_string());
@@ -1000,5 +1002,19 @@ mod tests {
             "{:?}",
             unmanaged.prefer
         );
+    }
+
+    #[test]
+    fn a_managed_boot_brings_fsck_vfat_so_a_boot_after_a_power_cut_repairs_the_esp() {
+        let managed = declared_from(
+            r#"return { packages = { "base" }, boot = { loader = "systemd-boot" }, kernel_params = { "root=/dev/vda2" } }"#,
+        );
+        assert!(
+            managed.prefer.contains(&"dosfstools".to_string()),
+            "{:?}",
+            managed.prefer
+        );
+        let unmanaged = declared_from(r#"return { packages = { "base" } }"#);
+        assert!(!unmanaged.prefer.contains(&"dosfstools".to_string()));
     }
 }
