@@ -43,6 +43,9 @@ jobs:
         fs: [ext4, btrfs]
     steps:
       - uses: actions/checkout@v5
+        with:
+          # selfupgrade builds ARCHIX_OLD from history, which a shallow clone lacks.
+          fetch-depth: ${{ matrix.suite != 'selfupgrade' && 1 || 0 }}
       - uses: ./.github/actions/vm-setup
         with:
           group: ${{ matrix.suite }}
