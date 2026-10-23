@@ -85,7 +85,15 @@ boot_target() {
   "$lib/var-manifest" /target "$gen" > "$state/var/$gen"
   in_target archix boot-check >> "$state/boot.log" 2>&1 || fail "archix boot-check: $(tail_of "$state/boot.log")"
   mark "bless-$gen"
-  if [ "$name" != "$entry" ]; then mv "/target/efi/loader/entries/$name" "/target/efi/loader/entries/$entry"; fi
+  # systemd-bless-boot with archix's drop-in: archix renames the entry and syncs it under its new name, then systemd's own rename finds that done; without it (BREAK=bless-unsynced) systemd renames it and syncs only the directory and the filesystem.
+  if [ "$name" != "$entry" ]; then
+    [ "$BREAK" = bless-unsynced ] || in_target archix bless >> "$state/boot.log" 2>&1 || fail "archix bless: $(tail_of "$state/boot.log")"
+    if [ -e "/target/efi/loader/entries/$name" ]; then
+      mv "/target/efi/loader/entries/$name" "/target/efi/loader/entries/$entry"
+      python -c 'import os, sys; os.fsync(os.open(sys.argv[1], os.O_RDONLY))' /target/efi/loader/entries
+      sync -f /target/efi
+    fi
+  fi
   in_target archix boot-complete >> "$state/boot.log" 2>&1 || fail "archix boot-complete: $(tail_of "$state/boot.log")"
   [ -s /target/var/lib/archix-powercut-hook ] || fail "the hook didn't run at deployment $gen's first boot: $(tail_of "$state/boot.log")"
   say "booted $name: deployment $booted; current $(current), deployments $(deployments)"
@@ -216,9 +224,11 @@ modprobe -q kvm_amd || modprobe -q kvm_intel
 # What a real boot takes on this machine: the pristine image's, deployment 3's first boot, which every replayed state's is judged against.
 secs=$("$lib/esp-case" pristine) || fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"
 real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
-[[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-900)"
-echo "$secs" > "$state/baseline-boot"
-say "baseline: the pristine image boots for real in $secs s ($real); a replayed state may take ${BOOT_RATIO}x that, and at most $BOOT_CEILING s"
+[[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-5000)"
+took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
+echo "${took:-$secs}" > "$state/baseline-boot"
+echo "$secs" > "$state/baseline-wall"
+say "baseline: the pristine image boots for real in ${took:-$secs} s to its report, $secs s with it ($real); a replayed state may take ${BOOT_RATIO}x that${BOOT_CEILING:+, and at most $BOOT_CEILING s}"
 # Each way the ESP can be mounted, with a file on it whose FAT chain runs into a free cluster, as a power cut can leave one; then what fsck's repair of current's entry or UKI leaves.
 cases=0
 for c in passno-2 passno-0 gpt-auto drop-entry drop-uki empty-uki only-fallback; do
@@ -255,7 +265,7 @@ count() { if [ -e "$state/$1" ]; then grep -vc '^[0-9]*/' "$state/$1"; else echo
 subset_count() { if [ -e "$state/$1" ]; then grep -c '^[0-9]*/' "$state/$1"; else echo 0; fi; }
 lines() { if [ -e "$state/$1" ]; then wc -l < "$state/$1"; else echo 0; fi; }
 checked=$(lines checked)
-say "PASS: $total points, $checked of them checked, in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count repaired) ESP repairs checked; $(count leftover-points) points leave leftovers the next switch clears"
+say "PASS: $total points, $checked of them checked, in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count repaired) ESP repairs checked; $(count leftover-points) points leave leftovers the next switch clears; $(lines stale-devices) device-mapper devices a check couldn't remove"
 if [ -s "$state/reorder-points" ]; then
   say "PASS: reordered $(awk '{ n += $4 } END { print n }' "$state/reorder-points") ESP subsets in $(awk '{ s += $5 } END { print s }' "$state/reorder-points") s at $(wc -l < "$state/reorder-points") flush points (seed $SEED, windows of up to $(sort -n -k2 "$state/reorder-points" | tail -1 | cut -d' ' -f2) ESP writes); $(subset_count real-boots) booted for real; fsck notes: $(subset_count vfat-notes) ESP; $(subset_count repaired) ESP repairs checked; $(subset_count leftover-points) leave leftovers the next switch clears"
 fi

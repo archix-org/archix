@@ -20,19 +20,34 @@ log() {
   echo "$msg" >> "$state/check.log"
   echo "${msg:0:600}" > /dev/console
 }
+# Each check's devices have names of their own, so one a teardown couldn't remove, which it says, doesn't keep the next from being made.
+n=0 snapdev= espdev= rootdev=
 unsnap() {
-  umount -R /check/root /check/esp 2> /dev/null
-  dmsetup remove sesp sroot snap 2> /dev/null
-  losetup -d "$cow" 2> /dev/null
-  rm -f /dev/shm/cow
+  local d tries p
+  # What the next archix run started in the chroot would keep its mounts, and so the snapshot, busy.
+  for p in /proc/[0-9]*; do [[ $(readlink "$p/root") == /check* ]] && kill -9 "${p#/proc/}" 2> /dev/null; done
+  umount -R /check/root /check/esp 2> /dev/null || { sleep 1; umount -R /check/root /check/esp 2> /dev/null; }
+  for d in $espdev $rootdev $snapdev; do
+    for tries in 1 2 3 4 5 6 7 8 9 10; do
+      [ -e "/dev/mapper/$d" ] || break
+      dmsetup remove "$d" 2> /dev/null || { udevadm settle; sleep 1; }
+    done
+    [ ! -e "/dev/mapper/$d" ] || { log "couldn't remove $d, which $(dmsetup info -c --noheadings -o open "$d") hold open (mounted at $(findmnt -rn -S "/dev/mapper/$d" -o TARGET | tr '\n' ' ')); the next check's devices have their own names"; echo "$point $d" >> "$state/stale-devices"; }
+  done
+  [ -z "$cow" ] || losetup -d "$cow" 2> /dev/null
+  cow=
+  rm -f "/dev/shm/cow-$$"
+  snapdev= espdev= rootdev=
 }
 snap() {
-  truncate -s 4G /dev/shm/cow
-  cow=$(losetup -f --show /dev/shm/cow)
-  dmsetup create snap --table "0 $(blockdev --getsz "$pristine") snapshot $pristine $cow N 8" || { log "no snapshot"; exit 2; }
-  [ -z "$mask" ] || reorder apply "$mask" /dev/mapper/snap || { log "couldn't write the subset"; exit 2; }
-  dmsetup create sesp --table "0 $esp_size linear /dev/mapper/snap $esp_start"
-  dmsetup create sroot --table "0 $root_size linear /dev/mapper/snap $root_start"
+  n=$((n + 1))
+  snapdev=snap-$point-$$-$n espdev=sesp-$point-$$-$n rootdev=sroot-$point-$$-$n
+  truncate -s 4G "/dev/shm/cow-$$"
+  cow=$(losetup -f --show "/dev/shm/cow-$$")
+  dmsetup create "$snapdev" --table "0 $(blockdev --getsz "$pristine") snapshot $pristine $cow N 8" || { log "no snapshot of the pristine disk; device-mapper has: $(dmsetup ls | tr '\n' ' ')"; exit 2; }
+  [ -z "$mask" ] || reorder apply "$mask" "/dev/mapper/$snapdev" || { log "couldn't write the subset"; exit 2; }
+  dmsetup create "$espdev" --table "0 $esp_size linear /dev/mapper/$snapdev $esp_start" || { log "no ESP device"; exit 2; }
+  dmsetup create "$rootdev" --table "0 $root_size linear /dev/mapper/$snapdev $root_start" || { log "no root device"; exit 2; }
 }
 reorder() { "$lib/reorder" /dev/vdc "$from" "$offset" "$esp_start" "$esp_size" "$state/esp-before" "$@"; }
 trap unsnap EXIT
@@ -48,7 +63,7 @@ check_state() {
   # The point's first subset whose FAT has a file running into a free cluster boots for real too, as the kernel remounts such an ESP read-only unless fsck repairs it first.
   if [ "$boot" = 0 ] && [ -n "$mask" ] && [ -z "$chain_booted" ]; then
     snap
-    fsck.vfat -n /dev/mapper/sesp 2>&1 | grep -q 'Contains a free cluster' && boot=1 chain_booted=$i
+    fsck.vfat -n "/dev/mapper/$espdev" 2>&1 | grep -q 'Contains a free cluster' && boot=1 chain_booted=$i
     unsnap
   fi
 
@@ -59,9 +74,9 @@ check_state() {
     local baseline
     baseline=$(cat "$state/baseline-boot")
     case $BREAK in
-      torn-file) mount ${opts:+-o $opts} /dev/mapper/sroot /check/root && truncate -s 4096 /check/root/archix/deploy/*/usr/bin/ls && umount /check/root ;;
+      torn-file) mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root && truncate -s 4096 /check/root/archix/deploy/*/usr/bin/ls && umount /check/root ;;
       slow-boot)
-        mount ${opts:+-o $opts} /dev/mapper/sroot /check/root
+        mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root
         for d in /check/root/archix/deploy/*/etc/systemd/system; do
           mkdir -p "$d/archix-deploy-activate.service.d" && printf '[Service]\nExecStartPre=/usr/bin/sleep %s\n' $((BOOT_RATIO * baseline)) > "$d/archix-deploy-activate.service.d/slow.conf"
         done
@@ -69,7 +84,7 @@ check_state() {
         ;;
     esac
     local secs
-    secs=$("$lib/boot-real" /dev/mapper/snap)
+    secs=$("$lib/boot-real" "/dev/mapper/$snapdev")
     real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
     if [ -z "$real" ]; then
       cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
@@ -78,9 +93,13 @@ check_state() {
       [[ $real == *" altered=0 "* ]] || problems+=("the real boot found package files altered: $(grep -a -o 'POWERCUT-ALTERED.*' /dev/shm/boot.log | head -5 | tr -d '\r' | tr '\n' '|')")
       [[ $real == *" esp=rw "* ]] || problems+=("the ESP is read-only after the real boot: $(grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
       [[ $real =~ \ espfsck=success:[1-9] ]] || problems+=("systemd-fsck didn't check the ESP at the real boot")
-      [[ $real == *" failed=" ]] || problems+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-1500)")
-      [ "$secs" -le $((BOOT_RATIO * baseline)) ] || problems+=("the real boot took $secs s, over ${BOOT_RATIO}x the pristine image's $baseline s")
-      [ "$secs" -le "$BOOT_CEILING" ] || problems+=("the real boot took $secs s, over BOOT_CEILING=$BOOT_CEILING s")
+      [[ $real == *" failed=" ]] || problems+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-5000)")
+      # The guest's own time to its report, as QEMU's whole run also holds the report's pacman -Qkk, which takes most of a slow runner's boot.
+      local took
+      took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
+      took=${took:-$secs}
+      [ "$took" -le $((BOOT_RATIO * baseline)) ] || problems+=("the real boot took $took s, over ${BOOT_RATIO}x the pristine image's $baseline s")
+      [ -z "$BOOT_CEILING" ] || [ "$took" -le "$BOOT_CEILING" ] || problems+=("the real boot took $took s, over BOOT_CEILING=$BOOT_CEILING s")
     fi
     real+=" secs=$secs"
     echo "$at $step $esp $real" >> "$state/real-boots"
@@ -89,9 +108,9 @@ check_state() {
 
   snap
   [ "$fs" = btrfs ] && btrfs device scan --forget > /dev/null 2>&1
-  mount -o ro /dev/mapper/sesp /check/esp || problems+=("the raw ESP doesn't mount")
+  mount -o ro "/dev/mapper/$espdev" /check/esp || problems+=("the raw ESP doesn't mount")
   # The kernel's own journal or log replay on mount is what a boot does, so the root isn't fscked first.
-  mount ${opts:+-o $opts} /dev/mapper/sroot /check/root || problems+=("the root doesn't mount without fsck")
+  mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root || problems+=("the root doesn't mount without fsck")
   out=$("$lib/invariant" check /check/root /check/esp "$before" "$after" 2>&1) || problems+=("invariant")
   booted=$(sed -n 's/^picked \S*, booted \([0-9]*\),.*/\1/p' <<< "$out")
   picked=$(sed -n 's/^picked \(\S*\),.*/\1/p' <<< "$out")
@@ -102,7 +121,7 @@ check_state() {
   umount -R /check/root /check/esp 2> /dev/null
 
   # Diagnostics only: fsck on what's left, the ESP as the firmware left it, the root after the kernel's replay.
-  if ! fsck.vfat -n /dev/mapper/sesp > /dev/shm/fsck.out 2>&1; then
+  if ! fsck.vfat -n "/dev/mapper/$espdev" > /dev/shm/fsck.out 2>&1; then
     # A mounted FAT always has its dirty bit set, and the free-cluster count is only a hint.
     vfat=$(grep -v -i -e 'dirty bit' -e 'differences between boot sector' -e 'mostly harmless' -e '^ *65:0[01]/0[01]$' -e 'not automatically fixing' -e 'leaving filesystem unchanged' \
       -e '^fsck.fat' -e '^/dev/' -e 'free cluster summary wrong' -e 'auto-correcting' -e '^\s*$' /dev/shm/fsck.out | head -3 | tr '\n' '|')
@@ -110,11 +129,11 @@ check_state() {
   fi
   # The pick above is the firmware's, made before Linux's fsck; what fsck.vfat -a leaves is what archix's boot units and every later boot see, so it must still boot a committed deployment whole.
   if [ -n "$vfat" ]; then
-    fsck.vfat -a /dev/mapper/sesp > /dev/shm/repair.out 2>&1
+    fsck.vfat -a "/dev/mapper/$espdev" > /dev/shm/repair.out 2>&1
     [ $? -le 1 ] || problems+=("fsck.vfat -a couldn't repair the ESP: $(tail -3 /dev/shm/repair.out | tr '\n' '|')")
     [ "$fs" = btrfs ] && btrfs device scan --forget > /dev/null 2>&1
-    mount -o ro /dev/mapper/sesp /check/esp || problems+=("the repaired ESP doesn't mount")
-    mount ${opts:+-o $opts} /dev/mapper/sroot /check/root || problems+=("the root doesn't mount without fsck")
+    mount -o ro "/dev/mapper/$espdev" /check/esp || problems+=("the repaired ESP doesn't mount")
+    mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root || problems+=("the root doesn't mount without fsck")
     repaired=$("$lib/invariant" check /check/root /check/esp "$before" "$after" 2>&1) || problems+=("after fsck.vfat -a: $(grep PROBLEM <<< "$repaired" | tr '\n' '|')")
     umount -R /check/root /check/esp 2> /dev/null
     notes+=("fsck.vfat -a: $(grep -v -e '^fsck.fat' -e '^/dev/' -e '^\s*$' /dev/shm/repair.out | head -3 | tr '\n' '|') then $(head -1 <<< "$repaired")")
@@ -124,15 +143,15 @@ check_state() {
   if [ -n "$mask" ]; then
     :
   elif [ "$fs" = btrfs ]; then
-    btrfs check --readonly /dev/mapper/sroot > /dev/shm/fsck.out 2>&1 || { notes+=("btrfs check: $(grep -v '^\[' /dev/shm/fsck.out | tail -3 | tr '\n' '|')"); echo "$at" >> "$state/root-fsck-notes"; }
+    btrfs check --readonly "/dev/mapper/$rootdev" > /dev/shm/fsck.out 2>&1 || { notes+=("btrfs check: $(grep -v '^\[' /dev/shm/fsck.out | tail -3 | tr '\n' '|')"); echo "$at" >> "$state/root-fsck-notes"; }
   else
-    e2fsck -fn /dev/mapper/sroot > /dev/shm/fsck.out 2>&1 || { notes+=("e2fsck: $(grep -v '^Pass\|^e2fsck' /dev/shm/fsck.out | head -3 | tr '\n' '|')"); echo "$at" >> "$state/root-fsck-notes"; }
+    e2fsck -fn "/dev/mapper/$rootdev" > /dev/shm/fsck.out 2>&1 || { notes+=("e2fsck: $(grep -v '^Pass\|^e2fsck' /dev/shm/fsck.out | head -3 | tr '\n' '|')"); echo "$at" >> "$state/root-fsck-notes"; }
   fi
 
   # The next run of archix on this state: a boot of the picked entry up to archix-boot, then gc; afterwards nothing may have lost its counterparts.
   if [ -n "$booted" ] && [[ $picked == archix-* ]]; then
     [ "$fs" = btrfs ] && btrfs device scan --forget > /dev/null 2>&1
-    mount ${opts:+-o $opts} /dev/mapper/sroot /check/root && mount /dev/mapper/sesp /check/esp
+    mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root && mount "/dev/mapper/$espdev" /check/esp
     mount -t tmpfs tmpfs /check/root/run && mount -t tmpfs tmpfs /check/root/tmp && mount --bind /check/esp /check/root/efi
     entry=$(sed -E 's/\+[0-9]+(-[0-9]+)?(\.(conf|efi))$/\2/' <<< "$picked")
     { printf '\x06\x00\x00\x00'; printf '%s\0' "$entry" | iconv -t UTF-16LE; } > /dev/shm/selected

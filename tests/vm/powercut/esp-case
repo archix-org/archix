@@ -88,7 +88,7 @@ with open(sys.argv[1], "r+b") as dev:
 PY
   fsck.vfat -n /dev/mapper/cesp 2>&1 | grep -q 'free cluster' || { echo "the broken chain isn't there: $(fsck.vfat -n /dev/mapper/cesp 2>&1 | tail -3 | tr '\n' '|')"; exit 2; }
 fi
-baseline=$(cat "$state/baseline-boot")
+baseline=$(cat "$state/baseline-wall")
 timeout=$((5 * baseline))
 [ "$case" != empty-uki ] || timeout=$((2 * baseline))
 secs=$("$lib/boot-real" /dev/mapper/csnap "$timeout")

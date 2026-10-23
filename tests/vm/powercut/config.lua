@@ -6,8 +6,9 @@ return {
   boot = { loader = "systemd-boot" },
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
-    -- What a real boot of a replayed state reports before powering off: the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines, and the kernel's FAT and the ESP fsck's messages.
+    -- What a real boot of a replayed state reports before powering off: the seconds from the kernel's start to this report, before its own checks take any, the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines, and the kernel's FAT and the ESP fsck's messages.
     ["/usr/local/bin/archix-powercut-booted"] = { mode = "0755", text = [[#!/bin/sh
+boot=$(cut -d. -f1 /proc/uptime)
 ls /efi > /dev/null
 [ ! -e /efi/CHAIN.BIN ] || cat /efi/CHAIN.BIN > /dev/null 2>&1
 esp=$(findmnt -no OPTIONS -t vfat /efi | cut -d, -f1)
@@ -19,9 +20,9 @@ altered=$(pacman -Qkk 2>&1 > /dev/null | grep -E '\((No such file or directory|S
   | grep -E ': /(usr|opt|boot|etc)/|No such file' | sed 's/ ([^)]*)$//' | sort -u)
 [ -z "$altered" ] || echo "$altered" | sed 's/^/POWERCUT-ALTERED /' > /dev/console
 failed=$(systemctl --failed --no-legend --plain | awk '{ print $1 }')
-for unit in $failed; do journalctl -b -u "$unit" -o cat --no-pager | tail -4 | sed "s/^/POWERCUT-FAILED $unit: /" > /dev/console; done
+for unit in $failed; do journalctl -b -u "$unit" -o short-monotonic --no-pager | tail -25 | sed "s/^/POWERCUT-FAILED $unit: /" > /dev/console; done
 { journalctl -b -k -o cat --no-pager | grep -i 'fat-fs\|vfat' | tail -4; journalctl -b -u 'systemd-fsck@*' -o cat --no-pager | tail -4; } | sed 's/^/POWERCUT-KERNEL /' > /dev/console
-echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) esp=${esp:-unmounted} espfsck=$espfsck altered=$(printf '%s' "$altered" | grep -c .) failed=$(echo $failed | tr ' ' ,)" > /dev/console
+echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) esp=${esp:-unmounted} espfsck=$espfsck boot=$boot altered=$(printf '%s' "$altered" | grep -c .) failed=$(echo $failed | tr ' ' ,)" > /dev/console
 systemctl poweroff
 ]] },
   },
