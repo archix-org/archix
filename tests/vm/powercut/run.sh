@@ -96,7 +96,7 @@ cp --sparse=always "$log/pristine.img" "$work/pristine.img"
 truncate -s 1M "$work/target.img"
 status=0
 vm replay /work/target.img /log/log.img /work/pristine.img /log/export.img ro || status=$?
-summary=$(grep -a -o 'VMTEST: SUMMARY: .*' "$work/serial.log" | tail -1 | sed 's/^VMTEST: SUMMARY: //' | tr -d '\r')
+summary=$(grep -a -o 'VMTEST: SUMMARY: .*' "$work/serial.log" | tail -1 | sed 's/^VMTEST: SUMMARY: //' | tr -d '\r' || true)
 if [ -n "${SUMMARY:-}" ] && [ -n "$summary" ]; then
   mkdir -p "$(dirname "$SUMMARY")"
   echo "$summary" > "$SUMMARY"
