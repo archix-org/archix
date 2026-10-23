@@ -1244,7 +1244,7 @@ pub fn counting_off() -> Option<String> {
 pub fn uki_count(plan: &BootPlan, local_db: &Path) -> u64 {
     let others = kernels_in(local_db)
         .iter()
-        .filter(|(name, _)| *name != plan.kernel)
+        .filter(|(name, _)| *name != plan.kernel && !name.contains('+'))
         .count();
     2 + u64::from(plan.anticheat) + others as u64
 }
@@ -1501,7 +1501,10 @@ fn entry_unchanged(paths: &Paths, id: &str) -> bool {
         .into_iter()
         .flatten()
         .flatten()
-        .find(|file| entry_id(&file.file_name().to_string_lossy()) == entry_id(id))
+        .find(|file| {
+            let name = file.file_name().to_string_lossy().into_owned();
+            parse_entry(&name).is_some() && entry_id(&name) == entry_id(id)
+        })
         .is_some_and(|file| fs::read(file.path()).is_ok_and(|text| text == record))
 }
 
@@ -2006,5 +2009,11 @@ mod tests {
         assert!(entry_unchanged(&paths, "archix-3.conf"));
         fs::write(entries_dir(esp.path()).join("archix-3+1-2.conf"), "title evil\n").unwrap();
         assert!(!entry_unchanged(&paths, "archix-3.conf"), "changed on the ESP");
+        fs::remove_file(entries_dir(esp.path()).join("archix-3+1-2.conf")).unwrap();
+        fs::write(entries_dir(esp.path()).join("archix-3+1-2.conf.tmp"), "title t\n").unwrap();
+        assert!(
+            !entry_unchanged(&paths, "archix-3.conf"),
+            "a temporary file a power cut left isn't the entry"
+        );
     }
 }
