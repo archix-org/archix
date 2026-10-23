@@ -97,6 +97,9 @@ truncate -s 1M "$work/target.img"
 status=0
 vm replay /work/target.img /log/log.img /work/pristine.img /log/export.img ro || status=$?
 summary=$(grep -a -o 'VMTEST: SUMMARY: .*' "$work/serial.log" | tail -1 | sed 's/^VMTEST: SUMMARY: //' | tr -d '\r')
-[ -z "${SUMMARY:-}" ] || [ -z "$summary" ] || echo "$summary" > "$SUMMARY"
+if [ -n "${SUMMARY:-}" ] && [ -n "$summary" ]; then
+  mkdir -p "$(dirname "$SUMMARY")"
+  echo "$summary" > "$SUMMARY"
+fi
 [ "$status" = 0 ] || echo "power-cut replay failed: reproduce with LOG=<the logged run> SEED=$seed${SHARD:+ SHARD=$SHARD} tests/vm/run.sh powercut ($(cat "$log/meta"))"
 exit "$status"
