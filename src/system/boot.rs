@@ -242,18 +242,46 @@ pub fn install_fallback(paths: &Paths, esp: &Path, generation: u32, uki: &Path) 
     crate::durable::sync_filesystems_checked(&[esp])
 }
 
-/// Takes every fallback UKI but `generation`'s off the ESP, with its record, once `generation`'s is flushed.
+/// What a retired fallback UKI is renamed to before it's removed, a name systemd-boot doesn't list.
+fn retired_path(esp: &Path, generation: u32) -> PathBuf {
+    esp.join("EFI/Linux")
+        .join(format!("{}.retired", fallback_name(generation)))
+}
+
+/// Takes every fallback UKI but `generation`'s off the ESP, with its record, once `generation`'s is flushed: each is renamed out of systemd-boot's sight and flushed before it's removed, as a power cut can leave a removal's FAT writes half done, and fsck then repairs the file into a truncated UKI systemd-boot would still list.
 pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
+    let linux = esp.join("EFI/Linux");
+    let leftovers: Vec<PathBuf> = fs::read_dir(&linux)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|file| file.path())
+        .filter(|path| path.to_string_lossy().ends_with(".efi.retired"))
+        .collect();
+    for path in &leftovers {
+        fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+    }
     if !fallbacks(esp).contains(&generation) {
+        if !leftovers.is_empty() {
+            crate::durable::sync_filesystems_checked(&[esp])?;
+        }
         return Ok(());
     }
     let mut removed = Vec::new();
     for old in fallbacks(esp).into_iter().filter(|n| *n != generation) {
         let path = fallback_path(esp, old);
-        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        fs::rename(&path, retired_path(esp, old)).with_context(|| format!("retiring {}", path.display()))?;
         removed.push(old);
     }
     if !removed.is_empty() {
+        crate::durable::sync_filesystems_checked(&[esp])?;
+        mark("retire-renamed");
+        for old in &removed {
+            let path = retired_path(esp, *old);
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    if !removed.is_empty() || !leftovers.is_empty() {
         // The records go once the removals are on the ESP, so a power cut never leaves a fallback without one.
         crate::durable::sync_filesystems_checked(&[esp])?;
     }
@@ -1949,10 +1977,16 @@ mod tests {
             [3, 4],
             "nothing goes before generation 9's is there"
         );
+        fs::write(retired_path(esp.path(), 2), "a power cut's leftover").unwrap();
         retire_fallbacks(&paths, esp.path(), 4).unwrap();
         assert_eq!(fallbacks(esp.path()), [4]);
         assert!(!entry_records(&paths).join("archix-fallback-3.efi").exists());
         assert_eq!(fs::read_to_string(fallback_path(esp.path(), 4)).unwrap(), "uki 4");
+        let names: Vec<String> = fs::read_dir(esp.path().join("EFI/Linux"))
+            .unwrap()
+            .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["archix-fallback-4.efi"], "retired fallbacks are gone");
     }
 
     fn boot_option(description: &str, file: &str) -> Vec<u8> {

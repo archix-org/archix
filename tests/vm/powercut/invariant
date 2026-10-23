@@ -268,6 +268,8 @@ def orphans(root, esp):
     records = os.path.join(state, "boot/entries")
     linux = os.path.join(esp, "EFI/Linux")
     for name in sorted(os.listdir(linux)) if os.path.isdir(linux) else []:
+        if re.fullmatch(r"archix-fallback-[1-9][0-9]*\.efi\.retired", name):
+            found.append(f"LEFTOVER: EFI/Linux/{name}")
         if re.fullmatch(r"archix-fallback-[1-9][0-9]*\.efi", name):
             ids.add(name)
             if not os.path.isfile(os.path.join(records, name)):
