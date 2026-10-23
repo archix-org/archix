@@ -90,7 +90,7 @@ pub fn sync_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Flushes each filesystem holding one of `paths` once, with syncfs: a global sync also waits on unrelated disks, and a stalled one hangs the switch.
+/// Flushes each filesystem holding one of `paths` once, with syncfs and an fsync of the path, which on FAT is what flushes the disk's cache: a global sync also waits on unrelated disks, and a stalled one hangs the switch.
 pub fn sync_filesystems<P: AsRef<Path>>(paths: &[P]) {
     let mut seen = Vec::new();
     for path in paths {
@@ -101,6 +101,7 @@ pub fn sync_filesystems<P: AsRef<Path>>(paths: &[P]) {
         if !seen.contains(&meta.dev()) {
             seen.push(meta.dev());
             unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+            let _ = dir.sync_all();
         }
     }
 }
@@ -123,6 +124,9 @@ pub fn sync_filesystems_checked<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
             return Err(std::io::Error::last_os_error())
                 .with_context(|| format!("flushing the filesystem holding {}", path.display()));
         }
+        // FAT has no sync_fs, so syncfs writes its buffers but never flushes the disk's cache; its fsync does.
+        dir.sync_all()
+            .with_context(|| format!("flushing the disk holding {}", path.display()))?;
     }
     Ok(())
 }
