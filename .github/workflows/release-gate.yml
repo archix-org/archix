@@ -3,6 +3,13 @@ name: Release gate
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      suites:
+        description: Suites to run, comma-separated (rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, powercut); empty runs all
+        default: ""
+      fs:
+        description: Filesystems, comma-separated (ext4, btrfs); empty runs both
+        default: ""
   schedule:
     - cron: "17 1 * * *"
 
@@ -13,8 +20,27 @@ concurrency:
   group: release-gate-${{ github.workflow }}-${{ github.ref }}
 
 jobs:
-  image:
+  plan:
     if: github.event_name != 'schedule' || github.repository == 'archix-org/archix'
+    runs-on: ubuntu-latest
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+      fs: ${{ steps.plan.outputs.fs }}
+      powercut: ${{ steps.plan.outputs.powercut }}
+    steps:
+      - id: plan
+        env:
+          SUITES: ${{ inputs.suites }}
+          FS: ${{ inputs.fs }}
+        run: |
+          all=rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn
+          pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$2" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
+          echo "suites=$(pick "$SUITES" "$all,powercut" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
+          echo "fs=$(pick "$FS" ext4,btrfs)" >> "$GITHUB_OUTPUT"
+          echo "powercut=$(pick "$SUITES" "$all,powercut" | jq 'index("powercut") != null')" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -32,15 +58,16 @@ jobs:
           status: ${{ job.status }}
 
   suites:
-    needs: image
+    needs: [plan, image]
+    if: needs.plan.outputs.suites != '[]'
     runs-on: ubuntu-latest
     # VM_TIMEOUT leaves room under the 6 h job limit for the image build before and the log upload after.
     timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
-        suite: [rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn]
-        fs: [ext4, btrfs]
+        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
+        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -65,13 +92,14 @@ jobs:
           status: ${{ job.status }}
 
   powercut:
-    needs: image
+    needs: [plan, image]
+    if: needs.plan.outputs.powercut == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 340
     strategy:
       fail-fast: false
       matrix:
-        fs: [ext4, btrfs]
+        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
         # Each shard logs its own run and checks every third point of it; GitHub's nested boots are about ten times slower than a desktop's, which puts the whole suite near 500 minutes.
         shard: [1, 2, 3]
     steps:
