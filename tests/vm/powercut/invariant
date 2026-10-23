@@ -105,7 +105,8 @@ def pick(esp, listed):
     """What systemd-boot 260 starts with no EFI variables set: `preferred` unless it's out of tries, then `default`, then the first entry."""
     import fnmatch
 
-    bootable = [e for e in listed if e.image]
+    # systemd-boot leaves out an entry whose image file isn't there.
+    bootable = [e for e in listed if e.image and os.path.isfile(os.path.join(esp, e.image.lstrip("/")))]
     preferred, default = loader_setting(esp, "preferred"), loader_setting(esp, "default")
     for pattern, usable in ((preferred, lambda e: e.tries_left != 0), (default, lambda e: True)):
         if pattern:

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run at each point of the replay (every Nth with SHARD=i/N): the replayed disk, unrepaired, as the firmware and a boot after a power cut there would see it, real boots in QEMU at ESP points and a sample of others, fsck as a diagnostic, then the next archix run and what it leaves orphaned.
+# Run at each point of the replay (every Nth with SHARD=i/N): the replayed disk, unrepaired, as the firmware and a boot after a power cut there would see it, real boots in QEMU at ESP points and a sample of others (both by the point's index in the whole log, so shards add up), fsck as a diagnostic, the ESP again once fsck.vfat -a repaired it, as the boot's systemd-fsck does, then the next archix run on that repaired ESP and what it leaves orphaned.
 set -u
 state=/var/lib/archix-powercut
 lib=/usr/local/lib/archix-powercut
@@ -43,7 +43,7 @@ export FINDINGS_CACHE=/dev/shm/findings
 
 # check_state BOOT: checks the snapshot of the replayed disk, with the ESP writes $mask keeps when set, booting it for real when BOOT is 1 or it is the point's first subset to break a FAT chain.
 check_state() {
-  problems=() notes=() leftovers=
+  problems=() notes=() leftovers= vfat=
   local at=$point${mask:+/$i} boot=$1
   # The point's first subset whose FAT has a file running into a free cluster boots for real too, as the kernel remounts such an ESP read-only unless fsck repairs it first.
   if [ "$boot" = 0 ] && [ -n "$mask" ] && [ -z "$chain_booted" ]; then
@@ -76,6 +76,8 @@ check_state() {
       problems+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | grep -av '^\s*$' | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
     else
       [[ $real == *" altered=0 "* ]] || problems+=("the real boot found package files altered: $(grep -a -o 'POWERCUT-ALTERED.*' /dev/shm/boot.log | head -5 | tr -d '\r' | tr '\n' '|')")
+      [[ $real == *" esp=rw "* ]] || problems+=("the ESP is read-only after the real boot: $(grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
+      [[ $real =~ \ espfsck=success:[1-9] ]] || problems+=("systemd-fsck didn't check the ESP at the real boot")
       [[ $real == *" failed=" ]] || problems+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-1500)")
       [ "$secs" -le $((BOOT_RATIO * baseline)) ] || problems+=("the real boot took $secs s, over ${BOOT_RATIO}x the pristine image's $baseline s")
       [ "$secs" -le "$BOOT_CEILING" ] || problems+=("the real boot took $secs s, over BOOT_CEILING=$BOOT_CEILING s")
@@ -105,6 +107,18 @@ check_state() {
     vfat=$(grep -v -i -e 'dirty bit' -e 'differences between boot sector' -e 'mostly harmless' -e '^ *65:0[01]/0[01]$' -e 'not automatically fixing' -e 'leaving filesystem unchanged' \
       -e '^fsck.fat' -e '^/dev/' -e 'free cluster summary wrong' -e 'auto-correcting' -e '^\s*$' /dev/shm/fsck.out | head -3 | tr '\n' '|')
     [ -z "$vfat" ] || { notes+=("fsck.vfat: $vfat"); echo "$at" >> "$state/vfat-notes"; }
+  fi
+  # The pick above is the firmware's, made before Linux's fsck; what fsck.vfat -a leaves is what archix's boot units and every later boot see, so it must still boot a committed deployment whole.
+  if [ -n "$vfat" ]; then
+    fsck.vfat -a /dev/mapper/sesp > /dev/shm/repair.out 2>&1
+    [ $? -le 1 ] || problems+=("fsck.vfat -a couldn't repair the ESP: $(tail -3 /dev/shm/repair.out | tr '\n' '|')")
+    [ "$fs" = btrfs ] && btrfs device scan --forget > /dev/null 2>&1
+    mount -o ro /dev/mapper/sesp /check/esp || problems+=("the repaired ESP doesn't mount")
+    mount ${opts:+-o $opts} /dev/mapper/sroot /check/root || problems+=("the root doesn't mount without fsck")
+    repaired=$("$lib/invariant" check /check/root /check/esp "$before" "$after" 2>&1) || problems+=("after fsck.vfat -a: $(grep PROBLEM <<< "$repaired" | tr '\n' '|')")
+    umount -R /check/root /check/esp 2> /dev/null
+    notes+=("fsck.vfat -a: $(grep -v -e '^fsck.fat' -e '^/dev/' -e '^\s*$' /dev/shm/repair.out | head -3 | tr '\n' '|') then $(head -1 <<< "$repaired")")
+    echo "$at" >> "$state/repaired"
   fi
   # A subset changes only the ESP, so the root's fsck would repeat the point's own.
   if [ -n "$mask" ]; then
@@ -159,9 +173,14 @@ check_state() {
   [ ${#problems[@]} = 0 ]
 }
 
-# A shard checks every Nth point, but every shard keeps the ESP copy the subsets start from up to date.
+# How many subsets the whole log's ESP points have had up to here, in every shard, which REORDER_SAMPLE counts by.
+seen() { echo $(($(cat "$state/subsets-seen" 2> /dev/null || echo 0) + $1)) > "$state/subsets-seen"; }
+# A shard checks every Nth point, but every shard keeps the ESP copy the subsets start from and the subset count up to date.
 if [ -n "${SHARD:-}" ] && [ $(((point - 1) % ${SHARD#*/})) != $((${SHARD%/*} - 1)) ]; then
-  [ "$esp" != 1 ] || [ -n "$POINTS" ] || [ "${SUBSETS:-0}" = 0 ] || reorder advance || { log "couldn't advance the ESP copy"; exit 2; }
+  if [ "$esp" = 1 ] && [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
+    seen "$(reorder pick "$SEED" "$point" "$SUBSETS" | grep -c .)"
+    reorder advance || { log "couldn't advance the ESP copy"; exit 2; }
+  fi
   exit 0
 fi
 echo "$point" >> "$state/checked"
@@ -177,8 +196,9 @@ if [ "$esp" = 1 ] && [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
   i=0 started=$SECONDS bad=0
   for mask in $(reorder pick "$SEED" "$point" "$SUBSETS"); do
     i=$((i + 1))
-    n=$(($(cat "$state/subsets" 2> /dev/null || echo 0) + 1))
-    echo "$n" > "$state/subsets"
+    echo $(($(cat "$state/subsets" 2> /dev/null || echo 0) + 1)) > "$state/subsets"
+    seen 1
+    n=$(cat "$state/subsets-seen")
     what="subset $i, keeping $(tr -cd 1 <<< "$mask" | wc -c) of $writes ESP writes$([ ${#mask} -gt 64 ] || echo " ($mask)")"
     boot=0
     if [ -n "$REORDER_SAMPLE" ] && [ $((n % REORDER_SAMPLE)) = 0 ]; then boot=1; fi

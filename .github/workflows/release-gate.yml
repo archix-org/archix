@@ -91,17 +91,16 @@ jobs:
           name: ${{ matrix.suite }}-${{ matrix.fs }}
           status: ${{ job.status }}
 
-  powercut:
+  # One logged run per filesystem, which every shard replays, so the shards' points are one set and add up; a failure reproduces from this artifact and the printed seed.
+  powercut-log:
     needs: [plan, image]
     if: needs.plan.outputs.powercut == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         fs: ${{ fromJSON(needs.plan.outputs.fs) }}
-        # Each shard logs its own run and checks every third point of it; GitHub's nested boots are about ten times slower than a desktop's, which puts the whole suite near 500 minutes.
-        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/vm-setup
@@ -111,10 +110,95 @@ jobs:
       - run: tests/vm/run.sh powercut
         env:
           FS: ${{ matrix.fs }}
+          RECORD_ONLY: "1"
+          SAVE_LOG: ${{ runner.temp }}/powercut-log
+      # The target and log images are sparse; tar keeps them so, and the replay recomputes the point table from the log.
+      - run: |
+          mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/logged"
+          tar -S -I 'zstd -T0 -6' -cf "$RUNNER_TEMP/out/powercut-log-$FS.tar.zst" -C "$RUNNER_TEMP/powercut-log" .
+          cp "$RUNNER_TEMP/powercut-log/logged" "$RUNNER_TEMP/logged/logged-$FS"
+          ls -l "$RUNNER_TEMP/out"
+        env:
+          FS: ${{ matrix.fs }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powercut-log-${{ matrix.fs }}
+          path: ${{ runner.temp }}/out
+          compression-level: 0
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: powercut-logged-${{ matrix.fs }}
+          path: ${{ runner.temp }}/logged
+          retention-days: 14
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: powercut
+          name: powercut-log-${{ matrix.fs }}
+          status: ${{ job.status }}
+
+  powercut:
+    needs: [plan, powercut-log]
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
+        # Each shard replays the same logged run and checks every third point of it by index; GitHub's nested boots are about ten times slower than a desktop's, which puts the whole suite near 500 minutes.
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: powercut
+          need-gb: "60"
+      - uses: actions/download-artifact@v4
+        with:
+          name: powercut-log-${{ matrix.fs }}
+          path: ${{ runner.temp }}/powercut-log
+      - run: tests/vm/run.sh powercut
+        env:
+          FS: ${{ matrix.fs }}
+          LOG: ${{ runner.temp }}/powercut-log/powercut-log-${{ matrix.fs }}.tar.zst
           SHARD: ${{ matrix.shard }}/3
+          SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: powercut-summary-${{ matrix.fs }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/summary
+          if-no-files-found: ignore
+          retention-days: 14
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: powercut
           name: powercut-${{ matrix.fs }}-${{ matrix.shard }}
           status: ${{ job.status }}
+
+  # The shards of one log must between them check each of its points once and boot each ESP point for real.
+  powercut-sum:
+    needs: [plan, powercut]
+    if: always() && needs.powercut.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: powercut-summary-${{ matrix.fs }}-*
+          path: ${{ runner.temp }}/summary
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: powercut-logged-${{ matrix.fs }}
+          path: ${{ runner.temp }}/log
+      - run: tests/vm/powercut/sum-shards "$RUNNER_TEMP/log/logged-$FS" "$RUNNER_TEMP"/summary/powercut-"$FS"-*.json
+        env:
+          FS: ${{ matrix.fs }}

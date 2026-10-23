@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# io-compare A1 A2 B1 B2: io-tokens of two runs of build A and two of build B, as flush epochs: at each flush (an empty one or a write's preflush) the regions written since the last, and each FUA write by region, which is the order a power cut can see; exits 1 when a run of A and one of B differ by more than A's or B's two runs do, in the whole sequence or the ESP's part of it.
+import collections
+import difflib
+import sys
+
+
+def epochs(path):
+    seq, written = [], set()
+    for line in open(path):
+        region, kind, tags = line.split()
+        tags = tags.split(",")
+        if kind == "flush" or "flush" in tags:
+            seq.append("flush after " + ("+".join(sorted(written)) or "nothing"))
+            written = set()
+        if kind != "flush":
+            written.add(region + (":meta" if "meta" in tags else ""))
+        if "fua" in tags:
+            seq.append("fua " + region)
+    if written:
+        seq.append("unflushed " + "+".join(sorted(written)))
+    return seq
+
+
+def esp_only(seq):
+    return [e for e in seq if "esp" in e]
+
+
+def distance(a, b):
+    return 1 - difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+names = ["A1", "A2", "B1", "B2"]
+runs = {name: epochs(path) for name, path in zip(names, sys.argv[1:5])}
+for name, path in zip(names, sys.argv[1:5]):
+    counts = collections.Counter(" ".join(line.split()[:2]) for line in open(path))
+    print(f"{name} ({path.rsplit('-', 2)[-2]}): {len(runs[name])} epochs, {sum(e.startswith('flush') for e in runs[name])} flushes, {sum(e.startswith('fua') for e in runs[name])} FUA; " + ", ".join(f"{n} {k}" for k, n in sorted(counts.items())))
+ok = True
+for label, view in (("all", lambda s: s), ("ESP", esp_only)):
+    same = {p: distance(view(runs[p[0]]), view(runs[p[1]])) for p in (("A1", "A2"), ("B1", "B2"))}
+    cross = {p: distance(view(runs[p[0]]), view(runs[p[1]])) for p in (("A1", "B1"), ("A2", "B2"), ("A1", "B2"), ("A2", "B1"))}
+    print(f"{label} epochs, distance (1 - difflib ratio): same build " + ", ".join(f"{a}/{b} {d:.4f}" for (a, b), d in same.items()) + "; across builds " + ", ".join(f"{a}/{b} {d:.4f}" for (a, b), d in cross.items()))
+    if min(cross.values()) > max(same.values()):
+        ok = False
+        print(f"{label}: every run of A differs from every run of B by more than either build's runs differ")
+    a, b = view(runs["A1"]), view(runs["B1"])
+    shown = 0
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag != "equal" and shown < 6:
+            shown += 1
+            print(f"{label} A1/B1 {tag} at {i1}: {a[i1:i2][:4]} -> {b[j1:j2][:4]}")
+
+def esp_windows(path):
+    """How many ESP writes each flush window that has any holds, which is what the replay's ESP subsets are drawn from."""
+    counts, n = [], 0
+    for line in open(path):
+        region, kind, tags = line.split()
+        if kind == "flush" or "flush" in tags.split(","):
+            if n:
+                counts.append(n)
+            n = 0
+        if region == "esp":
+            n += 1
+    return counts + ([n] if n else [])
+
+
+windows = {name: esp_windows(path) for name, path in zip(names, sys.argv[1:5])}
+for a, b in (("A1", "A2"), ("B1", "B2"), ("A1", "B1")):
+    differ = sum(x != y for x, y in zip(windows[a], windows[b])) + abs(len(windows[a]) - len(windows[b]))
+    print(f"ESP flush windows {a}/{b}: {len(windows[a])} and {len(windows[b])}, {differ} with another number of ESP writes; {a} {windows[a][:24]}, {b} {windows[b][:24]}")
+sys.exit(0 if ok else 1)

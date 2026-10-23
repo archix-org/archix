@@ -1,0 +1,118 @@
+#!/bin/bash
+# esp-case CASE: boots a copy of the pristine disk for real with its ESP changed as CASE says and judges the boot; `pristine` boots it as it is and prints the seconds it took. passno-2, passno-0 and gpt-auto put a file whose FAT chain runs into a free cluster on the ESP and mount it through current's fstab line with fs_passno 2, which archix writes and must fsck it and keep it writable, or with 0 or no line at all, which archix rewrites and which show why: no fsck and a read-only ESP once the chain is read, and systemd-gpt-auto-generator automounting it at /boot, which the deployment binds, so not at all; drop-entry, drop-uki and only-fallback leave the ESP as an fsck repair that removed current's entry or UKI, or every entry, would, and must boot current through the fallback UKI; empty-uki empties current's UKI, as a repair truncating it would, which systemd-boot can't get past.
+set -u
+state=/var/lib/archix-powercut
+lib=/usr/local/lib/archix-powercut
+pristine=/dev/vdd
+. /etc/archix-powercut.conf
+read -r esp_start esp_size root_start root_size fs opts < "$state/layout"
+case=$1
+cow=
+unsnap() {
+  umount -R /case/root /case/esp 2> /dev/null
+  local d
+  for d in cesp croot csnap; do dmsetup remove "$d" 2> /dev/null; done
+  [ -z "$cow" ] || losetup -d "$cow" 2> /dev/null
+  rm -f /dev/shm/case-cow
+}
+trap unsnap EXIT
+truncate -s 4G /dev/shm/case-cow
+cow=$(losetup -f --show /dev/shm/case-cow)
+dmsetup create csnap --table "0 $(blockdev --getsz "$pristine") snapshot $pristine $cow N 8" || exit 2
+if [ "$case" = pristine ]; then
+  secs=$("$lib/boot-real" /dev/mapper/csnap)
+  echo "$secs"
+  grep -aq 'POWERCUT-BOOTED' /dev/shm/boot.log
+  exit
+fi
+dmsetup create cesp --table "0 $esp_size linear /dev/mapper/csnap $esp_start"
+dmsetup create croot --table "0 $root_size linear /dev/mapper/csnap $root_start"
+mkdir -p /case/root /case/esp
+[ "$fs" = btrfs ] && btrfs device scan --forget > /dev/null 2>&1
+mount ${opts:+-o $opts} /dev/mapper/croot /case/root || exit 2
+mount /dev/mapper/cesp /case/esp || exit 2
+current=$(readlink /case/root/archix/current | sed 's|^deploy/||')
+fstab=/case/root/archix/deploy/$current/etc/fstab
+line=$(awk '$2 == "/efi"' "$fstab")
+[[ $line == *x-systemd.automount*" 2" ]] || { echo "current's fstab line for the ESP isn't an automount with fs_passno 2: $line"; exit 1; }
+want_fsck=1 want_esp=rw
+case $case in
+  passno-2) ;;
+  passno-0) sed -i '/[[:space:]]\/efi[[:space:]]/s/[0-9][[:space:]]*$/0/' "$fstab" && want_fsck=0 want_esp=ro ;;
+  gpt-auto) sed -i '/[[:space:]]\/efi[[:space:]]/d' "$fstab" && want_fsck=0 want_esp=unmounted ;;
+  drop-entry) rm /case/esp/loader/entries/archix-"$current"[+.]* ;;
+  drop-uki | empty-uki)
+    uki=$(sed -nE 's/^(uki|efi) //p' /case/esp/loader/entries/archix-"$current"[+.]*conf | head -1)
+    [ -n "$uki" ] || { echo "current's entry names no UKI"; exit 2; }
+    if [ "$case" = drop-uki ]; then rm "/case/esp/$uki"; else : > "/case/esp/$uki"; fi
+    ;;
+  only-fallback) rm /case/esp/loader/entries/*.conf ;;
+  *) echo "no case $case" && exit 2 ;;
+esac
+if [[ $case == passno-* || $case == gpt-auto ]]; then
+  head -c 262144 /dev/urandom > /case/esp/CHAIN.BIN
+fi
+expect=$("$lib/invariant" pick /case/esp)
+expected=${expect#archix-}
+expected=${expected#fallback-}
+expected=${expected%%[-.+]*}
+umount /case/esp /case/root
+if [ -n "$(blkid -o value -s TYPE /dev/mapper/cesp)" ] && [[ $case == passno-* || $case == gpt-auto ]]; then
+  python3 - /dev/mapper/cesp << 'PY' || exit 2
+import struct, sys
+# Frees the second cluster of CHAIN.BIN in every FAT, so its chain runs into a free cluster.
+with open(sys.argv[1], "r+b") as dev:
+    boot = dev.read(512)
+    bps, spc, reserved, nfats = struct.unpack_from("<HBHB", boot, 11)
+    fatsz, rootclus = struct.unpack_from("<I", boot, 36)[0], struct.unpack_from("<I", boot, 44)[0]
+    def fat(n, value=None):
+        for i in range(nfats):
+            dev.seek(reserved * bps + i * fatsz * bps + n * 4)
+            if value is None:
+                return struct.unpack("<I", dev.read(4))[0] & 0x0FFFFFFF
+            dev.write(struct.pack("<I", value))
+    def cluster(n):
+        dev.seek((reserved + nfats * fatsz + (n - 2) * spc) * bps)
+        return dev.read(spc * bps)
+    c = rootclus
+    while c < 0x0FFFFFF8:
+        data = cluster(c)
+        for at in range(0, len(data), 32):
+            if data[at : at + 11] == b"CHAIN   BIN":
+                first = struct.unpack_from("<H", data, at + 20)[0] << 16 | struct.unpack_from("<H", data, at + 26)[0]
+                second = fat(first)
+                fat(second, 0)
+                sys.exit(0)
+        c = fat(c)
+    sys.exit("no CHAIN.BIN on the ESP")
+PY
+  fsck.vfat -n /dev/mapper/cesp 2>&1 | grep -q 'free cluster' || { echo "the broken chain isn't there: $(fsck.vfat -n /dev/mapper/cesp 2>&1 | tail -3 | tr '\n' '|')"; exit 2; }
+fi
+baseline=$(cat "$state/baseline-boot")
+timeout=$((5 * baseline))
+[ "$case" != empty-uki ] || timeout=$((2 * baseline))
+secs=$("$lib/boot-real" /dev/mapper/csnap "$timeout")
+real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
+cp /dev/shm/boot.log "$state/case-$case.log"
+problems=()
+if [ "$case" = empty-uki ]; then
+  # systemd-boot lists an entry whose UKI is there but empty, fails to load it and hands back to the firmware, so no boot can get past it; the replay checks that no fsck repair of a replayed ESP leaves current's UKI so.
+  [ -z "$real" ] && grep -aq 'Error loading EFI binary' /dev/shm/boot.log || problems+=("systemd-boot was expected to stop at the empty UKI: ${real:-$(grep -a -i 'error' /dev/shm/boot.log | tail -3 | tr -d '\r' | tr '\n' '|')}")
+  real="POWERCUT-BOOTED none: $(grep -a -o 'Error loading EFI binary[^:]*: [A-Za-z ]*' /dev/shm/boot.log | head -1)"
+elif [ -z "$real" ]; then
+  problems+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency\|error' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
+else
+  [[ $real == *" deployment=$expected "* ]] || problems+=("systemd-boot was predicted to start $expect")
+  [[ $real == *" altered=0 "* ]] || problems+=("package files altered")
+  [[ $real == *" esp=$want_esp "* ]] || problems+=("the ESP should be $want_esp after the boot")
+  if [ "$want_fsck" = 1 ]; then
+    [[ $real =~ \ espfsck=success:[1-9] ]] || problems+=("systemd-fsck didn't check the ESP")
+  else
+    [[ $real == *" espfsck=none "* ]] || problems+=("systemd-fsck checked the ESP, though nothing asked it to")
+  fi
+  [[ $real == *" failed=" || $want_fsck == 0 ]] || problems+=("failed units")
+fi
+echo "$real secs=$secs"
+grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | head -6
+for p in "${problems[@]}"; do echo "PROBLEM: $p"; done
+[ ${#problems[@]} = 0 ] && echo "$case: as expected, ${real#POWERCUT-BOOTED } in $secs s" || { echo "$case: ${problems[*]}"; exit 1; }

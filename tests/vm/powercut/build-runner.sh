@@ -37,10 +37,9 @@ printf 'title runner\nlinux /vmlinuz-linux\ninitrd /initramfs-linux.img\noptions
 install -Dm755 /work/replay-log /mnt/usr/local/bin/replay-log
 install -Dm755 /work/archix-static /mnt/usr/local/bin/archix
 install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
-for tool in boot-real check-point invariant findings mark point-table reorder var-manifest; do install -Dm755 "/vm/powercut/$tool" "/mnt/usr/local/lib/archix-powercut/$tool"; done
+[ ! -e /work/archix-plain ] || install -Dm755 /work/archix-plain /mnt/usr/local/bin/archix-plain
+for tool in boot-real check-point esp-case invariant findings io-compare io-tokens mark point-table reorder var-manifest; do install -Dm755 "/vm/powercut/$tool" "/mnt/usr/local/lib/archix-powercut/$tool"; done
 install -Dm755 /vm/powercut/vmtest.sh /mnt/usr/local/bin/archix-powercut
-printf 'POINTS=%s\nBREAK=%s\nCOUNTING=%s\nSAMPLE=%s\nSUBSETS=%s\nREORDER_SAMPLE=%s\nSEED=%s\nBOOT_TIMEOUT=%s\nBOOT_RATIO=%s\nBOOT_CEILING=%s\nSHARD=%s\n' "${REPLAY_POINTS:-}" "${BREAK:-}" "${COUNTING-1}" "${SAMPLE-20}" \
-  "${SUBSETS-16}" "${REORDER_SAMPLE-16}" "${SEED:-1}" "${BOOT_TIMEOUT:-3600}" "${BOOT_RATIO:-3}" "${BOOT_CEILING:-1200}" "${SHARD:-}" > /mnt/etc/archix-powercut.conf
 printf '[Unit]\nDescription=archix power-cut replay\nAfter=multi-user.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-powercut\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target\n' \
   > /mnt/etc/systemd/system/archix-powercut.service
 arch-chroot /mnt systemctl enable archix-powercut.service > /dev/null 2>&1
