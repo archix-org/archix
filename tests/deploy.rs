@@ -59,7 +59,8 @@ impl LoopFs {
             mkfs.arg("-q");
         }
         sh(mkfs.args(mkfs_args).arg(&loop_fs.dev));
-        sh(Command::new("mount").arg(&loop_fs.dev).arg(&loop_fs.mnt));
+        // A probe can still see the previous filesystem on a reused loop device, so the type isn't left to it.
+        sh(Command::new("mount").args(["-t", fs]).arg(&loop_fs.dev).arg(&loop_fs.mnt));
         loop_fs
     }
 }
