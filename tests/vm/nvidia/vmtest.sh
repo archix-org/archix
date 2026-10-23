@@ -29,6 +29,22 @@ deployed_kernel() { for k in /archix/deploy/"$1"/usr/lib/modules/*/vmlinuz; do b
 deployed_module() { modinfo -F version /archix/deploy/"$1"/usr/lib/modules/"$2"/updates/dkms/nvidia.ko* 2>/dev/null; }
 module_version() { modinfo -k "$1" -F version nvidia 2>/dev/null; }
 nvidia_modules() { ls /usr/lib/modules/*/updates/dkms/nvidia* 2>/dev/null; }
+nvidia_sources() { ls -d /usr/src/nvidia* 2>/dev/null; }
+# nvidia-utils ships its GSP firmware in a directory named by version; linux-firmware's nvidia/ holds chip names.
+nvidia_firmware() { ls -d /usr/lib/firmware/nvidia/[0-9]* 2>/dev/null; }
+# modprobe.d, modules-load.d, udev and mkinitcpio files named for or mentioning nvidia; nvidia-utils ships the first three, nothing for mkinitcpio.
+nvidia_dropins() {
+  local dirs=(/usr/lib/modprobe.d /etc/modprobe.d /usr/lib/modules-load.d /etc/modules-load.d /usr/lib/udev/rules.d /etc/udev/rules.d /etc/mkinitcpio.conf.d /etc/mkinitcpio.d /usr/lib/initcpio)
+  { find "${dirs[@]}" -iname '*nvidia*' 2>/dev/null; grep -rlis nvidia "${dirs[@]}"; grep -v '^[[:space:]]*#' /etc/mkinitcpio.conf | grep -qi nvidia && echo /etc/mkinitcpio.conf; } | sort -u
+}
+# The initramfs files in the booted deployment's UKI; lsinitcpio reads a UKI's .initrd section with objcopy.
+initramfs_files() {
+  local entry uki
+  for entry in /efi/loader/entries/archix-"$booted".conf /efi/loader/entries/archix-"$booted"+*.conf; do [ -f "$entry" ] && break; done
+  uki=$(sed -nE 's#^(efi|uki) /#/efi/#p' "$entry" 2>/dev/null)
+  [ -f "$uki" ] || fail "deployment $booted's entry $entry should start a UKI, not '$uki': $(ls /efi/loader/entries | tr '\n' ' ')"
+  lsinitcpio "$uki" || fail "lsinitcpio $uki"
+}
 # Everything that shows the driver: the packages, the built module for the running kernel and DKMS's own record; $1 is the package version.
 driver() {
   local want=${1%-*} kernel; kernel=$(uname -r)
@@ -36,6 +52,10 @@ driver() {
   case $(pkg nvidia-utils) in "$want"-*) ;; *) fail "nvidia-utils should be $want, not '$(pkg nvidia-utils)'" ;; esac
   [ "$(module_version "$kernel")" = "$want" ] || fail "the nvidia module built for $kernel should be $want, not '$(module_version "$kernel")'"
   dkms status nvidia | grep -q "nvidia/$want, $kernel, x86_64: installed" || fail "dkms should show nvidia/$want installed for $kernel: $(dkms status nvidia)"
+  [ -f "/usr/src/nvidia-$want/dkms.conf" ] || fail "nvidia-open-dkms's source tree /usr/src/nvidia-$want should be there: $(nvidia_sources)"
+  [ -f "/usr/lib/firmware/nvidia/$want/gsp_ga10x.bin" ] || fail "nvidia-utils's GSP firmware should be in /usr/lib/firmware/nvidia/$want: $(nvidia_firmware)"
+  nvidia_dropins | grep -qx /usr/lib/modprobe.d/nvidia-utils.conf || fail "nvidia-utils's /usr/lib/modprobe.d/nvidia-utils.conf should be found: $(nvidia_dropins)"
+  modprobe -n nvidia || fail "modprobe should find the nvidia module for $kernel"
 }
 # What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
 findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
@@ -48,6 +68,17 @@ no_driver() {
   [ -z "$(nvidia_modules)" ] || fail "nvidia modules are left behind: $(nvidia_modules)"
   [ -z "$(dkms status nvidia 2>/dev/null)" ] || fail "dkms still knows nvidia: $(dkms status nvidia)"
   modinfo -k "$(uname -r)" nvidia > /dev/null 2>&1 && fail "modinfo still finds an nvidia module for $(uname -r)"
+  [ -z "$(nvidia_sources)" ] || fail "nvidia sources are left in /usr/src: $(nvidia_sources)"
+  [ -z "$(nvidia_firmware)" ] || fail "nvidia-utils's firmware is left behind: $(nvidia_firmware)"
+  [ -z "$(nvidia_dropins)" ] || fail "nvidia modprobe, modules-load, udev or mkinitcpio files are left behind: $(nvidia_dropins | tr '\n' ' ')"
+  local err; err=$(modprobe nvidia 2>&1) && fail "modprobe nvidia should fail"
+  [[ $err == *"Module nvidia not found"* ]] || fail "modprobe nvidia should fail for want of the module, not with: $err"
+  [ -d /sys/module/nvidia ] && fail "the nvidia module is loaded"
+  local files; files=$(initramfs_files)
+  grep -q "usr/lib/modules/$(uname -r)/.*\.ko" <<< "$files" || fail "lsinitcpio should list deployment $booted's initramfs modules for $(uname -r): $(head -c 400 <<< "$files")"
+  # The kernel's own hid-nvidia-shield.ko is in every initramfs, so only DKMS modules, the driver's names and nvidia-utils's firmware count.
+  local ours; ours=$(grep -E '/updates/|/nvidia[^/]*\.ko|/firmware/nvidia/[0-9]' <<< "$files")
+  [ -z "$ours" ] || fail "deployment $booted's UKI has nvidia in its initramfs: $(head -5 <<< "$ours" | tr '\n' ' ')"
   return 0
 }
 say "stage $stage: booted $booted, current $(current), deployments $(ls /archix/deploy | sort -n | tr '\n' ' '), kernel $(uname -r), $(pacman -Q dkms 2>/dev/null || echo "no dkms")"
@@ -72,7 +103,7 @@ case $stage in
     [ "$booted" = "$(recall nv_old)" ] || fail "deployment $(recall nv_old) should boot after its switch"
     remember old_kernel "$(uname -r)"
     driver "$(recall old_driver)"
-    say "PASS: deployment $(recall nv_old) boots nvidia-open-dkms $(recall old_driver), built by DKMS for $(uname -r) while staging"
+    say "PASS: deployment $(recall nv_old) boots nvidia-open-dkms $(recall old_driver), built by DKMS for $(uname -r) while staging, with its /usr/src tree, nvidia-utils's firmware and modprobe.d file; no GPU, so build and install checks, not a hardware result"
     ax update --to "$to" --noconfirm > /dev/console 2>&1 || fail "archix update --to $to"
     baseline "$(recall nv_old)"
     ax switch --noconfirm > /dev/console 2>&1 || fail "switch to the $to snapshot"
@@ -113,7 +144,7 @@ case $stage in
   5)
     [ "$booted" = "$(recall none)" ] || fail "the rollback should boot deployment $(recall none)"
     no_driver
-    say "PASS: deployment $(recall none), which had no driver, boots without any nvidia package or module"
+    say "PASS: deployment $(recall none), which had no driver, boots without any nvidia package, module, /usr/src tree, firmware or modprobe, modules-load, udev or mkinitcpio file, modprobe nvidia finds no module, and its UKI's initramfs has no nvidia; no GPU, so build, install and remove checks, not a hardware result"
 
     sed -i 's|"devtools", "nvidia-open-dkms" }, -- packages|"devtools", "nvidia-580xx-dkms" }, -- packages|' "$config"
     baseline "$(recall none)"
