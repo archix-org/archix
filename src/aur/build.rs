@@ -609,11 +609,19 @@ impl Builder<'_> {
         let installed = crate::pacman::read_local_db(&staging.tree("pacman"))?;
         let files = self.build_inputs(&missing, &installed, date, repos, inputs)?;
         if !files.is_empty() {
-            let mut install = args(&["pacman", "-U", "--noconfirm", "--needed", "--asdeps"]);
-            for file in &files {
-                install.push(file.to_str().context("a package path isn't UTF-8")?.to_string());
+            let output = tx
+                .pacman()?
+                .args(["-U", "--noconfirm", "--needed", "--asdeps"])
+                .args(&files)
+                .env(TRANSACTION_ENV, "1")
+                .output()
+                .context("running pacman -U in the build view")?;
+            if !output.status.success() {
+                bail!(
+                    "pacman -U failed in the build view: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
-            succeeds(&install)?;
         }
         let mut makepkg = args(&[
             "setpriv",
