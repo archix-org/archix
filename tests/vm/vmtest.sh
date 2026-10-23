@@ -26,6 +26,12 @@ if [ -n "$failed_units" ]; then
   networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
   fail "units failed at this boot: $failed_units"
 fi
+# Nothing in a deployment pulls in the network wait, so a link networkd never configured would go unseen; every stage has a NIC.
+if ! /usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1; then
+  networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
+  journalctl -b -u systemd-networkd --no-pager | tail -30 | sed 's|^|VMTEST: networkd: |' > /dev/console
+  fail "networkd didn't configure the NIC's link within 90 s of this stage starting"
+fi
 # Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.
 [ "$stage" = 10 ] || [ "$booted" = "$running" ] || fail "the initramfs mounted deployment $running, but systemd-boot started $selected"
 config=/etc/archix/init.lua
