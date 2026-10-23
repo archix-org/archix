@@ -177,6 +177,9 @@ enum Command {
     /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: make its generation the default
     #[command(hide = true)]
     BootComplete,
+    /// Run by systemd-bless-boot.service, before its own rename: count the booted entry as good, synced under its new name
+    #[command(hide = true)]
+    Bless,
     /// Run by archix-health-check.service before boot-complete.target: check a new deployment's counted boot, and mark its entry bad if it fails
     #[command(hide = true)]
     HealthCheck,
@@ -558,7 +561,11 @@ fn run() -> Result<ExitCode> {
     let changes_things = needs_root(&command).is_some()
         || matches!(
             command,
-            Command::BootCheck { .. } | Command::BootComplete | Command::DeployFlatpak | Command::HealthCheck
+            Command::BootCheck { .. }
+                | Command::BootComplete
+                | Command::Bless
+                | Command::DeployFlatpak
+                | Command::HealthCheck
         );
     if needs_root(&command).is_some() {
         leave_login_session();
@@ -624,6 +631,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::BootComplete => {
             archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Bless => {
+            archix::system::boot::bless_booted(&archix::paths::Paths::system())?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::DeployFlatpak => {
@@ -791,6 +802,7 @@ fn run() -> Result<ExitCode> {
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::BootComplete
+        | Command::Bless
         | Command::HealthCheck
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }

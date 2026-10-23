@@ -652,6 +652,44 @@ fn a_read_only_esp_at_boot_keeps_the_deployment_current_says_so_and_is_retried_a
     assert!(!notes().contains(said), "{}", notes());
 }
 
+#[test]
+#[ignore]
+fn archix_blesses_a_counted_boot_itself_before_systemd_bless_boot_and_syncs_the_entry_under_its_new_name() {
+    let _system = lock_system();
+    let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let machine = &setup.machine;
+    let new = machine.current().unwrap();
+    let dropin = machine
+        .deployment(new)
+        .join("etc/systemd/system/systemd-bless-boot.service.d/archix.conf");
+    let text = fs::read_to_string(&dropin).unwrap_or_default();
+    assert!(text.contains("ExecStartPre=-") && text.contains(" bless"), "{text}");
+    let entries_dir = machine.esp().join("loader/entries");
+    let counted = entries_dir.join(format!("archix-{new}+3.conf"));
+    let content = fs::read_to_string(&counted).unwrap();
+    fs::rename(&counted, entries_dir.join(format!("archix-{new}+2-1.conf"))).unwrap();
+    machine.reboot(Some(&format!("archix-{new}.conf")));
+    let out = setup.ok_env(&[counting], &["bless"]);
+    assert!(
+        out.contains(&format!("renamed archix-{new}+2-1.conf to archix-{new}.conf")),
+        "{out}"
+    );
+    assert_eq!(machine.entries(), [format!("archix-{new}.conf")]);
+    assert_eq!(
+        fs::read_to_string(entries_dir.join(format!("archix-{new}.conf"))).unwrap(),
+        content
+    );
+    assert_eq!(
+        setup.ok_env(&[counting], &["bless"]),
+        "",
+        "systemd-bless-boot's own rename then finds it done"
+    );
+    setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(machine.loader_conf().contains(&format!("default archix-{new}.conf")));
+}
+
 fn efivar(entry: &str) -> Vec<u8> {
     let mut bytes = vec![6, 0, 0, 0];
     bytes.extend(entry.encode_utf16().flat_map(u16::to_le_bytes));

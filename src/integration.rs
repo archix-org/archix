@@ -159,8 +159,13 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         Paths::system().state.display(),
         archix.display()
     );
+    let bless = format!("[Service]\nExecStartPre=-{} bless\n", archix.display());
     let root = Path::new("/");
     let mut files = vec![
+        (
+            root.join("etc/systemd/system/systemd-bless-boot.service.d/archix.conf"),
+            bless,
+        ),
         (root.join("etc/systemd/system/archix-etc-merge.service"), etc_merge),
         (
             root.join("etc/systemd/system/archix-etc-merge-boot.service"),

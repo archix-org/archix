@@ -60,7 +60,8 @@ else
   mount "$root" /mnt
 fi
 mkdir -p /mnt/efi
-mount "$esp" /mnt/efi
+# bootctl won't trust a random seed on a world-readable ESP.
+mount -o umask=0077 "$esp" /mnt/efi
 
 grep -v '^NoExtract' /etc/pacman.conf > /tmp/pacman.conf
 if [ "$suite" = cachyos ]; then
