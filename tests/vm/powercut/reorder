@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+# reorder LOG FROM TO ESP_START ESP_SIZE BEFORE pick SEED POINT N | apply MASK DEV | advance: the ESP writes logged between byte offsets FROM and TO (one flush window), as a power cut before its flush may keep any of them; `pick` prints up to N distinct masks of them (all but the full one, exhaustively when that fits), `apply` restores the window's ESP sectors on DEV from BEFORE (the ESP as of the window's start) then writes the masked-in ones in log order, `advance` writes them all into BEFORE.
+import os
+import random
+import struct
+import sys
+
+FLUSH, FUA, DISCARD, MARK = 1 << 0, 1 << 1, 1 << 2, 1 << 3
+log_path, start, end, esp_start, esp_size, before = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]) * 512, int(sys.argv[5]) * 512, sys.argv[6]
+command = sys.argv[7]
+
+
+def window():
+    """The window's ESP writes as (disk offset, length, log offset of the data, always kept): a FUA write completed before the cut is on the disk, unless it's the window's last entry, whose completion is the cut."""
+    found = []
+    with open(log_path, "rb") as log:
+        sectorsize = struct.unpack("<QQQI", log.read(28))[3]
+        pos = start or sectorsize
+        while pos < end:
+            log.seek(pos)
+            sector, count, flags, _ = struct.unpack("<QQQQ", log.read(32))
+            pos += sectorsize
+            data = pos
+            if count and not flags & DISCARD:
+                pos += count * sectorsize
+            first, length = sector * sectorsize, count * sectorsize
+            if count and not flags & (DISCARD | MARK) and first < esp_start + esp_size and first + length > esp_start:
+                found.append((first, length, data, bool(flags & FUA) and pos < end))
+    return found
+
+
+def copy(src, src_at, dst, dst_at, length):
+    while length:
+        chunk = min(length, 1 << 20)
+        src.seek(src_at)
+        dst.seek(dst_at)
+        dst.write(src.read(chunk))
+        src_at, dst_at, length = src_at + chunk, dst_at + chunk, length - chunk
+
+
+writes = window()
+free = [i for i, w in enumerate(writes) if not w[3]]
+if command == "pick":
+    seed, point, wanted = sys.argv[8], sys.argv[9], int(sys.argv[10])
+    full = "1" * len(writes)
+    masks = []
+    if len(free) < 20 and (1 << len(free)) - 1 <= wanted:
+        for bits in range((1 << len(free)) - 1):
+            mask = ["1"] * len(writes)
+            for k, i in enumerate(free):
+                mask[i] = "1" if bits >> k & 1 else "0"
+            masks.append("".join(mask))
+    else:
+        rng = random.Random(f"{seed}:{point}")
+        tries = 0
+        while len(masks) < wanted and tries < 100 * wanted:
+            tries += 1
+            mask = ["1"] * len(writes)
+            for i in free:
+                mask[i] = rng.choice("01")
+            mask = "".join(mask)
+            if mask != full and mask not in masks:
+                masks.append(mask)
+    print("\n".join(masks))
+elif command == "apply":
+    mask = sys.argv[8]
+    assert len(mask) == len(writes), f"the mask has {len(mask)} writes, the window {len(writes)}"
+    with open(before, "rb") as base, open(log_path, "rb") as log, open(sys.argv[9], "r+b") as dev:
+        for first, length, _, _ in writes:
+            lo, hi = max(first, esp_start), min(first + length, esp_start + esp_size)
+            copy(base, lo - esp_start, dev, lo, hi - lo)
+        for keep, (first, length, data, _) in zip(mask, writes):
+            if keep == "1":
+                copy(log, data, dev, first, length)
+        dev.flush()
+        os.fsync(dev.fileno())
+elif command == "advance":
+    with open(log_path, "rb") as log, open(before, "r+b") as base:
+        for first, length, data, _ in writes:
+            lo, hi = max(first, esp_start), min(first + length, esp_start + esp_size)
+            copy(log, data + lo - first, base, lo - esp_start, hi - lo)
+elif command == "count":
+    print(len(writes), len(free))

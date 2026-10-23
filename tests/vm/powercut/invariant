@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# `invariant pick ESP` prints the entry systemd-boot would start; `invariant check ROOT ESP BEFORE AFTER` checks a replayed disk: every archix entry names a committed deployment whose UKI matches, the picked entry and `current` name committed deployments, archix's initramfs boots the picked one, and its files match its baseline.
+# `invariant pick ESP` prints the entry systemd-boot would start; `invariant check ROOT ESP BEFORE AFTER` checks a replayed disk: every archix entry names a committed deployment whose UKI matches, as does the fallback UKI once its deployment is committed, the picked entry and `current` name committed deployments, archix's initramfs boots the picked one, and its files match its baseline.
 import functools
 import os
 import re
@@ -33,19 +33,30 @@ def read(path):
 
 
 class Entry:
-    def __init__(self, esp, name):
+    def __init__(self, esp, name, osrel=None):
         self.name = name
-        m = re.fullmatch(r"(.*?)(?:\+(\d+)(?:-(\d+))?)?\.conf", name, re.I)
-        self.id = m.group(1) + ".conf"
+        m = re.fullmatch(r"(.*?)(?:\+(\d+)(?:-(\d+))?)?(\.conf|\.efi)", name, re.I)
+        self.id = m.group(1) + m.group(4)
         self.tries_left = int(m.group(2)) if m.group(2) is not None else UNCOUNTED
         self.tries_done = int(m.group(3) or 0)
         self.keys = {}
-        for line in (read(os.path.join(esp, "loader/entries", name)) or b"").decode(errors="replace").splitlines():
-            parts = line.strip().split(None, 1)
-            if len(parts) == 2 and not parts[0].startswith("#"):
-                self.keys.setdefault(parts[0], parts[1].strip())
-        self.image = self.keys.get("uki") or self.keys.get("efi") or self.keys.get("linux")
-        g = re.fullmatch(r"archix-([1-9]\d*)(?:-protected)?\.conf", self.id)
+        self.fallback = osrel is not None
+        if self.fallback:
+            # systemd-boot's Type #2 entry: its sort key is IMAGE_ID or ID, its version IMAGE_VERSION or VERSION_ID.
+            rel = {}
+            for line in osrel.decode(errors="replace").splitlines():
+                key, _, value = line.partition("=")
+                rel.setdefault(key.strip(), value.strip().strip("\"'"))
+            self.keys = {k: v for k, v in (("sort-key", rel.get("IMAGE_ID") or rel.get("ID")), ("version", rel.get("IMAGE_VERSION") or rel.get("VERSION_ID"))) if v}
+            self.image = "/EFI/Linux/" + name
+            g = re.fullmatch(r"archix-fallback-([1-9]\d*)\.efi", self.id)
+        else:
+            for line in (read(os.path.join(esp, "loader/entries", name)) or b"").decode(errors="replace").splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) == 2 and not parts[0].startswith("#"):
+                    self.keys.setdefault(parts[0], parts[1].strip())
+            self.image = self.keys.get("uki") or self.keys.get("efi") or self.keys.get("linux")
+            g = re.fullmatch(r"archix-([1-9]\d*)(?:-protected)?\.conf", self.id)
         self.generation = g.group(1) if g else None
 
 
@@ -65,12 +76,19 @@ def compare(a, b):
     return -strverscmp(a.id, b.id) or -((a.tries_left > b.tries_left) - (a.tries_left < b.tries_left))
 
 
-def entries(esp):
+def entries(esp, type2=False):
+    """systemd-boot's menu: loader/entries, and with `type2` the UKIs in EFI/Linux whose .osrel and .linux it can read."""
     found = []
     folder = os.path.join(esp, "loader/entries")
     for name in os.listdir(folder) if os.path.isdir(folder) else []:
         if name.lower().endswith(".conf") and not name.startswith("auto-") and os.path.isfile(os.path.join(folder, name)):
             found.append(Entry(esp, name))
+    linux = os.path.join(esp, "EFI/Linux")
+    for name in os.listdir(linux) if type2 and os.path.isdir(linux) else []:
+        data = read(os.path.join(linux, name)) if name.lower().endswith(".efi") and not name.startswith(".") else None
+        osrel = section(data, ".osrel") if data else None
+        if osrel is not None and section(data, ".linux"):
+            found.append(Entry(esp, name, osrel))
     return sorted(found, key=functools.cmp_to_key(compare))
 
 
@@ -106,15 +124,18 @@ def section(data, wanted):
     """A PE section's bytes, as ukify writes them: VirtualSize long, at PointerToRawData."""
     if data[:2] != b"MZ":
         return None
-    pe = struct.unpack_from("<I", data, 0x3C)[0]
-    if data[pe : pe + 4] != b"PE\0\0":
-        return None
-    count, optional = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
-    table = pe + 24 + optional
-    for i in range(count):
-        name, vsize, _, rsize, offset = struct.unpack_from("<8sIIII", data, table + 40 * i)
-        if name.rstrip(b"\0").decode(errors="replace") == wanted:
-            return data[offset : offset + min(vsize, rsize)]
+    try:
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe : pe + 4] != b"PE\0\0":
+            return None
+        count, optional = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+        table = pe + 24 + optional
+        for i in range(count):
+            name, vsize, _, rsize, offset = struct.unpack_from("<8sIIII", data, table + 40 * i)
+            if name.rstrip(b"\0").decode(errors="replace") == wanted:
+                return data[offset : offset + min(vsize, rsize)]
+    except struct.error:
+        pass
     return None
 
 
@@ -124,6 +145,11 @@ def uki_problem(root, esp, entry):
     if uki is None:
         return f"{entry.name} starts {entry.image}, which is missing"
     deployment = os.path.join(root, "archix/deploy", entry.generation)
+    if entry.fallback:
+        # A copy of one of the generation's UKIs, under its own name.
+        folder = os.path.join(deployment, "boot/archix")
+        if any(read(os.path.join(folder, n)) == uki for n in (os.listdir(folder) if os.path.isdir(folder) else [])):
+            return None
     built = read(os.path.join(deployment, "boot/archix", os.path.basename(entry.image)))
     if built is not None:
         return None if built == uki else f"{entry.name}'s UKI {entry.image} isn't the one deployment {entry.generation} built"
@@ -151,7 +177,7 @@ def boot(root, entry):
 
 def check(root, esp, before, after):
     problems = []
-    listed = entries(esp)
+    listed = entries(esp, type2=True)
     bootable = 0
     for e in listed:
         if e.generation is None:
@@ -159,7 +185,9 @@ def check(root, esp, before, after):
         if not e.image:
             problems.append(f"{e.name} has no efi or uki line, so it was written torn")
         elif not committed(root, e.generation):
-            problems.append(f"{e.name} names deployment {e.generation}, which isn't committed")
+            # The ESP step puts the fallback down before the deployment is committed.
+            if not e.fallback:
+                problems.append(f"{e.name} names deployment {e.generation}, which isn't committed")
         else:
             problem = uki_problem(root, esp, e)
             if problem:
@@ -167,7 +195,7 @@ def check(root, esp, before, after):
             elif e.tries_left != 0:
                 bootable += 1
     if not bootable:
-        problems.append("no archix entry systemd-boot can read starts a committed deployment with its UKI")
+        problems.append("no archix entry or fallback UKI systemd-boot can read starts a committed deployment with its UKI")
     link = os.path.join(root, "archix/current")
     current = os.readlink(link) if os.path.islink(link) else None
     number = current.removeprefix("deploy/") if current else None
@@ -179,6 +207,8 @@ def check(root, esp, before, after):
         problems.append("systemd-boot has no entry to start")
     elif picked.generation is None:
         problems.append(f"systemd-boot would start {picked.name}, which isn't archix's")
+    elif picked.fallback and not committed(root, picked.generation):
+        problems.append(f"systemd-boot would start {picked.name}, whose deployment {picked.generation} isn't committed")
     elif committed(root, picked.generation):
         booted, error = boot(root, picked)
         if error:
@@ -187,7 +217,14 @@ def check(root, esp, before, after):
             problems.append(f"systemd-boot starts {picked.name}, but archix's initramfs step mounts deployment {booted}")
     if booted and booted.isdigit():
         baseline = next((read(os.path.join(d, booted)) for d in (before, after) if os.path.exists(os.path.join(d, booted))), None)
-        found = subprocess.run(["/usr/local/lib/archix-powercut/findings", booted, root], capture_output=True, text=True).stdout
+        # The root is the same for every ESP subset of a point, so its findings are too.
+        cached = os.path.join(os.environ["FINDINGS_CACHE"], booted) if os.environ.get("FINDINGS_CACHE") else None
+        found = read(cached).decode() if cached and os.path.exists(cached) else None
+        if found is None:
+            found = subprocess.run(["/usr/local/lib/archix-powercut/findings", booted, root], capture_output=True, text=True).stdout
+            if cached:
+                with open(cached, "w") as f:
+                    f.write(found)
         if baseline is None:
             problems.append(f"no baseline for deployment {booted}, which boots here")
         elif found != baseline.decode():
@@ -256,7 +293,7 @@ def orphans(root, esp):
 
 if __name__ == "__main__":
     if sys.argv[1] == "pick":
-        picked = pick(sys.argv[2], entries(sys.argv[2]))
+        picked = pick(sys.argv[2], entries(sys.argv[2], type2=True))
         print(picked.name if picked else "")
     elif sys.argv[1] == "orphans":
         print("\n".join(orphans(sys.argv[2], sys.argv[3])))

@@ -34,7 +34,9 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
         }
         file.write_all(contents)
             .with_context(|| format!("writing {}", tmp.display()))?;
-        file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
+        if !crate::testhooks::broken("data-unsynced") {
+            file.sync_all().with_context(|| format!("writing {}", tmp.display()))?;
+        }
         fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
     })?;
     sync_renamed(path)
@@ -42,6 +44,9 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
 
 /// Flushes a file renamed into place and its directory; on FAT the new name's entry says empty until the file itself is synced again.
 pub fn sync_renamed(path: &Path) -> Result<()> {
+    if crate::testhooks::broken("renamed-unsynced") {
+        return sync_dir(path);
+    }
     File::open(path)
         .and_then(|file| file.sync_all())
         .with_context(|| format!("writing {}", path.display()))?;
@@ -67,9 +72,11 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
     let tmp = to.with_file_name(tmp_name);
     removing_on_error(&tmp, || {
         fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
-        File::open(&tmp)?
-            .sync_all()
-            .with_context(|| format!("writing {}", tmp.display()))?;
+        if !crate::testhooks::broken("data-unsynced") {
+            File::open(&tmp)?
+                .sync_all()
+                .with_context(|| format!("writing {}", tmp.display()))?;
+        }
         fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
     })?;
     sync_renamed(to)

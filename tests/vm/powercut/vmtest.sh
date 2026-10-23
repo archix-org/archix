@@ -51,9 +51,9 @@ boot_target() {
   local name counted
   name=$("$lib/invariant" pick /target/efi)
   [ -n "$name" ] || fail "systemd-boot finds no entry on the target: $(ls /target/efi/loader/entries | tr '\n' ' ')"
-  entry=${name%%+*}
-  [[ $entry == *.conf ]] || entry=$entry.conf
+  entry=$(sed -E 's/\+[0-9]+(-[0-9]+)?(\.(conf|efi))$/\2/' <<< "$name")
   local gen=${entry#archix-}
+  gen=${gen#fallback-}
   gen=${gen%%[-.]*}
   mark "boot-$gen"
   if [[ $name =~ ^(.*)\+([0-9]+)(-([0-9]+))?\.conf$ ]] && [ "${BASH_REMATCH[2]}" -gt 0 ]; then
@@ -146,10 +146,31 @@ fi
 total=$(wc -l < "$state/table")
 esp_points=$(awk '$2 == 1' "$state/table" | wc -l)
 say "replaying $total points ($mode), $esp_points after ESP writes, each of those booted for real, and every ${SAMPLE:-no}th other point"
+if [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
+  # What the ESP holds before each flush window, which check-point's subsets of the window's writes start from.
+  dd if="$pristine" of="$state/esp-before" bs=1M iflag=skip_bytes,count_bytes skip=$((esp_start * 512)) count=$((esp_size * 512)) conv=sparse status=none || fail "copying the ESP"
+  say "reordering: up to $SUBSETS subsets of the ESP writes before each of those $esp_points flushes, seed $SEED, every ${REORDER_SAMPLE:-no}th booted for real"
+fi
 modprobe -q kvm_amd || modprobe -q kvm_intel
 [ -e /dev/kvm ] || fail "no KVM in the runner for the real boots; the host needs nested virtualisation"
+# What a real boot takes on this machine: the pristine image's, deployment 3's first boot, which every replayed state's is judged against.
+truncate -s 4G /dev/shm/cow
+cow=$(losetup -f --show /dev/shm/cow)
+dmsetup create base --table "0 $(blockdev --getsz "$pristine") snapshot $pristine $cow N 8" || fail "snapshotting the pristine image"
+secs=$("$lib/boot-real" /dev/mapper/base)
+real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
+dmsetup remove base && losetup -d "$cow" && rm /dev/shm/cow
+[ -n "$real" ] || fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"
+[[ $real == *" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-900)"
+echo "$secs" > "$state/baseline-boot"
+say "baseline: the pristine image boots for real in $secs s; a replayed state may take ${BOOT_RATIO}x that, and at most $BOOT_CEILING s${SHARD:+; shard $SHARD checks every ${SHARD#*/}th point}"
 replay_started=$SECONDS
-stop() { say "replay log: $(tail -3 "$state/replay.log" | tr '\n' '|')"; fail "$(tail -1 "$state/check.log")"; }
+stop() {
+  # replay-log's "Fsck errored out on entry N" only says check-point failed after entry N.
+  say "replay log: $(grep -v 'Fsck errored out' "$state/replay.log" | tail -3 | tr '\n' '|')"
+  grep PROBLEM "$state/check.log" | head -4 | while read -r line; do say "${line:0:2000}"; done
+  fail "$(tail -1 "$state/check.log")"
+}
 if [ -n "$POINTS" ]; then
   pos=0
   while read -r p _; do
@@ -163,13 +184,19 @@ else
   [ "$(cat "$state/points")" = "$total" ] || "$lib/check-point" || stop
 fi
 [ "$(cat "$state/points")" = "$total" ] || fail "checked $(cat "$state/points") points of $total"
-say "steps: $(grep -o '^point [0-9]* ([^,)]*' "$state/check.log" | sed 's/^point [0-9]* (//' | uniq -c | tr -s ' ' | tr '\n' ' ')"
+say "steps: $(grep -v ', subset [0-9]*,' "$state/check.log" | grep -o '^point [0-9]* ([^,)]*' | sed 's/^point [0-9]* (//' | uniq -c | tr -s ' ' | tr '\n' ' ')"
 while read -r p step esp real; do say "real boot at point $p ($step$([ "$esp" = 1 ] && echo ', ESP')): ${real#POWERCUT-BOOTED }"; done < "$state/real-boots"
-count() { if [ -e "$state/$1" ]; then wc -l < "$state/$1"; else echo 0; fi; }
-say "PASS: $total points in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count leftover-points) points leave leftovers the next switch clears"
+# Records of an ESP subset are tagged POINT/SUBSET.
+count() { if [ -e "$state/$1" ]; then grep -vc '^[0-9]*/' "$state/$1"; else echo 0; fi; }
+subset_count() { if [ -e "$state/$1" ]; then grep -c '^[0-9]*/' "$state/$1"; else echo 0; fi; }
+say "PASS: $total points, $(wc -l < "$state/checked") of them checked, in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count leftover-points) points leave leftovers the next switch clears"
+if [ -s "$state/reorder-points" ]; then
+  say "PASS: reordered $(awk '{ n += $4 } END { print n }' "$state/reorder-points") ESP subsets in $(awk '{ s += $5 } END { print s }' "$state/reorder-points") s at $(wc -l < "$state/reorder-points") flush points (seed $SEED, windows of up to $(sort -n -k2 "$state/reorder-points" | tail -1 | cut -d' ' -f2) ESP writes); $(subset_count real-boots) booted for real; fsck notes: $(subset_count vfat-notes) ESP; $(subset_count leftover-points) leave leftovers the next switch clears"
+fi
+say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(grep -o 'secs=[0-9]*' "$state/real-boots" | cut -d= -f2 | sort -n | awk '{ a[NR] = $1; s += $1 } END { printf "%.1f s mean, %d s median, %d s max", s / NR, a[int((NR + 1) / 2)], a[NR] }') against the baseline's $(cat "$state/baseline-boot") s"
 if [ -s "$state/orphans" ]; then
   while read -r n line; do say "orphan at $n points: $line"; done < <(cut -d' ' -f2- "$state/orphans" | sort | uniq -c)
-  fail "$(count orphans) points leave orphans after the next boot and gc"
+  fail "$(count orphans) points and $(subset_count orphans) ESP subsets leave orphans after the next boot and gc"
 fi
 say "OK"
 systemctl poweroff

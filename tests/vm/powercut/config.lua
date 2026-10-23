@@ -6,10 +6,16 @@ return {
   boot = { loader = "systemd-boot" },
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
-    -- What a real boot of a replayed state reports before powering off: the entry systemd-boot started, the deployment archix mounted, and pacman's missing files.
+    -- What a real boot of a replayed state reports before powering off: the entry systemd-boot started, the deployment archix mounted, the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines, and the kernel's FAT and the ESP fsck's messages.
     ["/usr/local/bin/archix-powercut-booted"] = { mode = "0755", text = [[#!/bin/sh
 entry=$(tr -d '\000' < /sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -cd '[:alnum:]+.-')
-echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) missing=$(pacman -Qk 2>&1 | grep -c 'No such file') failed=$(systemctl --failed --no-legend --plain | awk '{ print $1 }' | paste -sd, -)" > /dev/console
+altered=$(pacman -Qkk 2>&1 > /dev/null | grep -E '\((No such file or directory|Size mismatch|SHA256 checksum mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch)\)' \
+  | grep -E ': /(usr|opt|boot|etc)/|No such file' | sed 's/ ([^)]*)$//' | sort -u)
+[ -z "$altered" ] || echo "$altered" | sed 's/^/POWERCUT-ALTERED /' > /dev/console
+failed=$(systemctl --failed --no-legend --plain | awk '{ print $1 }')
+for unit in $failed; do journalctl -b -u "$unit" -o cat --no-pager | tail -4 | sed "s/^/POWERCUT-FAILED $unit: /" > /dev/console; done
+{ journalctl -b -k -o cat --no-pager | grep -i 'fat-fs\|vfat' | tail -4; journalctl -b -u 'systemd-fsck@*' -o cat --no-pager | tail -4; } | sed 's/^/POWERCUT-KERNEL /' > /dev/console
+echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) altered=$(printf '%s' "$altered" | grep -c .) failed=$(echo $failed | tr ' ' ,)" > /dev/console
 systemctl poweroff
 ]] },
   },

@@ -72,6 +72,8 @@ jobs:
       fail-fast: false
       matrix:
         fs: [ext4, btrfs]
+        # Each shard logs its own run and checks every third point of it; GitHub's nested boots are about ten times slower than a desktop's, which puts the whole suite near 500 minutes.
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/vm-setup
@@ -81,9 +83,10 @@ jobs:
       - run: tests/vm/run.sh powercut
         env:
           FS: ${{ matrix.fs }}
+          SHARD: ${{ matrix.shard }}/3
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: powercut
-          name: powercut-${{ matrix.fs }}
+          name: powercut-${{ matrix.fs }}-${{ matrix.shard }}
           status: ${{ job.status }}

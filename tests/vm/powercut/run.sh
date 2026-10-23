@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points; FS=ext4|btrfs, DATE/TO_DATE the update (2026-10-03 to 2026-10-10; 2026-06-01 for four months), TARGET_PACKAGES, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), BREAK=entry-before-rename to see it fail, COUNTING= without boot counting.
+# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points; FS=ext4|btrfs, DATE/TO_DATE the update (2026-10-03 to 2026-10-10; 2026-06-01 for four months), TARGET_PACKAGES, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), SUBSETS=N seeded random subsets (16; 0: none) of the unflushed ESP writes replayed at each ESP flush point with SEED (1), REORDER_SAMPLE=N real boots of every Nth subset (16; empty: none) and of each point's first that breaks a FAT chain, BOOT_RATIO (3) and BOOT_CEILING (1200 s) failing a real boot slower than that many times the pristine image's or than that, BOOT_TIMEOUT (3600 s) for a hung one, SHARD=i/N checking every Nth point, BREAK=entry-before-rename|renamed-unsynced|data-unsynced|torn-file|slow-boot to see it fail, COUNTING= without boot counting.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
@@ -19,7 +19,8 @@ docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PRO
   gcc -O2 -static -o /work/replay-log replay-log.c log-writes.c'
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 env=(-e ARCHIVE="$archive" -e SUITE=powercut -e FS="${FS:-ext4}" -e DATE="$date" -e TO_DATE="$to" -e SIZE="$size" -e TARGET_PACKAGES="${TARGET_PACKAGES:-}"
-  -e REPLAY_POINTS="${REPLAY_POINTS:-}" -e BREAK="${BREAK:-}" -e COUNTING="${COUNTING-1}" -e SAMPLE="${SAMPLE-20}")
+  -e REPLAY_POINTS="${REPLAY_POINTS:-}" -e BREAK="${BREAK:-}" -e COUNTING="${COUNTING-1}" -e SAMPLE="${SAMPLE-20}" -e SUBSETS="${SUBSETS-16}" -e REORDER_SAMPLE="${REORDER_SAMPLE-16}" -e SEED="${SEED:-1}"
+  -e BOOT_TIMEOUT="${BOOT_TIMEOUT:-}" -e BOOT_RATIO="${BOOT_RATIO:-}" -e BOOT_CEILING="${BOOT_CEILING:-}" -e SHARD="${SHARD:-}")
 docker run --rm --privileged --network host "${mounts[@]}" "${env[@]}" archix-arch-test /vm/build-image.sh
 docker run --rm --privileged --network host "${mounts[@]}" "${env[@]}" archix-arch-test /vm/powercut/build-runner.sh
 cp --sparse=always "$work/disk.img" "$work/pristine.img"

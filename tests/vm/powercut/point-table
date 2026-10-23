@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# point-table LOG ESP_START ESP_SIZE [EVERY]: one line per check point, in replay order: the log prefix it ends, whether the ESP was written since the previous point, the last mark and the last stage mark; flush entries by default, else every EVERY entries, and the whole log last.
+# point-table LOG ESP_START ESP_SIZE [EVERY]: one line per check point, in replay order: the log prefix it ends, whether the ESP was written since the previous point, the last mark, the last stage mark and the log's byte offset after the point; flush entries by default, else every EVERY entries, and the whole log last.
 import struct
 import sys
 
@@ -24,5 +24,5 @@ with open(log_path, "rb") as log:
         if count and not flags & DISCARD:
             log.seek(count * sectorsize, 1)
         if (every and (n + 1) % every == 0) or (not every and flags & FLUSH) or n + 1 == entries:
-            print(n + 1, int(esp), mark, stage)
+            print(n + 1, int(esp), mark, stage, log.tell())
             esp = False
