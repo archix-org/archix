@@ -446,6 +446,9 @@ pub fn status(target: &Target) -> Result<()> {
             if let Some(fallback) = super::switch::read_fallback(&paths).filter(|f| f.to == number) {
                 println!("{}", fallback.note);
             }
+            if let Some(note) = archix::system::boot::esp_unwritable_note(&paths) {
+                println!("{note}");
+            }
             if let Some(entry) = archix::system::boot::default_override() {
                 println!(
                     "warning: systemd-boot's LoaderEntryDefault variable (the boot menu's default, or `bootctl set-default`) names {entry} and overrides archix's default; the next switch clears it, or `sudo bootctl set-default ''` now"

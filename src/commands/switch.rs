@@ -1906,15 +1906,21 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
             println!("archix: {line}");
         }
     }
-    if let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp"))
-        && let Err(e) = system::boot::set_default_entry(Path::new(esp.trim()), booted)
-    {
-        println!("archix: couldn't make generation {booted} the boot default: {e:#}");
-    }
-    if let Ok(esp) = &esp
-        && let Err(e) = system::boot::follow_with_fallback(&paths, esp, booted)
-    {
-        println!("archix: couldn't point the fallback UKI at generation {booted}: {e:#}");
+    if let Ok(esp) = &esp {
+        let unwritten = |what: String, e: anyhow::Error| {
+            if let Err(e) = system::boot::esp_unwritable(&paths, esp, &what, &format!("{e:#}")) {
+                println!("archix: {what}: {e:#}");
+            }
+        };
+        if let Err(e) = system::boot::set_default_entry(esp, booted) {
+            unwritten(format!("generation {booted} couldn't be made the boot default"), e);
+        }
+        if let Err(e) = system::boot::follow_with_fallback(&paths, esp, booted) {
+            unwritten(
+                format!("the fallback UKI couldn't be pointed at generation {booted}"),
+                e,
+            );
+        }
     }
     deployments.point_current(booted)?;
     if let Some(note) = note {

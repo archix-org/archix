@@ -101,7 +101,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     crate::integration::write_staged(&staging, &crate::integration::own_path()?)?;
     crate::integration::sync_pacman_conf(&etc.join("pacman.conf"), plan.repos)?;
     let fstab_managed = plan.system.to.files.contains_key("/etc/fstab");
-    boot::automount_esp_in(&etc, &plan.boot.esp, fstab_managed)?;
+    boot::esp_fstab_in(&etc, &plan.boot.esp, fstab_managed)?;
     (plan.config)(staging.dir())?;
     let built = boot::build(paths, plan.boot, plan.number, &staging, &tx)?;
     drop(tx);

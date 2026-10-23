@@ -581,6 +581,77 @@ fn a_failed_health_check_falls_back_says_why_and_names_unsafe_downgrades_and_hib
     assert!(status.contains(&why) && status.contains(risky), "{status}");
 }
 
+#[test]
+#[ignore]
+fn a_read_only_esp_at_boot_keeps_the_deployment_current_says_so_and_is_retried_at_the_next_boot() {
+    let _system = lock_system();
+    let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let machine = &setup.machine;
+    let entries_dir = machine.esp().join("loader/entries");
+    let rename = |from: String, to: String| fs::rename(entries_dir.join(from), entries_dir.join(to)).unwrap();
+    rename("archix-1+3.conf".into(), "archix-1.conf".into());
+    machine.reboot(Some("archix-1.conf"));
+    setup.ok_env(&[counting], &["boot-complete"]);
+    setup.set_body(&["tree"], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    let esp = FatEsp::new(machine, "256M");
+    let read_only = |ro: bool| {
+        run(Command::new("mount")
+            .args(["-o", if ro { "remount,ro" } else { "remount,rw" }])
+            .arg(&esp.at))
+    };
+    let notes = || fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    let said = "is read-only";
+
+    // The first try of the new deployment, whose blessing the kernel's read-only FAT stops.
+    rename(format!("archix-{new}+3.conf"), format!("archix-{new}+2-1.conf"));
+    machine.reboot(Some(&format!("archix-{new}.conf")));
+    read_only(true);
+    let loader = machine.loader_conf();
+    setup.ok_env(&[counting], &["boot-check"]);
+    let out = setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(out.contains(said) && out.contains("couldn't count this boot"), "{out}");
+    assert_eq!(machine.current(), Some(new), "a healthy deployment isn't rolled back");
+    assert_eq!(machine.loader_conf(), loader);
+    assert!(notes().contains(said), "{}", notes());
+    assert!(setup.ok(&["status"]).contains(said));
+    let again = setup.ok_env(&[counting], &["boot-complete"]);
+    assert_eq!(notes().matches(said).count(), 1, "said once: {}\n{again}", notes());
+
+    // The next try, after fsck at boot repaired the ESP: systemd-bless-boot counts it, and archix makes it the default.
+    read_only(false);
+    rename(format!("archix-{new}+2-1.conf"), format!("archix-{new}.conf"));
+    machine.reboot(Some(&format!("archix-{new}.conf")));
+    setup.ok_env(&[counting], &["boot-check"]);
+    setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(
+        machine.loader_conf().contains(&format!("default archix-{new}.conf")),
+        "{}",
+        machine.loader_conf()
+    );
+    assert!(!notes().contains(said), "{}", notes());
+    assert!(!setup.ok(&["status"]).contains(said));
+
+    // A blessed deployment whose ESP turned read-only before archix made it the default.
+    setup.set_body(&[], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let newest = machine.current().unwrap();
+    rename(format!("archix-{newest}+3.conf"), format!("archix-{newest}.conf"));
+    machine.reboot(Some(&format!("archix-{newest}.conf")));
+    read_only(true);
+    let out = setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(out.contains(said) && out.contains("the boot default"), "{out}");
+    assert_eq!(machine.current(), Some(newest));
+    assert!(notes().contains(said), "{}", notes());
+    read_only(false);
+    setup.ok_env(&[counting], &["boot-complete"]);
+    assert!(machine.loader_conf().contains(&format!("default archix-{newest}.conf")));
+    assert!(!notes().contains(said), "{}", notes());
+}
+
 fn efivar(entry: &str) -> Vec<u8> {
     let mut bytes = vec![6, 0, 0, 0];
     bytes.extend(entry.encode_utf16().flat_map(u16::to_le_bytes));

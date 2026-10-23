@@ -346,51 +346,82 @@ fn partuuid_of(path: &Path) -> Option<String> {
     })
 }
 
-/// fstab text with the ESP's line mounting it on access and unmounting it after a minute idle, so a forced reboot rarely finds the FAT mounted (systemd-bless-boot's renames and archix's writes mount it again); None when there's no line for `esp` or it already automounts or is noauto.
-pub fn automount_esp(fstab: &str, esp: &str) -> Option<String> {
+/// What `esp_fstab` changed on the ESP's fstab line.
+#[derive(Debug, Default, PartialEq)]
+pub struct EspFstab {
+    pub automount: bool,
+    pub fsck: bool,
+}
+
+/// fstab text with the ESP's line mounting it on access and unmounting it after a minute idle, so a forced reboot rarely finds the FAT mounted (systemd-bless-boot's renames and archix's writes mount it again), and with fs_passno 2, without which systemd runs no fsck on it and the kernel remounts a FAT a power cut left half-written read-only at its first broken chain; None when there's no line for `esp` or it already does both (a noauto line is the user's to mount, so only gets the fsck).
+pub fn esp_fstab(fstab: &str, esp: &str) -> Option<(String, EspFstab)> {
     let esp = esp.trim_end_matches('/');
-    let mut changed = false;
+    let mut changed = EspFstab::default();
     let lines: Vec<String> = fstab
         .lines()
         .map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
-            let ours = !line.trim_start().starts_with('#')
-                && fields.len() >= 4
-                && fields[1].trim_end_matches('/') == esp
-                && !fields[3]
-                    .split(',')
-                    .any(|option| option == "noauto" || option == "x-systemd.automount");
-            if !ours {
+            if line.trim_start().starts_with('#') || fields.len() < 4 || fields[1].trim_end_matches('/') != esp {
                 return line.to_string();
             }
-            changed = true;
+            let automount = !fields[3]
+                .split(',')
+                .any(|option| option == "noauto" || option == "x-systemd.automount");
+            let fsck = fields
+                .get(5)
+                .is_none_or(|passno| passno.parse::<u32>().is_ok_and(|n| n == 0));
+            if !automount && !fsck {
+                return line.to_string();
+            }
             let mut fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
-            fields[3].push_str(",x-systemd.automount,x-systemd.idle-timeout=60");
+            if automount {
+                changed.automount = true;
+                fields[3].push_str(",x-systemd.automount,x-systemd.idle-timeout=60");
+            }
+            if fsck {
+                changed.fsck = true;
+                fields.resize(6, "0".to_string());
+                fields[5] = "2".to_string();
+            }
             fields.join(" ")
         })
         .collect();
-    changed.then(|| lines.join("\n") + "\n")
+    (changed != EspFstab::default()).then(|| (lines.join("\n") + "\n", changed))
 }
 
-/// Makes a staged deployment's fstab automount the ESP, unless the config manages /etc/fstab, which only gets a warning.
-pub fn automount_esp_in(etc: &Path, esp: &str, managed: bool) -> Result<()> {
+/// Makes a staged deployment's fstab automount the ESP and fsck it at boot, unless the config manages /etc/fstab, which only gets a warning.
+pub fn esp_fstab_in(etc: &Path, esp: &str, managed: bool) -> Result<()> {
     let path = etc.join("fstab");
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(());
     };
-    let Some(changed) = automount_esp(&text, esp) else {
+    let Some((text, changed)) = esp_fstab(&text, esp) else {
         return Ok(());
     };
     if managed {
-        eprintln!(
-            "warning: the config's /etc/fstab keeps the ESP at {esp} mounted all the time, where a forced reboot can corrupt it; add x-systemd.automount,x-systemd.idle-timeout=60 to its options"
-        );
+        if changed.automount {
+            eprintln!(
+                "warning: the config's /etc/fstab keeps the ESP at {esp} mounted all the time, where a forced reboot can corrupt it; add x-systemd.automount,x-systemd.idle-timeout=60 to its options"
+            );
+        }
+        if changed.fsck {
+            eprintln!(
+                "warning: the config's /etc/fstab gives the ESP at {esp} no fs_passno, so systemd never runs fsck on it, and a FAT a power cut left damaged is mounted unrepaired and turns read-only at its first broken chain, where boot entries can't be written; set its sixth field to 2"
+            );
+        }
         return Ok(());
     }
-    crate::durable::write(&path, changed.as_bytes())?;
-    println!(
-        "fstab      the ESP at {esp} mounts on access and unmounts after a minute idle, so a forced reboot rarely catches it mounted"
-    );
+    crate::durable::write(&path, text.as_bytes())?;
+    if changed.automount {
+        println!(
+            "fstab      the ESP at {esp} mounts on access and unmounts after a minute idle, so a forced reboot rarely catches it mounted"
+        );
+    }
+    if changed.fsck {
+        println!(
+            "fstab      the ESP at {esp} is checked by fsck at boot (fs_passno 2), so a FAT a power cut left damaged is repaired before it's mounted"
+        );
+    }
     Ok(())
 }
 
@@ -1210,7 +1241,7 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
     Ok(written)
 }
 
-/// After a boot systemd-boot has counted as good, makes its generation the default, if it's the current one, so `default` doesn't lag until the next switch.
+/// After a boot systemd-boot has counted as good, makes its generation the default, if it's the current one, so `default` doesn't lag until the next switch; an ESP it can't write leaves everything as it is, says so in the login notes and `archix status`, and is tried again at the next boot.
 pub fn promote_booted(paths: &Paths) -> Result<()> {
     let (Some(booted), Some(current)) = (booted(), crate::generations::Store::new(paths).current()?) else {
         return Ok(());
@@ -1219,17 +1250,89 @@ pub fn promote_booted(paths: &Paths) -> Result<()> {
         return Ok(());
     };
     let esp = Path::new(esp.trim());
-    let still_counting = entries(esp).iter().any(|(number, extra, path)| {
-        *number == booted
-            && !extra
-            && path
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().contains('+'))
+    let counting = entries(esp).into_iter().find_map(|(number, extra, path)| {
+        let name = path.file_name()?.to_string_lossy().into_owned();
+        (number == booted && !extra && name.contains('+')).then_some(name)
     });
-    if booted != current || still_counting {
-        return Ok(());
+    if let Some(name) = &counting
+        && read_only(esp)
+    {
+        let what = format!(
+            "systemd-bless-boot couldn't count this boot of deployment {booted} as good: its entry {name} keeps counting tries, and once they run out systemd-boot starts the previous deployment"
+        );
+        return esp_unwritable(paths, esp, &what, "the kernel mounted it read-only");
     }
-    set_default_entry(esp, booted)
+    let written = if booted == current && counting.is_none() {
+        set_default_entry(esp, booted)
+    } else {
+        Ok(())
+    };
+    match written {
+        Err(e) if read_only(esp) || e.chain().any(|cause| cause.is::<io::Error>()) => esp_unwritable(
+            paths,
+            esp,
+            &format!("deployment {booted} couldn't be made the boot default"),
+            &format!("{e:#}"),
+        ),
+        Err(e) => Err(e),
+        Ok(()) if read_only(esp) => Ok(()),
+        Ok(()) => esp_writable(paths),
+    }
+}
+
+/// Whether the filesystem at `esp` is mounted read-only, as the kernel remounts a FAT it finds a broken cluster chain in.
+fn read_only(esp: &Path) -> bool {
+    let Ok(path) = CString::new(esp.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    unsafe { libc::statvfs(path.as_ptr(), &mut stat) == 0 && stat.f_flag & libc::ST_RDONLY != 0 }
+}
+
+/// Where a boot that couldn't write the ESP leaves its note, until a boot that can.
+fn esp_unwritable_record(paths: &Paths) -> PathBuf {
+    paths.state.join("boot").join("esp-unwritable")
+}
+
+/// The note a boot that couldn't write the ESP left, for `archix status`.
+pub fn esp_unwritable_note(paths: &Paths) -> Option<String> {
+    fs::read_to_string(esp_unwritable_record(paths))
+        .ok()
+        .filter(|note| !note.is_empty())
+}
+
+/// Says, in the login notes and `archix status`, that `what` didn't happen as the ESP couldn't be written.
+pub fn esp_unwritable(paths: &Paths, esp: &Path, what: &str, why: &str) -> Result<()> {
+    let note = format!(
+        "archix: the ESP at {} is read-only or can't be written ({why}), so {what}; current stays as it is, and archix tries again at every boot. The kernel turns a FAT read-only at a broken cluster chain, which a power cut can leave: `journalctl -k | grep -i fat` shows it, and a reboot repairs it with fsck when the ESP's fstab line has fs_passno 2 (or `umount {}; fsck.fat -a` on its device)",
+        esp.display(),
+        esp.display()
+    );
+    println!("{note}");
+    let old = esp_unwritable_note(paths);
+    crate::durable::write(&esp_unwritable_record(paths), note.as_bytes())?;
+    let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+    if let Some(old) = old {
+        notes = notes.replace(&format!("{old}\n"), "");
+    }
+    notes.push_str(&note);
+    notes.push('\n');
+    crate::durable::write(&paths.notes(), notes.as_bytes())
+}
+
+/// Drops the note a boot that couldn't write the ESP left, from the record and the login notes.
+fn esp_writable(paths: &Paths) -> Result<()> {
+    let Some(old) = esp_unwritable_note(paths) else {
+        return Ok(());
+    };
+    let notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+    let kept = notes.replace(&format!("{old}\n"), "");
+    if kept.trim().is_empty() {
+        let _ = fs::remove_file(paths.notes());
+    } else if kept != notes {
+        crate::durable::write(&paths.notes(), kept.as_bytes())?;
+    }
+    fs::remove_file(esp_unwritable_record(paths)).context("removing the note about the read-only ESP")
 }
 
 /// Why a new generation's entry won't be counted, when the systemd-boot that started this boot can't do it.
@@ -1973,28 +2076,87 @@ mod tests {
     #[test]
     fn the_esp_mounts_on_access_and_unmounts_when_idle() {
         let fstab = "# /dev/vda2\nUUID=a / ext4 rw,relatime 0 1\n\n# esp\nUUID=b\t/efi/\tvfat\tdefaults\t0 2\n";
+        let (once, changed) = esp_fstab(fstab, "/efi").unwrap();
         assert_eq!(
-            automount_esp(fstab, "/efi").unwrap(),
+            once,
             "# /dev/vda2\nUUID=a / ext4 rw,relatime 0 1\n\n# esp\nUUID=b /efi/ vfat defaults,x-systemd.automount,x-systemd.idle-timeout=60 0 2\n"
         );
-        let once = automount_esp(fstab, "/efi").unwrap();
-        assert_eq!(automount_esp(&once, "/efi"), None, "already automounted");
         assert_eq!(
-            automount_esp("UUID=b /efi vfat noauto 0 2\n", "/efi"),
+            changed,
+            EspFstab {
+                automount: true,
+                fsck: false
+            }
+        );
+        assert_eq!(esp_fstab(&once, "/efi"), None, "already automounted and fscked");
+        assert_eq!(
+            esp_fstab("UUID=b /efi vfat noauto 0 2\n", "/efi"),
             None,
             "noauto is the user's call"
         );
-        assert_eq!(automount_esp(fstab, "/boot/efi"), None, "no line for that ESP");
+        assert_eq!(esp_fstab(fstab, "/boot/efi"), None, "no line for that ESP");
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("fstab"), fstab).unwrap();
-        automount_esp_in(dir.path(), "/efi", true).unwrap();
+        esp_fstab_in(dir.path(), "/efi", true).unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("fstab")).unwrap(),
             fstab,
             "a managed fstab is left alone"
         );
-        automount_esp_in(dir.path(), "/efi", false).unwrap();
+        esp_fstab_in(dir.path(), "/efi", false).unwrap();
         assert_eq!(fs::read_to_string(dir.path().join("fstab")).unwrap(), once);
+    }
+
+    #[test]
+    fn the_esp_is_fscked_at_boot_whatever_its_fstab_line_said() {
+        let automounted = "defaults,x-systemd.automount,x-systemd.idle-timeout=60";
+        for (line, want) in [
+            (
+                "UUID=b /efi vfat defaults 0 0",
+                format!("UUID=b /efi vfat {automounted} 0 2"),
+            ),
+            (
+                "UUID=b /efi vfat defaults",
+                format!("UUID=b /efi vfat {automounted} 0 2"),
+            ),
+            (
+                "UUID=b /efi vfat defaults 1",
+                format!("UUID=b /efi vfat {automounted} 1 2"),
+            ),
+            (
+                &format!("UUID=b /efi vfat {automounted} 0 0"),
+                format!("UUID=b /efi vfat {automounted} 0 2"),
+            ),
+            ("UUID=b /efi vfat noauto 0 0", "UUID=b /efi vfat noauto 0 2".to_string()),
+        ] {
+            let (text, changed) = esp_fstab(&format!("UUID=a / ext4 rw 0 0\n{line}\n"), "/efi").unwrap();
+            assert_eq!(text, format!("UUID=a / ext4 rw 0 0\n{want}\n"), "{line}");
+            assert!(changed.fsck, "{line}");
+            assert_eq!(
+                changed.automount,
+                !line.contains("automount") && !line.contains("noauto")
+            );
+        }
+        assert_eq!(
+            esp_fstab("UUID=b /efi vfat noauto 0 1\n", "/efi"),
+            None,
+            "1 is fscked too"
+        );
+
+        let fstab = "UUID=b /efi vfat defaults,x-systemd.automount 0 0\n";
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("fstab"), fstab).unwrap();
+        esp_fstab_in(dir.path(), "/efi", true).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("fstab")).unwrap(),
+            fstab,
+            "a managed fstab only gets a warning"
+        );
+        esp_fstab_in(dir.path(), "/efi", false).unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("fstab")).unwrap(),
+            "UUID=b /efi vfat defaults,x-systemd.automount 0 2\n"
+        );
     }
 
     #[test]
