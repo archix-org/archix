@@ -21,7 +21,11 @@ booted=$(echo "$selected" | grep -aoE 'archix-(fallback-)?[0-9]+' | head -1 | gr
 running=$(cat /run/archix/deployment 2>/dev/null)
 say "stage $stage: booted entry $selected, mounted deployment $running, current $(current), deployments $(deployments)"
 failed_units=$(systemctl --failed --no-legend --plain | awk '{ print $1 }' | tr '\n' ' ')
-[ -z "$failed_units" ] || fail "units failed at this boot: $failed_units"
+if [ -n "$failed_units" ]; then
+  for unit in $failed_units; do journalctl -b -u "$unit" --no-pager | tail -20 | sed "s|^|VMTEST: $unit: |" > /dev/console; done
+  networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
+  fail "units failed at this boot: $failed_units"
+fi
 # Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.
 [ "$stage" = 10 ] || [ "$booted" = "$running" ] || fail "the initramfs mounted deployment $running, but systemd-boot started $selected"
 config=/etc/archix/init.lua
