@@ -1691,7 +1691,7 @@ pub fn hook_record() {
     }
 }
 
-/// Run by archix-flatpak.service once the network is up: installs the Flatpak apps left for the booted deployment, records their commits in its generation and in archix.lock, and keeps the record for the next boot if anything failed.
+/// Run by archix-flatpak.service: once network-online.target is reached, installs the Flatpak apps left for the booted deployment, records their commits in its generation and in archix.lock, and keeps the record for the next boot if anything failed.
 pub fn deploy_flatpak() -> Result<()> {
     let paths = Paths::system();
     let Some(number) = system::boot::booted_deployment(&paths.root) else {
@@ -1701,6 +1701,12 @@ pub fn deploy_flatpak() -> Result<()> {
         return Ok(());
     };
     let ids: Vec<&str> = pending.apps.iter().map(|(_, id)| id.as_str()).collect();
+    // The unit can't Want the network itself: its condition doesn't stop a Wants=, which would start the network wait at every boot.
+    if paths.root == Path::new("/") && Path::new("/run/systemd/system").is_dir() {
+        let _ = Command::new("systemctl")
+            .args(["start", "network-online.target"])
+            .status();
+    }
     println!(
         "archix: installing deployment {number}'s Flatpak apps: {}",
         ids.join(", ")

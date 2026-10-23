@@ -132,7 +132,7 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     );
     let flatpak = format!(
         "[Unit]\nDescription=archix: install the Flatpak apps left for this deployment's first boot\n\
-         Wants=network-online.target\nAfter=network-online.target\nConditionDirectoryNotEmpty={}\n\n\
+         After=network-online.target\nConditionDirectoryNotEmpty={}\n\n\
          [Service]\nType=oneshot\nExecStart={} deploy-flatpak\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n",
         crate::flatpak::PENDING_DIR,
         archix.display()
@@ -486,6 +486,22 @@ mod tests {
         );
         assert!(remove(&paths).is_err(), "eject can't take the hook off");
         assert!(hook.exists());
+    }
+
+    #[test]
+    fn no_boot_unit_pulls_in_the_network_wait_at_every_boot() {
+        for (path, unit) in boot_files(Path::new("/usr/bin/archix")) {
+            assert!(
+                !unit.contains("Wants=network-online.target"),
+                "{} is enabled in every deployment, so its Wants= would start the network wait at every boot, which fails offline: {unit}",
+                path.display()
+            );
+        }
+        let flatpak = boot_files(Path::new("/usr/bin/archix"))
+            .into_iter()
+            .find(|(path, _)| path.ends_with("archix-flatpak.service"))
+            .unwrap();
+        assert!(flatpak.1.contains("After=network-online.target"), "{}", flatpak.1);
     }
 
     #[test]
