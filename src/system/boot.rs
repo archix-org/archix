@@ -530,7 +530,10 @@ pub fn prune_records(paths: &Paths, esp: &Path) -> Result<Vec<String>> {
     };
     let ids: BTreeSet<String> = listed
         .flatten()
-        .map(|entry| entry_id(&entry.file_name().to_string_lossy()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        // An entry's temporary file, archix-N+3.conf.tmp, would otherwise count as archix-N.conf.
+        .filter(|name| parse_entry(name).is_some())
+        .map(|name| entry_id(&name))
         .chain(fallbacks(esp).into_iter().map(fallback_name))
         .collect();
     let records = entry_records(paths);
@@ -1576,7 +1579,10 @@ mod tests {
 
     #[test]
     fn records_without_their_entry_are_pruned_and_an_unreadable_esp_prunes_nothing() {
-        let esp = esp_with(&["archix-2+1-2.conf", "archix-3.conf"], "default archix-3.conf\n");
+        let esp = esp_with(
+            &["archix-2+1-2.conf", "archix-3.conf", "archix-4+3.conf.tmp"],
+            "default archix-3.conf\n",
+        );
         fs::create_dir_all(esp.path().join("EFI/Linux")).unwrap();
         fs::write(fallback_path(esp.path(), 3), "uki 3").unwrap();
         let root = tempfile::tempdir().unwrap();
