@@ -166,6 +166,8 @@ impl Archive {
 
     /// Tries `attempt` on each source of `url` in turn until one has it; an archive that fails is skipped from then on.
     fn on_sources(&self, url: &str, attempt: impl Fn(&str) -> Result<bool>) -> Result<bool> {
+        let proxy = crate::testhooks::archive_proxy();
+        let attempt = |source: &str| attempt(&proxied(source, proxy.as_deref()));
         let sources = self.sources(url);
         let mut sources = sources.iter().peekable();
         while let Some(source) = sources.next() {
@@ -202,7 +204,11 @@ impl Archive {
 
     /// A repo snapshot on the archive and then on each mirror, for pacman's Server lines.
     pub fn repo_urls(&self, date: Date, repo: &str) -> Vec<String> {
+        let proxy = crate::testhooks::archive_proxy();
         self.sources(&self.repo_url(date, repo))
+            .iter()
+            .map(|url| proxied(url, proxy.as_deref()))
+            .collect()
     }
 
     pub fn repo_url(&self, date: Date, repo: &str) -> String {
@@ -214,7 +220,7 @@ impl Archive {
 
     /// The newest snapshot, searching back from today because today's may not be published yet.
     pub fn latest(&self) -> Result<Date> {
-        let mut date = Date::today_utc();
+        let mut date = crate::testhooks::archive_today().unwrap_or_else(Date::today_utc);
         for _ in 0..SEARCH_DAYS {
             let url = format!("{}/core.db", self.repo_url(date, "core"));
             if self.exists(&url)? {
@@ -327,6 +333,16 @@ impl Archive {
     }
 }
 
+/// `url` on `proxy` instead when it's on archive.archlinux.org.
+fn proxied(url: &str, proxy: Option<&str>) -> String {
+    match (proxy, url.strip_prefix(ARCHIVE_URL)) {
+        (Some(proxy), Some(rest)) if rest.is_empty() || rest.starts_with('/') => {
+            format!("{}{rest}", proxy.trim_end_matches('/'))
+        }
+        _ => url.to_string(),
+    }
+}
+
 const ATTEMPTS: u32 = 3;
 
 /// Waits before another attempt: 4 seconds, then 8.
@@ -394,6 +410,30 @@ mod mirror_tests {
         assert_eq!(
             Archive::new("https://archive.test").sources("https://archive.test/x"),
             ["https://archive.test/x"]
+        );
+    }
+
+    #[test]
+    fn only_archive_urls_go_to_the_test_proxy() {
+        let proxy = Some("http://127.0.0.1:8079/");
+        assert_eq!(
+            proxied(
+                "https://archive.archlinux.org/repos/2026/10/10/core/os/x86_64/core.db",
+                proxy
+            ),
+            "http://127.0.0.1:8079/repos/2026/10/10/core/os/x86_64/core.db"
+        );
+        assert_eq!(proxied("https://archive.archlinux.org", proxy), "http://127.0.0.1:8079");
+        for url in [
+            "https://archive.archlinux.org.test/x",
+            "http://127.0.0.1:9/repos",
+            "https://mirror.test/x",
+        ] {
+            assert_eq!(proxied(url, proxy), url);
+        }
+        assert_eq!(
+            proxied("https://archive.archlinux.org/x", None),
+            "https://archive.archlinux.org/x"
         );
     }
 }

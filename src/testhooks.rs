@@ -40,6 +40,22 @@ pub fn kernel_cmdline() -> String {
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
 
+/// A caching proxy of archive.archlinux.org that requests for it go to instead, ARCHIX_TEST_ARCHIVE in a debug build, so the test suites don't depend on reaching the archive.
+pub fn archive_proxy() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("ARCHIX_TEST_ARCHIVE").ok().filter(|url| !url.is_empty())
+}
+
+/// The day the newest archive snapshot is searched back from, ARCHIX_TEST_TODAY in a debug build, so a test sees the same newest snapshot every day.
+pub fn archive_today() -> Option<crate::date::Date> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("ARCHIX_TEST_TODAY").ok()?.parse().ok()
+}
+
 /// The root whose /archix holds the deployments, or ARCHIX_TEST_ROOT in a debug build, so tests can switch a machine laid out in a directory.
 pub fn root() -> std::path::PathBuf {
     if cfg!(debug_assertions)
