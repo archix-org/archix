@@ -35,6 +35,8 @@ if ! /usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1
     ip -d link show "$(basename "$nic")" 2>&1 | sed 's|^|VMTEST: nic: |' > /dev/console
   done
   journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30 | sed 's|^|VMTEST: kernel: |' > /dev/console
+  # The host asks QEMU for its view of the link on seeing the lines above, before the down/up below changes it.
+  sleep 10
   # Whether the device or the stack lost the link: a down/up that brings the carrier back points at the stack.
   for nic in /sys/class/net/en*; do ip link set "$(basename "$nic")" down; ip link set "$(basename "$nic")" up; done
   /usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1 && say "nic: a link down/up brought it back" || say "nic: still not configured 30 s after a link down/up"
