@@ -3,7 +3,7 @@
 | Workflow | When | Jobs | Takes |
 | --- | --- | --- | --- |
 | `ci.yml` | Every push to `main` and every pull request | `lint`: fmt, clippy and the archive proxy's own test; `image`: the test image; `container`: `tests/arch/run.sh` (cargo test with the ignored tests, and the musl build); `boot`: `tests/vm/run.sh boot` on ext4 and btrfs; `deploy-boot`: `tests/vm/deploy-boot/run.sh` with systemd and busybox initramfs, on ext4 and btrfs | about 50 min, all VM jobs in parallel |
-| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | `rollback`, `nvidia` and `cachyos` on ext4 and btrfs; `powercut` on both once `tests/vm/powercut/` exists | an estimated 30 min to 3 h per job; 4 h VM timeout, 5.5 h job limit |
+| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | the VM suites on ext4 and btrfs; per filesystem, `powercut-log` logs one power-cut run and uploads it as `powercut-log-<fs>`, three `powercut` shards replay it, and `powercut-sum` checks their summaries cover each of its points once | an estimated 30 min to 3 h per job; 4 h VM timeout, 5.5 h job limit |
 | `release.yml` | A `v*` tag | Runs both of the above, then builds the draft release only if they pass | |
 
 The VM jobs need KVM: `tests/ci/check-kvm.sh` fails the job if the runner user can't create a VM, rather than letting QEMU emulate.
@@ -20,5 +20,7 @@ Run the same script the job runs, for example `FS=btrfs tests/vm/run.sh rollback
 tests/ci/archive-proxy.py serve --cache ~/.cache/archix-archive --port 8079 &
 ARCHIX_TEST_ARCHIVE=http://127.0.0.1:8079 tests/vm/run.sh boot
 ```
+
+A failed `powercut` shard prints its seed; download its filesystem's `powercut-log-<fs>` artifact and run `LOG=powercut-log-<fs>.tar.zst SEED=<seed> SHARD=<i>/3 tests/vm/run.sh powercut` to replay the same log with the same subsets.
 
 A failed job uploads its logs as the `logs-<job>` artifact: each work dir's `serial.log` and other logs, plus the proxy's log, but never disk images.
