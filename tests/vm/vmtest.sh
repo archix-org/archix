@@ -30,6 +30,14 @@ fi
 if ! /usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1; then
   networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
   journalctl -b -u systemd-networkd --no-pager | tail -30 | sed 's|^|VMTEST: networkd: |' > /dev/console
+  for nic in /sys/class/net/en*; do
+    echo "$(basename "$nic") carrier=$(cat "$nic/carrier" 2>&1) operstate=$(cat "$nic/operstate") flags=$(cat "$nic/flags") driver=$(basename "$(readlink -f "$nic/device/driver")")" | sed 's|^|VMTEST: nic: |' > /dev/console
+    ip -d link show "$(basename "$nic")" 2>&1 | sed 's|^|VMTEST: nic: |' > /dev/console
+  done
+  journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30 | sed 's|^|VMTEST: kernel: |' > /dev/console
+  # Whether the device or the stack lost the link: a down/up that brings the carrier back points at the stack.
+  for nic in /sys/class/net/en*; do ip link set "$(basename "$nic")" down; ip link set "$(basename "$nic")" up; done
+  /usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1 && say "nic: a link down/up brought it back" || say "nic: still not configured 30 s after a link down/up"
   fail "networkd didn't configure the NIC's link within 90 s of this stage starting"
 fi
 # Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.
