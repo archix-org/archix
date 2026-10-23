@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rollback torture test across deployments: a real base-system update (2026-06-01 to 2026-10-10), a power cut, a kill, a full disk, a broken glibc and a missing key.
+# Rollback torture test across deployments: a real base-system update (2026-06-01 to 2026-10-10), a power cut, a kill, a full disk, a broken glibc, a missing key, and a rollback to the generation without the DKMS module.
 set -u
 shopt -s extglob
 state=/var/lib/archix-vmtest
@@ -43,6 +43,34 @@ dkms_module() {
   case $(modinfo -n v4l2loopback) in */updates/dkms/*) ;; *) fail "v4l2loopback should come from DKMS, not $(modinfo -n v4l2loopback)" ;; esac
   modprobe v4l2loopback || fail "v4l2loopback $want should load on $(uname -r)"
   dkms status v4l2loopback | grep -q "v4l2loopback/$want, $(uname -r), x86_64: installed" || fail "dkms should list v4l2loopback/$want as installed for $(uname -r): $(dkms status v4l2loopback)"
+  [ -f "/usr/src/v4l2loopback-$want/dkms.conf" ] || fail "v4l2loopback-dkms's source tree /usr/src/v4l2loopback-$want should be there: $(ls -d /usr/src/v4l2loopback* 2>&1)"
+}
+# The initramfs files in the booted deployment's UKI; lsinitcpio reads a UKI's .initrd section with objcopy.
+initramfs_files() {
+  local entry uki
+  for entry in /efi/loader/entries/archix-"$booted".conf /efi/loader/entries/archix-"$booted"+*.conf; do [ -f "$entry" ] && break; done
+  uki=$(sed -nE 's#^(efi|uki) /#/efi/#p' "$entry" 2>/dev/null)
+  [ -f "$uki" ] || fail "deployment $booted's entry $entry should start a UKI, not '$uki': $(ls /efi/loader/entries | tr '\n' ' ')"
+  lsinitcpio "$uki" || fail "lsinitcpio $uki"
+}
+# Everything that would show v4l2loopback in a deployment without it, for every kernel's modules directory.
+no_dkms_module() {
+  local left err files
+  [ -z "$(pacman -Q v4l2loopback-dkms 2>/dev/null)" ] || fail "v4l2loopback-dkms should be gone: $(pacman -Q v4l2loopback-dkms)"
+  [ -z "$(dkms status v4l2loopback 2>/dev/null)" ] || fail "dkms still knows v4l2loopback: $(dkms status v4l2loopback)"
+  left=$(ls -d /usr/src/v4l2loopback* 2>/dev/null)
+  [ -z "$left" ] || fail "v4l2loopback sources are left in /usr/src: $left"
+  [ -n "$(ls -d /usr/lib/modules/*/kernel 2>/dev/null)" ] || fail "no kernel modules directory to look in: $(ls /usr/lib/modules)"
+  left=$(find /usr/lib/modules -path '*/updates/dkms/*' -name 'v4l2loopback*' 2>/dev/null)
+  [ -z "$left" ] || fail "v4l2loopback modules are left behind: $left"
+  err=$(modprobe v4l2loopback 2>&1) && fail "modprobe v4l2loopback should fail"
+  [[ $err == *"Module v4l2loopback not found"* ]] || fail "modprobe v4l2loopback should fail for want of the module, not with: $err"
+  [ -d /sys/module/v4l2loopback ] && fail "v4l2loopback is loaded"
+  files=$(initramfs_files)
+  grep -q "usr/lib/modules/$(uname -r)/.*\.ko" <<< "$files" || fail "lsinitcpio should list deployment $booted's initramfs modules for $(uname -r): $(head -c 400 <<< "$files")"
+  left=$(grep -E '/updates/|v4l2loopback' <<< "$files")
+  [ -z "$left" ] || fail "deployment $booted's UKI has v4l2loopback or a DKMS module in its initramfs: $(head -5 <<< "$left" | tr '\n' ' ')"
+  return 0
 }
 # Files that reference a GLIBC symbol version the installed glibc lacks; empty when the system is consistent.
 needs_newer_glibc() {
@@ -238,14 +266,23 @@ case $stage in
     unchanged "the full disk, the killed rebuild and the rebuild of generation $image" "$old"
     [ -d "/archix/deploy/$new" ] && fail "a rebuilding rollback runs gc like a switch, so keep = 2 should have dropped deployment $new"
     say "PASS: a killed rebuild changed nothing, and the next one rebuilt generation $image from the package cache, leaving the running deployment's files as they were"
-
-    ax rollback "$new" --noconfirm > /dev/console 2>&1 || fail "rolling forward to generation $new"
-    [ "$(current)" = "$new" ] || fail "deployment $new should be current"
-    [ "$(cat "/archix/deploy/$new/usr/share/archix-test-hello/built-with")" = 2.44 ] || fail "deployment $new should have the glibc 2.44 build of the local recipe"
     next 6
     systemctl reboot
     ;;
   6)
+    image=$(recall image) new=$(recall new)
+    [ "$booted" = "$image" ] && [ "$(current)" = "$image" ] || fail "the rollback should boot the rebuilt deployment $image, which has no DKMS module, not $booted"
+    case $(uname -r) in 7.0.*) ;; *) fail "deployment $image should boot kernel 7.0, not $(uname -r)" ;; esac
+    no_dkms_module
+    say "PASS: generation $image, rebuilt without v4l2loopback-dkms, boots with no v4l2loopback package, dkms record, /usr/src tree or module for any of $(ls /usr/lib/modules | tr '\n' ' '); modprobe finds none and its UKI's initramfs has none"
+
+    ax rollback "$new" --noconfirm > /dev/console 2>&1 || fail "rolling forward to generation $new"
+    [ "$(current)" = "$new" ] || fail "deployment $new should be current"
+    [ "$(cat "/archix/deploy/$new/usr/share/archix-test-hello/built-with")" = 2.44 ] || fail "deployment $new should have the glibc 2.44 build of the local recipe"
+    next 7
+    systemctl reboot
+    ;;
+  7)
     new=$(recall new)
     [ "$booted" = "$new" ] || fail "the rebuilt deployment $new should boot, not $booted"
     case $(uname -r) in 7.2.*) ;; *) fail "deployment $new should boot kernel 7.2, not $(uname -r)" ;; esac
@@ -270,10 +307,10 @@ case $stage in
     [ "$(glibc)" = 2.44 ] && archix --version > /dev/null || fail "breaking deployment $bad's glibc touched the running one"
     unchanged "breaking deployment $bad's glibc" "$good"
     say "broke glibc in deployment $bad; rebooting into it"
-    next 7
+    next 8
     systemctl reboot
     ;;
-  7)
+  8)
     good=$(recall good) bad=$(recall bad)
     [ "$booted" = "$good" ] || fail "after deployment $bad failed to boot, systemd-boot should start $good, not $booted"
     [ "$(current)" = "$good" ] || fail "archix should make deployment $good current after $bad failed to boot"
