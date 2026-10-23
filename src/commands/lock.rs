@@ -272,15 +272,12 @@ fn identity(path: &Path) -> Option<(u64, u64)> {
 
 /// What a deployment waiting for the next boot means for /etc until then, by whether an /etc merge is carrying changes into it.
 pub(super) fn pending_note(number: u32, carried: bool) -> String {
-    if carried {
-        format!(
-            "deployment {number} is committed and boots at the next restart; changes to /etc made before then are carried over to it"
-        )
+    let etc = if carried {
+        "changes to /etc made before then are carried over to it"
     } else {
-        format!(
-            "deployment {number} is committed and boots at the next restart; no /etc merge is running, so changes to /etc made before then don't reach it"
-        )
-    }
+        "no /etc merge is running, so changes to /etc made before then don't reach it"
+    };
+    format!("deployment {number} is committed and boots at the next restart; {etc}")
 }
 
 /// The /etc of the deployment that boots next, when it isn't the one the running /etc belongs to.

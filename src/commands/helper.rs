@@ -254,16 +254,16 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     .inspect_err(|_| archix::etcmerge::discard(&paths, number))?;
     archix::system::reboot::refresh_note(&paths.root);
     archix::system::sleep::after_commit(&paths.root);
-    let merging = archix::etcmerge::start(&paths);
+    let merging = archix::etcmerge::start(&paths).unwrap_or_else(|e| {
+        eprintln!("warning: starting the /etc merge into deployment {number} failed: {e:#}");
+        false
+    });
     println!(
         "installed {} without declaring it, in deployment {number}, which boots at the next restart; the next `archix switch` drops it unless it's declared",
         names.join(" ")
     );
-    if let Err(e) = &merging {
-        eprintln!("warning: starting the /etc merge into deployment {number} failed: {e:#}");
-    }
     if super::lock::pending_etc(&paths).is_some() {
-        println!("{}", super::lock::pending_note(number, merging.unwrap_or(false)));
+        println!("{}", super::lock::pending_note(number, merging));
     }
     Ok(())
 }
