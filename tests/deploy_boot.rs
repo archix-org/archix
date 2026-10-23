@@ -570,6 +570,31 @@ fn a_power_cut_at_any_step_of_the_var_apply_is_finished_by_the_next_boot() {
 
 #[test]
 #[ignore]
+fn a_power_cut_after_the_activation_marker_leaves_no_progress_marker_behind() {
+    let reference = staged_root();
+    let out = activate(&reference.path().join("root"), &[]);
+    assert!(out.status.success(), "{}", text(&out));
+    let want = var_state(&reference.path().join("root/var"));
+    let dir = staged_root();
+    let root = dir.path().join("root");
+    let first = activate(&root, &[("ARCHIX_TEST_CRASH", "activate-marked")]);
+    assert_eq!(
+        std::os::unix::process::ExitStatusExt::signal(&first.status),
+        Some(libc::SIGKILL),
+        "{}",
+        text(&first)
+    );
+    assert_eq!(fs::read_dir(root.join("var/lib/archix/activated")).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(root.join("var/lib/archix/activating")).unwrap().count(), 1);
+    let again = activate(&root, &[]);
+    assert!(again.status.success(), "{}", text(&again));
+    assert!(!text(&again).contains("cut off at an earlier boot"), "{}", text(&again));
+    assert_eq!(var_state(&root.join("var")), want);
+    assert_eq!(fs::read_dir(root.join("var/lib/archix/activating")).unwrap().count(), 0);
+}
+
+#[test]
+#[ignore]
 fn failing_hooks_rerun_at_three_boots_then_wait_for_archix_hooks() {
     let dir = staged_root();
     let root = dir.path().join("root");

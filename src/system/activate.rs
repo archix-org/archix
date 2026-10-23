@@ -562,6 +562,7 @@ pub fn activate(root: &Path) -> Result<()> {
     let deployment = root.join("archix/deploy").join(generation.to_string());
     let id = deployment_id(&deployment, generation)?;
     let marker = state.join("activated").join(&id);
+    let progress = state.join("activating").join(&id);
     if !marker.exists() {
         let read = |path: &str| fs::read_to_string(root.join(path)).with_context(|| format!("reading /{path}"));
         check_ids(&read("etc/passwd")?, &read("etc/group")?)?;
@@ -589,7 +590,6 @@ pub fn activate(root: &Path) -> Result<()> {
             );
         }
         let upper = deployment.join("var-upper");
-        let progress = state.join("activating").join(&id);
         if upper.is_dir() {
             if progress.exists() {
                 println!(
@@ -625,7 +625,11 @@ pub fn activate(root: &Path) -> Result<()> {
         // The /var changes and users must be on disk before the marker that skips them at the next boot.
         crate::durable::sync_filesystems_checked(&[root])?;
         crate::durable::write(&marker, b"")?;
-        let _ = fs::remove_file(&progress);
+        crate::testhooks::crash_at("activate-marked");
+    }
+    // A power cut can keep the progress marker of an activation whose done marker reached the disk.
+    if fs::remove_file(&progress).is_ok() {
+        let _ = crate::durable::sync_dir(&progress);
     }
     run_hooks(root, &state, generation)?;
     crate::system::reboot::refresh_note(root);
