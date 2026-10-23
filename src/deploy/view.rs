@@ -62,6 +62,20 @@ impl Transaction {
 
     /// A command that runs `program`, found on the view's PATH, as the only child of the view's PID 1; add arguments, environment and stdio as usual.
     pub fn command<S: AsRef<OsStr>>(&self, program: S) -> Command {
+        self.command_in(program, false)
+    }
+
+    /// pacman in the view, which can't make the network namespace CachyOS's pacman puts each scriptlet and hook in without CAP_SYS_ADMIN, so a pacman that would gets one from the view for the whole command instead.
+    pub fn pacman(&self) -> Result<Command> {
+        let isolates = self.output(&["pacman", SANDBOX_NETWORK_OFF, "--version"])?.status.success();
+        let mut command = self.command_in("pacman", isolates);
+        if isolates {
+            command.arg(SANDBOX_NETWORK_OFF);
+        }
+        Ok(command)
+    }
+
+    fn command_in<S: AsRef<OsStr>>(&self, program: S, offline: bool) -> Command {
         let mut command = Command::new(program);
         command
             .env_clear()
@@ -75,7 +89,7 @@ impl Transaction {
         }
         let plan = Arc::clone(&self.plan);
         unsafe {
-            command.pre_exec(move || plan.enter());
+            command.pre_exec(move || plan.enter(offline));
         }
         command
     }
@@ -452,14 +466,18 @@ impl Plan {
     }
 
     /// Runs after fork in the child archix spawned, which builds the view and waits for the namespace's PID 1; nothing here may allocate.
-    fn enter(&self) -> io::Result<()> {
+    fn enter(&self, offline: bool) -> io::Result<()> {
         unsafe {
             // The death signal follows the spawning thread, so the caller must wait for the command on the thread that started it.
             if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 || libc::getppid() != self.parent {
                 libc::_exit(127);
             }
-            if libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID) != 0 {
+            let net = if offline { libc::CLONE_NEWNET } else { 0 };
+            if libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWPID | net) != 0 {
                 return Err(say_failed(b"archix: can't make namespaces for the staging root\n"));
+            }
+            if offline && !loopback_up() {
+                return Err(say_failed(b"archix: can't bring up loopback in the staging root\n"));
             }
             for step in &self.steps {
                 if step.run().is_err() {
@@ -550,6 +568,30 @@ const FORWARDED: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
 
 /// The kernel's number for CAP_SYS_ADMIN, which the libc crate doesn't define.
 const CAP_SYS_ADMIN: libc::c_ulong = 21;
+
+/// The option that keeps CachyOS's pacman from making network namespaces itself; pacman without that sandbox rejects it.
+const SANDBOX_NETWORK_OFF: &str = "--disable-sandbox-network";
+
+/// Brings up the loopback interface a new network namespace starts with down, as pacman's own network sandbox does; nothing here may allocate.
+unsafe fn loopback_up() -> bool {
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
+        if sock < 0 {
+            return false;
+        }
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        for (to, from) in ifr.ifr_name.iter_mut().zip(b"lo") {
+            *to = *from as libc::c_char;
+        }
+        // The request's type is c_ulong on glibc and c_int on musl.
+        let up = libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) == 0 && {
+            ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as libc::c_short;
+            libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) == 0
+        };
+        libc::close(sock);
+        up
+    }
+}
 
 static FORWARD_TO: AtomicI32 = AtomicI32::new(0);
 

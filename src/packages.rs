@@ -70,7 +70,7 @@ pub fn transact(tx: &Transaction, packages: &Packages, db: &Path) -> Result<()> 
     }
     let pacman = |args: &[&OsStr]| -> Result<()> {
         let status = tx
-            .command("pacman")
+            .pacman()?
             .args(args)
             .env(TRANSACTION_ENV, "1")
             .status()

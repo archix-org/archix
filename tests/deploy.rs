@@ -1954,6 +1954,59 @@ fn signing_keys_are_hidden_from_everything_in_the_view_but_the_boot_builds_signi
     }
 }
 
+/// Stands in for pacman: with /etc/net-sandbox, CachyOS's, which refuses to run hooks and scriptlets it can't put in a network namespace unless told not to; without, Arch's, which rejects that option. Logs each run's arguments, network namespace, interface count and whether loopback is up.
+const NET_SANDBOX_PACMAN: &str = r#"#!/bin/sh
+if [ "$1" = --disable-sandbox-network ]; then
+  [ -e /etc/net-sandbox ] || { echo "pacman: unrecognized option '--disable-sandbox-network'" >&2; exit 1; }
+  shift
+elif [ -e /etc/net-sandbox ] && ! unshare -n true; then
+  echo 'refusing to run "/bin/sh" with network access; set DisableSandboxNetwork in pacman.conf to override' >&2
+  exit 1
+fi
+[ "$1" = --version ] && exit 0
+echo "$1 $(readlink /proc/self/ns/net) $(grep -c : /proc/net/dev) $(ip link show lo | grep -c ',UP')" >> /var/log/pacman.log
+[ "$1" = -Rdd ] && rm -r /var/lib/pacman/local/base-1
+exit 0
+"#;
+
+#[test]
+#[ignore]
+fn a_pacman_that_isolates_its_hooks_from_the_network_gets_a_namespace_for_it_in_the_staging_root() {
+    let _serial = serial();
+    let host_net = fs::read_link("/proc/self/ns/net").unwrap().to_string_lossy().into_owned();
+    for sandboxed in [true, false] {
+        let (_fs, store) = system("ext4");
+        let root = store.root().to_path_buf();
+        let dep = store.path(1);
+        fs::write(dep.join("pacman/base-1/desc"), "%NAME%\nbase\n\n%VERSION%\n1-1\n").unwrap();
+        let pacman = dep.join("usr/bin/pacman");
+        fs::write(&pacman, NET_SANDBOX_PACMAN).unwrap();
+        fs::set_permissions(&pacman, fs::Permissions::from_mode(0o755)).unwrap();
+        if sandboxed {
+            fs::write(dep.join("etc/net-sandbox"), "").unwrap();
+        }
+        let staging = Staging::new(&store, 2).unwrap();
+        let tx = staging.transaction().unwrap();
+        let packages = archix::packages::Packages {
+            remove: vec!["base".to_string()],
+            ..Default::default()
+        };
+        archix::packages::transact(&tx, &packages, &staging.tree("pacman"))
+            .unwrap_or_else(|e| panic!("sandboxed {sandboxed}: {e:#}"));
+        drop(tx);
+        staging.discard().unwrap();
+        let log = fs::read_to_string(root.join("var/log/pacman.log")).unwrap();
+        let run: Vec<&str> = log.lines().last().unwrap().split(' ').collect();
+        assert_eq!(run[0], "-Rdd", "sandboxed {sandboxed}: {log}");
+        if sandboxed {
+            assert_ne!(run[1], host_net, "pacman's hooks share the host's network namespace: {log}");
+            assert_eq!(&run[2..], ["1", "1"], "only loopback, and up: {log}");
+        } else {
+            assert_eq!(run[1], host_net, "pacman without the sandbox runs as before: {log}");
+        }
+    }
+}
+
 /// rename(2) with its errno as the exit status, unlike mv, which copies when a rename crosses devices.
 const RENAME: &str = r#"
 #include <errno.h>
