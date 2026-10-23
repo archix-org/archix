@@ -491,7 +491,7 @@ mod tests {
         let live = texts(
             &format!("{PASSWD}carol:x:960:960::/home/carol:/bin/bash\n"),
             "root:x:0:\nwheel:x:998:\ndocker:x:970:alice,carol\nalice:x:1000:\ncarol:x:960:\n",
-            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:!$a:20000::::::\ncarol:$c:20100::::::\n",
+            "root:$r:20000:::::0:\nalpm:!*:20000::::::\nalice:!$a:20000::::::\ncarol:$c:20100::::::\n",
             "root:::\nwheel:::\ndocker:::alice,carol\nalice:!::\ncarol:!::\n",
         );
         let theirs = texts(
@@ -513,6 +513,10 @@ mod tests {
             "removals from wheel carry; carol's docker membership waits"
         );
         assert!(held[2].as_deref().unwrap().contains("alice:!$a:"), "a lock carries");
+        assert!(
+            held[2].as_deref().unwrap().contains("root:$r:20000:::::0:"),
+            "an expiry (chage -E 0) carries"
+        );
         assert!(!held[2].as_deref().unwrap().contains("mallory"));
         assert_eq!(
             held[3].as_deref(),
