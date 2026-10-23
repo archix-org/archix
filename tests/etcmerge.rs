@@ -708,12 +708,46 @@ fn a_password_changed_after_a_switch_boots_with_the_pending_deployment_though_a_
     setup.lay_out();
     let machine = &setup.machine;
     let booted = machine.current().unwrap();
+    let live = machine.root.join("etc");
+    let wheel = |group: &str, members: &str| -> String {
+        group
+            .lines()
+            .map(|l| match l.strip_prefix("wheel:") {
+                Some(rest) => format!("wheel:{}:{members}\n", rest.rsplit_once(':').unwrap().0),
+                None => format!("{l}\n"),
+            })
+            .collect()
+    };
+    let (passwd, group, shadow) = (
+        read(&live.join("passwd")),
+        read(&live.join("group")),
+        read(&live.join("shadow")),
+    );
+    assert!(
+        group.lines().any(|l| l.starts_with("wheel:") && l.ends_with(':')),
+        "an empty wheel: {group}"
+    );
+    assert!(!passwd.contains(":x:1001:"), "{passwd}");
+    write_renamed(
+        &live,
+        "passwd",
+        &format!("{passwd}mallory:x:1001:1001::/:/bin/bash\n"),
+        0o644,
+    );
+    write_renamed(
+        &live,
+        "group",
+        &format!("{}mallory:x:1001:\n", wheel(&group, "mallory")),
+        0o644,
+    );
+    write_renamed(&live, "shadow", &format!("{shadow}mallory:$m:20000::::::\n"), 0o600);
     setup.set_body(&[], &body(1));
     setup.ok_env(&[("ARCHIX_TEST_ETC_MERGE", "1")], &["switch", "--noconfirm"]);
     let pending = machine.current().unwrap();
     assert_ne!(pending, booted);
     let unit = etcmerge::unit_name(&machine.root);
-    let (live, etc) = (machine.root.join("etc"), machine.deployment(pending).join("etc"));
+    let etc = machine.deployment(pending).join("etc");
+    assert!(read(&etc.join("passwd")).contains("mallory:"), "staged with mallory");
     let state = || etcmerge::load(&Paths::under(&machine.root), pending);
     let wait = |what: &str, done: &dyn Fn() -> bool| {
         let started = Instant::now();
@@ -749,6 +783,20 @@ fn a_password_changed_after_a_switch_boots_with_the_pending_deployment_though_a_
     let clash = state().unwrap().clash.unwrap();
     assert!(clash.contains("UID 65534 would be both clash's"), "{clash}");
 
+    let without = |text: String| -> String {
+        text.lines()
+            .filter(|l| !l.starts_with("mallory:"))
+            .map(|l| format!("{l}\n"))
+            .collect()
+    };
+    write_renamed(&live, "shadow", &without(read(&live.join("shadow"))), 0o600);
+    write_renamed(&live, "group", &without(wheel(&read(&live.join("group")), "")), 0o644);
+    write_renamed(&live, "passwd", &without(read(&live.join("passwd"))), 0o644);
+    wait("mallory's removal in the pending deployment", &|| {
+        !read(&etc.join("passwd")).contains("mallory:") && !read(&etc.join("group")).contains("mallory")
+    });
+    assert!(state().unwrap().clash.is_some(), "the clash still holds additions back");
+
     sh(&format!("systemctl stop {unit}"));
     machine.reboot(Some(&format!("archix-{pending}.conf")));
     let out = Command::new(env!("CARGO_BIN_EXE_archix"))
@@ -766,6 +814,9 @@ fn a_password_changed_after_a_switch_boots_with_the_pending_deployment_though_a_
         shadow.lines().any(|l| l == new) && !shadow.lines().any(|l| l == old),
         "deployment {pending} boots with the new password: {shadow}"
     );
+    assert!(!shadow.contains("mallory:") && !read(&live.join("passwd")).contains("mallory:"));
+    let group = read(&live.join("group"));
+    assert!(!group.contains("mallory"), "removed from wheel and deleted: {group}");
 }
 
 #[test]

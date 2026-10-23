@@ -507,11 +507,11 @@ impl Merge<'_> {
                     eprintln!("archix: /etc merge: stopped carrying the account files: {clash}");
                 }
                 self.note(&format!(
-                    "archix: the /etc merge stopped carrying users and groups into deployment {target}: {clash}. Give the running system's account another number (usermod -u, groupmod -g) and the merge goes on; until then deployment {target} boots without the accounts added since the switch, though password changes to the accounts it has still reach it"
+                    "archix: the /etc merge stopped carrying users and groups into deployment {target}: {clash}. Give the running system's account another number (usermod -u, groupmod -g) and the merge goes on; until then deployment {target} boots without the accounts and group members added since the switch, though deleted accounts, removed members and password changes still reach it"
                 ));
                 self.state.clash = Some(clash);
-                let passwords = accounts::merge_passwords(&self.state.accounts, &live, &theirs);
-                self.write_accounts(&passwords, &theirs);
+                let held = accounts::merge_held(&self.state.accounts, &live, &theirs);
+                self.write_accounts(&held, &theirs);
                 return;
             }
         };

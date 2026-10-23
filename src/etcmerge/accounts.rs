@@ -61,14 +61,20 @@ fn members(field: Option<&String>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Theirs' members, plus those live added and minus those live removed since base.
-fn merge_members(base: Option<&String>, live: Option<&String>, theirs: Option<&String>) -> String {
+/// Theirs' members minus those live removed since base.
+fn kept_members(base: Option<&String>, live: Option<&String>, theirs: Option<&String>) -> Vec<String> {
     let (base, live) = (members(base), members(live));
-    let mut out: Vec<String> = members(theirs)
+    members(theirs)
         .into_iter()
         .filter(|m| !base.contains(m) || live.contains(m))
-        .collect();
-    for m in live {
+        .collect()
+}
+
+/// Theirs' members, plus those live added and minus those live removed since base.
+fn merge_members(base: Option<&String>, live: Option<&String>, theirs: Option<&String>) -> String {
+    let mut out = kept_members(base, live, theirs);
+    let base = members(base);
+    for m in members(live) {
         if !base.contains(&m) && !out.contains(&m) {
             out.push(m);
         }
@@ -192,33 +198,32 @@ pub fn merge_all(base: &Texts, live: &Texts, theirs: &Texts, target: u32) -> Res
     }
 }
 
-/// What still carries while an ID clash holds passwd and group back: live's password and aging changes to accounts theirs has by the same name; new accounts and group admins and members wait with the clash.
-pub fn merge_passwords(base: &Texts, live: &Texts, theirs: &Texts) -> Texts {
+/// What still carries while an ID clash holds additions back: accounts deleted live, members and admins removed live, and live's password, lock and aging changes to accounts theirs has by the same name; new accounts and new members wait with the clash.
+pub fn merge_held(base: &Texts, live: &Texts, theirs: &Texts) -> Texts {
     let mut out = theirs.clone();
-    for i in [2, 3] {
+    for (i, file) in FILES.iter().enumerate() {
         let (Some(live), Some(theirs)) = (&live[i], &theirs[i]) else {
             continue;
         };
         let (base, live) = (entries(base[i].as_deref().unwrap_or(theirs)), entries(live));
         let lines: Vec<Line> = parse(theirs)
             .into_iter()
+            .filter(|line| !matches!(line, Line::Entry(name, _) if base.contains_key(name) && !live.contains_key(name)))
             .map(|line| match line {
                 Line::Entry(name, fields) if live.contains_key(&name) => {
-                    let merged = merge_fields(FILES[i], base.get(&name), &live[&name], &fields);
-                    let fields = match i {
-                        2 => merged,
-                        _ => fields
-                            .iter()
-                            .enumerate()
-                            .map(|(n, field)| {
-                                if n == 1 {
-                                    merged.get(1).cloned().unwrap_or_default()
-                                } else {
-                                    field.clone()
-                                }
-                            })
-                            .collect(),
-                    };
+                    let (base, live) = (base.get(&name), &live[&name]);
+                    let merged = merge_fields(file, base, live, &fields);
+                    let fields = fields
+                        .iter()
+                        .enumerate()
+                        .map(|(n, field)| match (*file, n) {
+                            ("shadow", _) | ("gshadow", 1) => merged.get(n).cloned().unwrap_or_default(),
+                            _ if member_fields(file).contains(&n) => {
+                                kept_members(base.and_then(|b| b.get(n)), live.get(n), Some(field)).join(",")
+                            }
+                            _ => field.clone(),
+                        })
+                        .collect();
                     Line::Entry(name, fields)
                 }
                 line => line,
@@ -456,7 +461,7 @@ mod tests {
             "root:::\nwheel:::alice\nalice:!::\npkguser:!::\n",
         );
         assert!(merge_all(&base, &live, &theirs, 3).is_err());
-        let carried = merge_passwords(&base, &live, &theirs);
+        let carried = merge_held(&base, &live, &theirs);
         assert_eq!(carried[0], theirs[0]);
         assert_eq!(carried[1], theirs[1]);
         assert_eq!(
@@ -470,6 +475,49 @@ mod tests {
             carried[3].as_deref(),
             Some("root:::\nwheel:$w::alice\nalice:!::\npkguser:!::\n"),
             "the group password carries; members and admins wait with the group file"
+        );
+    }
+
+    #[test]
+    fn a_clash_still_carries_revoked_access() {
+        let passwd = format!("{PASSWD}mallory:x:1001:1001::/home/mallory:/bin/bash\n");
+        let group = "root:x:0:\nwheel:x:998:alice,mallory\ndocker:x:970:alice\nalice:x:1000:\nmallory:x:1001:\n";
+        let base = texts(
+            &passwd,
+            group,
+            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:$a:20000::::::\nmallory:$m:20000::::::\n",
+            "root:::\nwheel::alice:alice,mallory\ndocker:::alice\nalice:!::\nmallory:!::\n",
+        );
+        let live = texts(
+            &format!("{PASSWD}carol:x:960:960::/home/carol:/bin/bash\n"),
+            "root:x:0:\nwheel:x:998:\ndocker:x:970:alice,carol\nalice:x:1000:\ncarol:x:960:\n",
+            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:!$a:20000::::::\ncarol:$c:20100::::::\n",
+            "root:::\nwheel:::\ndocker:::alice,carol\nalice:!::\ncarol:!::\n",
+        );
+        let theirs = texts(
+            &format!("{passwd}pkguser:x:960:960::/:/usr/bin/nologin\n"),
+            &format!("{group}pkguser:x:960:\n"),
+            "root:$r:20000::::::\nalpm:!*:20000::::::\nalice:$a:20000::::::\nmallory:$m:20000::::::\npkguser:!*:20050::::::\n",
+            "root:::\nwheel::alice:alice,mallory\ndocker:::alice\nalice:!::\nmallory:!::\npkguser:!::\n",
+        );
+        assert!(merge_all(&base, &live, &theirs, 3).is_err());
+        let held = merge_held(&base, &live, &theirs);
+        assert_eq!(
+            held[0].as_deref(),
+            Some(format!("{PASSWD}pkguser:x:960:960::/:/usr/bin/nologin\n").as_str()),
+            "mallory, deleted live, is deleted there too; carol waits"
+        );
+        assert_eq!(
+            held[1].as_deref(),
+            Some("root:x:0:\nwheel:x:998:\ndocker:x:970:alice\nalice:x:1000:\npkguser:x:960:\n"),
+            "removals from wheel carry; carol's docker membership waits"
+        );
+        assert!(held[2].as_deref().unwrap().contains("alice:!$a:"), "a lock carries");
+        assert!(!held[2].as_deref().unwrap().contains("mallory"));
+        assert_eq!(
+            held[3].as_deref(),
+            Some("root:::\nwheel:::\ndocker:::alice\nalice:!::\npkguser:!::\n"),
+            "a removed group admin carries"
         );
     }
 
