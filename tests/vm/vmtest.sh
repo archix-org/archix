@@ -31,7 +31,8 @@ if ! /usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1
   networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
   journalctl -b -u systemd-networkd --no-pager | tail -30 | sed 's|^|VMTEST: networkd: |' > /dev/console
   for nic in /sys/class/net/en*; do
-    echo "$(basename "$nic") carrier=$(cat "$nic/carrier" 2>&1) operstate=$(cat "$nic/operstate") flags=$(cat "$nic/flags") driver=$(basename "$(readlink -f "$nic/device/driver")")" | sed 's|^|VMTEST: nic: |' > /dev/console
+    # carrier_changes 0 means the guest never saw the link up; more means it saw it and lost it.
+    echo "$(basename "$nic") carrier=$(cat "$nic/carrier" 2>&1) carrier_changes=$(cat "$nic/carrier_changes") carrier_up=$(cat "$nic/carrier_up_count" 2>/dev/null) carrier_down=$(cat "$nic/carrier_down_count" 2>/dev/null) operstate=$(cat "$nic/operstate") flags=$(cat "$nic/flags") driver=$(basename "$(readlink -f "$nic/device/driver")") virtio_features=$(cat "$(readlink -f "$nic/device")/features" 2>/dev/null)" | sed 's|^|VMTEST: nic: |' > /dev/console
     ip -d link show "$(basename "$nic")" 2>&1 | sed 's|^|VMTEST: nic: |' > /dev/console
   done
   journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30 | sed 's|^|VMTEST: kernel: |' > /dev/console
