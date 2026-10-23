@@ -67,7 +67,10 @@ impl Transaction {
 
     /// pacman in the view, which can't make the network namespace CachyOS's pacman puts each scriptlet and hook in without CAP_SYS_ADMIN, so a pacman that would gets one from the view for the whole command instead.
     pub fn pacman(&self) -> Result<Command> {
-        let isolates = self.output(&["pacman", SANDBOX_NETWORK_OFF, "--version"])?.status.success();
+        let isolates = self
+            .output(&["pacman", SANDBOX_NETWORK_OFF, "--version"])?
+            .status
+            .success();
         let mut command = self.command_in("pacman", isolates);
         if isolates {
             command.arg(SANDBOX_NETWORK_OFF);

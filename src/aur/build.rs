@@ -361,7 +361,11 @@ impl Builder<'_> {
                     fs::remove_dir_all(&root)?;
                 }
                 run(
-                    devtools("mkarchroot").arg("-C").arg(&bootstrap).arg(&root).arg("base-devel"),
+                    devtools("mkarchroot")
+                        .arg("-C")
+                        .arg(&bootstrap)
+                        .arg(&root)
+                        .arg("base-devel"),
                     "mkarchroot",
                 )
             })?;

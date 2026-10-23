@@ -60,7 +60,10 @@ impl LoopFs {
         }
         sh(mkfs.args(mkfs_args).arg(&loop_fs.dev));
         // A probe can still see the previous filesystem on a reused loop device, so the type isn't left to it.
-        sh(Command::new("mount").args(["-t", fs]).arg(&loop_fs.dev).arg(&loop_fs.mnt));
+        sh(Command::new("mount")
+            .args(["-t", fs])
+            .arg(&loop_fs.dev)
+            .arg(&loop_fs.mnt));
         loop_fs
     }
 }
@@ -1974,7 +1977,10 @@ exit 0
 #[ignore]
 fn a_pacman_that_isolates_its_hooks_from_the_network_gets_a_namespace_for_it_in_the_staging_root() {
     let _serial = serial();
-    let host_net = fs::read_link("/proc/self/ns/net").unwrap().to_string_lossy().into_owned();
+    let host_net = fs::read_link("/proc/self/ns/net")
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     for sandboxed in [true, false] {
         let (_fs, store) = system("ext4");
         let root = store.root().to_path_buf();
@@ -2000,7 +2006,10 @@ fn a_pacman_that_isolates_its_hooks_from_the_network_gets_a_namespace_for_it_in_
         let run: Vec<&str> = log.lines().last().unwrap().split(' ').collect();
         assert_eq!(run[0], "-Rdd", "sandboxed {sandboxed}: {log}");
         if sandboxed {
-            assert_ne!(run[1], host_net, "pacman's hooks share the host's network namespace: {log}");
+            assert_ne!(
+                run[1], host_net,
+                "pacman's hooks share the host's network namespace: {log}"
+            );
             assert_eq!(&run[2..], ["1", "1"], "only loopback, and up: {log}");
         } else {
             assert_eq!(run[1], host_net, "pacman without the sandbox runs as before: {log}");

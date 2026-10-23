@@ -32,4 +32,7 @@ df -h / "$base"
 sudo mkdir -p "$base/archix-ci/work"
 sudo chown -R "$(id -u):$(id -g)" "$base/archix-ci"
 echo "ARCHIX_VM_WORK=$base/archix-ci/work" >> "$GITHUB_ENV"
+# The work-dir guard's defaults are for a shared desktop; a runner is sized to the job by NEED_GB.
+echo "ARCHIX_MIN_FREE_GB=$need" >> "$GITHUB_ENV"
+echo "ARCHIX_FLOOR_GB=3" >> "$GITHUB_ENV"
 echo "VM_CPUS=$(nproc)" >> "$GITHUB_ENV"

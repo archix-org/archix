@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [rollback, nvidia, cachyos]
+        suite: [rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn]
         fs: [ext4, btrfs]
     steps:
       - uses: actions/checkout@v5
@@ -52,6 +52,8 @@ jobs:
           SUITE: ${{ matrix.suite }}
           FS: ${{ matrix.fs }}
           VM_TIMEOUT: "14400"
+          # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
+          ARCHIX_OLD: 3a99d0c
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
@@ -69,25 +71,14 @@ jobs:
         fs: [ext4, btrfs]
     steps:
       - uses: actions/checkout@v5
-      - id: runner
-        run: |
-          if [ -x tests/vm/powercut/run.sh ]; then
-            echo "command=tests/vm/powercut/run.sh" >> "$GITHUB_OUTPUT"
-          elif [ -f tests/vm/powercut/vmtest.sh ]; then
-            echo "command=tests/vm/run.sh powercut" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::no power-cut suite yet (tests/vm/powercut/), so this job checks nothing"
-          fi
-      - if: steps.runner.outputs.command
-        uses: ./.github/actions/vm-setup
+      - uses: ./.github/actions/vm-setup
         with:
           group: powercut
           need-gb: "60"
-      - if: steps.runner.outputs.command
-        run: ${{ steps.runner.outputs.command }}
+      - run: tests/vm/run.sh powercut
         env:
           FS: ${{ matrix.fs }}
-      - if: always() && steps.runner.outputs.command
+      - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: powercut
