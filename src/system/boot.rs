@@ -247,15 +247,18 @@ pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()
     if !fallbacks(esp).contains(&generation) {
         return Ok(());
     }
-    let mut removed = false;
+    let mut removed = Vec::new();
     for old in fallbacks(esp).into_iter().filter(|n| *n != generation) {
         let path = fallback_path(esp, old);
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
-        let _ = fs::remove_file(entry_records(paths).join(fallback_name(old)));
-        removed = true;
+        removed.push(old);
     }
-    if removed {
+    if !removed.is_empty() {
+        // The records go once the removals are on the ESP, so a power cut never leaves a fallback without one.
         crate::durable::sync_filesystems_checked(&[esp])?;
+    }
+    for old in removed {
+        let _ = fs::remove_file(entry_records(paths).join(fallback_name(old)));
     }
     Ok(())
 }
@@ -520,7 +523,7 @@ pub fn drop_entries(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
     crate::durable::sync_filesystems_checked(&[esp])
 }
 
-/// Removes the entry records whose entry isn't on the ESP, which a power cut between a record and its entry leaves; an unreadable ESP prunes nothing.
+/// Removes the entry records whose entry, or fallback UKI, isn't on the ESP, which a power cut between a record and its entry leaves; an unreadable ESP prunes nothing.
 pub fn prune_records(paths: &Paths, esp: &Path) -> Result<Vec<String>> {
     let Ok(listed) = fs::read_dir(entries_dir(esp)) else {
         return Ok(Vec::new());
@@ -528,6 +531,7 @@ pub fn prune_records(paths: &Paths, esp: &Path) -> Result<Vec<String>> {
     let ids: BTreeSet<String> = listed
         .flatten()
         .map(|entry| entry_id(&entry.file_name().to_string_lossy()))
+        .chain(fallbacks(esp).into_iter().map(fallback_name))
         .collect();
     let records = entry_records(paths);
     let mut removed = Vec::new();
@@ -918,8 +922,8 @@ impl EspStep for Entries<'_> {
         let esp = Path::new(&self.plan.esp);
         crate::deploy::commit::clean_esp(esp)?;
         let _ = fs::remove_file(fallback_path(esp, number));
-        let _ = fs::remove_file(entry_records(self.paths).join(fallback_name(number)));
         drop_entries(self.paths, esp, number)?;
+        let _ = fs::remove_file(entry_records(self.paths).join(fallback_name(number)));
         match previous {
             Some(previous) if entries(esp).iter().any(|(n, extra, _)| *n == previous && !extra) => {
                 set_default_entry(esp, previous)
@@ -1573,24 +1577,33 @@ mod tests {
     #[test]
     fn records_without_their_entry_are_pruned_and_an_unreadable_esp_prunes_nothing() {
         let esp = esp_with(&["archix-2+1-2.conf", "archix-3.conf"], "default archix-3.conf\n");
+        fs::create_dir_all(esp.path().join("EFI/Linux")).unwrap();
+        fs::write(fallback_path(esp.path(), 3), "uki 3").unwrap();
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::under(root.path());
         let records = entry_records(&paths);
         fs::create_dir_all(&records).unwrap();
-        for name in ["archix-2.conf", "archix-3.conf", "archix-4.conf", "archix-5.conf.tmp"] {
+        for name in [
+            "archix-2.conf",
+            "archix-3.conf",
+            "archix-4.conf",
+            "archix-5.conf.tmp",
+            "archix-fallback-3.efi",
+            "archix-fallback-4.efi",
+        ] {
             fs::write(records.join(name), "title t\n").unwrap();
         }
         assert!(prune_records(&paths, &root.path().join("no-esp")).unwrap().is_empty());
         assert_eq!(
             prune_records(&paths, esp.path()).unwrap(),
-            ["archix-4.conf", "archix-5.conf.tmp"]
+            ["archix-4.conf", "archix-5.conf.tmp", "archix-fallback-4.efi"]
         );
         let mut left: Vec<String> = fs::read_dir(&records)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         left.sort();
-        assert_eq!(left, ["archix-2.conf", "archix-3.conf"]);
+        assert_eq!(left, ["archix-2.conf", "archix-3.conf", "archix-fallback-3.efi"]);
     }
 
     #[test]
