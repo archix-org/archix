@@ -20,6 +20,8 @@ selected=$(tail -c +5 "$efivar" 2>/dev/null | tr -d '\000')
 booted=$(echo "$selected" | grep -aoE 'archix-(fallback-)?[0-9]+' | head -1 | grep -oE '[0-9]+$')
 running=$(cat /run/archix/deployment 2>/dev/null)
 say "stage $stage: booted entry $selected, mounted deployment $running, current $(current), deployments $(deployments)"
+failed_units=$(systemctl --failed --no-legend --plain | awk '{ print $1 }' | tr '\n' ' ')
+[ -z "$failed_units" ] || fail "units failed at this boot: $failed_units"
 # Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.
 [ "$stage" = 10 ] || [ "$booted" = "$running" ] || fail "the initramfs mounted deployment $running, but systemd-boot started $selected"
 config=/etc/archix/init.lua
