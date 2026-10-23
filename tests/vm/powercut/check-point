@@ -175,10 +175,12 @@ check_state() {
 
 # How many subsets the whole log's ESP points have had up to here, in every shard, which REORDER_SAMPLE counts by.
 seen() { echo $(($(cat "$state/subsets-seen" 2> /dev/null || echo 0) + $1)) > "$state/subsets-seen"; }
+# The subsets' random stream is keyed by the point's stage, step and place among that step's ESP points, not its index, so a log whose root side flushed once more elsewhere draws the same subsets at the same ESP step.
+key=$(head -n "$point" "$state/table" | awk -v stage="$stage" -v step="$step" '$2 == 1 && $3 == step && $4 == stage { n++ } END { print stage ":" step ":" n }')
 # A shard checks every Nth point, but every shard keeps the ESP copy the subsets start from and the subset count up to date.
 if [ -n "${SHARD:-}" ] && [ $(((point - 1) % ${SHARD#*/})) != $((${SHARD%/*} - 1)) ]; then
   if [ "$esp" = 1 ] && [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
-    seen "$(reorder pick "$SEED" "$point" "$SUBSETS" | grep -c .)"
+    seen "$(reorder pick "$SEED" "$key" "$SUBSETS" | grep -c .)"
     reorder advance || { log "couldn't advance the ESP copy"; exit 2; }
   fi
   exit 0
@@ -194,7 +196,7 @@ point_boot=$boot
 if [ "$esp" = 1 ] && [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
   read -r writes free < <(reorder count)
   i=0 started=$SECONDS bad=0
-  for mask in $(reorder pick "$SEED" "$point" "$SUBSETS"); do
+  for mask in $(reorder pick "$SEED" "$key" "$SUBSETS"); do
     i=$((i + 1))
     echo $(($(cat "$state/subsets" 2> /dev/null || echo 0) + 1)) > "$state/subsets"
     seen 1
