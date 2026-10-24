@@ -89,9 +89,21 @@ pub fn efivars() -> Option<std::path::PathBuf> {
     Some(std::path::PathBuf::from("/sys/firmware/efi/efivars"))
 }
 
-/// Whether boot.esp must be a mounted FAT filesystem: always, but on a test root, whose ESP is a plain directory, only with ARCHIX_TEST_CHECK_ESP.
+/// Whether boot.esp must be a mounted FAT filesystem: always, but on a test root, whose ESP is a plain directory, only with ARCHIX_TEST_CHECK_ESP, and never with ARCHIX_TEST_PLAIN_ESP in a debug build.
 pub fn check_esp() -> bool {
+    let plain =
+        PLAIN_ESP.load(std::sync::atomic::Ordering::Relaxed) || std::env::var_os("ARCHIX_TEST_PLAIN_ESP").is_some();
+    if cfg!(test) || (cfg!(debug_assertions) && plain) {
+        return false;
+    }
     root() == std::path::Path::new("/") || std::env::var_os("ARCHIX_TEST_CHECK_ESP").is_some()
+}
+
+static PLAIN_ESP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Lets a test that calls archix in its own process use a plain directory as the ESP, as a test root or ARCHIX_TEST_PLAIN_ESP does; a no-op in a release build.
+pub fn allow_plain_esp() {
+    PLAIN_ESP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Whether systemd-boot is counting this boot's tries (it sets LoaderBootCountPath then), or ARCHIX_TEST_COUNTED_BOOT in a debug build.

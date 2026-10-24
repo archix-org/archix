@@ -239,7 +239,7 @@ pub fn install_fallback(paths: &Paths, esp: &Path, generation: u32, uki: &Path) 
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
     crate::durable::copy(uki, &target)?;
-    crate::durable::sync_filesystems_checked(&[esp])
+    crate::durable::sync_esp(esp)
 }
 
 /// What a retired fallback UKI is renamed to before it's removed, a name systemd-boot doesn't list.
@@ -263,7 +263,7 @@ pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()
     }
     if !fallbacks(esp).contains(&generation) {
         if !leftovers.is_empty() {
-            crate::durable::sync_filesystems_checked(&[esp])?;
+            crate::durable::sync_esp(esp)?;
         }
         return Ok(());
     }
@@ -274,7 +274,7 @@ pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()
         removed.push(old);
     }
     if !removed.is_empty() {
-        crate::durable::sync_filesystems_checked(&[esp])?;
+        crate::durable::sync_esp(esp)?;
         mark("retire-renamed");
         for old in &removed {
             let path = retired_path(esp, *old);
@@ -283,7 +283,7 @@ pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()
     }
     if !removed.is_empty() || !leftovers.is_empty() {
         // The records go once the removals are on the ESP, so a power cut never leaves a fallback without one.
-        crate::durable::sync_filesystems_checked(&[esp])?;
+        crate::durable::sync_esp(esp)?;
     }
     for old in removed {
         let _ = fs::remove_file(entry_records(paths).join(fallback_name(old)));
@@ -564,7 +564,7 @@ pub fn mark_bad(esp: &Path, generation: u32) -> Result<bool> {
         let bad = path.with_file_name(format!("{stem}+0-{}.conf", left + done));
         if bad != path {
             fs::rename(&path, &bad).with_context(|| format!("renaming {}", path.display()))?;
-            crate::durable::sync_filesystems_checked(&[esp])?;
+            crate::durable::sync_esp(esp)?;
         }
         return Ok(true);
     }
@@ -628,10 +628,10 @@ pub fn drop_entries(paths: &Paths, esp: &Path, generation: u32) -> Result<()> {
         }
     }
     // FAT reuses freed clusters, so the entries' removal reaches the disk before the UKIs they name are freed.
-    crate::durable::sync_filesystems_checked(&[esp])?;
+    crate::durable::sync_esp(esp)?;
     mark("deploy-drop-ukis");
     remove_unused_ukis_but(esp, &[])?;
-    crate::durable::sync_filesystems_checked(&[esp])
+    crate::durable::sync_esp(esp)
 }
 
 /// Removes the entry records whose entry, or fallback UKI, isn't on the ESP, which a power cut between a record and its entry leaves; an unreadable ESP prunes nothing.
@@ -976,10 +976,10 @@ impl EspStep for Entries<'_> {
                 }
             }
             // Each removal reaches the disk before the clusters it frees can be written again.
-            crate::durable::sync_filesystems_checked(&[esp])?;
+            crate::durable::sync_esp(esp)?;
             mark("deploy-esp-drop-ukis");
             remove_unused_ukis_but(esp, &reused)?;
-            crate::durable::sync_filesystems_checked(&[esp])?;
+            crate::durable::sync_esp(esp)?;
         }
         mark("deploy-esp-uki");
         for uki in made {
@@ -1311,12 +1311,12 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
         let path = fallback_path(Path::new(esp), generation);
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
-    crate::durable::sync_filesystems_checked(&[Path::new(esp)])?;
+    crate::durable::sync_esp(Path::new(esp))?;
     match fs::remove_dir_all(uki_dir(Path::new(esp))) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing archix's UKIs"),
         _ => {}
     }
-    crate::durable::sync_filesystems_checked(&[Path::new(esp)])?;
+    crate::durable::sync_esp(Path::new(esp))?;
     written.insert(0, format!("default {default_id}"));
     Ok(written)
 }
@@ -1360,7 +1360,7 @@ pub fn promote_booted(paths: &Paths) -> Result<()> {
     }
 }
 
-/// Run by systemd-bless-boot's drop-in just before it renames the booted entry to its name without boot counters: does that rename itself and syncs the entry under its new name, then its directory. vfat's rename leaves the new name's directory entry empty until the file's inode is written, and systemd-bless-boot only syncs the directory and the filesystem, which on FAT doesn't flush the disk, so a power cut after its rename can leave the blessed entry empty; systemd-bless-boot then finds the rename done.
+/// Run by systemd-bless-boot's drop-in just before it renames the booted entry to its name without boot counters: does that rename itself and flushes the ESP, whose fsync of the entry under its new name writes the name's directory entry. vfat's rename leaves the new name's directory entry empty until the file's inode is written, and systemd-bless-boot only syncs the directory and the filesystem, which on FAT doesn't flush the disk, so a power cut after its rename can leave the blessed entry empty; systemd-bless-boot then finds the rename done.
 pub fn bless_booted(paths: &Paths) -> Result<()> {
     let Some(selected) = crate::testhooks::selected_entry() else {
         return Ok(());
@@ -1384,10 +1384,7 @@ pub fn bless_booted(paths: &Paths) -> Result<()> {
         return Ok(());
     };
     fs::rename(dir.join(&counted), &target).with_context(|| format!("renaming {counted} to {id}"))?;
-    fs::File::open(&target)
-        .and_then(|file| file.sync_all())
-        .and_then(|()| fs::File::open(&dir)?.sync_all())
-        .with_context(|| format!("syncing {id}"))?;
+    crate::durable::sync_esp(&target).with_context(|| format!("syncing {id}"))?;
     println!("archix: the boot counted as good: renamed {counted} to {id}, synced under its new name");
     Ok(())
 }

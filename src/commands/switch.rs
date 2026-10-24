@@ -1487,7 +1487,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
         // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
         boot::set_default_entry(&esp, number)?;
-        archix::durable::sync_filesystems_checked(&[&esp])?;
+        archix::durable::sync_esp(&esp)?;
         follow_with_fallback(&paths, &boot, &deployments, number)?;
         deployments.point_current(number)?;
         deployments.choose(number)?;

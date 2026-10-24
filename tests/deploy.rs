@@ -749,6 +749,7 @@ fn helper(action: &str, root: &Path, env: &[(&str, &str)]) -> Command {
         ])
         .env("ARCHIX_DEPLOY_HELPER", action)
         .env("ARCHIX_DEPLOY_ROOT", root)
+        .env("ARCHIX_TEST_PLAIN_ESP", "1")
         .env_remove("ARCHIX_TEST_CRASH");
     for (name, value) in env {
         command.env(name, value);
@@ -1746,6 +1747,7 @@ fn in_view(tx: &archix::deploy::Transaction, script: &str) -> String {
 }
 
 fn commit(store: &Store, staging: Staging) {
+    archix::testhooks::allow_plain_esp();
     let esp = store.root().join("efi");
     let boot = SystemdBoot {
         esp: esp.clone(),
@@ -2149,6 +2151,39 @@ fn dropping_a_deployments_entries_reaches_the_disk_before_its_ukis_are_freed() {
         "deployment 4's entry was still on disk when its UKI was freed:\n{on_disk}"
     );
     assert!(!esp.mnt.join("EFI/archix/aaaa.efi").exists() && esp.mnt.join("EFI/archix/bbbb.efi").exists());
+}
+
+/// The start cluster and size in `entry`'s short-name directory entry (8.3, upper case, padded) on a FAT image, if it has one.
+fn fat_dir_entry(img: &Path, entry: &[u8; 11]) -> Option<(u32, u32)> {
+    let bytes = fs::read(img).unwrap();
+    bytes.chunks_exact(32).find(|de| &de[..11] == entry).map(|de| {
+        let word = |at: usize| u16::from_le_bytes([de[at], de[at + 1]]) as u32;
+        (
+            word(20) << 16 | word(26),
+            u32::from_le_bytes(de[28..32].try_into().unwrap()),
+        )
+    })
+}
+
+#[test]
+#[ignore]
+fn an_esp_flush_writes_a_renamed_entry_whole_where_a_directory_fsync_leaves_it_empty() {
+    let _serial = serial();
+    let esp = LoopFs::sized("vfat", "32M");
+    let img = esp.mnt.parent().unwrap().join("fs.img");
+    fs::write(esp.mnt.join("entry.tmp"), "title t\n").unwrap();
+    archix::durable::sync_esp(&esp.mnt).unwrap();
+    assert_eq!(fat_dir_entry(&img, b"ENTRY   TMP").map(|(_, size)| size), Some(8));
+    fs::rename(esp.mnt.join("entry.tmp"), esp.mnt.join("entry.cnf")).unwrap();
+    fs::File::open(&esp.mnt).unwrap().sync_all().unwrap();
+    assert_eq!(
+        fat_dir_entry(&img, b"ENTRY   CNF"),
+        Some((0, 0)),
+        "vfat's rename no longer leaves the new name's entry empty until the file's inode is written"
+    );
+    archix::durable::sync_esp(&esp.mnt.join("entry.cnf")).unwrap();
+    let (cluster, size) = fat_dir_entry(&img, b"ENTRY   CNF").unwrap();
+    assert!(cluster != 0 && size == 8, "cluster {cluster}, size {size}");
 }
 
 /// Copies installed packages' files and database entries from the container into `root`, as pacstrap would have put them.

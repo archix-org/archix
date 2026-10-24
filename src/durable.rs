@@ -131,6 +131,34 @@ pub fn sync_filesystems_checked<P: AsRef<Path>>(paths: &[P]) -> Result<()> {
     Ok(())
 }
 
+/// statfs's f_type for FAT.
+const MSDOS_SUPER_MAGIC: i64 = 0x4d44;
+
+/// Flushes the ESP holding `path` with syncfs, which writes FAT's buffers, and an fsync, as FAT has no sync_fs and only its fsync flushes the disk's cache; anything but FAT is refused, as that pairing is FAT's, and a path that isn't on it isn't on the ESP.
+pub fn sync_esp(path: &Path) -> Result<()> {
+    flush_esp(path, crate::testhooks::check_esp())
+}
+
+fn flush_esp(path: &Path, fat_only: bool) -> Result<()> {
+    let file = File::open(path).with_context(|| format!("opening {} to flush the ESP", path.display()))?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+    if fat_only {
+        let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatfs(fd, &mut stat) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("flushing the ESP at {}: statfs", path.display()));
+        }
+        if stat.f_type as i64 != MSDOS_SUPER_MAGIC {
+            anyhow::bail!("{} should be on the ESP, but isn't on a FAT filesystem", path.display());
+        }
+    }
+    if unsafe { libc::syncfs(fd) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("flushing the ESP at {}", path.display()));
+    }
+    file.sync_all()
+        .with_context(|| format!("flushing the disk holding the ESP at {}", path.display()))
+}
+
 /// Writes a file in the user's config like `write`, keeping its owner and mode, or giving a new one its directory's owner and 0644, so a run under sudo leaves nothing root-owned there.
 pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
     let before = fs::symlink_metadata(path)
@@ -262,5 +290,12 @@ mod tests {
         sync_filesystems_checked(&[dir.path()]).unwrap();
         let err = sync_filesystems_checked(&[dir.path(), &dir.path().join("missing")]).unwrap_err();
         assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
+
+    #[test]
+    fn an_esp_flush_refuses_a_path_not_on_fat() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = flush_esp(dir.path(), true).unwrap_err();
+        assert!(format!("{err:#}").contains("isn't on a FAT filesystem"), "{err:#}");
     }
 }

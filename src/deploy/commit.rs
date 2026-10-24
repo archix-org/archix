@@ -111,7 +111,8 @@ impl Staged {
         self.check()?;
         step.clean().context("removing temporary files from the ESP")?;
         mark("deploy-commit-sync");
-        durable::sync_filesystems_checked(&[store.dir(), esp])?;
+        durable::sync_filesystems_checked(&[store.dir()])?;
+        durable::sync_esp(esp)?;
         mark("deploy-commit-rename");
         let previous = store.current()?;
         let path = store.path(self.number);
@@ -125,7 +126,7 @@ impl Staged {
             mark("deploy-commit-esp");
             step.install(self.number, &path)
                 .with_context(|| format!("writing deployment {}'s boot entry", self.number))?;
-            durable::sync_filesystems_checked(&[esp])?;
+            durable::sync_esp(esp)?;
             mark("deploy-commit-current");
             store.point_current(self.number)
         })();

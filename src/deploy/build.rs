@@ -172,7 +172,7 @@ fn write_entry(store: &Store, paths: &Paths, plan: &BootPlan, number: u32) -> Re
     };
     super::EspStep::clean(&entries)?;
     super::EspStep::install(&entries, number, &root)?;
-    crate::durable::sync_filesystems_checked(&[Path::new(&plan.esp)])?;
+    crate::durable::sync_esp(Path::new(&plan.esp))?;
     boot::retire_fallbacks(paths, Path::new(&plan.esp), number)?;
     staging.discard()
 }
