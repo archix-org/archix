@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points: one runner boot logs the run (FS=ext4|btrfs, DATE/TO_DATE the update, 2026-10-03 to 2026-10-10 or 2026-06-01 for four months, TARGET_PACKAGES, BREAK=entry-before-rename|renamed-unsynced|data-unsynced|bless-unsynced to see it fail), SAVE_LOG=DIR keeps that log, RECORD_ONLY=1 stops there, and LOG=DIR (or its .tar.zst) replays a kept log instead of logging one; a second boot replays it, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), SUBSETS=N seeded random subsets (16; 0: none) of the unflushed ESP writes at each ESP flush point, REORDER_SAMPLE=N real boots of every Nth subset (16; empty: none) and of each point's first that breaks a FAT chain, BOOT_RATIO (3) failing a real boot whose time to its report (the guest's uptime, not the report's own checks) is over that many times the pristine image's, BOOT_CEILING (none) or over that many seconds, BOOT_TIMEOUT (3600 s) for a hung one, SHARD=i/N checking every Nth point of the log by its index, BREAK=torn-file|slow-boot to see the replay fail, COUNTING= without boot counting, SUMMARY=FILE for the shard's coverage as JSON; SEED defaults to GITHUB_RUN_ID or today's date and is printed first, and a failure reproduces exactly as `LOG=<the logged run's dir or powercut-log-FS.tar.zst artifact> SEED=<printed seed> SHARD=<its shard> tests/vm/run.sh powercut`; COMPARE=1 instead logs one switch and its first boot twice with this build and twice with a plain release build and compares their writes, flushes and FUAs.
+# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points: one runner boot logs the run (FS=ext4|btrfs, DATE/TO_DATE the update, 2026-10-03 to 2026-10-10 or 2026-06-01 for four months, TARGET_PACKAGES, BREAK=entry-before-rename|renamed-unsynced|data-unsynced|bless-unsynced to see it fail), SAVE_LOG=DIR keeps that log, RECORD_ONLY=1 stops there, and LOG=DIR (or its .tar.zst) replays a kept log instead of logging one; a second boot replays it, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), SUBSETS=N seeded random subsets (16; 0: none) of the unflushed ESP writes at each ESP flush point, REORDER_SAMPLE=N real boots of every Nth subset (16; empty: none) and of each point's first that breaks a FAT chain, BOOT_RATIO (3) failing a real boot whose time to its report (the guest's uptime, not the report's own checks) is over that many times the pristine image's, BOOT_CEILING (none) or over that many seconds, BOOT_TIMEOUT (3600 s) for a hung one, SHARD=i/N checking every Nth point of the log by its index, BREAK=torn-file|slow-boot to see the replay fail, COUNTING= without boot counting, SUMMARY=FILE for the shard's coverage as JSON; SEED defaults to GITHUB_RUN_ID or today's date and is printed first, and a failure reproduces exactly as `LOG=<the logged run's dir or powercut-log-FS.tar.zst artifact> SEED=<printed seed> SHARD=<its shard> tests/vm/run.sh powercut`; COMPARE=1 instead logs one switch and its first boot twice with this build and twice with a plain release build and compares their writes, flushes and FUAs, SAVE_LOG=DIR keeping each run's io-tokens.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
@@ -68,9 +68,14 @@ if [ -z "$log" ]; then
   cp --sparse=always "$work/disk.img" "$work/pristine.img"
   truncate -s 32G "$work/log.img"
   if [ -n "${COMPARE:-}" ]; then
-    truncate -s 1M "$work/export.img"
-    vm compare /work/disk.img /work/log.img /work/pristine.img /work/export.img
-    exit
+    truncate -s 256M "$work/export.img"
+    status=0
+    vm compare /work/disk.img /work/log.img /work/pristine.img /work/export.img || status=$?
+    if [ -n "${SAVE_LOG:-}" ]; then
+      mkdir -p "$SAVE_LOG"
+      tar -xf "$work/export.img" -C "$SAVE_LOG" && echo "kept the compared runs' io-tokens in $SAVE_LOG"
+    fi
+    exit "$status"
   fi
   truncate -s 512M "$work/export.img"
   vm record /work/disk.img /work/log.img /work/pristine.img /work/export.img

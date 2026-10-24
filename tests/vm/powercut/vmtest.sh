@@ -147,6 +147,7 @@ if [ "$PHASE" = compare ]; then
   done
   "$lib/io-compare" "$state"/tokens-{powercut-1,powercut-2,plain-1,plain-2} > "$state/compare" 2>&1
   verdict=$?
+  tar -C "$state" -cf "$export" compare tokens-{powercut-1,powercut-2,plain-1,plain-2} || fail "exporting the tokens"
   while read -r line; do say "$line"; done < "$state/compare"
   [ "$verdict" = 0 ] || fail "the power-cut build's I/O differs from the plain release build's beyond what two runs of one build differ by"
   say "OK"

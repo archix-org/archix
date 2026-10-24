@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# io-tokens LOG ESP_START ESP_SIZE: one line per logged request but marks, in order: the region it hits (esp, root or none), what it is (write, discard or flush) and its flags (flush, fua, meta).
+# io-tokens LOG ESP_START ESP_SIZE: one line per logged request but marks, in order: the region it hits (esp, root or none), what it is (write, discard or flush), its flags (flush, fua, meta), and its first 512-byte sector, from the ESP's start for the ESP, and length in them.
 import struct
 import sys
 
@@ -18,4 +18,5 @@ with open(log_path, "rb") as log:
         region = "none" if not count else "esp" if first < esp_start + esp_size and first + count * sectorsize // 512 > esp_start else "root"
         kind = "discard" if flags & DISCARD else "write" if count else "flush"
         tags = [name for bit, name in ((FLUSH, "flush"), (FUA, "fua"), (META, "meta")) if flags & bit and not (kind == "flush" and bit == FLUSH)]
-        print(region, kind, ",".join(tags) or "-")
+        length = count * sectorsize // 512
+        print(region, kind, ",".join(tags) or "-", first - esp_start if region == "esp" else first, length)
