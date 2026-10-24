@@ -612,6 +612,18 @@ fn a_read_only_esp_at_boot_keeps_the_deployment_current_says_so_and_is_retried_a
     read_only(true);
     let loader = machine.loader_conf();
     setup.ok_env(&[counting], &["boot-check"]);
+    // systemd-bless-boot's drop-in ignores archix bless failing (ExecStartPre=-), and its own rename then fails the same way.
+    let blessed = setup.run_env(&[counting], &["bless"]);
+    let why = String::from_utf8_lossy(&blessed.stderr);
+    assert!(
+        !blessed.status.success() && why.contains(&format!("renaming archix-{new}+2-1.conf")),
+        "{why}"
+    );
+    assert!(
+        machine.entries().contains(&format!("archix-{new}+2-1.conf")),
+        "its counters stay as they were: {:?}",
+        machine.entries()
+    );
     let out = setup.ok_env(&[counting], &["boot-complete"]);
     assert!(out.contains(said) && out.contains("couldn't count this boot"), "{out}");
     assert_eq!(machine.current(), Some(new), "a healthy deployment isn't rolled back");
