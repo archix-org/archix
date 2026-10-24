@@ -8,7 +8,7 @@ build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"
 seed=${SEED:-${GITHUB_RUN_ID:-$(date -u +%Y%m%d)}}
-echo "power-cut replay: SEED=$seed"
+echo "power-cut replay: SEED=$seed${LOG_ARTIFACT:+ LOG artifact $LOG_ARTIFACT}"
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro)
 log=${LOG:-}
 if [ -n "$log" ]; then
@@ -106,5 +106,5 @@ if [ -n "${SUMMARY:-}" ] && [ -n "$summary" ]; then
   mkdir -p "$(dirname "$SUMMARY")"
   echo "$summary" > "$SUMMARY"
 fi
-[ "$status" = 0 ] || echo "power-cut replay failed: reproduce with LOG=<the logged run> SEED=$seed${SHARD:+ SHARD=$SHARD} tests/vm/run.sh powercut ($(cat "$log/meta"))"
+[ "$status" = 0 ] || echo "power-cut replay failed: reproduce with LOG=${LOG_ARTIFACT:-<the logged run>} SEED=$seed${SHARD:+ SHARD=$SHARD} tests/vm/run.sh powercut ($(cat "$log/meta"))"
 exit "$status"

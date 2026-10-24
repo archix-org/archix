@@ -21,6 +21,6 @@ tests/ci/archive-proxy.py serve --cache ~/.cache/archix-archive --port 8079 &
 ARCHIX_TEST_ARCHIVE=http://127.0.0.1:8079 tests/vm/run.sh boot
 ```
 
-A failed `powercut` shard prints its seed; download its filesystem's `powercut-log-<fs>` artifact and run `LOG=powercut-log-<fs>.tar.zst SEED=<seed> SHARD=<i>/3 tests/vm/run.sh powercut` to replay the same log with the same subsets.
+A failed `powercut` shard prints its seed and the name of the log artifact it replayed, kept 90 days, as a failure in the UKI-copy windows reproduces only from that log; download its filesystem's `powercut-log-<fs>` artifact and run `LOG=powercut-log-<fs>.tar.zst SEED=<seed> SHARD=<i>/3 tests/vm/run.sh powercut` to replay the same log with the same subsets.
 
 A failed job uploads its logs as the `logs-<job>` artifact: each work dir's `serial.log` and other logs, plus the proxy's log, but never disk images.

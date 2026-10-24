@@ -125,12 +125,13 @@ jobs:
           name: powercut-log-${{ matrix.fs }}
           path: ${{ runner.temp }}/out
           compression-level: 0
-          retention-days: 14
+          # A failure in the UKI-copy windows reproduces only from this log, not the seed alone, so it outlives a release cycle.
+          retention-days: 90
       - uses: actions/upload-artifact@v4
         with:
           name: powercut-logged-${{ matrix.fs }}
           path: ${{ runner.temp }}/logged
-          retention-days: 14
+          retention-days: 90
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
@@ -163,6 +164,7 @@ jobs:
           FS: ${{ matrix.fs }}
           LOG: ${{ runner.temp }}/powercut-log/powercut-log-${{ matrix.fs }}.tar.zst
           SHARD: ${{ matrix.shard }}/3
+          LOG_ARTIFACT: "powercut-log-${{ matrix.fs }} of run ${{ github.run_id }} (gh run download ${{ github.run_id }} -n powercut-log-${{ matrix.fs }})"
           SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
       - if: always()
         uses: actions/upload-artifact@v4
