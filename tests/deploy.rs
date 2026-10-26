@@ -2156,13 +2156,18 @@ fn dropping_a_deployments_entries_reaches_the_disk_before_its_ukis_are_freed() {
 /// The start cluster and size in `entry`'s short-name directory entry (8.3, upper case, padded) on a FAT image, if it has one.
 fn fat_dir_entry(img: &Path, entry: &[u8; 11]) -> Option<(u32, u32)> {
     let bytes = fs::read(img).unwrap();
-    bytes.chunks_exact(32).find(|de| &de[..11] == entry).map(|de| {
-        let word = |at: usize| u16::from_le_bytes([de[at], de[at + 1]]) as u32;
-        (
-            word(20) << 16 | word(26),
-            u32::from_le_bytes(de[28..32].try_into().unwrap()),
-        )
-    })
+    bytes
+        .as_chunks::<32>()
+        .0
+        .iter()
+        .find(|de| &de[..11] == entry)
+        .map(|de| {
+            let word = |at: usize| u16::from_le_bytes([de[at], de[at + 1]]) as u32;
+            (
+                word(20) << 16 | word(26),
+                u32::from_le_bytes(de[28..32].try_into().unwrap()),
+            )
+        })
 }
 
 #[test]
