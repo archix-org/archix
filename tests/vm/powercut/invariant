@@ -40,6 +40,7 @@ class Entry:
         self.tries_left = int(m.group(2)) if m.group(2) is not None else UNCOUNTED
         self.tries_done = int(m.group(3) or 0)
         self.keys = {}
+        self.empty = False
         self.fallback = osrel is not None
         if self.fallback:
             # systemd-boot's Type #2 entry: its sort key is IMAGE_ID or ID, its version IMAGE_VERSION or VERSION_ID.
@@ -51,7 +52,9 @@ class Entry:
             self.image = "/EFI/Linux/" + name
             g = re.fullmatch(r"archix-fallback-([1-9]\d*)\.efi", self.id)
         else:
-            for line in (read(os.path.join(esp, "loader/entries", name)) or b"").decode(errors="replace").splitlines():
+            text = read(os.path.join(esp, "loader/entries", name)) or b""
+            self.empty = not text
+            for line in text.decode(errors="replace").splitlines():
                 parts = line.strip().split(None, 1)
                 if len(parts) == 2 and not parts[0].startswith("#"):
                     self.keys.setdefault(parts[0], parts[1].strip())
@@ -177,13 +180,16 @@ def boot(root, entry):
 
 
 def check(root, esp, before, after):
-    problems = []
+    problems, notes = [], []
     listed = entries(esp, type2=True)
     bootable = 0
     for e in listed:
         if e.generation is None:
             continue
-        if not e.image:
+        if not e.image and e.empty:
+            # An entry fits in one cluster, so fsck either keeps it whole or, where its removal freed the cluster but left the directory entry, empties it.
+            notes.append(f"{e.name} is empty, as fsck leaves an entry whose removal a power cut cut short; systemd-boot skips an entry with no linux, efi or uki line")
+        elif not e.image:
             problems.append(f"{e.name} has no efi or uki line, so it was written torn")
         elif not committed(root, e.generation):
             # The ESP step puts the fallback down before the deployment is committed.
@@ -236,6 +242,8 @@ def check(root, esp, before, after):
         f"picked {picked.name if picked else None}, booted {booted}, current {current}, bootable entries {bootable}, entries {[e.name for e in listed]}, "
         f"default {loader_setting(esp, 'default')}, preferred {loader_setting(esp, 'preferred')}, deploy {deployed}"
     )
+    for note in notes:
+        print(f"note: {note}")
     for problem in problems:
         print(f"PROBLEM: {problem}")
     return not problems
@@ -258,7 +266,7 @@ def orphans(root, esp):
             committed_numbers.add(name)
             if not os.path.isdir(os.path.join(state, "generations", name)):
                 found.append(f"ORPHAN: deployment {name} has no generation record")
-            if not any(e.generation == name and not e.id.endswith("-protected.conf") for e in listed):
+            if not any(e.generation == name and e.image and not e.id.endswith("-protected.conf") for e in listed):
                 found.append(f"ORPHAN: deployment {name} has no boot entry")
     for e in listed:
         if e.generation not in committed_numbers:
