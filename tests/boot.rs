@@ -766,6 +766,119 @@ fn a_lost_loader_conf_after_a_rollback_leaves_the_rolled_back_deployment_current
 }
 
 /// Every file on a machine's ESP except systemd-boot's own, relative to it.
+#[test]
+#[ignore]
+fn from_a_live_usb_rolling_back_to_current_after_the_esp_was_wiped_writes_its_entry_default_and_fallback_again() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let current = machine.current().unwrap();
+    let esp = machine.esp();
+    for dir in ["loader", "EFI/archix", "EFI/Linux"] {
+        let _ = fs::remove_dir_all(esp.join(dir));
+    }
+    let out = setup.ok(&["rollback", &current.to_string(), "--noconfirm"]);
+    assert!(
+        out.contains(&format!("deployment {current} has no boot entry")),
+        "{out}"
+    );
+    assert_eq!(entries(machine), [format!("archix-{current}.conf")]);
+    assert!(
+        machine.loader_conf().contains(&format!("archix-{current}")),
+        "{}",
+        machine.loader_conf()
+    );
+    assert_eq!(archix::system::boot::fallbacks(&esp), [current]);
+    let out = machine.reboot(Some(&format!("archix-{current}.conf")));
+    assert!(
+        out.contains(&format!("booting deployment {current} (the boot entry")),
+        "{out}"
+    );
+    let again = setup.ok(&["rollback", &current.to_string(), "--noconfirm"]);
+    assert!(
+        !again.contains("has no boot entry"),
+        "an intact ESP is left as it is: {again}"
+    );
+}
+
+fn mount_deployment(root: &Path, number: Option<u32>) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_archix"));
+    command.arg("mount-deployment").arg(root);
+    if let Some(number) = number {
+        command.arg(number.to_string());
+    }
+    command.output().unwrap()
+}
+
+#[test]
+#[ignore]
+fn from_a_live_usb_mount_deployment_binds_a_kept_deployment_over_the_mounted_root() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 5 }";
+    let setup = Setup::new(&[], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let older = machine.current().unwrap();
+    setup.set_body(&["tree"], keep);
+    setup.ok(&["switch", "--noconfirm"]);
+    let newest = machine.current().unwrap();
+    let root = &machine.root;
+    machine.power_off();
+
+    let out = mount_deployment(root, Some(older));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{text}{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        text.contains(&format!("arch-chroot {}", root.display())) && text.contains(&format!("archix rollback {older}")),
+        "{text}"
+    );
+    assert!(
+        !root.join("usr/bin/tree").exists(),
+        "deployment {older}'s /usr has no tree"
+    );
+    assert!(
+        !archix::pacman::read_local_db(&root.join("var/lib/pacman/local"))
+            .unwrap()
+            .contains_key("tree"),
+        "and its pacman database doesn't list it"
+    );
+    assert!(fs::write(root.join("usr/x"), "").is_err(), "/usr is bound read-only");
+    assert!(fs::write(root.join("archix/x"), "").is_err(), "and so is the store");
+    let twice = mount_deployment(root, Some(older));
+    assert!(
+        String::from_utf8_lossy(&twice.stderr).contains("is mounted already"),
+        "{}",
+        String::from_utf8_lossy(&twice.stderr)
+    );
+
+    machine.power_off();
+    let out = mount_deployment(root, None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(root.join("usr/bin/tree").exists(), "current, {newest}, by default");
+
+    machine.power_off();
+    fs::remove_dir_all(machine.deployment(newest).join("opt")).unwrap();
+    let out = mount_deployment(root, None);
+    let err = String::from_utf8_lossy(&out.stderr);
+    let complete = err
+        .split("the complete ones are ")
+        .nth(1)
+        .unwrap_or_default()
+        .trim()
+        .split(", ")
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        !out.status.success()
+            && err.contains(&format!("deployment {newest} isn't complete"))
+            && complete.contains(&older.to_string())
+            && !complete.contains(&newest.to_string()),
+        "{err}"
+    );
+    assert!(!root.join("usr/bin/tree").exists(), "nothing was bound");
+}
+
 fn esp_files(machine: &Machine) -> Vec<String> {
     fn walk(esp: &Path, dir: &Path, out: &mut Vec<String>) {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {

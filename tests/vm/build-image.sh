@@ -29,6 +29,8 @@ elif [ "$suite" = firewall ]; then
   dir=/vm/firewall packages=(base linux mkinitcpio systemd-ukify openssh nftables)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
+elif [ "$suite" = recovery ]; then
+  dir=/vm/recovery
 fi
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
@@ -189,3 +191,4 @@ fi
 # Inside the VM the host-side mirror has another address; each deployment has its own /etc.
 sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/archix/deploy/*/etc/archix/init.lua /mnt/archix/deploy/*/etc/pacman.d/mirrorlist
 [ ! -f /mnt/var/lib/archix/archive-url ] || sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/var/lib/archix/archive-url
+[ "$suite" != recovery ] || /vm/recovery/build-rescue.sh

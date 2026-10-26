@@ -1355,7 +1355,19 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     };
     if number == current {
         if layout::laid_out(&paths.root) {
-            deploy::Store::open(&paths.root)?.choose(number)?;
+            let deployments = deploy::Store::open(&paths.root)?;
+            // As after the ESP was lost or wiped: current's entry, default and fallback come back from its deployment.
+            if let Some(boot) = store.get(number)?.settings.boot
+                && deployments.deployments()?.contains(&number)
+                && !system::boot::entries(Path::new(&boot.esp))
+                    .iter()
+                    .any(|(n, extra, _)| *n == number && !extra)
+            {
+                system::boot::require_esp(Path::new(&boot.esp))?;
+                deploy::verify::ensure_intact(&paths, &deployments, number)?;
+                ensure_entry(&paths, &boot, number)?;
+            }
+            deployments.choose(number)?;
         }
         println!("generation {number} is current already; it stays, and gc may now drop newer deployments");
         return Ok(());

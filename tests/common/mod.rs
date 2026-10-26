@@ -225,13 +225,7 @@ impl Machine {
 
     /// Restarts the machine into the boot entry `entry`, or into `current` without one: the deployment binds go, and the initramfs's `archix deploy-mount` binds the deployment it picks.
     pub fn reboot(&self, entry: Option<&str>) -> String {
-        for (_, at) in archix::system::deploy_boot::TREES {
-            Machine::unmount_all(&self.root.join(at));
-        }
-        let store = self.root.join("archix");
-        while Machine::mounts_under(&store).contains(&store) {
-            sh(&format!("umount {}", store.display()));
-        }
+        self.power_off();
         let efivar = self.root.join("run/test-efivar");
         match entry {
             Some(entry) => {
@@ -261,6 +255,17 @@ impl Machine {
         assert!(output.status.success(), "deploy-mount failed:\n{text}");
         *self.booted.borrow_mut() = entry.map(str::to_string);
         text
+    }
+
+    /// Takes the running deployment's binds and the read-only store off the root, leaving it as a live USB mounts it.
+    pub fn power_off(&self) {
+        for (_, at) in archix::system::deploy_boot::TREES {
+            Machine::unmount_all(&self.root.join(at));
+        }
+        let store = self.root.join("archix");
+        while Machine::mounts_under(&store).contains(&store) {
+            sh(&format!("umount {}", store.display()));
+        }
     }
 
     /// Makes the machine's /archix, which its boot bound read-only, writable or read-only again, as a test that edits a deployment by hand needs.

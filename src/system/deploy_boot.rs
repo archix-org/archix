@@ -345,6 +345,57 @@ pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     Ok(chosen.generation)
 }
 
+/// The committed deployments under `archix` that have every tree, oldest first.
+fn complete_deployments(archix: &Path) -> Vec<u32> {
+    let mut numbers: Vec<u32> = fs::read_dir(archix.join("deploy"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|number| complete(archix, *number))
+        .collect();
+    numbers.sort_unstable();
+    numbers
+}
+
+/// From a live USB: binds deployment `number`'s trees, current's by default, over the archix root mounted at `root`, and the store read-only as a boot does, so `arch-chroot` into `root` runs that deployment.
+pub fn mount_for_chroot(root: &Path, number: Option<u32>) -> Result<u32> {
+    let archix = root.join("archix");
+    if !is_dir(&archix.join("deploy")) {
+        bail!(
+            "{} doesn't exist, so either the root isn't mounted at {} or it doesn't use deployments",
+            archix.join("deploy").display(),
+            root.display()
+        );
+    }
+    let kept = complete_deployments(&archix);
+    let listed = kept.iter().map(u32::to_string).collect::<Vec<_>>().join(", ");
+    let number = match number {
+        Some(number) => number,
+        None => match current(&archix) {
+            Ok(Some(number)) => number,
+            Ok(None) => bail!("{} has no current deployment; name one of {listed}", archix.display()),
+            Err(e) => return Err(e.context(format!("name one of the complete deployments: {listed}"))),
+        },
+    };
+    if !kept.contains(&number) {
+        bail!("deployment {number} isn't complete; the complete ones are {listed}");
+    }
+    let mountinfo = fs::read("/proc/self/mountinfo").unwrap_or_default();
+    let points = crate::deploy::view::mount_points(&mountinfo);
+    if let Some((_, at)) = TREES.iter().find(|(_, at)| points.contains(&root.join(at))) {
+        bail!(
+            "{} is mounted already; `umount -R {}` and mount the root again first",
+            root.join(at).display(),
+            root.display()
+        );
+    }
+    bind_trees(root, &archix.join("deploy").join(number.to_string()))
+        .with_context(|| format!("mounting deployment {number}"))?;
+    protect_store(root)?;
+    Ok(number)
+}
+
 /// The activation unit.
 pub fn activate_file(root: &Path, archix: &Path) -> (PathBuf, String) {
     (

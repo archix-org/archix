@@ -98,3 +98,23 @@ pub fn verify(repair: bool) -> Result<()> {
     }
     Ok(())
 }
+
+/// `archix mount-deployment`, from a live USB: binds a deployment's trees over the mounted archix root and says what to run next.
+pub fn mount_deployment(root: &std::path::Path, number: Option<u32>) -> Result<()> {
+    require_root("mount-deployment")?;
+    let number = system::deploy_boot::mount_for_chroot(root, number)?;
+    println!("bound deployment {number}'s trees over {}", root.display());
+    let esp = fs::read_to_string(Paths::under(root).state.join("boot/esp")).unwrap_or_default();
+    let esp = esp.trim().trim_start_matches('/');
+    if !esp.is_empty() && !system::boot::is_fat(&root.join(esp)) {
+        println!(
+            "mount the ESP at {} next, as boot entries go there",
+            root.join(esp).display()
+        );
+    }
+    println!(
+        "then `arch-chroot {root}`, and there `archix rollback {number}` makes deployment {number} current and writes its boot entry; `umount -R {root}` once you're done",
+        root = root.display()
+    );
+    Ok(())
+}
