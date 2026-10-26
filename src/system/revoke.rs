@@ -174,11 +174,8 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
         current.len(),
         images.len()
     );
-    if ours + images.len() > MAX_ENTRIES {
-        bail!(
-            "that would make {} of archix's entries in dbx, more than the {MAX_ENTRIES} it allows itself, since the firmware's variable store is small and Windows' dbx updates need room too; nothing was changed",
-            ours + images.len()
-        );
+    if let Some(warning) = room_for(ours, images.len())? {
+        eprintln!("warning: {warning}");
     }
     if dry_run {
         return Ok(());
@@ -188,7 +185,8 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
     )?;
     if free < size + NVRAM_MARGIN {
         bail!(
-            "the firmware has {free} bytes of variable space free, and archix keeps {NVRAM_MARGIN} free besides what it writes; nothing was changed"
+            "the firmware has {free} bytes of variable space free, and archix keeps {NVRAM_MARGIN} free besides what it writes; nothing was changed. Firmware usually reclaims the space old copies of variables hold at a reboot, so this may pass after one. Until it does, {}",
+            PAST_THE_CEILING
         );
     }
     let (key, cert) = kek()?;
@@ -240,7 +238,15 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
     if was_immutable {
         let _ = set_immutable(Path::new(DBX), true);
     }
-    written?;
+    if let Err(e) = written {
+        let size = fs::metadata(&backup).map_or(0, |meta| meta.len().saturating_sub(4));
+        if format!("{e:#}").contains("No space left") {
+            bail!(
+                "the firmware has no room for dbx to grow from {size} bytes, which can be the most one variable may hold, a limit Linux doesn't show; nothing was changed. From here on {PAST_THE_CEILING}"
+            );
+        }
+        return Err(e);
+    }
     let _ = fs::remove_dir_all(&work);
     let now: BTreeSet<String> = dbx()?.iter().map(|(_, hash)| hex(hash)).collect();
     let missing: Vec<&Signed> = images.iter().filter(|image| !now.contains(&image.hash)).collect();
@@ -262,6 +268,27 @@ pub fn revoke(paths: &Paths, dry_run: bool, automatic: bool, confirm: &dyn Fn(&s
         backup.display()
     );
     Ok(())
+}
+
+/// From this many of its own entries in dbx on, archix warns that it nears its cap.
+const WARN_ENTRIES: usize = MAX_ENTRIES * 3 / 4;
+
+/// What a revocation archix can't write leaves, and the one way past it.
+const PAST_THE_CEILING: &str = "the boot images archix stops using stay bootable for anyone who kept a copy, and only a new Secure Boot db key retires them all at once, as the firmware then trusts nothing the old key signed (https://archix.dev/docs/guides/secure-boot/#the-dbx-ceiling)";
+
+/// Refuses adding `adding` entries to archix's `ours` in dbx past its cap, and warns once they reach three quarters of it.
+fn room_for(ours: usize, adding: usize) -> Result<Option<String>> {
+    let after = ours + adding;
+    if after > MAX_ENTRIES {
+        bail!(
+            "that would make {after} of archix's entries in dbx, more than the {MAX_ENTRIES} it allows itself, since the firmware's variable store is small and Windows' dbx updates need room too; nothing was changed. From here on {PAST_THE_CEILING}"
+        );
+    }
+    Ok((after >= WARN_ENTRIES).then(|| {
+        format!(
+            "archix will have {after} of the {MAX_ENTRIES} dbx entries it allows itself; past that it revokes nothing more (https://archix.dev/docs/guides/secure-boot/#the-dbx-ceiling)"
+        )
+    }))
 }
 
 /// Sets or clears a file's immutable flag, returning whether it was set.
@@ -331,6 +358,22 @@ mod tests {
                 signed("aa", "7.2.8-arch1-1-aaaa.efi"),
                 signed("dd", "7.2.9-arch1-1-dddd.efi")
             ]
+        );
+    }
+
+    #[test]
+    fn archix_warns_from_three_quarters_of_its_dbx_cap_and_refuses_past_it() {
+        assert_eq!(room_for(0, 1).unwrap(), None);
+        assert_eq!(room_for(94, 1).unwrap(), None);
+        let near = room_for(95, 1).unwrap().unwrap();
+        assert!(near.contains("96 of the 128"), "{near}");
+        assert!(room_for(127, 1).unwrap().is_some());
+        let refused = format!("{:#}", room_for(127, 2).unwrap_err());
+        assert!(
+            refused.contains("that would make 129 of archix's entries in dbx, more than the 128 it allows itself")
+                && refused.contains("nothing was changed")
+                && refused.contains("new Secure Boot db key"),
+            "{refused}"
         );
     }
 
