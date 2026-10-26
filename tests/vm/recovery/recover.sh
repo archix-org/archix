@@ -29,7 +29,11 @@ in_root archix verify > "$log" 2>&1 && fail "archix verify should find deploymen
 grep -q "^deployment $kept: matches its packages" "$log" && grep -q "^deployment $broken: .* differ" "$log" || fail "archix verify should flag deployment $broken and pass $kept: $(tr '\n' '|' < "$log")"
 say "verify: $(grep -v '^::' "$log" | tr '\n' '|')"
 # 3. Put systemd-boot back, make the intact deployment current and write its boot entry and fallback.
-step in_root bootctl --esp-path="$at" install
+if ! in_root bootctl --esp-path="$at" install > "$log" 2>&1; then
+  in_root SYSTEMD_LOG_LEVEL=debug SYSTEMD_LOG_TARGET=console bootctl --esp-path="$at" install > "$log" 2>&1
+  say "DIAG: bootctl install failed (exit $? when repeated): $(tail -25 "$log" | tr '\n' '|')"
+  step in_root bootctl --esp-path="$at" --no-variables install
+fi
 say "bootctl: $(tail -4 "$log" | tr '\n' '|')"
 step in_root archix rollback "$kept" --noconfirm
 say "rollback: $(tail -6 "$log" | tr '\n' '|')"
