@@ -36,6 +36,12 @@ impl Registry {
 
 /// Adds every number `texts` hands out that the registry hasn't seen.
 pub fn record(state: &Path, texts: &Texts) -> Result<()> {
+    fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
+    let lock = fs::File::create(state.join("id-registry.lock")).context("opening the ID registry's lock")?;
+    // A switch and the /etc merge can both record at once; without it one's numbers would be lost.
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("locking the ID registry");
+    }
     let mut registry = Registry::load(state);
     let [uids, gids] = ids(texts);
     let mut changed = false;
@@ -179,6 +185,31 @@ mod tests {
         let registry = Registry::load(&state);
         assert_eq!(registry.uids.get(&960).map(String::as_str), Some("pkg"));
         assert_eq!(registry.uids.get(&1005).map(String::as_str), Some("gone"));
+    }
+
+    #[test]
+    fn records_made_at_once_all_land() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().to_path_buf();
+        let threads: Vec<_> = (0..16u32)
+            .map(|i| {
+                let state = state.clone();
+                std::thread::spawn(move || {
+                    let id = 2000 + i;
+                    record(
+                        &state,
+                        &texts(&format!("u{i}:x:{id}:{id}::/:/bin/sh\n"), &format!("u{i}:x:{id}:\n")),
+                    )
+                    .unwrap();
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let registry = Registry::load(&state);
+        assert_eq!(registry.uids.len(), 16, "{:?}", registry.uids);
+        assert_eq!(registry.gids.len(), 16, "{:?}", registry.gids);
     }
 
     fn texts(passwd: &str, group: &str) -> Texts {
