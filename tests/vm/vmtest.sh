@@ -160,6 +160,8 @@ case $stage in
     archix secure-boot setup > /dev/console 2>&1 || fail "archix secure-boot setup"
     sed -i 's|boot = { loader = "systemd-boot" }|boot = { loader = "systemd-boot", secure_boot = true, protected_entry = true }|' "$config"
     archix --host archix-vm switch --noconfirm > /dev/console 2>&1 || fail "switch with Secure Boot"
+    # config.lua's systemd-bless-boot drop-ins make the ESP read-only for archix bless at the next boot, which counts the new entry.
+    touch "$state/bless-fault"
     next 5
     systemctl reboot
     ;;
@@ -170,6 +172,16 @@ case $stage in
     grep -qx "default archix-$(current).conf" "$loader" && ! grep -q "^preferred" "$loader" \
       || fail "once deployment $(current) booted fine, it should be the default and nothing preferred: $(cat "$loader")"
     say "PASS: a deployment that booted fine became systemd-boot's default"
+    rm -f "$state/bless-fault"
+    bless=$(journalctl -b -u systemd-bless-boot.service --no-pager)
+    echo "$bless" | grep -qE "renaming archix-$booted\+[0-9-]+\.conf to archix-$booted\.conf.*Read-only file system" \
+      || fail "archix bless should have failed to rename the counted entry on the read-only ESP: $(echo "$bless" | tail -8)"
+    systemctl is-active -q systemd-bless-boot.service || fail "systemd-bless-boot should succeed after archix bless failed: $(echo "$bless" | tail -8)"
+    [ -f "/efi/loader/entries/archix-$booted.conf" ] || fail "systemd-bless-boot should have blessed deployment $booted's entry: $(ls /efi/loader/entries | tr '\n' ' ')"
+    ls /efi/loader/entries | grep -qE '\+' && fail "no entry should keep or gain boot counters: $(ls /efi/loader/entries | tr '\n' ' ')"
+    [ "$(current)" = "$booted" ] || fail "deployment $booted should stay current after archix bless failed, not $(current)"
+    grep -qs "couldn't count this boot" /var/lib/archix/notes && fail "the login notes shouldn't say the boot wasn't counted: $(cat /var/lib/archix/notes)"
+    say "PASS: with archix bless failing on a read-only ESP, systemd-bless-boot still blessed deployment $booted's entry, which stays current and unmarked"
     archix secure-boot check > /dev/console 2>&1 || fail "secure-boot check should pass"
     archix secure-boot check --anticheat > /dev/console 2>&1 && fail "the anti-cheat check can't pass with a self-signed kernel"
     [ -f "/efi/loader/entries/archix-$(current)-protected.conf" ] || fail "protected_entry should write a protected entry"

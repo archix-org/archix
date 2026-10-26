@@ -7,6 +7,9 @@ return {
   files = {
     ["/usr/local/bin/archix-vmtest"] = { source = "vmtest.sh", mode = "0755" },
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
+    -- Around archix's own archix.conf: with the stage's marker set, the ESP is read-only for archix bless and writable again for systemd-bless-boot.
+    ["/etc/systemd/system/systemd-bless-boot.service.d/00-vmtest.conf"] = { text = "[Service]\nExecStartPre=/bin/sh -c 'if [ -e /var/lib/archix-vmtest/bless-fault ]; then ls /efi > /dev/null && mount -o remount,ro /efi; fi'\n" },
+    ["/etc/systemd/system/systemd-bless-boot.service.d/zz-vmtest.conf"] = { text = "[Service]\nExecStartPre=/bin/sh -c 'if [ -e /var/lib/archix-vmtest/bless-fault ]; then mount -o remount,rw /efi; fi'\n" },
   },
   units = {
     ["archix-marker.service"] = "[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/bin/true\n\n[Install]\nWantedBy=multi-user.target", -- marker
