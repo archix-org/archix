@@ -8,7 +8,15 @@ mkdir -p "$state"
 head -c 65536 /dev/vdf | tr -d '\000' > /etc/archix-powercut.conf
 . /etc/archix-powercut.conf
 say() { echo "VMTEST: $*" > /dev/console; }
-fail() { say "FAIL: $*"; systemctl poweroff; exit 1; }
+# What a failed replay is read by: its check log and the consoles of the boots that failed, on vdg, which run.sh unpacks into the work dir's out/.
+keep_logs() {
+  [ "$PHASE" = replay ] && [ -d "$state" ] || return 0
+  rm -rf "$state/out" && mkdir -p "$state/out"
+  cp "$state"/check.log "$state"/replay.log "$state"/boot-*.log "$state"/case-*.log "$state/out/" 2> /dev/null
+  for f in real-boots point-times reorder-points slow-once; do [ ! -e "$state/$f" ] || cp "$state/$f" "$state/out/$f.txt"; done
+  tar -C "$state/out" -cf /dev/vdg . 2> /dev/null
+}
+fail() { say "FAIL: $*"; keep_logs; systemctl poweroff; exit 1; }
 [ -e "$state/started" ] && fail "the runner rebooted"
 touch "$state/started"
 target=/dev/vdb log=/dev/vdc pristine=/dev/vdd export=/dev/vde
@@ -222,19 +230,23 @@ if [ -z "$POINTS" ] && [ "${SUBSETS:-0}" -gt 0 ]; then
 fi
 modprobe -q kvm_amd || modprobe -q kvm_intel
 [ -e /dev/kvm ] || fail "no KVM in the runner for the real boots; the host needs nested virtualisation"
-# What a real boot takes on this machine: the pristine image's, deployment 3's first boot, which every replayed state's is judged against.
-secs=$("$lib/esp-case" pristine) || fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"
+# What a real boot takes on this machine: the pristine image's, deployment 3's first boot, whose archix units' time every replayed state's is judged against.
+secs=$("$lib/esp-case" pristine) || { cp /dev/shm/boot.log "$state/boot-pristine.log"; fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"; }
+cp /dev/shm/boot.log "$state/boot-pristine.log"
 real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
 [[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-5000)"
 took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
+units=$(grep -o ' archix=[0-9]*' <<< "$real" | cut -d= -f2)
+[ -n "$units" ] || fail "the pristine image's report has no archix units' time: $real"
 echo "${took:-$secs}" > "$state/baseline-boot"
-echo "$secs" > "$state/baseline-wall"
-say "baseline: the pristine image boots for real in ${took:-$secs} s to its report, $secs s with it ($real); a replayed state may take ${BOOT_RATIO}x that${BOOT_CEILING:+, and at most $BOOT_CEILING s}"
+echo "$units" > "$state/baseline-units"
+say "baseline: the pristine image boots for real in ${took:-$secs} s to its report, $secs s with it, $units ms of it in archix's units ($real; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r')); a replayed state's archix units may take ${BOOT_RATIO}x that or $BOOT_FLOOR s more, whichever is longer, unless a second boot of it and of the pristine image says otherwise${BOOT_CEILING:+, and its boot at most $BOOT_CEILING s}"
 # Each way the ESP can be mounted, with a file on it whose FAT chain runs into a free cluster, as a power cut can leave one; then what fsck's repair of current's entry or UKI leaves.
 cases=0
 for c in passno-2 passno-0 gpt-auto drop-entry drop-uki empty-uki only-fallback; do
   [ -z "$SHARD" ] || [ "$((cases % ${SHARD#*/}))" = "$((${SHARD%/*} - 1))" ] || { cases=$((cases + 1)); continue; }
   cases=$((cases + 1))
+  [ -z "$CASES" ] || [[ ,$CASES, == *,$c,* ]] || continue
   "$lib/esp-case" "$c" > "$state/case.out" 2>&1 || fail "ESP case $c: $(tail -3 "$state/case.out" | tr '\n' '|')"
   say "ESP case $c: $(tail -1 "$state/case.out")"
   echo "$c" >> "$state/cases"
@@ -270,7 +282,9 @@ say "PASS: $total points, $checked of them checked, in $((SECONDS - replay_start
 if [ -s "$state/reorder-points" ]; then
   say "PASS: reordered $(awk '{ n += $4 } END { print n }' "$state/reorder-points") ESP subsets in $(awk '{ s += $5 } END { print s }' "$state/reorder-points") s at $(wc -l < "$state/reorder-points") flush points (seed $SEED, windows of up to $(sort -n -k2 "$state/reorder-points" | tail -1 | cut -d' ' -f2) ESP writes); $(subset_count real-boots) booted for real; fsck notes: $(subset_count vfat-notes) ESP; $(subset_count repaired) ESP repairs checked; $(subset_count leftover-points) leave leftovers the next switch clears"
 fi
-say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(grep -o 'secs=[0-9]*' "$state/real-boots" | cut -d= -f2 | sort -n | awk '{ a[NR] = $1; s += $1 } END { printf "%.1f s mean, %d s median, %d s max", s / NR, a[int((NR + 1) / 2)], a[NR] }') against the baseline's $(cat "$state/baseline-boot") s"
+spread() { grep -o " $1=[0-9]*" "$state/real-boots" 2> /dev/null | cut -d= -f2 | sort -n | awk -v u="$2" '{ a[NR] = $1; s += $1 } END { if (NR) printf "%d %s mean, %d %s median, %d %s max", s / NR, u, a[int((NR + 1) / 2)], u, a[NR], u; else printf "none" }'; }
+say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(spread secs s), $(spread boot s) to the report, against the baseline's $(cat "$state/baseline-boot") s; archix's units $(spread archix ms) against the baseline's $(cat "$state/baseline-units") ms"
+[ ! -s "$state/slow-once" ] || while read -r line; do say "slow once: $line"; done < "$state/slow-once"
 if [ -s "$state/orphans" ]; then
   while read -r n line; do say "orphan at $n points: $line"; done < <(cut -d' ' -f2- "$state/orphans" | sort | uniq -c)
   fail "$(count orphans) points and $(subset_count orphans) ESP subsets leave orphans after the next boot and gc"

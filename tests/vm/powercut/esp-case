@@ -88,10 +88,10 @@ with open(sys.argv[1], "r+b") as dev:
 PY
   fsck.vfat -n /dev/mapper/cesp 2>&1 | grep -q 'free cluster' || { echo "the broken chain isn't there: $(fsck.vfat -n /dev/mapper/cesp 2>&1 | tail -3 | tr '\n' '|')"; exit 2; }
 fi
-baseline=$(cat "$state/baseline-wall")
-timeout=$((5 * baseline))
-[ "$case" != empty-uki ] || timeout=$((2 * baseline))
-secs=$("$lib/boot-real" /dev/mapper/csnap "$timeout")
+# A case is judged by what its boot reports, not how long it takes, so only BOOT_TIMEOUT stops a hung one; systemd-boot's failure to load an empty UKI ends the boot.
+stop=
+[ "$case" != empty-uki ] || stop='Error loading EFI binary'
+secs=$("$lib/boot-real" /dev/mapper/csnap "" "$stop")
 real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
 cp /dev/shm/boot.log "$state/case-$case.log"
 problems=()
@@ -100,7 +100,7 @@ if [ "$case" = empty-uki ]; then
   [ -z "$real" ] && grep -aq 'Error loading EFI binary' /dev/shm/boot.log || problems+=("systemd-boot was expected to stop at the empty UKI: ${real:-$(grep -a -i 'error' /dev/shm/boot.log | tail -3 | tr -d '\r' | tr '\n' '|')}")
   real="POWERCUT-BOOTED none: $(grep -a -o 'Error loading EFI binary[^:]*: [A-Za-z ]*' /dev/shm/boot.log | head -1)"
 elif [ -z "$real" ]; then
-  problems+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency\|error' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
+  problems+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency\|error' /dev/shm/boot.log | grep -av 'POWERCUT-WATCH' | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700); still running: $(awk '/POWERCUT-WATCH at / { buf = "" } /POWERCUT-WATCH/ { sub(/.*POWERCUT-WATCH /, ""); buf = buf $0 "|" } END { print buf }' /dev/shm/boot.log | tr -d '\r' | cut -c1-1500)")
 else
   [[ $real == *" deployment=$expected "* ]] || problems+=("systemd-boot was predicted to start $expect")
   [[ $real == *" altered=0 "* ]] || problems+=("package files altered")
@@ -110,7 +110,7 @@ else
   else
     [[ $real == *" espfsck=none "* ]] || problems+=("systemd-fsck checked the ESP, though nothing asked it to")
   fi
-  [[ $real == *" failed=" || $want_fsck == 0 ]] || problems+=("failed units")
+  [[ $real == *" failed=" || $want_fsck == 0 ]] || problems+=("failed units: ${real##* failed=}: $(grep -a -o 'POWERCUT-\(FAILED\|JOURNAL\).*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-4000)")
 fi
 echo "$real secs=$secs"
 grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | head -6

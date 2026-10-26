@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points: one runner boot logs the run (FS=ext4|btrfs, DATE/TO_DATE the update, 2026-10-03 to 2026-10-10 or 2026-06-01 for four months, TARGET_PACKAGES, BREAK=entry-before-rename|renamed-unsynced|data-unsynced|bless-unsynced to see it fail), SAVE_LOG=DIR keeps that log, RECORD_ONLY=1 stops there, and LOG=DIR (or its .tar.zst) replays a kept log instead of logging one; a second boot replays it, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), SUBSETS=N seeded random subsets (16; 0: none) of the unflushed ESP writes at each ESP flush point, REORDER_SAMPLE=N real boots of every Nth subset (16; empty: none) and of each point's first that breaks a FAT chain, BOOT_RATIO (3) failing a real boot whose time to its report (the guest's uptime, not the report's own checks) is over that many times the pristine image's, BOOT_CEILING (none) or over that many seconds, BOOT_TIMEOUT (3600 s) for a hung one, SHARD=i/N checking every Nth point of the log by its index, BREAK=torn-file|slow-boot to see the replay fail, COUNTING= without boot counting, SUMMARY=FILE for the shard's coverage as JSON; SEED defaults to GITHUB_RUN_ID or today's date and is printed first, and a failure reproduces exactly as `LOG=<the logged run's dir or powercut-log-FS.tar.zst artifact> SEED=<printed seed> SHARD=<its shard> tests/vm/run.sh powercut`; COMPARE=1 instead logs one switch and its first boot twice with this build and twice with a plain release build and compares their writes, flushes and FUAs, SAVE_LOG=DIR keeping each run's io-tokens.
+# Power-cut replay of archix's real switch, rollback, rebuild and first boots through dm-log-writes, with real nested boots at ESP points: one runner boot logs the run (FS=ext4|btrfs, DATE/TO_DATE the update, 2026-10-03 to 2026-10-10 or 2026-06-01 for four months, TARGET_PACKAGES, BREAK=entry-before-rename|renamed-unsynced|data-unsynced|bless-unsynced to see it fail), SAVE_LOG=DIR keeps that log, RECORD_ONLY=1 stops there, and LOG=DIR (or its .tar.zst) replays a kept log instead of logging one; a second boot replays it, REPLAY_POINTS=N for evenly spaced prefixes, SAMPLE=N real boots of every Nth other point (empty: none), SUBSETS=N seeded random subsets (16; 0: none) of the unflushed ESP writes at each ESP flush point, REORDER_SAMPLE=N real boots of every Nth subset (16; empty: none) and of each point's first that breaks a FAT chain, BOOT_RATIO (3) and BOOT_FLOOR (10 s) failing a real boot whose archix units take over that many times the pristine image's, or that many seconds more, whichever is longer, both in it and in a second boot of it judged against a second one of the pristine image, BOOT_CEILING (none) one over that many seconds to its report, BOOT_TIMEOUT (3600 s) for a hung one, SHARD=i/N checking every Nth point of the log by its index, ONLY=P,Q/S only point P and subset S of point Q, CASES=a,b only those ESP cases (none for none), BREAK=torn-file|slow-boot to see the replay fail, COUNTING= without boot counting, SUMMARY=FILE for the shard's coverage as JSON; SEED defaults to GITHUB_RUN_ID or today's date and is printed first, and a failure reproduces exactly as `LOG=<the logged run's dir or powercut-log-FS.tar.zst artifact> SEED=<printed seed> SHARD=<its shard> tests/vm/run.sh powercut`; COMPARE=1 instead logs one switch and its first boot twice with this build and twice with a plain release build and compares their writes, flushes and FUAs, SAVE_LOG=DIR keeping each run's io-tokens.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
@@ -43,11 +43,12 @@ docker run --rm --privileged --network host "${mounts[@]}" "${env[@]}" archix-ar
 # vm PHASE TARGET LOG PRISTINE EXPORT [readonly]: boots a fresh copy of the runner with this phase's settings on vdf; paths are inside the container, where $work is /work and LOG's directory /log.
 vm() {
   local phase=$1 ro=${6:+,readonly=on}
-  printf 'PHASE=%s\nPOINTS=%s\nBREAK=%s\nCOUNTING=%s\nSAMPLE=%s\nSUBSETS=%s\nREORDER_SAMPLE=%s\nSEED=%s\nBOOT_TIMEOUT=%s\nBOOT_RATIO=%s\nBOOT_CEILING=%s\nSHARD=%s\n' "$phase" "${REPLAY_POINTS:-}" \
-    "${BREAK:-}" "${COUNTING-1}" "${SAMPLE-20}" "${SUBSETS-16}" "${REORDER_SAMPLE-16}" "$seed" "${BOOT_TIMEOUT:-3600}" "${BOOT_RATIO:-3}" "${BOOT_CEILING:-}" "${SHARD:-}" > "$work/conf.img"
+  printf 'PHASE=%s\nPOINTS=%s\nBREAK=%s\nCOUNTING=%s\nSAMPLE=%s\nSUBSETS=%s\nREORDER_SAMPLE=%s\nSEED=%s\nBOOT_TIMEOUT=%s\nBOOT_RATIO=%s\nBOOT_FLOOR=%s\nBOOT_CEILING=%s\nSHARD=%s\nONLY=%s\nCASES=%s\n' "$phase" "${REPLAY_POINTS:-}" \
+    "${BREAK:-}" "${COUNTING-1}" "${SAMPLE-20}" "${SUBSETS-16}" "${REORDER_SAMPLE-16}" "$seed" "${BOOT_TIMEOUT:-3600}" "${BOOT_RATIO:-3}" "${BOOT_FLOOR:-10}" "${BOOT_CEILING:-}" "${SHARD:-}" "${ONLY:-}" "${CASES:-}" > "$work/conf.img"
   truncate -s 1M "$work/conf.img"
   cp --sparse=always "$work/runner.img" "$work/run.img"
-  rm -f "$work/serial.log"
+  rm -f "$work/serial.log" "$work/out.img"
+  truncate -s 1G "$work/out.img"
   docker run --rm --device /dev/kvm -v "$work":/work ${log:+-v "$log":/log:ro} -e VM_TIMEOUT="${VM_TIMEOUT:-21600}" archix-arch-test bash -c '
     cp /usr/share/edk2/x64/OVMF_VARS.4m.fd /work/runner-vars.fd
     timeout "$VM_TIMEOUT" qemu-system-x86_64 -enable-kvm -cpu host -m 8192 -smp 4 -machine q35 \
@@ -59,8 +60,10 @@ vm() {
       -drive file="$3",format=raw,if=virtio,cache=none \
       -drive file="$4",format=raw,if=virtio,cache=none$5 \
       -drive file=/work/conf.img,format=raw,if=virtio,readonly=on \
+      -drive file=/work/out.img,format=raw,if=virtio,cache=none \
       -nic none -display none -serial file:/work/serial.log -monitor none || true
     grep -a VMTEST /work/serial.log || true
+    mkdir -p /work/out && { tar -xf /work/out.img -C /work/out 2> /dev/null || true; }
     grep -aq "VMTEST: OK" /work/serial.log' vm "$2" "$3" "$4" "$5" "$ro"
 }
 
@@ -106,5 +109,11 @@ if [ -n "${SUMMARY:-}" ] && [ -n "$summary" ]; then
   mkdir -p "$(dirname "$SUMMARY")"
   echo "$summary" > "$SUMMARY"
 fi
-[ "$status" = 0 ] || echo "power-cut replay failed: reproduce with LOG=${LOG_ARTIFACT:-<the logged run>} SEED=$seed${SHARD:+ SHARD=$SHARD} tests/vm/run.sh powercut ($(cat "$log/meta"))"
+if [ "$status" != 0 ]; then
+  echo "power-cut replay failed: reproduce with LOG=${LOG_ARTIFACT:-<the logged run>} SEED=$seed${SHARD:+ SHARD=$SHARD} tests/vm/run.sh powercut ($(cat "$log/meta"))"
+  if [ -n "$(ls -A "$work/out" 2> /dev/null)" ]; then
+    kept=${ARCHIX_VM_LOGS:-${XDG_CACHE_HOME:-$HOME/.cache}/archix-vm-logs}/$(basename "$work").out
+    mkdir -p "$kept" && cp -r "$work/out/." "$kept/" && echo "kept the check log and the failed boots' consoles: $kept"
+  fi
+fi
 exit "$status"
