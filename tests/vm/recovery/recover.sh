@@ -6,6 +6,8 @@ fail() { say "FAIL: $*"; umount -R /mnt 2> /dev/null; systemctl poweroff; exit 1
 log=/var/tmp/recover.log
 # Runs a step, failing with its output's tail.
 step() { "$@" > "$log" 2>&1 || fail "\`$*\` failed: $(tail -12 "$log" | tr '\n' '|')"; }
+# A command in the chroot as typed at its shell: arch-chroot's own command is PID 1 of a new namespace, where systemd's tools log to the kernel rather than stderr.
+in_root() { arch-chroot /mnt bash -c "$*"; }
 root=$(blkid -L archixroot) || fail "no filesystem labelled archixroot"
 esp=$(blkid -L ESP) || fail "no filesystem labelled ESP"
 say "booted from $(findmnt -no SOURCE /), the archix root is $root, its ESP $esp"
@@ -21,14 +23,15 @@ broken=$(cat /mnt/var/lib/archix-vmtest/broken) kept=$(cat /mnt/var/lib/archix-v
 # 2. Bind a deployment over the root with the static archix it carries, then look for the damage from inside it.
 step "/mnt/archix/deploy/$kept/usr/lib/archix/archix-static" mount-deployment /mnt "$kept"
 say "mount-deployment: $(tr '\n' '|' < "$log")"
-step arch-chroot /mnt archix generations
+step in_root archix generations
 say "generations: $(tr '\n' '|' < "$log")"
-arch-chroot /mnt archix verify > "$log" 2>&1 && fail "archix verify should find deployment $broken damaged: $(tr '\n' '|' < "$log")"
+in_root archix verify > "$log" 2>&1 && fail "archix verify should find deployment $broken damaged: $(tr '\n' '|' < "$log")"
 grep -q "^deployment $kept: matches its packages" "$log" && grep -q "^deployment $broken: .* differ" "$log" || fail "archix verify should flag deployment $broken and pass $kept: $(tr '\n' '|' < "$log")"
-say "verify: $(grep '^deployment' "$log" | tr '\n' '|')"
+say "verify: $(grep -v '^::' "$log" | tr '\n' '|')"
 # 3. Put systemd-boot back, make the intact deployment current and write its boot entry and fallback.
-step arch-chroot /mnt bootctl --esp-path="$at" install
-step arch-chroot /mnt archix rollback "$kept" --noconfirm
+step in_root bootctl --esp-path="$at" install
+say "bootctl: $(tail -4 "$log" | tr '\n' '|')"
+step in_root archix rollback "$kept" --noconfirm
 say "rollback: $(tail -6 "$log" | tr '\n' '|')"
 [ "$(readlink /mnt/archix/current)" = "deploy/$kept" ] || fail "current should be deploy/$kept, not $(readlink /mnt/archix/current)"
 ls "/mnt$at/loader/entries" | grep -q "^archix-$kept[.+]" || fail "the ESP should have deployment $kept's entry: $(ls "/mnt$at/loader/entries" | tr '\n' ' ')"
