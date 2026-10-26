@@ -358,8 +358,9 @@ fn complete_deployments(archix: &Path) -> Vec<u32> {
     numbers
 }
 
-/// From a live USB: binds deployment `number`'s trees, current's by default, over the archix root mounted at `root`, and the store read-only as a boot does, so `arch-chroot` into `root` runs that deployment.
+/// From a live USB: binds deployment `number`'s trees, current's by default, over the archix root mounted at `root`, and the store read-only as a boot does, so `arch-chroot` into `root` runs that deployment; the mount above `root` is made private, as the staging root's pivot_root needs.
 pub fn mount_for_chroot(root: &Path, number: Option<u32>) -> Result<u32> {
+    let root = &fs::canonicalize(root).with_context(|| format!("reading {}", root.display()))?;
     let archix = root.join("archix");
     if !is_dir(&archix.join("deploy")) {
         bail!(
@@ -389,6 +390,16 @@ pub fn mount_for_chroot(root: &Path, number: Option<u32>) -> Result<u32> {
             root.join(at).display(),
             root.display()
         );
+    }
+    if points.iter().any(|point| point == root)
+        && let Some(parent) = points
+            .iter()
+            .filter(|point| root.parent().is_some_and(|dir| dir.starts_with(point)))
+            .max_by_key(|point| point.components().count())
+    {
+        // pivot_root refuses a root whose parent mount is shared, which the staging root's commands would then hit inside arch-chroot.
+        sys_mount(None, parent, libc::MS_PRIVATE)
+            .with_context(|| format!("making {} a private mount", parent.display()))?;
     }
     bind_trees(root, &archix.join("deploy").join(number.to_string()))
         .with_context(|| format!("mounting deployment {number}"))?;
