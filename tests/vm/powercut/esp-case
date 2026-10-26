@@ -10,11 +10,18 @@ case=$1
 cow=
 unsnap() {
   umount -R /case/root /case/esp 2> /dev/null
-  local d
-  for d in cesp croot csnap; do dmsetup remove "$d" 2> /dev/null; done
+  local d tries
+  # udev's probe of a device QEMU just closed can keep it open a moment, which made the next case's csnap fail as busy.
+  for d in cesp croot csnap; do
+    for tries in 1 2 3 4 5 6 7 8 9 10; do
+      [ -e "/dev/mapper/$d" ] || break
+      dmsetup remove "$d" 2> /dev/null || { udevadm settle; sleep 1; }
+    done
+  done
   [ -z "$cow" ] || losetup -d "$cow" 2> /dev/null
   rm -f /dev/shm/case-cow
 }
+[ ! -e /dev/mapper/csnap ] || { echo "the previous case's csnap is still there, open $(dmsetup info -c --noheadings -o open csnap) times"; exit 2; }
 trap unsnap EXIT
 truncate -s 4G /dev/shm/case-cow
 cow=$(losetup -f --show /dev/shm/case-cow)
