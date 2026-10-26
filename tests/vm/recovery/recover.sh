@@ -6,8 +6,8 @@ fail() { say "FAIL: $*"; umount -R /mnt 2> /dev/null; systemctl poweroff; exit 1
 log=/var/tmp/recover.log
 # Runs a step, failing with its output's tail.
 step() { "$@" > "$log" 2>&1 || fail "\`$*\` failed: $(tail -12 "$log" | tr '\n' '|')"; }
-# A command in the chroot as typed at its shell: arch-chroot's own command is PID 1 of a new namespace, where systemd's tools log to the kernel rather than stderr.
-in_root() { arch-chroot /mnt bash -c "$*"; }
+# A command in the chroot as typed at its shell, where systemd's tools log to stderr: not as PID 1 of arch-chroot's namespace, nor with this unit's JOURNAL_STREAM.
+in_root() { arch-chroot /mnt env -u JOURNAL_STREAM bash -c "$*"; }
 root=$(blkid -L archixroot) || fail "no filesystem labelled archixroot"
 esp=$(blkid -L ESP) || fail "no filesystem labelled ESP"
 say "booted from $(findmnt -no SOURCE /), the archix root is $root, its ESP $esp"
@@ -29,11 +29,8 @@ in_root archix verify > "$log" 2>&1 && fail "archix verify should find deploymen
 grep -q "^deployment $kept: matches its packages" "$log" && grep -q "^deployment $broken: .* differ" "$log" || fail "archix verify should flag deployment $broken and pass $kept: $(tr '\n' '|' < "$log")"
 say "verify: $(grep -v '^::' "$log" | tr '\n' '|')"
 # 3. Put systemd-boot back, make the intact deployment current and write its boot entry and fallback.
-if ! in_root bootctl --esp-path="$at" install > "$log" 2>&1; then
-  in_root SYSTEMD_LOG_LEVEL=debug SYSTEMD_LOG_TARGET=console bootctl --esp-path="$at" install > "$log" 2>&1
-  say "DIAG: bootctl install failed (exit $? when repeated): $(tail -25 "$log" | tr '\n' '|')"
-  step in_root bootctl --esp-path="$at" --no-variables install
-fi
+# In a chroot bootctl skips its partition checks and takes the read-only /boot bind for an XBOOTLDR partition, so it's told the ESP is $BOOT too.
+step in_root bootctl --esp-path="$at" --boot-path="$at" install
 say "bootctl: $(tail -4 "$log" | tr '\n' '|')"
 step in_root archix rollback "$kept" --noconfirm
 say "rollback: $(tail -6 "$log" | tr '\n' '|')"
