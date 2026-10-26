@@ -30,17 +30,27 @@ fi
 if ! /usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1; then
   networkctl list --no-pager 2>&1 | sed 's|^|VMTEST: networkctl: |' > /dev/console
   journalctl -b -u systemd-networkd --no-pager | tail -30 | sed 's|^|VMTEST: networkd: |' > /dev/console
-  for nic in /sys/class/net/en*; do
-    # carrier_changes 0 means the guest never saw the link up; more means it saw it and lost it.
-    echo "$(basename "$nic") carrier=$(cat "$nic/carrier" 2>&1) carrier_changes=$(cat "$nic/carrier_changes") carrier_up=$(cat "$nic/carrier_up_count" 2>/dev/null) carrier_down=$(cat "$nic/carrier_down_count" 2>/dev/null) operstate=$(cat "$nic/operstate") flags=$(cat "$nic/flags") driver=$(basename "$(readlink -f "$nic/device/driver")") virtio_features=$(cat "$(readlink -f "$nic/device")/features" 2>/dev/null)" | sed 's|^|VMTEST: nic: |' > /dev/console
-    ip -d link show "$(basename "$nic")" 2>&1 | sed 's|^|VMTEST: nic: |' > /dev/console
-  done
+  # carrier_changes 0 means the guest never saw the link up; more means it saw it and lost it.
+  nic_state() {
+    for nic in /sys/class/net/en*; do
+      echo "$(basename "$nic") carrier=$(cat "$nic/carrier" 2>&1) carrier_changes=$(cat "$nic/carrier_changes") carrier_up=$(cat "$nic/carrier_up_count" 2>/dev/null) carrier_down=$(cat "$nic/carrier_down_count" 2>/dev/null) operstate=$(cat "$nic/operstate") flags=$(cat "$nic/flags") driver=$(basename "$(readlink -f "$nic/device/driver")") virtio_status=$(cat "$(readlink -f "$nic/device")/status" 2>/dev/null) virtio_features=$(cat "$(readlink -f "$nic/device")/features" 2>/dev/null)" | sed "s|^|VMTEST: nic: $1: |" > /dev/console
+    done
+  }
+  nic_state "at the report"
+  for nic in /sys/class/net/en*; do ip -d link show "$(basename "$nic")" 2>&1 | sed 's|^|VMTEST: nic: |' > /dev/console; done
   journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30 | sed 's|^|VMTEST: kernel: |' > /dev/console
   # The host asks QEMU for its view of the link on seeing the lines above, before the down/up below changes it.
   sleep 10
   # Whether the device or the stack lost the link: a down/up that brings the carrier back points at the stack.
   for nic in /sys/class/net/en*; do ip link set "$(basename "$nic")" down; ip link set "$(basename "$nic")" up; done
-  /usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1 && say "nic: a link down/up brought it back" || say "nic: still not configured 30 s after a link down/up"
+  if /usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1; then
+    say "nic: a link down/up brought it back"
+  else
+    say "nic: still not configured 30 s after a link down/up"
+    # The host answers that line with QEMU's set_link off and on, which makes the device signal a link change.
+    /usr/lib/systemd/systemd-networkd-wait-online --timeout=40 > /dev/null 2>&1 && say "nic: after the host's set_link off/on it's configured" || say "nic: after the host's set_link off/on still not configured"
+  fi
+  nic_state "at the end"
   fail "networkd didn't configure the NIC's link within 90 s of this stage starting"
 fi
 # Stage 10 boots the fallback of a deployment that doesn't exist, which has to fall back to current.

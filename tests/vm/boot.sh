@@ -1,12 +1,40 @@
 #!/usr/bin/env bash
-# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report; SUITE=pcr adds a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on.
+# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report, with QEMU's view of the NIC when the guest reports one networkd didn't configure; SUITE=pcr adds a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on.
 set -euo pipefail
 vars=/work/vars.fd
-monitor=(-monitor none)
+qmp=/work/qmp.sock
+rm -f "$qmp" /work/serial.log /work/qemu-nic.log
+monitor=(-qmp "unix:$qmp,server=on,wait=off")
+watchers=()
+trap 'kill "${watchers[@]}" 2> /dev/null' EXIT
+nic_view() {
+  local dev
+  dev=$(python /vm/qmp.py "$qmp" "info virtio" | grep -a '\[virtio-net\]' | cut -d' ' -f1)
+  # Not info virtio-status, which crashes QEMU 11.1.2 on a virtio-net device.
+  { echo "== $1, $(date +%T)"; python /vm/qmp.py "$qmp" "info network" "info virtio-queue-status $dev 0" "info virtio-queue-status $dev 1"; } >> /work/qemu-nic.log 2>&1
+}
+# vmtest.sh's NIC report: QEMU's view of the device as the guest reports it and after its link down/up, then the host's own set_link off/on if that didn't help.
+(
+  set +e
+  step=0
+  while sleep 1; do
+    log=$(grep -a "VMTEST: nic:" /work/serial.log 2> /dev/null) || continue
+    case $step in
+      0) nic_view "the guest's first NIC report"; step=1 ;;
+      1) grep -q "nic: a link down/up\|nic: still not configured" <<< "$log" || continue
+        nic_view "after the guest's link down/up"; step=2
+        grep -q "nic: still not configured" <<< "$log" || break
+        { echo "== set_link net0 off, then on, $(date +%T)"; python /vm/qmp.py "$qmp" "set_link net0 off"; sleep 2; python /vm/qmp.py "$qmp" "set_link net0 on"; } >> /work/qemu-nic.log 2>&1 ;;
+      2) grep -q "nic: after the host's set_link" <<< "$log" || continue
+        nic_view "after the host's set_link off/on"; break ;;
+    esac
+  done
+) &
+watchers+=($!)
 if [ "${SUITE:-boot}" = health ]; then
   sock=/work/monitor.sock
-  rm -f "$sock" /work/serial.log
-  monitor=(-monitor "unix:$sock,server=on,wait=off")
+  rm -f "$sock"
+  monitor+=(-monitor "unix:$sock,server=on,wait=off")
   # The health suite pulls its network cable and puts it back by asking on the console; QEMU's monitor flips the link.
   (
     cable=on
@@ -18,8 +46,9 @@ if [ "${SUITE:-boot}" = health ]; then
       python -c 'import socket, sys; s = socket.socket(socket.AF_UNIX); s.connect(sys.argv[1]); s.sendall(("set_link net0 %s\n" % sys.argv[2]).encode()); __import__("time").sleep(1)' "$sock" "$want" && cable=$want
     done
   ) &
-  cable_pid=$!
-  trap 'kill "$cable_pid" 2> /dev/null' EXIT
+  watchers+=($!)
+else
+  monitor+=(-monitor none)
 fi
 [ -f "$vars" ] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"
 extra=() net=user,id=net0
@@ -50,4 +79,5 @@ timeout "${VM_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_
 # The console log carries escape and NUL bytes, which make grep call it binary and hide every line.
 grep -a VMTEST /work/serial.log || true
 [ ! -f /work/probe.log ] || sed 's/^/probe: /' /work/probe.log
+[ ! -f /work/qemu-nic.log ] || sed 's/^/qemu: /' /work/qemu-nic.log
 grep -aq "VMTEST: OK" /work/serial.log

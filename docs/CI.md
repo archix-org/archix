@@ -3,7 +3,7 @@
 | Workflow | When | Jobs | Takes |
 | --- | --- | --- | --- |
 | `ci.yml` | Every push to `main` and every pull request | `lint`: fmt, clippy and the archive proxy's own test; `image`: the test image; `container`: `tests/arch/run.sh` (cargo test with the ignored tests, and the musl build); `boot`: `tests/vm/run.sh boot` on ext4 and btrfs; `deploy-boot`: `tests/vm/deploy-boot/run.sh` with systemd and busybox initramfs, on ext4 and btrfs | about 50 min, all VM jobs in parallel |
-| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | the VM suites on ext4 and btrfs; per filesystem, `powercut-log` logs one power-cut run and uploads it as `powercut-log-<fs>`, three `powercut` shards replay it, and `powercut-sum` checks their summaries cover each of its points once | an estimated 30 min to 3 h per job; 4 h VM timeout, 5.5 h job limit |
+| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | the VM suites on ext4 and btrfs, plus CI's `boot` and `deploy-boot` (both initramfs flavours in one job) when `suites` names them, each suite job `repeat` times side by side; per filesystem, `powercut-log` logs one power-cut run and uploads it as `powercut-log-<fs>`, three `powercut` shards replay it, and `powercut-sum` checks their summaries cover each of its points once | an estimated 30 min to 3 h per job; 4 h VM timeout, 5.5 h job limit |
 | `release.yml` | A `v*` tag | Runs both of the above, then builds the draft release only if they pass | |
 
 The VM jobs need KVM: `tests/ci/check-kvm.sh` fails the job if the runner user can't create a VM, rather than letting QEMU emulate.
@@ -22,5 +22,7 @@ ARCHIX_TEST_ARCHIVE=http://127.0.0.1:8079 tests/vm/run.sh boot
 ```
 
 A failed `powercut` shard prints its seed and the name of the log artifact it replayed, kept 90 days, as a failure in the UKI-copy windows reproduces only from that log; download its filesystem's `powercut-log-<fs>` artifact and run `LOG=powercut-log-<fs>.tar.zst SEED=<seed> SHARD=<i>/3 tests/vm/run.sh powercut` to replay the same log with the same subsets.
+
+An intermittent failure is hunted on GitHub rather than locally: `gh workflow run release-gate.yml --ref <branch> -f suites=boot -f fs=ext4 -f repeat=10` runs ten boot jobs side by side. When the boot suite's guest reports a NIC networkd didn't configure, `tests/vm/boot.sh` adds QEMU's view of the device (`info network` and the rx and tx queues' `info virtio-queue-status`) to the job's output as `qemu:` lines, and pulls and puts back the cable with `set_link` if the guest's own link down/up didn't help.
 
 A failed job uploads its logs as the `logs-<job>` artifact: each work dir's `serial.log` and other logs, plus the proxy's log, but never disk images.
