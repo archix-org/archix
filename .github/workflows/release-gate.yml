@@ -5,11 +5,14 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Suites to run, comma-separated (rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, powercut); empty runs all
+        description: Suites to run, comma-separated (rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, powercut; boot and deploy-boot, which CI runs, only when named); empty runs all but boot and deploy-boot
         default: ""
       fs:
         description: Filesystems, comma-separated (ext4, btrfs); empty runs both
         default: ""
+      repeat:
+        description: How many times to run each suite job, side by side, to catch an intermittent failure
+        default: "1"
   schedule:
     - cron: "17 1 * * *"
 
@@ -27,17 +30,21 @@ jobs:
       suites: ${{ steps.plan.outputs.suites }}
       fs: ${{ steps.plan.outputs.fs }}
       powercut: ${{ steps.plan.outputs.powercut }}
+      runs: ${{ steps.plan.outputs.runs }}
     steps:
       - id: plan
         env:
           SUITES: ${{ inputs.suites }}
           FS: ${{ inputs.fs }}
+          REPEAT: ${{ inputs.repeat }}
         run: |
-          all=rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn
-          pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$2" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
-          echo "suites=$(pick "$SUITES" "$all,powercut" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
-          echo "fs=$(pick "$FS" ext4,btrfs)" >> "$GITHUB_OUTPUT"
-          echo "powercut=$(pick "$SUITES" "$all,powercut" | jq 'index("powercut") != null')" >> "$GITHUB_OUTPUT"
+          all=rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn,powercut
+          # $1 as named, else $2, keeping only names in $3.
+          pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$3" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
+          echo "suites=$(pick "$SUITES" "$all" "$all,boot,deploy-boot" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
+          echo "fs=$(pick "$FS" ext4,btrfs ext4,btrfs)" >> "$GITHUB_OUTPUT"
+          echo "powercut=$(pick "$SUITES" "$all" "$all" | jq 'index("powercut") != null')" >> "$GITHUB_OUTPUT"
+          echo "runs=$(jq -nc --argjson n "${REPEAT:-1}" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
   image:
     needs: plan
@@ -68,6 +75,7 @@ jobs:
       matrix:
         suite: ${{ fromJSON(needs.plan.outputs.suites) }}
         fs: ${{ fromJSON(needs.plan.outputs.fs) }}
+        run: ${{ fromJSON(needs.plan.outputs.runs) }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -77,7 +85,12 @@ jobs:
         with:
           group: ${{ matrix.suite }}
           need-gb: "40"
-      - run: tests/vm/run.sh "$SUITE"
+      - run: |
+          if [ "$SUITE" = deploy-boot ]; then
+            for initramfs in systemd busybox; do INITRAMFS=$initramfs tests/vm/deploy-boot/run.sh; done
+          else
+            tests/vm/run.sh "$SUITE"
+          fi
         env:
           SUITE: ${{ matrix.suite }}
           FS: ${{ matrix.fs }}
@@ -88,7 +101,7 @@ jobs:
         uses: ./.github/actions/vm-finish
         with:
           group: ${{ matrix.suite }}
-          name: ${{ matrix.suite }}-${{ matrix.fs }}
+          name: ${{ matrix.suite }}-${{ matrix.fs }}${{ matrix.run > 1 && format('-{0}', matrix.run) || '' }}
           status: ${{ job.status }}
 
   # One logged run per filesystem, which every shard replays, so the shards' points are one set and add up; a failure reproduces from this artifact and the printed seed.
