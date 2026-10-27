@@ -187,8 +187,8 @@ jobs:
       fail-fast: false
       matrix:
         fs: ${{ fromJSON(needs.plan.outputs.fs) }}
-        # Each shard replays the same logged run and checks every third point of it by index; GitHub's nested boots are about ten times slower than a desktop's, which puts the whole suite near 500 minutes.
-        shard: [1, 2, 3]
+        # Each shard replays the same logged run and checks every sixth point of it by index; GitHub's nested boots are about ten times slower than a desktop's, which put three shards at up to 5.4 h each.
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/vm-setup
@@ -203,7 +203,7 @@ jobs:
         env:
           FS: ${{ matrix.fs }}
           LOG: ${{ runner.temp }}/powercut-log/powercut-log-${{ matrix.fs }}.tar.zst
-          SHARD: ${{ matrix.shard }}/3
+          SHARD: ${{ matrix.shard }}/6
           LOG_ARTIFACT: "powercut-log-${{ matrix.fs }} of run ${{ github.run_id }} (gh run download ${{ github.run_id }} -n powercut-log-${{ matrix.fs }})"
           SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
       - if: always()
