@@ -39,9 +39,13 @@ build() {
     # Ahead of busybox's on the rescue's PATH: eject copies with GNU cp's --reflink and --no-target-directory.
     add_binary /usr/bin/cp /usr/lib/archix-rescue/cp
     map add_module 'vfat?' 'nls_cp437?' 'nls_iso8859_1?' 'nls_ascii?' 'efivarfs?' 'dm_mod?' 'dm_crypt?'
-    # The ciphers LUKS volumes use, as mkinitcpio's encrypt hook adds them.
-    add_all_modules '/crypto/'
-    add_all_modules '/lib/crypto/'
+    # What cryptsetup needs here, as mkinitcpio's encrypt hook adds it: without the dm udev rules it waits forever for udev after the passphrase.
+    if type -P cryptsetup > /dev/null; then
+        add_all_modules '/crypto/'
+        add_all_modules '/lib/crypto/'
+        map add_udev_rule '10-dm.rules' '13-dm-disk.rules' '95-dm-notify.rules'
+        add_binary /usr/lib/libgcc_s.so.1
+    fi
     add_runscript
 }
 

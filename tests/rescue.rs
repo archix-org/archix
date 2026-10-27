@@ -133,6 +133,9 @@ fn every_switch_keeps_a_signed_rescue_entry_from_the_newest_deployment_that_boot
         "usr/bin/bsdtar",
         "usr/lib/archix-rescue/cp",
         "usr/bin/cttyhack",
+        "usr/bin/cryptsetup",
+        "usr/lib/udev/rules.d/95-dm-notify.rules",
+        "usr/lib/libgcc_s.so.1",
     ] {
         assert!(
             root.join(path).symlink_metadata().is_ok(),
