@@ -312,7 +312,9 @@ def run(m, t):
         m.succeed("mv /etc/NetworkManager/system-connections/.vmtest.nmconnection.T3MP /etc/NetworkManager/system-connections/vmtest.nmconnection")
         m.succeed("mkdir -p /etc/vmtest-dir/sub && echo 'made after the switch' > /etc/vmtest-dir/sub/file && echo /bin/vmtest-shell >> /etc/shells")
         m.execute(f"for _ in $(seq 50); do grep -qx /bin/vmtest-shell /archix/deploy/{pending}/etc/shells && break; sleep 0.2; done")
-        status = out(f"{HOST} status 2>&1")
+        # The copy lands before the merge records it for status, which a status read 0.1 s later missed on btrfs.
+        counted = f"grep -q '/etc changes carried into the pending deployment {pending}' <<< \"$s\" && grep -q '/etc/shells: changed on the running system' <<< \"$s\""
+        status = out(f"for _ in $(seq 50); do s=$({HOST} status 2>&1); {counted} && break; sleep 0.2; done; echo \"$s\"")
         if not t.check(f"/etc changes carried into the pending deployment {pending}" in status and "/etc/shells: changed on the running system" in status,
                        "status should count the carried changes and the conflict"):
             t.log("status: " + status)
