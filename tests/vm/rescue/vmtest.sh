@@ -48,7 +48,8 @@ case $stage in
     [ "$booted" = "$(current)" ] || fail "the current deployment should boot first"
     remember older "$booted"
     check_menu
-    [ "$(rescue_source)" = "$booted" ] || fail "the image's switch should build the rescue entry from deployment $booted, as nothing had booted"
+    first=$(deployments | cut -d' ' -f1)
+    [ "$(rescue_source)" = "$first" ] || fail "the image's switch should build the rescue entry from deployment $first, the system it laid out and ran on, as nothing had booted from an entry"
     ls /var/cache/pacman/pkg | grep -qE '^systemd-[0-9]' || fail "the image should keep systemd's package, which the repair restores from"
     sed -i 's|\["/etc/archix-vmtest-mark"\] = { text = "1" }|["/etc/archix-vmtest-mark"] = { text = "2" }|' "$config"
     ax switch --noconfirm > "$state/switch.log" 2>&1 || fail "the switch: $(tail -8 "$state/switch.log" | tr '\n' '|')"
