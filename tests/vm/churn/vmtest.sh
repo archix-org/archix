@@ -45,7 +45,11 @@ invariants() {
   [ "$booted" = "$(current)" ] || fail "the new deployment $(current) should boot, not $booted"
   complete "$(current)" || fail "current names deployment $(current), which isn't complete"
   ls -d /archix/deploy/.staging-* > /dev/null 2>&1 && fail "a staging tree is left: $(ls -A /archix/deploy | tr '\n' ' ')"
-  for entry in /efi/loader/entries/archix-*.conf; do
+  # The rescue entry names no deployment; it has to stay whole with exactly one UKI however many switches refresh it.
+  rescue=$(sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2> /dev/null)
+  [ -n "$rescue" ] && [ -f "$rescue" ] || fail "the rescue entry or its UKI is missing: $(ls /efi/loader/entries)"
+  [ "$(ls /efi/EFI/archix-rescue | wc -l)" = 1 ] || fail "EFI/archix-rescue should hold one UKI: $(ls /efi/EFI/archix-rescue)"
+  for entry in /efi/loader/entries/archix-[0-9]*.conf; do
     n=$(basename "$entry" | grep -o '^archix-[0-9]*' | cut -d- -f2)
     complete "$n" || fail "$(basename "$entry") names deployment $n, which isn't a complete committed deployment"
     uki=$(sed -nE 's#^(efi|uki) /#/efi/#p' "$entry")
