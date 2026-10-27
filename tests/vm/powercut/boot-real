@@ -1,5 +1,5 @@
 #!/bin/bash
-# boot-real DEV [TIMEOUT] [STOP]: boots DEV for real in nested QEMU with no NIC, its serial console in /dev/shm/boot.log, and prints how many seconds it took; TIMEOUT or BOOT_TIMEOUT only stops a hung boot, as check-point judges the time against the pristine image's, and STOP, a fixed string, stops the boot once the console shows it.
+# boot-real DEV [TIMEOUT] [STOP]: boots DEV for real in nested QEMU with no NIC, its serial console in /dev/shm/boot.log, and prints how many seconds it took; TIMEOUT or BOOT_TIMEOUT only stops a hung boot, as check-point judges the time against the pristine image's, and STOP, a fixed string, stops the boot once the console shows it, as a frozen PID 1 or a kernel panic does.
 . /etc/archix-powercut.conf
 cp /usr/share/edk2/x64/OVMF_VARS.4m.fd /dev/shm/vars.fd
 rm -f /dev/shm/boot.log
@@ -8,11 +8,10 @@ timeout "${2:-${BOOT_TIMEOUT:-3600}}" qemu-system-x86_64 -enable-kvm -cpu host -
   -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.4m.fd -drive if=pflash,format=raw,unit=1,file=/dev/shm/vars.fd \
   -drive file="$1",format=raw,if=virtio,cache=none -nic none -display none -serial file:/dev/shm/boot.log -monitor none > /dev/null 2>&1 &
 qemu=$!
-if [ -n "${3:-}" ]; then
-  while kill -0 "$qemu" 2> /dev/null; do
-    grep -aqF -- "$3" /dev/shm/boot.log 2> /dev/null && { kill "$qemu" 2> /dev/null; break; }
-    sleep 2
-  done
-fi
+# A crashed PID 1 or kernel never powers off, so the boot ends there instead of at the timeout.
+while kill -0 "$qemu" 2> /dev/null; do
+  grep -aqF -e "${3:-Freezing execution.}" -e 'Freezing execution.' -e 'Kernel panic - not syncing' /dev/shm/boot.log 2> /dev/null && { sleep 5; kill "$qemu" 2> /dev/null; break; }
+  sleep 2
+done
 wait "$qemu"
 echo $((SECONDS - started))

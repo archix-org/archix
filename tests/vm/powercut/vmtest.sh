@@ -231,7 +231,12 @@ fi
 modprobe -q kvm_amd || modprobe -q kvm_intel
 [ -e /dev/kvm ] || fail "no KVM in the runner for the real boots; the host needs nested virtualisation"
 # What a real boot takes on this machine: the pristine image's, deployment 3's first boot, whose archix units' time every replayed state's is judged against.
-secs=$("$lib/esp-case" pristine) || { cp /dev/shm/boot.log "$state/boot-pristine.log"; fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"; }
+# The pristine image is the logged run's starting disk, the same for every shard, so a boot of it that crashed (gate 40429132019: PID 1 in the initrd segfaulted on a page of zeros in libsystemd-core) is the runner's and gets one more try.
+secs=$("$lib/esp-case" pristine) || {
+  cp /dev/shm/boot.log "$state/boot-pristine-1.log"
+  say "the pristine image didn't boot for real in $secs s, so it boots once more: $(grep -a -i 'segfault\|panic\|freezing\|failed\|emergency' /dev/shm/boot.log | tail -4 | tr -d '\r' | tr '\n' '|' | cut -c1-600)"
+  secs=$("$lib/esp-case" pristine)
+} || { cp /dev/shm/boot.log "$state/boot-pristine.log"; fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"; }
 cp /dev/shm/boot.log "$state/boot-pristine.log"
 real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
 [[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-5000)"
