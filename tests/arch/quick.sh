@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Usage: quick.sh TESTS SELECTED SKIPPED; picks from TESTS (list-tests.sh's lines) the always-run targets of tests/quick.tsv and those its longest matching prefix maps each file changed since main to, writing the skipped targets to SKIPPED.
+# Usage: quick.sh TESTS SELECTED SKIPPED; picks from TESTS (list-tests.sh's lines) the always-run targets of tests/quick.tsv and those its longest matching prefix maps each file changed since main (or ARCHIX_QUICK_BASE, e.g. HEAD) to, writing the skipped targets to SKIPPED.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
 map=$root/tests/quick.tsv
-base=$(git -C "$root" merge-base HEAD main 2>/dev/null || git -C "$root" rev-parse HEAD)
+if [ -n "${ARCHIX_QUICK_BASE:-}" ]; then
+  base=$(git -C "$root" rev-parse --verify "$ARCHIX_QUICK_BASE^{commit}")
+else
+  base=$(git -C "$root" merge-base HEAD main 2>/dev/null || git -C "$root" rev-parse HEAD)
+fi
 changed=$( { git -C "$root" diff --name-only "$base"; git -C "$root" ls-files --others --exclude-standard; } | sort -u)
 all=
 picked=$(sed -n 's/^always\t//p' "$map")
