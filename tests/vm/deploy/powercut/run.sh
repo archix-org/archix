@@ -3,9 +3,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../../.." && pwd)
 . "$root/tests/vm/work-dir.sh" powercut
-build_log=$(mktemp)
-docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
-rm -f "$build_log"
+"$root/tests/arch/image.sh"
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 docker run --rm -v "$work":/work archix-arch-test bash -c 'set -e
   git clone -q --depth 1 https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git /tmp/xfstests

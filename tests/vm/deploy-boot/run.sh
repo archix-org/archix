@@ -4,9 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" deploy-boot
-build_log=$(mktemp)
-docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
-rm -f "$build_log"
+"$root/tests/arch/image.sh"
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro
   -e FS="${FS:-ext4}" -e INITRAMFS="${INITRAMFS:-systemd}" -e ROOT_OPTS="${ROOT_OPTS:-ro}" -e DATE="${DATE:-2026-10-03}")
 # ARCHIX_PREBUILT=DIR, tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR, has the static binary and the deploy_boot test executable already built.

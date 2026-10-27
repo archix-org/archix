@@ -3,9 +3,7 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 . "$root/tests/vm/work-dir.sh" storage
-build_log=$(mktemp)
-docker build -t archix-arch-test "$root/tests/arch" > "$build_log" 2>&1 || { cat "$build_log"; exit 1; }
-rm -f "$build_log"
+"$root/tests/arch/image.sh"
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 packages="base-devel devtools firefox rust git"
 for fs in ${STORAGE_FS:-ext4 btrfs btrfs:compress=zstd}; do

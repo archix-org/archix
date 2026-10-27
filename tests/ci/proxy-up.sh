@@ -33,4 +33,4 @@ if [ -n "$bridge" ] && docker run --rm archlinux:latest curl -sf -m 10 -o /dev/n
 else
   echo "::warning::image builds can't reach the archive proxy on docker0, so the test image comes straight from archive.archlinux.org"
 fi
-ARCHIVE_MIRROR=$mirror docker build ${mirror:+--secret id=archive,env=ARCHIVE_MIRROR} -t archix-arch-test "$root/tests/arch"
+ARCHIVE_MIRROR=$mirror docker build ${mirror:+--secret id=archive,env=ARCHIVE_MIRROR} --label "archix.dockerfile=$(sha256sum "$root/tests/arch/Dockerfile" | cut -c1-64)" -t archix-arch-test "$root/tests/arch"

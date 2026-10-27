@@ -24,9 +24,7 @@ exec 9> "${XDG_RUNTIME_DIR:-/tmp}/$volume.lock"
 flock -n 9 || { echo "another test run is using the build volume $target; waiting for it" >&2; flock 9; }
 . "$root/tests/heavy-slot.sh"
 [ "$jobs" = 1 ] || . "$root/tests/heavy-slot.sh"
-build_log=$(mktemp)
-docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
-rm -f "$build_log"
+"$root/tests/arch/image.sh"
 snapshot=$(sed -n 's/^ARG SNAPSHOT=//p' "$root/tests/arch/Dockerfile")
 # The newest snapshot the tests see, an old one so it's the same every day and a cache can hold it.
 today=2026-10-20

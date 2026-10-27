@@ -2,7 +2,7 @@
 # Rehearses a signed release of the committed HEAD in the Arch test container with a throwaway key; the steps are in rehearse.sh.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/../.." && pwd)
-docker build -t archix-arch-test "$root/tests/arch" >/tmp/archix-docker-build.log 2>&1 || { cat /tmp/archix-docker-build.log; exit 1; }
+"$root/tests/arch/image.sh"
 bundle=$(mktemp -d)
 trap 'rm -rf "$bundle"' EXIT
 git -C "$root" bundle create "$bundle/archix.bundle" HEAD >/dev/null 2>&1

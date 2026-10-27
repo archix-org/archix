@@ -8,9 +8,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 # One build volume per checkout, as in tests/arch/run.sh.
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
-build_log=$(mktemp)
-docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
-rm -f "$build_log"
+"$root/tests/arch/image.sh"
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
 # ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them.
 if [ -n "${ARCHIX_PREBUILT:-}" ]; then
