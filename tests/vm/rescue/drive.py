@@ -46,7 +46,16 @@ console.settimeout(1)
 
 seen = b""
 script = []
-announced = re.compile(rb"VMTEST: rescue script: ([A-Za-z0-9+/=]+)")
+# Only a whole line: the console arrives in chunks, and half an announcement decodes to nothing.
+announced = re.compile(rb"VMTEST: rescue script: ([A-Za-z0-9+/=]+)\r?\n")
+
+
+def fail(why):
+    note(f"FAIL: {why}")
+    log.write(b"\r\nVMTEST: FAIL: the rescue prompt didn't go as scripted\r\n")
+    quit_qemu()
+
+
 waiting_since = None
 while True:
     try:
@@ -60,8 +69,13 @@ while True:
     except OSError:
         break
     for match in announced.finditer(seen):
-        text = base64.b64decode(match.group(1)).decode()
-        script = [line.split("\t", 1) for line in text.splitlines() if line]
+        try:
+            text = base64.b64decode(match.group(1)).decode()
+            script = [line.split("\t", 1) for line in text.splitlines() if line]
+            assert all(len(step) == 2 for step in script)
+        except Exception as e:
+            fail(f"the announced script doesn't decode: {e!r}")
+            sys.exit(1)
         note(f"got a script of {len(script)} steps")
         seen = seen[match.end():]
         waiting_since = time.time()
@@ -79,7 +93,5 @@ while True:
         else:
             note(f"saw {expect!r}")
     elif time.time() - waiting_since > step_timeout:
-        note(f"FAIL: rescue: {expect!r} never showed in {step_timeout} s")
-        log.write(b"\r\nVMTEST: FAIL: the rescue prompt didn't go as scripted\r\n")
-        quit_qemu()
+        fail(f"{expect!r} never showed in {step_timeout} s")
         break
