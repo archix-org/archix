@@ -208,11 +208,20 @@ jobs:
           VM_TIMEOUT: "18600"
           LOG_ARTIFACT: "powercut-log-${{ matrix.fs }} of run ${{ github.run_id }} (gh run download ${{ github.run_id }} -n powercut-log-${{ matrix.fs }})"
           SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
+          OUT: ${{ runner.temp }}/powercut-out
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: powercut-summary-${{ matrix.fs }}-${{ matrix.shard }}
           path: ${{ runner.temp }}/summary
+          if-no-files-found: ignore
+          retention-days: 14
+      # Uploaded when the shard passed too, so every boot made again keeps its first console.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: powercut-out-${{ matrix.fs }}-${{ matrix.shard }}
+          path: ${{ runner.temp }}/powercut-out
           if-no-files-found: ignore
           retention-days: 14
       - if: always()

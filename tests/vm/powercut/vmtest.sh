@@ -8,12 +8,12 @@ mkdir -p "$state"
 head -c 65536 /dev/vdf | tr -d '\000' > /etc/archix-powercut.conf
 . /etc/archix-powercut.conf
 say() { echo "VMTEST: $*" > /dev/console; }
-# What a failed replay is read by: its check log and the consoles of the boots that failed, on vdg, which run.sh unpacks into the work dir's out/.
+# What a replay is read by: its check log, its retries and the consoles of the boots that failed or were booted again, on vdg, which run.sh unpacks into the work dir's out/.
 keep_logs() {
   [ "$PHASE" = replay ] && [ -d "$state" ] || return 0
   rm -rf "$state/out" && mkdir -p "$state/out"
   cp "$state"/check.log "$state"/replay.log "$state"/boot-*.log "$state"/case-*.log "$state/out/" 2> /dev/null
-  for f in real-boots point-times reorder-points slow-once rebooted; do [ ! -e "$state/$f" ] || cp "$state/$f" "$state/out/$f.txt"; done
+  for f in real-boots point-times reorder-points retries; do [ ! -e "$state/$f" ] || cp "$state/$f" "$state/out/$f.txt"; done
   tar -C "$state/out" -cf /dev/vdg . 2> /dev/null
 }
 fail() { say "FAIL: $*"; keep_logs; systemctl poweroff; exit 1; }
@@ -231,15 +231,9 @@ fi
 modprobe -q kvm_amd || modprobe -q kvm_intel
 [ -e /dev/kvm ] || fail "no KVM in the runner for the real boots; the host needs nested virtualisation"
 # What a real boot takes on this machine: the pristine image's, deployment 3's first boot, whose archix units' time every replayed state's is judged against.
-# The pristine image is the logged run's starting disk, the same for every shard, so a boot of it that crashed (gate 40429132019: PID 1 in the initrd segfaulted on a page of zeros in libsystemd-core) is the runner's and gets one more try.
-secs=$("$lib/esp-case" pristine) || {
-  cp /dev/shm/boot.log "$state/boot-pristine-1.log"
-  say "the pristine image didn't boot for real in $secs s, so it boots once more: $(grep -a -i 'segfault\|panic\|freezing\|failed\|emergency' /dev/shm/boot.log | tail -4 | tr -d '\r' | tr '\n' '|' | cut -c1-600)"
-  secs=$("$lib/esp-case" pristine)
-} || { cp /dev/shm/boot.log "$state/boot-pristine.log"; fail "the pristine image didn't boot for real in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | tail -6 | tr -d '\r' | tr '\n' '|')"; }
+out=$("$lib/pristine-boot" pristine) || fail "$out"
+read -r secs real <<< "$out"
 cp /dev/shm/boot.log "$state/boot-pristine.log"
-real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
-[[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-5000)"
 took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
 units=$(grep -o ' archix=[0-9]*' <<< "$real" | cut -d= -f2)
 qkk=$(grep -o ' qkk=[0-9]*' <<< "$real" | cut -d= -f2)
@@ -254,7 +248,16 @@ for c in passno-2 passno-0 gpt-auto drop-entry drop-uki empty-uki only-fallback;
   [ -z "$SHARD" ] || [ "$((cases % ${SHARD#*/}))" = "$((${SHARD%/*} - 1))" ] || { cases=$((cases + 1)); continue; }
   cases=$((cases + 1))
   [ -z "$CASES" ] || [[ ,$CASES, == *,$c,* ]] || continue
-  "$lib/esp-case" "$c" > "$state/case.out" 2>&1 || fail "ESP case $c: $(tail -3 "$state/case.out" | tr '\n' '|')"
+  rm -f /dev/shm/boot.log /dev/shm/boot.end
+  "$lib/esp-case" "$c" > "$state/case.out" 2>&1
+  status=$?
+  if [ "$status" = 1 ] && [ "$c" != empty-uki ] && why=$("$lib/boot-cause"); then
+    cp /dev/shm/boot.log "$state/case-$c-first.log"
+    printf '%s\tESP case\t%s\t%s\tcase-%s-first.log\n' "$c" "${why%%: *}" "${why#*: }" "$c" >> "$state/retries"
+    "$lib/esp-case" "$c" > "$state/case.out" 2>&1
+    status=$?
+  fi
+  [ "$status" = 0 ] || fail "ESP case $c: $(tail -3 "$state/case.out" | tr '\n' '|')"
   say "ESP case $c: $(tail -1 "$state/case.out")"
   echo "$c" >> "$state/cases"
 done
@@ -285,14 +288,17 @@ count() { if [ -e "$state/$1" ]; then grep -vc '^[0-9]*/' "$state/$1"; else echo
 subset_count() { if [ -e "$state/$1" ]; then grep -c '^[0-9]*/' "$state/$1"; else echo 0; fi; }
 lines() { if [ -e "$state/$1" ]; then wc -l < "$state/$1"; else echo 0; fi; }
 checked=$(lines checked)
-say "PASS: $total points, $checked of them checked, in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count repaired) ESP repairs checked; $(count leftover-points) points leave leftovers the next switch clears; $(lines stale-devices) device-mapper devices a check couldn't remove"
+boots=$(($(lines real-boots) + $(lines cases) + 1))
+retries=$(lines retries)
+allowed=$((boots * RETRY_SHARE / 100))
+kinds=$([ ! -s "$state/retries" ] || cut -f3 "$state/retries" | sort | uniq -c | awk '{ printf "%s%d %s", (NR > 1 ? ", " : " ("), $1, $2 } END { if (NR) printf ")" }')
+say "PASS: $total points, $checked of them checked, in $((SECONDS - replay_started)) s ($mode), $esp_points after ESP writes; $(count real-boots) booted for real; $retries of $boots real boots booted again$kinds, $allowed allowed by RETRY_SHARE=$RETRY_SHARE%${SHARD:+ over all the shards}; $(count activation-points) cut during a first boot, whose next activation matched a whole one; fsck notes: $(count vfat-notes) ESP, $(count root-fsck-notes) root; $(count repaired) ESP repairs checked; $(count leftover-points) points leave leftovers the next switch clears; $(lines stale-devices) device-mapper devices a check couldn't remove"
 if [ -s "$state/reorder-points" ]; then
   say "PASS: reordered $(awk '{ n += $4 } END { print n }' "$state/reorder-points") ESP subsets in $(awk '{ s += $5 } END { print s }' "$state/reorder-points") s at $(wc -l < "$state/reorder-points") flush points (seed $SEED, windows of up to $(sort -n -k2 "$state/reorder-points" | tail -1 | cut -d' ' -f2) ESP writes); $(subset_count real-boots) booted for real; fsck notes: $(subset_count vfat-notes) ESP; $(subset_count repaired) ESP repairs checked; $(subset_count leftover-points) leave leftovers the next switch clears"
 fi
 spread() { grep -o " $1=[0-9]*" "$state/real-boots" 2> /dev/null | cut -d= -f2 | sort -n | awk -v u="$2" '{ a[NR] = $1; s += $1 } END { if (NR) printf "%d %s mean, %d %s median, %d %s max", s / NR, u, a[int((NR + 1) / 2)], u, a[NR], u; else printf "none" }'; }
 say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(spread secs s), $(spread boot s) to the report, against the baseline's $(cat "$state/baseline-boot") s; archix's units $(spread archix ms) against the baseline's $(cat "$state/baseline-units") ms; pacman -Qkk $(spread qkk ms) against the baseline's $(cat "$state/baseline-qkk") ms"
-[ ! -s "$state/slow-once" ] || while read -r line; do say "slow once: $line"; done < "$state/slow-once"
-[ ! -s "$state/rebooted" ] || while read -r line; do say "booted again: $line"; done < "$state/rebooted"
+[ ! -s "$state/retries" ] || while IFS=$'\t' read -r at step kind why first; do say "booted again: $at ($step), $kind: ${why:0:1500}; first console out/$first"; done < "$state/retries"
 if [ -s "$state/orphans" ]; then
   while read -r n line; do say "orphan at $n points: $line"; done < <(cut -d' ' -f2- "$state/orphans" | sort | uniq -c)
   fail "$(count orphans) points and $(subset_count orphans) ESP subsets leave orphans after the next boot and gc"
@@ -301,6 +307,9 @@ fi
 esp_booted=$(awk '$3 == 1 && $2 == 1' "$state/point-times" | wc -l)
 sampled=$(awk '$3 == 1 && $2 == 0' "$state/point-times" | wc -l)
 sample_due=$(awk -v s="${SAMPLE:-0}" '$2 == 0 && s > 0 && NR % s == 0' "$state/table" | wc -l)
-say "SUMMARY: {\"log\": \"$log_id\", \"fs\": \"$fs\", \"seed\": \"$SEED\", \"shard\": \"${SHARD:-1/1}\", \"points_total\": $total, \"esp_points_total\": $esp_points, \"sampled_points_total\": $sample_due, \"subsets_total\": $(cat "$state/subsets-seen" 2> /dev/null || echo 0), \"cases_total\": 7, \"points_checked\": $checked, \"esp_points_booted\": $esp_booted, \"sampled_points_booted\": $sampled, \"subsets_checked\": $(cat "$state/subsets" 2> /dev/null || echo 0), \"subsets_booted\": $(subset_count real-boots), \"real_boots\": $(lines real-boots), \"cases_checked\": $(lines cases)}"
+say "SUMMARY: {\"log\": \"$log_id\", \"fs\": \"$fs\", \"seed\": \"$SEED\", \"shard\": \"${SHARD:-1/1}\", \"points_total\": $total, \"esp_points_total\": $esp_points, \"sampled_points_total\": $sample_due, \"subsets_total\": $(cat "$state/subsets-seen" 2> /dev/null || echo 0), \"cases_total\": 7, \"points_checked\": $checked, \"esp_points_booted\": $esp_booted, \"sampled_points_booted\": $sampled, \"subsets_checked\": $(cat "$state/subsets" 2> /dev/null || echo 0), \"subsets_booted\": $(subset_count real-boots), \"real_boots\": $(lines real-boots), \"cases_checked\": $(lines cases), \"boots\": $boots, \"retries\": $retries, \"retried\": $("$lib/retries-json" $([ ! -e "$state/retries" ] || echo "$state/retries"))}"
+keep_logs
+# A shard's share is judged by sum-shards over the whole log, as one shard's few boots would allow none.
+[ -n "$SHARD" ] && [ "$SHARD" != 1/1 ] || [ "$retries" -le "$allowed" ] || fail "$retries of $boots real boots were booted again, over the $allowed that RETRY_SHARE=$RETRY_SHARE% allows"
 say "OK"
 systemctl poweroff

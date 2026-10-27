@@ -1,0 +1,10 @@
+#!/usr/bin/env python3
+# retries-json [FILE]: the retries check-point and pristine-boot recorded (at, step, cause, detail, first console's log, tab-separated) as a JSON list on one line.
+import json
+import sys
+
+rows = []
+for line in open(sys.argv[1]) if len(sys.argv) > 1 else []:
+    at, step, cause, detail, log = (line.rstrip("\n").split("\t") + [""] * 5)[:5]
+    rows.append({"at": at, "step": step, "cause": cause, "detail": detail[:400], "log": log})
+print(json.dumps(rows))

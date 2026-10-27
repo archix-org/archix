@@ -1,0 +1,15 @@
+#!/bin/bash
+# boot-cause [LOG]: names what a failed real boot's console (boot-real's /dev/shm/boot.log and boot.end) shows it on, as `crash: LINES`, `device-timeout: LINES` or `timeout: ...`, and exits 1 when it shows none of them; only these let a boot be retried, as a disk's bytes are the same at every boot.
+. /etc/archix-powercut.conf
+log=${1:-/dev/shm/boot.log}
+end=$(cat /dev/shm/boot.end 2> /dev/null)
+lines() { grep -a -m3 -E "$1" "$log" | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g; s/\x1b[A-Za-z]//g' | tr '\n' '|' | cut -c1-400; }
+crash=$(lines 'Kernel panic - not syncing|systemd\[1\]: Caught <|Freezing execution|systemd\[1\]: segfault at|traps: systemd\[1\]|BUG: kernel|Oops: ')
+[ -z "$crash" ] || { echo "crash: $crash"; exit 0; }
+dev=$(lines 'Timed out waiting for device|\.device/start timed out')
+[ -z "$dev" ] || { echo "device-timeout: $dev"; exit 0; }
+if [ "$end" = timeout ] && ! grep -aq 'POWERCUT-BOOTED' "$log"; then
+  echo "timeout: no report before BOOT_TIMEOUT ($BOOT_TIMEOUT s); still running: $(awk '/POWERCUT-WATCH at / { buf = "" } /POWERCUT-WATCH/ { sub(/.*POWERCUT-WATCH /, ""); buf = buf $0 "|" } END { print buf }' "$log" | tr -d '\r' | cut -c1-400)"
+  exit 0
+fi
+exit 1

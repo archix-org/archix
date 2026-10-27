@@ -2,12 +2,12 @@ return {
   packages = { "base", "linux", "mkinitcpio", "systemd-ukify", @EXTRA_PACKAGES@ }, -- packages
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
-  -- GitHub's nested boots left udev's coldplug unfinished past 90 s and even 600 s (gate 40446996364), so a device waits for udev, and a boot that never gets one runs into BOOT_TIMEOUT.
-  kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0", "systemd.default_device_timeout_sec=infinity" },
+  -- systemd's own 90 s device timeout, as users boot; a boot that hits it fails, and only its console's device timeout lets it boot again.
+  kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
   boot = { loader = "systemd-boot", rescue_entry = false },
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
-    -- What a real boot of a replayed state reports before powering off: the seconds from the kernel's start to this report, before its own checks take any, the milliseconds archix's own units spent starting (archix-*.service and systemd-bless-boot.service, whose ExecStartPre is archix bless; each in POWERCUT-UNITS), the milliseconds its own pacman -Qkk took, a fixed workload that says how fast the machine ran then, the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines and the ESP's mount, fsck and device lines, and the kernel's FAT messages and warnings and the ESP fsck's.
+    -- What a real boot of a replayed state reports before powering off: the seconds from the kernel's start to this report, before its own checks take any, the milliseconds archix's own units spent starting (archix-*.service and systemd-bless-boot.service, whose ExecStartPre is archix bless; each in POWERCUT-UNITS), the milliseconds its own pacman -Qkk took, a fixed workload that says how fast the machine ran then, the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), how many device timeouts its journal has (each in POWERCUT-DEVTIMEOUT), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines and the ESP's mount, fsck and device lines, and the kernel's FAT messages and warnings and the ESP fsck's.
     ["/usr/local/bin/archix-powercut-booted"] = { mode = "0755", text = [[#!/bin/sh
 boot=$(cut -d. -f1 /proc/uptime)
 now=$(awk '{ printf "%d", $1 * 1000000 }' /proc/uptime)
@@ -38,9 +38,11 @@ qkk=$(($(date +%s%3N) - qkk))
 [ -z "$altered" ] || echo "$altered" | sed 's/^/POWERCUT-ALTERED /' > /dev/console
 failed=$(systemctl --failed --no-legend --plain | awk '{ print $1 }')
 for unit in $failed; do journalctl -b -u "$unit" -o short-monotonic --no-pager | tail -25 | sed "s/^/POWERCUT-FAILED $unit: /" > /dev/console; done
+devtimeout=$(journalctl -b -o short-monotonic --no-pager | grep -E 'Timed out waiting for device|\.device/start timed out')
+[ -z "$devtimeout" ] || echo "$devtimeout" | tail -4 | sed 's/^/POWERCUT-DEVTIMEOUT /' > /dev/console
 [ -z "$failed" ] || journalctl -b -o short-monotonic --no-pager | grep -E 'efi\.(auto)?mount|/efi|systemd-fsck@|by-uuid|vda1|Timed out|Dependency failed|udevd' | tail -40 | sed 's/^/POWERCUT-JOURNAL /' > /dev/console
 { journalctl -b -k -o cat --no-pager | grep -i 'fat-fs\|soft lockup\|rcu.*stall\|BUG:\|WARNING:' | tail -4; journalctl -b -u 'systemd-fsck@*' -o cat --no-pager | tail -4; } | sed 's/^/POWERCUT-KERNEL /' > /dev/console
-echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) esp=${esp:-unmounted} espfsck=$espfsck boot=$boot archix=$archix qkk=$qkk altered=$(printf '%s' "$altered" | grep -c .) failed=$(echo $failed | tr ' ' ,)" > /dev/console
+echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) current=$(readlink /archix/current) esp=${esp:-unmounted} espfsck=$espfsck boot=$boot archix=$archix qkk=$qkk devtimeout=$(printf '%s' "$devtimeout" | grep -c .) altered=$(printf '%s' "$altered" | grep -c .) failed=$(echo $failed | tr ' ' ,)" > /dev/console
 systemctl poweroff
 ]] },
     -- Every 120 s of a boot, the jobs systemd still runs, what the running ones' units log and the processes in uninterruptible sleep, so a boot that never reports shows what it waits on.

@@ -70,7 +70,7 @@ boot_limit() {
   echo $((r > f ? r : f))
 }
 field() { grep -o " $1=[0-9]*" <<< "$2" | cut -d= -f2; }
-# boot_state: boots a fresh snapshot of the state for real, setting real (the report), secs (QEMU's run), took (the guest's time to its report), units (archix's units' ms) and watch (what a boot that never reported still ran).
+# boot_state [again]: boots a fresh snapshot of the state for real, setting real (the report), secs (QEMU's run), took (the guest's time to its report), units (archix's units' ms) and watch (what a boot that never reported still ran).
 boot_state() {
   snap
   case $BREAK in
@@ -81,6 +81,21 @@ boot_state() {
         mkdir -p "$d/archix-deploy-activate.service.d" && printf '[Service]\nExecStartPre=/usr/bin/sleep %s\n' $((2 * $(boot_limit "$(cat "$state/baseline-units")" 1 1) / 1000 + 1)) > "$d/archix-deploy-activate.service.d/slow.conf"
       done
       umount /check/root
+      ;;
+    # Only a state's first boot: fail-once fails a unit with nothing on the console to retry it by, devtimeout-once fails it after a device timeout, as GitHub's runners did.
+    fail-once | devtimeout-once)
+      if [ -z "${1:-}" ]; then
+        mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root
+        for d in /check/root/archix/deploy/*/etc/systemd/system; do
+          mkdir -p "$d/systemd-boot-random-seed.service.d"
+          if [ "$BREAK" = fail-once ]; then
+            printf '[Service]\nExecStartPre=/usr/bin/false\n'
+          else
+            printf '[Unit]\nWants=dev-powercut.device\nAfter=dev-powercut.device\n\n[Service]\nExecStartPre=/usr/bin/test -e /dev/powercut\n'
+          fi > "$d/systemd-boot-random-seed.service.d/break.conf"
+        done
+        umount /check/root
+      fi
       ;;
   esac
   secs=$("$lib/boot-real" "/dev/mapper/$snapdev")
@@ -94,17 +109,22 @@ boot_state() {
   watch=
   [ -n "$real" ] || watch=$(awk '/POWERCUT-WATCH at / { buf = "" } /POWERCUT-WATCH/ { sub(/.*POWERCUT-WATCH /, ""); buf = buf $0 "|" } END { print buf }' /dev/shm/boot.log | tr -d '\r' | cut -c1-1500)
   unsnap
-  # A disk's bytes are the same at every boot, so a crash or hang the second boot doesn't repeat was the runner's (gate 40429132019: a pristine boot's segfault on a page of zeros, a boot 20x slower than the one before it).
-  if [ -z "$real" ] && [ -z "${1:-}" ]; then
-    local why
-    why=$(grep -a -m2 -e 'segfault at' -e 'Caught <' -e 'Kernel panic' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-400)
-    if [ -n "$why" ]; then why="crashed: $why"; else why="didn't report in $secs s; still running: ${watch:0:600}"; fi
-    cp /dev/shm/boot.log "$state/boot-${at/\//-}-once.log"
-    echo "$at ($step): $why" >> "$state/rebooted"
-    notes+=("the real boot $why, so it booted again")
-    boot_state again
-  fi
 }
+# judge_boot: what's wrong with the real boot just made, in bp, and hard set when that is something no runner's slowness explains.
+judge_boot() {
+  bp=() hard=
+  if [ -z "$real" ]; then
+    bp+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | grep -av '^\s*$\|POWERCUT-WATCH' | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)${watch:+; still running: $watch}")
+    return
+  fi
+  [[ $real == *" altered=0 "* ]] || { bp+=("the real boot found package files altered: $(grep -a -o 'POWERCUT-ALTERED.*' /dev/shm/boot.log | head -5 | tr -d '\r' | tr '\n' '|')"); hard=1; }
+  [[ $real == *" esp=rw "* ]] || bp+=("the ESP is read-only after the real boot: $(grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
+  [[ $real =~ \ espfsck=success:[1-9] ]] || bp+=("systemd-fsck didn't check the ESP at the real boot")
+  [[ $real == *" failed=" ]] || bp+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-DEVTIMEOUT.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-JOURNAL.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-6000)")
+  [ -z "$BOOT_CEILING" ] || [ "$took" -le "$BOOT_CEILING" ] || { bp+=("the real boot took $took s, over BOOT_CEILING=$BOOT_CEILING s"); hard=1; }
+}
+# retried AT STEP CAUSE LOG: one more boot made because the first's console showed CAUSE ("kind: lines"), whose console LOG keeps.
+retried() { printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "${3%%: *}" "${3#*: }" "$4" >> "$state/retries"; }
 
 # check_state BOOT: checks the snapshot of the replayed disk, with the ESP writes $mask keeps when set, booting it for real when BOOT is 1 or it is the point's first subset to break a FAT chain.
 check_state() {
@@ -116,18 +136,25 @@ check_state() {
   # systemd-boot's own reading is the ground truth: the replayed disk boots in QEMU as it is, and reports what it booted.
   real=
   if [ "$boot" = 1 ]; then
-    local secs units qkk took limit
+    local secs units qkk took limit retry= why bp hard
     boot_state
-    if [ -z "$real" ]; then
-      cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
-      problems+=("the real boot didn't finish in $secs s: $(grep -a -i 'archix\|failed\|emergency' /dev/shm/boot.log | grep -av '^\s*$\|POWERCUT-WATCH' | tail -6 | tr -d '\r' | tr '\n' '|' | cut -c1-700)${watch:+; still running: $watch}")
-    else
-      [[ $real == *" altered=0 "* ]] || problems+=("the real boot found package files altered: $(grep -a -o 'POWERCUT-ALTERED.*' /dev/shm/boot.log | head -5 | tr -d '\r' | tr '\n' '|')")
-      [[ $real == *" esp=rw "* ]] || problems+=("the ESP is read-only after the real boot: $(grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-700)")
-      [[ $real =~ \ espfsck=success:[1-9] ]] || problems+=("systemd-fsck didn't check the ESP at the real boot")
-      [[ $real == *" failed=" ]] || problems+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-JOURNAL.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-6000)")
-      [ -z "$BOOT_CEILING" ] || [ "$took" -le "$BOOT_CEILING" ] || problems+=("the real boot took $took s, over BOOT_CEILING=$BOOT_CEILING s")
-      [ ${#problems[@]} = 0 ] || cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
+    judge_boot
+    # A disk's bytes are the same at every boot, so a failure the second boot doesn't repeat was the runner's, but only a first boot whose console shows a crash, a device timeout or no report by BOOT_TIMEOUT gets that second boot.
+    if [ ${#bp[@]} -gt 0 ] && [ -z "$hard" ]; then
+      if why=$("$lib/boot-cause"); then
+        cp /dev/shm/boot.log "$state/boot-${at/\//-}-first.log"
+        retried "$at" "$step" "$why" "boot-${at/\//-}-first.log"
+        retry=" retried=${why%%: *}"
+        notes+=("booted again, as the first boot showed ${why:0:600}")
+        boot_state again
+        judge_boot
+      else
+        bp+=("its console shows no crash, device timeout or timeout, so it isn't booted again")
+      fi
+    fi
+    problems+=("${bp[@]}")
+    [ ${#bp[@]} = 0 ] || cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
+    if [ -n "$real" ]; then
       # What archix's own units took is judged, not the whole boot, whose kernel, udev, fsck and report time follow the runner's load and what fsck repairs, and against the pristine boot's scaled by the two boots' pacman -Qkk times; a slow verdict stands only if a second boot of the state, right after a second one of the pristine image, is slow against that one too.
       local p_units p_qkk
       p_units=$(cat "$state/baseline-units") p_qkk=$(cat "$state/baseline-qkk")
@@ -135,13 +162,13 @@ check_state() {
       if [ "$units" -gt "$limit" ]; then
         cp /dev/shm/boot.log "$state/boot-${at/\//-}-slow.log"
         local first="$units ms (pacman -Qkk $qkk ms) against the pristine image's $p_units ms ($p_qkk ms; limit $limit ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))" again again_qkk limit2 report
-        report=$({ "$lib/esp-case" pristine > /dev/null || "$lib/esp-case" pristine > /dev/null; } && grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1)
+        report=$("$lib/pristine-boot" "${at/\//-}-pristine")
         again=$(field archix "$report") again_qkk=$(field qkk "$report")
         if [ -z "$again" ] || [ -z "$again_qkk" ]; then
-          problems+=("archix's units took $first, and the pristine image didn't boot again to judge it by")
+          problems+=("archix's units took $first, and the pristine image didn't boot again to judge it by: ${report:0:3000}")
         else
           real_first=$real secs_first=$secs
-          boot_state
+          boot_state again
           limit2=$(boot_limit "$again" "$again_qkk" "$qkk")
           if [ -z "$real" ]; then
             cp /dev/shm/boot.log "$state/boot-${at/\//-}-again.log"
@@ -150,14 +177,15 @@ check_state() {
             cp /dev/shm/boot.log "$state/boot-${at/\//-}-again.log"
             problems+=("archix's units took $first, and again $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms) booted just before (limit $limit2 ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))")
           else
-            echo "$at ($step): archix's units took $first, then $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms; limit $limit2 ms)" >> "$state/slow-once"
+            retried "$at" "$step" "slow: archix's units took $first, then $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms; limit $limit2 ms)" "boot-${at/\//-}-slow.log"
+            retry+=" retried=slow"
             notes+=("slow once: archix's units took $first, then $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms)")
           fi
           real=$real_first secs=$secs_first
         fi
       fi
     fi
-    real+=" secs=$secs"
+    real+=" secs=$secs$retry"
     echo "$at $step $esp $real" >> "$state/real-boots"
   fi
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# sum-shards LOGGED SUMMARY...: checks that the shards' summaries of one logged run add up to it: every shard replayed the log LOGGED (the record's "writes used points esp_points id" line) with one seed, and between them checked each of its points once, booted each point after an ESP write and each sampled point for real, and checked every ESP subset and ESP case.
+# sum-shards LOGGED SUMMARY...: checks that the shards' summaries of one logged run add up to it: every shard replayed the log LOGGED (the record's "writes used points esp_points id" line) with one seed, and between them checked each of its points once, booted each point after an ESP write and each sampled point for real, and checked every ESP subset and ESP case; and that the boots they made again, each listed, are at most RETRY_SHARE (3) percent of their real boots.
 import json
+import os
 import sys
 
 writes, used, points, esp_points, log_id = open(sys.argv[1]).read().split()
@@ -28,6 +29,22 @@ for s in sorted(shards, key=lambda s: s["shard"]):
     print(f"  shard {s['shard']}: {s['points_checked']} points, {s['esp_points_booted']} ESP points and {s['sampled_points_booted']} sampled ones booted, {s['subsets_checked']} subsets ({s['subsets_booted']} booted), {s['cases_checked']} ESP cases, {s['real_boots']} real boots")
 for key in ("points_checked", "esp_points_booted", "sampled_points_booted", "subsets_checked", "subsets_booted", "cases_checked", "real_boots"):
     print(f"  total {key}: {sum(s[key] for s in shards)}")
+share = int(os.environ.get("RETRY_SHARE") or 3)
+boots = sum(s.get("boots", 0) for s in shards)
+retried = [r for s in shards for r in s.get("retried", [])]
+retries = sum(s.get("retries", 0) for s in shards)
+allowed = boots * share // 100
+causes = {}
+for r in retried:
+    causes[r["cause"]] = causes.get(r["cause"], 0) + 1
+print(f"  retries: {retries} of {boots} real boots ({', '.join(f'{n} {c}' for c, n in sorted(causes.items())) or 'none'}), {allowed} allowed by RETRY_SHARE={share}%")
+for s in sorted(shards, key=lambda s: s["shard"]):
+    for r in s.get("retried", []):
+        print(f"    shard {s['shard']}: {r['at']} ({r['step']}), {r['cause']}: {r['detail'][:300]}; first console {r['log']}")
+if retries != len(retried):
+    problems.append(f"the shards count {retries} retries but list {len(retried)}")
+if retries > allowed:
+    problems.append(f"{retries} of {boots} real boots were booted again, over the {allowed} that RETRY_SHARE={share}% allows")
 for problem in problems:
     print(f"PROBLEM: {problem}")
 sys.exit(1 if problems or not shards else 0)

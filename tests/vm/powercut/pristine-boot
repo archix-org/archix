@@ -1,0 +1,27 @@
+#!/bin/bash
+# pristine-boot AT: boots the pristine image for real and prints "SECONDS REPORT" once a boot of it is clean; a first boot that isn't boots once more only when boot-cause names why, which goes to the retries under AT, and otherwise, or when the second isn't clean either, it prints why and exits 1.
+set -u
+state=/var/lib/archix-powercut
+lib=/usr/local/lib/archix-powercut
+boot() {
+  rm -f /dev/shm/boot.log /dev/shm/boot.end
+  secs=$("$lib/esp-case" pristine)
+  real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log 2> /dev/null | tail -1 | tr -d '\r')
+  [[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]]
+}
+detail() { echo "${real:-no report} $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log 2> /dev/null | grep -v POWERCUT-WATCH | tr -d '\r' | tr '\n' '|' | cut -c1-3000)"; }
+if ! boot; then
+  why=$("$lib/boot-cause") || {
+    cp /dev/shm/boot.log "$state/boot-$1.log" 2> /dev/null
+    echo "the pristine image's real boot in $secs s isn't clean, and its console shows no crash, device timeout or timeout to boot it again by: $(detail)"
+    exit 1
+  }
+  cp /dev/shm/boot.log "$state/boot-$1-first.log"
+  printf '%s\tpristine\t%s\t%s\tboot-%s-first.log\n' "$1" "${why%%: *}" "${why#*: }" "$1" >> "$state/retries"
+  boot || {
+    cp /dev/shm/boot.log "$state/boot-$1.log" 2> /dev/null
+    echo "the pristine image's real boot isn't clean twice: first $why; then in $secs s $(detail)"
+    exit 1
+  }
+fi
+echo "$secs $real"
