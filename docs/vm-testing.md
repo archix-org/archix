@@ -17,7 +17,7 @@ Read from nixpkgs `master` on 2026-10-27; paths are in nixpkgs.
 ## What fits archix
 
 - **Backdoor: fits.** `tests/vm/driver/backdoor.sh` is a named virtio-serial port (`archix.shell`) rather than a virtio console. That port is no tty, so there is no `stty raw` and no getty to fight. One line out (`TOKEN TIMEOUT BASE64-COMMAND`) gets one line back with the status, stdout and stderr, which goes into the failure message. It announces every boot with its boot id, so the driver knows a reboot has finished. Commands run without `pipefail`, as vmtest.sh's did, because `cmd | grep -q` would fail when grep closes the pipe early.
-- **Machine API: fits.** `crash()` and `reboot()` differ on purpose. archix's subject is what the firmware and systemd-boot do across a reboot, so QEMU keeps running (no `-no-reboot`), with the same OVMF variables file and swtpm. `crash()` is QMP `system_reset`, the same cut as vmtest.sh's sysrq-b. Running `quit` and starting again would also work, but reset keeps the volatile EFI state behaving like a real reset.
+- **Machine API: fits.** `crash()` and `reboot()` differ on purpose. archix's subject is what the firmware and systemd-boot do across a reboot, so QEMU keeps running (no `-no-reboot`), with the same OVMF variables file and swtpm. `crash()` is QMP `system_reset`, the same cut as vmtest.sh's sysrq-b: what the guest hadn't written is lost, and the disks and variables stay.
 - **Direct kernel boot: doesn't fit the boot suite, and fits little else.** archix chooses a deployment in systemd-boot: the entry, its counters, `LoaderEntrySelected`, which the initramfs reads to mount a deployment, the fallback UKI, Secure Boot signatures and dbx. The kernel command line is inside the signed UKI. Booting `-kernel` skips every one of these. Suites that only check things after boot could boot that way, but every archix suite switches and reboots into a new deployment, which the NixOS docs say direct boot doesn't do. What a direct boot could save is at most the firmware and loader part of each boot (see the timings below), not the boot itself.
 - **Shared store over 9p or virtiofs: doesn't fit.** archix's deployments live on the root filesystem, and the root's layout is what is under test.
 - **Prebuilt base image as a qcow2 overlay: little to gain.** `docs/CI.md` already weighs caching VM images: the boot suite's image builds in 17 s from the archive cache, and it holds the archix binary under test.
@@ -55,7 +55,24 @@ Every command, boot and step goes to the timeline with its time since the start 
 
 ## Timings
 
-TIMINGS
+Measured on this host on 2026-10-27 (cbcaad7), with the 8079 archive cache, archix already built, and `tests/vm/run.sh`'s whole wall time, from the release build to the VM's end.
+
+| Run | ext4 | btrfs |
+| --- | --- | --- |
+| `boot` (vmtest.sh), four runs side by side | 429 s | 425 s |
+| `boot2` (the driver), in the same batch | 436 s (419 s of steps) | failed at 330 s: the etc-merge status race, fixed in cbcaad7 |
+| `boot2`, two runs side by side | 414 s (398 s of steps) | 411 s (394 s of steps) |
+| `boot2` again, cached | 86 ms | 85 ms |
+
+The driver makes a run neither faster nor slower: the VM does the same work. 18 boots took 205 s of the 419 s of steps, counted from the reset or reboot to the guest's shell. A boot is 7.8 to 10 s, and 38 s for step 7's three panicking boots plus the fallback. loader.conf's `timeout 2` is 2 s of each. The time saved comes from the cache, and in the plan from splitting the suite.
+
+The cache can't hide a change. Flipping one byte of `src/main.rs`, `Cargo.lock`, the Dockerfile, `build-image.sh`, `check-deployment`, `machine.py`, `backdoor.sh`, `test.py` or `config.lua`, an exec bit, a new untracked file under `src/`, or `FS` each gave a new key, and restoring it gave the old one back. With one byte of a comment in `src/main.rs` changed, `run.sh boot2` rebuilt archix and ran the suite (413 s, passed); once it was restored, the old pass was a hit again (84 ms). With two checks in step plain broken, the run failed at 37 s with:
+
+```
+FAIL: step 'plain: the first switch on a booted system' failed, 2 check(s):
+- the first switch should lay out deployment 1 and build 2: 1 2
+- /boot should be read-only once laid out
+```
 
 ## Old checks and new steps
 
