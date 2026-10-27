@@ -5,6 +5,23 @@ suite=${1:-boot}
 case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; tests/vm/run.sh selfupgrade replaces it" >&2; exit 2 ;; esac
 root=$(cd "$(dirname "$0")/../.." && pwd)
 [ "$suite" != powercut ] || exec "$root/tests/vm/powercut/run.sh"
+# `run.sh boot2` is the boot suite on the Python driver (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache.
+driver= interactive= cache=1
+case $suite in boot2) driver=boot ;; esac
+for arg in "${@:2}"; do
+  case $arg in
+    --interactive) interactive=1 ;;
+    --no-cache) cache= ;;
+    *) echo "unknown option $arg" >&2; exit 2 ;;
+  esac
+done
+[ -n "$driver" ] || [ -z "$interactive" ] || { echo "--interactive needs a driver suite (boot2)" >&2; exit 2; }
+key=
+if [ -n "$driver" ] && [ -z "$interactive" ]; then
+  key=$(python3 "$root/tests/vm/driver/cache.py" key "$suite")
+  [ -z "$cache" ] || ! python3 "$root/tests/vm/driver/cache.py" hit "$suite" "$key" || exit 0
+fi
+started=$(date +%s)
 # One build volume per checkout, as in tests/arch/run.sh.
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
@@ -39,4 +56,17 @@ case $suite in
   health) mounts+=(-e VM_TIMEOUT=5400) ;;
   rescue) mounts+=(-e VM_TIMEOUT=7200) ;;
 esac
-docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh
+if [ -z "$driver" ]; then
+  docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh
+  exit
+fi
+tty=() args=()
+[ -z "$interactive" ] || tty=(-it) args=(--interactive)
+docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS archix-arch-test python -m driver "/vm/$driver/test.py" "${args[@]}"
+[ -n "$key" ] || exit 0
+# A file edited while the suite ran may not be what it tested, so the pass is recorded only for inputs that didn't change.
+if [ "$(python3 "$root/tests/vm/driver/cache.py" key "$suite")" = "$key" ]; then
+  python3 "$root/tests/vm/driver/cache.py" record "$suite" "$key" "$(($(date +%s) - started))"
+else
+  echo "the inputs changed during the run; not recording the pass"
+fi

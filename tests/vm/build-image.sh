@@ -31,6 +31,8 @@ elif [ "$suite" = rescue ]; then
   dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq sbctl tpm2-tss)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
+elif [ "$suite" = boot2 ]; then
+  dir=/vm/boot
 elif [ "$suite" = recovery ]; then
   dir=/vm/recovery
 fi
@@ -162,19 +164,28 @@ rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs
 extra=$(for package in ${TARGET_PACKAGES:-}; do printf '"%s", ' "$package"; done)
 sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" \
   -e "s|@EXTRA_PACKAGES@|$extra|" "$dir/config.lua" > /mnt/etc/archix/init.lua
-install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
+[ ! -f "$dir/vmtest.sh" ] || install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
+# The driver's suites (tests/vm/driver) have no vmtest.sh: the guest runs the driver's root shell, which config.lua takes from here.
+[ "$suite" != boot2 ] || install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
 install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
-if [ "$suite" = boot ]; then
+if [ "$suite" = boot ] || [ "$suite" = boot2 ]; then
   # The boot suite lays the system out on its first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
-  install -Dm755 "$dir/vmtest.sh" /mnt/usr/local/bin/archix-vmtest
+  if [ "$suite" = boot ]; then
+    test_unit=archix-vmtest.service
+    install -Dm755 "$dir/vmtest.sh" /mnt/usr/local/bin/archix-vmtest
+    printf '[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vmtest\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-vmtest.service
+  else
+    test_unit=archix-backdoor.service
+    install -Dm755 /vm/driver/backdoor.sh /mnt/usr/local/bin/archix-backdoor
+    printf "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/usr/local/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target\n" > /mnt/etc/systemd/system/archix-backdoor.service
+  fi
   printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' > /mnt/etc/systemd/network/20-wired.network
-  printf '[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vmtest\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-vmtest.service
   # A service that reads /usr all the time from a read-only view of its own, as ProtectSystem=strict gives it.
   printf '[Service]\nProtectSystem=strict\nExecStart=/bin/sh -c "while cat /usr/lib/os-release > /dev/null && ls /usr/bin > /dev/null; do sleep 0.2; done; exit 1"\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-protected.service
-  arch-chroot /mnt systemctl enable archix-vmtest.service archix-protected.service systemd-networkd.service systemd-resolved.service
+  arch-chroot /mnt systemctl enable "$test_unit" archix-protected.service systemd-networkd.service systemd-resolved.service
   sed -n 's/.*kernel_params = { \(.*\) },$/\1/p' /mnt/etc/archix/init.lua | tr -d '",' > /mnt/etc/kernel/cmdline
   kernel=$(basename "$(dirname "$(ls /mnt/usr/lib/modules/*/vmlinuz | head -1)")")
   mkdir -p /mnt/efi/EFI/Linux

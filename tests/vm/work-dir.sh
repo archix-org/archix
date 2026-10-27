@@ -34,6 +34,7 @@ remove_work() {
   if [ "$rc" != 0 ] && [ -s "$work/serial.log" ]; then
     kept=${ARCHIX_VM_LOGS:-${XDG_CACHE_HOME:-$HOME/.cache}/archix-vm-logs}/$(basename "$work").serial.log
     mkdir -p "$(dirname "$kept")" && cp "$work/serial.log" "$kept" && echo "kept the failed run's console: $kept"
+    [ ! -s "$work/timeline.log" ] || { cp "$work/timeline.log" "${kept%.serial.log}.timeline.log" && echo "and its driver timeline: ${kept%.serial.log}.timeline.log"; }
   fi
   if [ -n "${ARCHIX_VM_KEEP:-}" ]; then
     echo "kept work dir: $work ($(du -sh "$work" 2> /dev/null | cut -f1 || true))"
