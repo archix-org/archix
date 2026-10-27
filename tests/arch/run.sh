@@ -124,7 +124,7 @@ else
   status=0
   run "$cid" /src/tests/arch/run-tests.sh /out/selected.tsv /out/results.tsv || status=1
 fi
-[ -z "${ARCHIX_TEST_RESULTS:-}" ] || cp "$results" "$ARCHIX_TEST_RESULTS"
+[ -z "${ARCHIX_TEST_RESULTS:-}" ] || { mkdir -p "$(dirname "$ARCHIX_TEST_RESULTS")" && cp "$results" "$ARCHIX_TEST_RESULTS"; }
 "$root/tests/ci/shard-plan.py" check "$selected" "$results" || status=1
 if [ -n "$quick" ] && [ -s "$out/skipped" ]; then
   echo "--quick did NOT run these test targets (tests in each); the full tests/arch/run.sh is still needed before pushing a change to src/:"
