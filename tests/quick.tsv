@@ -1,0 +1,46 @@
+always	lib:archix bin:archix test:no_global_sync test:eval test:formats test:hm
+src/aur/	test:aur test:helper test:recipes
+src/commands/helper.rs	test:helper test:aur
+src/commands/init/	test:init
+src/commands/switch.rs	test:switch test:system test:boot
+src/commands/deployments.rs	test:switch test:deploy
+src/commands/eject.rs	test:deploy test:switch
+src/commands/lock.rs	test:switch test:archlinux
+src/deploy/	test:deploy test:switch test:boot test:deploy_boot
+src/etcmerge/	test:etcmerge test:switch
+src/eval/	test:init test:home test:recipes test:system
+src/options/	test:system test:home
+src/value.rs	test:system test:home
+src/luagen.rs	test:init
+src/capture.rs	test:init
+src/system/boot.rs	test:boot test:switch
+src/system/secureboot.rs	test:boot test:switch
+src/system/authenticode.rs	test:boot
+src/system/blobs.rs	test:boot
+src/system/revoke.rs	test:boot
+src/system/deploy_boot.rs	test:deploy_boot test:deploy
+src/system/	test:system test:switch
+src/flatpak.rs	test:flatpak
+src/fetch.rs	test:fetch test:archlinux
+src/archive.rs	test:archlinux test:fetch test:switch
+src/repos.rs	test:repos
+src/recipes.rs	test:recipes test:helper
+src/repack.rs	test:repos test:recipes
+src/pacman/	test:switch test:archlinux test:repos
+src/lock.rs	test:switch test:archlinux
+src/resolve.rs	test:switch test:archlinux test:helper
+src/plan.rs	test:switch
+src/packages.rs	test:switch test:archlinux
+src/adopt.rs	test:switch
+src/downgrade.rs	test:switch
+src/unsafe_downgrades.json	test:switch
+src/conflicts.rs	test:switch
+src/installed.rs	test:switch test:system
+src/gc.rs	test:switch
+src/generations.rs	test:switch
+src/durable.rs	test:switch test:deploy
+src/date.rs	test:switch test:archlinux
+src/elf.rs	test:deploy_boot test:switch
+src/soname.rs	test:switch
+src/paths.rs	test:switch test:deploy
+src/testhooks.rs	test:switch test:deploy test:boot

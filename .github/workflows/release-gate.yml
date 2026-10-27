@@ -64,8 +64,30 @@ jobs:
           name: gate-image
           status: ${{ job.status }}
 
+  build:
+    needs: plan
+    if: needs.plan.outputs.suites != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: base
+          kvm: "false"
+          need-gb: "10"
+      - uses: ./.github/actions/build
+        with:
+          name: archix-build-gate
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: base
+          name: gate-build
+          status: ${{ job.status }}
+
   suites:
-    needs: [plan, image]
+    needs: [plan, image, build]
     if: needs.plan.outputs.suites != '[]'
     runs-on: ubuntu-latest
     # VM_TIMEOUT leaves room under the 6 h job limit for the image build before and the log upload after.
@@ -85,6 +107,10 @@ jobs:
         with:
           group: ${{ matrix.suite }}
           need-gb: "40"
+      - uses: actions/download-artifact@v4
+        with:
+          name: archix-build-gate
+          path: ${{ runner.temp }}/build
       - run: |
           if [ "$SUITE" = deploy-boot ]; then
             for initramfs in systemd busybox; do INITRAMFS=$initramfs tests/vm/deploy-boot/run.sh; done
@@ -95,6 +121,7 @@ jobs:
           SUITE: ${{ matrix.suite }}
           FS: ${{ matrix.fs }}
           VM_TIMEOUT: "14400"
+          ARCHIX_PREBUILT: ${{ runner.temp }}/build
           # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
           ARCHIX_OLD: 3a99d0c
       - if: always()

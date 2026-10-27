@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,6 +14,9 @@ concurrency:
   # GitHub keeps one pending run per group and drops the older, so a push to main would cancel the queued CI of the commit before it; each pushed commit gets its own group.
   group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CONTAINER_SHARDS: "6"
 
 jobs:
   lint:
@@ -44,10 +48,45 @@ jobs:
           name: image
           status: ${{ job.status }}
 
-  container:
-    needs: image
+  build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 40
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: base
+          kvm: "false"
+          need-gb: "10"
+      - uses: ./.github/actions/build
+      # The shards split every test cargo built, so a new test or test file can't fall outside them.
+      - id: plan
+        run: |
+          tests/ci/shard-plan.py plan "$RUNNER_TEMP/build/tests.tsv" tests/ci/test-times.tsv "$CONTAINER_SHARDS" "$RUNNER_TEMP/shards"
+          cp "$RUNNER_TEMP/build/tests.tsv" "$RUNNER_TEMP/shards/"
+          echo "shards=$(jq -nc --argjson n "$CONTAINER_SHARDS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: container-shards
+          path: ${{ runner.temp }}/shards
+          retention-days: 14
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: base
+          name: build
+          status: ${{ job.status }}
+
+  container:
+    needs: [image, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.build.outputs.shards) }}
     steps:
       - uses: actions/checkout@v5
       - uses: ./.github/actions/vm-setup
@@ -55,16 +94,80 @@ jobs:
           group: base
           kvm: "false"
           need-gb: "5"
+      - uses: actions/download-artifact@v4
+        with:
+          name: archix-build
+          path: ${{ runner.temp }}/build
+      - uses: actions/download-artifact@v4
+        with:
+          name: container-shards
+          path: ${{ runner.temp }}/shards
       - run: tests/arch/run.sh
+        env:
+          ARCHIX_PREBUILT: ${{ runner.temp }}/build
+          ARCHIX_TEST_LIST: ${{ runner.temp }}/shards/shard-${{ matrix.shard }}.tsv
+          ARCHIX_TEST_RESULTS: ${{ runner.temp }}/results/container-${{ matrix.shard }}.tsv
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-results-${{ matrix.shard }}
+          path: ${{ runner.temp }}/results
+          if-no-files-found: ignore
+          retention-days: 14
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: base
-          name: container
+          name: container-${{ matrix.shard }}
           status: ${{ job.status }}
+          new-files: artifact
+
+  # The shards must between them run every test the build listed exactly once; the archive files they newly cached are saved as one base cache, as the unsharded job saved it.
+  container-sum:
+    needs: [build, container]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: container-shards
+          path: ${{ runner.temp }}/shards
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: container-results-*
+          path: ${{ runner.temp }}/results
+          merge-multiple: true
+      - run: tests/ci/shard-plan.py check "$RUNNER_TEMP/shards/tests.tsv" "$RUNNER_TEMP"/results/container-*.tsv
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-new-container-*
+          path: ${{ runner.temp }}/archive-new
+      - id: new
+        run: |
+          shopt -s nullglob
+          tars=("$RUNNER_TEMP"/archive-new/*/archive-new.tar)
+          echo "tars=${#tars[@]}" >> "$GITHUB_OUTPUT"
+      - if: steps.new.outputs.tars != '0'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/archive/base
+          key: archive-base-${{ github.run_id }}
+          restore-keys: archive-base-
+      - if: steps.new.outputs.tars != '0'
+        run: |
+          mkdir -p "$RUNNER_TEMP/archive/base"
+          for tar in "$RUNNER_TEMP"/archive-new/*/archive-new.tar; do tar -C "$RUNNER_TEMP/archive/base" -xf "$tar"; done
+          python3 tests/ci/archive-proxy.py verify "$RUNNER_TEMP/archive/base"
+      - if: steps.new.outputs.tars != '0'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/archive/base
+          key: archive-base-${{ github.run_id }}-${{ github.run_attempt }}-container
 
   boot:
-    needs: image
+    needs: [image, build]
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -77,9 +180,14 @@ jobs:
         with:
           group: boot
           need-gb: "25"
+      - uses: actions/download-artifact@v4
+        with:
+          name: archix-build
+          path: ${{ runner.temp }}/build
       - run: tests/vm/run.sh boot
         env:
           FS: ${{ matrix.fs }}
+          ARCHIX_PREBUILT: ${{ runner.temp }}/build
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
@@ -88,7 +196,7 @@ jobs:
           status: ${{ job.status }}
 
   deploy-boot:
-    needs: image
+    needs: [image, build]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
@@ -102,10 +210,15 @@ jobs:
         with:
           group: deploy-boot
           need-gb: "15"
+      - uses: actions/download-artifact@v4
+        with:
+          name: archix-build
+          path: ${{ runner.temp }}/build
       - run: tests/vm/deploy-boot/run.sh
         env:
           FS: ${{ matrix.fs }}
           INITRAMFS: ${{ matrix.initramfs }}
+          ARCHIX_PREBUILT: ${{ runner.temp }}/build
       - if: always()
         uses: ./.github/actions/vm-finish
         with:

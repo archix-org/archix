@@ -12,9 +12,16 @@ build_log=$(mktemp)
 docker build -t archix-arch-test "$root/tests/arch" >"$build_log" 2>&1 || { cat "$build_log"; exit 1; }
 rm -f "$build_log"
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
-docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
-  cargo build --locked --release && cp /target/release/archix /work/archix
-  cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them.
+if [ -n "${ARCHIX_PREBUILT:-}" ]; then
+  docker run --rm -v "$ARCHIX_PREBUILT":/prebuilt:ro -v "$work":/work archix-arch-test bash -c 'set -e
+    tar -I zstd -xf /prebuilt/target.tar.zst -C /tmp target/release/archix target/x86_64-unknown-linux-musl/release/archix
+    cp /tmp/target/release/archix /work/archix && cp /tmp/target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+else
+  docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
+    cargo build --locked --release && cp /target/release/archix /work/archix
+    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+fi
 if [ "$suite" = selfupgrade ]; then
   old=${ARCHIX_OLD:-HEAD~1}
   rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old"

@@ -10,6 +10,9 @@ inputs:
   status:
     description: The job's status so far, job.status.
     required: true
+  new-files:
+    description: What becomes of newly cached files; "cache" saves the group's cache, "artifact" uploads just them as archive-new-NAME for one job to merge.
+    default: cache
 runs:
   using: composite
   steps:
@@ -17,7 +20,19 @@ runs:
       if: always()
       shell: bash
       run: tests/ci/proxy-down.sh
-    - if: always() && steps.proxy.outputs.new == 'true'
+    - if: always() && steps.proxy.outputs.new == 'true' && inputs.new-files == 'artifact'
+      shell: bash
+      run: sort -u "$RUNNER_TEMP/archive-proxy/new" | tar -C "$RUNNER_TEMP/archive/$GROUP" -cf "$RUNNER_TEMP/archive-new.tar" -T -
+      env:
+        GROUP: ${{ inputs.group }}
+    - if: always() && steps.proxy.outputs.new == 'true' && inputs.new-files == 'artifact'
+      uses: actions/upload-artifact@v4
+      with:
+        name: archive-new-${{ inputs.name }}
+        path: ${{ runner.temp }}/archive-new.tar
+        compression-level: 0
+        retention-days: 1
+    - if: always() && steps.proxy.outputs.new == 'true' && inputs.new-files == 'cache'
       uses: actions/cache/save@v4
       with:
         path: ${{ runner.temp }}/archive/${{ inputs.group }}

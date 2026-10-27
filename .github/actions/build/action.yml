@@ -1,0 +1,19 @@
+name: Build archix once
+description: Builds the release and static binaries and every test executable in the test image, runs the doc tests, and uploads them as an artifact the test jobs take as ARCHIX_PREBUILT.
+inputs:
+  name:
+    description: The artifact's name, unique in the workflow run (release.yml runs CI and the release gate in one).
+    default: archix-build
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: tests/arch/run.sh
+      env:
+        ARCHIX_BUILD_OUT: ${{ runner.temp }}/build
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ runner.temp }}/build
+        compression-level: 0
+        retention-days: 3
