@@ -2,8 +2,8 @@ return {
   packages = { "base", "linux", "mkinitcpio", "systemd-ukify", @EXTRA_PACKAGES@ }, -- packages
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
-  -- GitHub's nested boots left udev's coldplug unfinished past systemd's 90 s device timeout (ttyS0's as well as the ESP's), so a device gets 600 s here.
-  kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0", "systemd.default_device_timeout_sec=600" },
+  -- GitHub's nested boots left udev's coldplug unfinished past 90 s and even 600 s (gate 40446996364), so a device waits for udev, and a boot that never gets one runs into BOOT_TIMEOUT.
+  kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0", "systemd.default_device_timeout_sec=infinity" },
   boot = { loader = "systemd-boot", rescue_entry = false },
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
