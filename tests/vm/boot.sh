@@ -76,14 +76,45 @@ if [ "${SUITE:-}" = firewall ]; then
   extra+=(-device virtio-serial-pci -chardev socket,id=ctl,path=/work/ctl.sock,server=on,wait=off -device virtserialport,chardev=ctl,name=archix.ctl)
   python /vm/firewall/probe.py /work/ctl.sock "$port" /work/ssh-key > /work/probe.log 2>&1 &
 fi
-timeout "${VM_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_MEM:-3072}" -smp "${VM_CPUS:-2}" \
-  -machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on \
-  -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd \
-  -drive if=pflash,format=raw,unit=1,file="$vars" \
-  -drive file=/work/disk.img,format=raw,if=virtio \
-  "${extra[@]}" \
-  -netdev "$net" -device virtio-net-pci,netdev=net0,romfile= \
-  -display none "${serial[@]}" "${monitor[@]}" || true
+# Boots until the VM powers off or $1 seconds pass, with its console in $2 and the disks that follow.
+vm() {
+  local limit=$1 log=$2 console
+  shift 2
+  console=(-serial file:"$log")
+  [ "${SUITE:-}" != rescue ] || console=("${serial[@]}")
+  timeout "$limit" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_MEM:-3072}" -smp "${VM_CPUS:-2}" \
+    -machine q35,smm=on -global driver=cfi.pflash01,property=secure,value=on \
+    -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd \
+    -drive if=pflash,format=raw,unit=1,file="$vars" \
+    "$@" \
+    -netdev "$net" -device virtio-net-pci,netdev=net0,romfile= \
+    -display none "${console[@]}" "${monitor[@]}" || true
+}
+if [ "${SUITE:-}" = recovery ]; then
+  # Four boots: the archix disk breaks itself, then starts no kernel, the rescue disk (first, so it's vda) recovers it, and it boots again.
+  archix=(-drive file=/work/disk.img,format=raw,if=none,id=archix -device virtio-blk-pci,drive=archix,bootindex=1)
+  rescue=(-drive file=/work/rescue.img,format=raw,if=none,id=rescue -device virtio-blk-pci,drive=rescue,bootindex=0)
+  : > /work/serial.log
+  phase() {
+    local name=$1 limit=$2 want=$3
+    shift 3
+    vm "$limit" "/work/serial-$name.log" "$@"
+    cat "/work/serial-$name.log" >> /work/serial.log
+    [ -z "$want" ] || grep -aq "VMTEST: $want" "/work/serial-$name.log" || { grep -a VMTEST /work/serial.log || true; echo "the $name boot didn't print VMTEST: $want" >&2; exit 1; }
+  }
+  phase broken "${VM_TIMEOUT:-2400}" broken "${archix[@]}"
+  phase unbootable "${UNBOOTABLE_TIMEOUT:-180}" "" "${archix[@]}"
+  if grep -aq "Linux version" /work/serial-unbootable.log; then
+    grep -a VMTEST /work/serial.log || true
+    echo "the broken disk should start no kernel" >&2
+    exit 1
+  fi
+  echo "VMTEST: harness: the broken disk started no kernel in ${UNBOOTABLE_TIMEOUT:-180} s" >> /work/serial.log
+  phase rescue "${VM_TIMEOUT:-2400}" "rescue: recovered" "${rescue[@]}" "${archix[@]}"
+  phase recovered "${VM_TIMEOUT:-2400}" "" "${archix[@]}"
+else
+  vm "${VM_TIMEOUT:-2400}" /work/serial.log -drive file=/work/disk.img,format=raw,if=virtio "${extra[@]}"
+fi
 # The console log carries escape and NUL bytes, which make grep call it binary and hide every line.
 grep -a VMTEST /work/serial.log || true
 [ ! -f /work/probe.log ] || sed 's/^/probe: /' /work/probe.log

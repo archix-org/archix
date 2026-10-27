@@ -521,15 +521,13 @@ impl Session {
         let esp = self.esp()?;
         let paths = Paths::under(&root);
         let store = deploy::Store::open(&root)?;
-        let _lock = store.lock()?;
         if !store.deployments()?.contains(&number) {
             bail!("there's no complete deployment {number}; `list` shows them");
         }
         if rescue::entry_state(&paths, &esp, number) == rescue::EntryState::Missing {
-            bail!(
-                "deployment {number} has no boot entry, which the rescue can't build; `use` one that has, then switch from it"
-            );
+            return rollback_in_chroot(&root, &esp, number);
         }
+        let _lock = store.lock()?;
         deploy::verify::ensure_intact(&paths, &store, number)
             .with_context(|| format!("deployment {number} stays as it was; `verify {number}` shows what differs"))?;
         if boot::retry_entry(&esp, number)? {
@@ -666,6 +664,38 @@ impl Session {
         unsafe { libc::reboot(how) };
         Err(io::Error::last_os_error()).context("restarting")
     }
+}
+
+/// For a deployment whose boot entry is gone, as after the ESP was wiped: binds it over `root` as `archix mount-deployment` does and runs its own `archix rollback` chrooted there, which builds its entry, default and fallback, as the live-USB recovery does.
+fn rollback_in_chroot(root: &Path, esp: &Path, number: u32) -> Result<()> {
+    if !esp.starts_with(root) {
+        bail!(
+            "deployment {number} has no boot entry, and building one needs the ESP mounted under the root, not at {}",
+            esp.display()
+        );
+    }
+    println!("deployment {number} has no boot entry; building it from the deployment, chrooted into it");
+    archix::system::deploy_boot::mount_for_chroot(root, Some(number))?;
+    archix::deploy::eject::mount_api_filesystems(root)?;
+    let c_root = std::ffi::CString::new(root.as_os_str().as_encoded_bytes())?;
+    let mut rollback = Command::new(archix::integration::STATIC_BINARY);
+    rollback
+        .args(["rollback", &number.to_string(), "--noconfirm"])
+        .env_remove("ARCHIX_TEST_ROOT");
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut rollback, move || {
+            if libc::chroot(c_root.as_ptr()) != 0 || libc::chdir(c"/".as_ptr()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let status = rollback.status().context("running archix rollback in the deployment")?;
+    if !status.success() {
+        bail!("`archix rollback {number}` in deployment {number} failed ({status}); its output is above");
+    }
+    println!("deployment {number} is current and the boot default with a new entry; `reboot` starts it");
+    Ok(())
 }
 
 /// Checks and repairs the filesystem on `device`, which must not be mounted.

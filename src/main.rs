@@ -106,6 +106,13 @@ enum Command {
         #[arg(long)]
         purge: bool,
     },
+    /// From a live USB: bind a deployment's trees over the archix root mounted at ROOT, so `arch-chroot ROOT` runs it and `archix rollback` there can repair booting; run it as /usr/lib/archix/archix-static from a deployment under ROOT/archix/deploy
+    MountDeployment {
+        /// Where the archix root is mounted, such as /mnt (on btrfs, its root subvolume)
+        root: PathBuf,
+        /// The deployment to bind; current's by default
+        deployment: Option<u32>,
+    },
     /// Declare packages in installed.lua and install them (pacman-style: archix -S <packages>)
     Install {
         #[arg(required = true)]
@@ -512,6 +519,10 @@ fn run() -> Result<ExitCode> {
             commands::prune_hidden(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::MountDeployment { root, deployment } => {
+            commands::mount_deployment(&root, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::EjectHere { root, state } => {
             let paths = archix::paths::Paths {
                 root: root.clone(),
@@ -812,6 +823,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
+        | Command::MountDeployment { .. }
         | Command::EjectHere { .. }
         | Command::EtcMerge { .. }
         | Command::DeployIntegrate { .. }

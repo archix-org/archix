@@ -351,6 +351,15 @@ pub fn failed_to_boot(paths: &Paths, generation: u32) -> bool {
 /// statfs's f_type for FAT, which every ESP is.
 const MSDOS_SUPER_MAGIC: u64 = 0x4d44;
 
+/// Whether a FAT filesystem is mounted at `path`.
+pub fn is_fat(path: &Path) -> bool {
+    let Ok(c_path) = CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    unsafe { libc::statfs(c_path.as_ptr(), &mut stat) == 0 && stat.f_type as u64 == MSDOS_SUPER_MAGIC }
+}
+
 /// Checked before a switch, rollback or gc changes anything: `esp` must be a mounted FAT filesystem, and the partition systemd-boot started from when it says which (LoaderDevicePartUUID), else entries would land in a bare directory or on a disk the firmware never reads.
 pub fn require_esp(esp: &Path) -> Result<()> {
     if !crate::testhooks::check_esp() {
@@ -365,12 +374,19 @@ pub fn require_esp(esp: &Path) -> Result<()> {
             io::Error::last_os_error()
         );
     }
-    if stat.f_type as u64 != MSDOS_SUPER_MAGIC {
+    if !is_fat(esp) {
         bail!(
             "boot.esp is {}, but no FAT filesystem is mounted there, so boot entries would go into a directory the firmware never reads; mount the ESP (`mount {}` with its fstab line), then try again; nothing was changed",
             esp.display(),
             esp.display()
         );
+    }
+    if super::secureboot::in_chroot() {
+        eprintln!(
+            "note: not checking that {} is the partition the firmware starts from, since this runs in a chroot, whose firmware variables are the live system's",
+            esp.display()
+        );
+        return Ok(());
     }
     let Some(loader) = loader_var_entry("LoaderDevicePartUUID") else {
         return Ok(());

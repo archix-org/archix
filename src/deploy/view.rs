@@ -104,6 +104,7 @@ impl Transaction {
             .command(program)
             .args(args)
             .status()
+            .map_err(chroot_hint)
             .with_context(|| format!("running {} in the staging root", describe(argv)))?;
         if !status.success() {
             bail!("{} failed in the staging root ({status})", describe(argv));
@@ -117,8 +118,21 @@ impl Transaction {
         self.command(program)
             .args(args)
             .output()
+            .map_err(chroot_hint)
             .with_context(|| format!("running {} in the staging root", describe(argv)))
     }
+}
+
+/// The likely cause when the view can't be entered from a chroot: pivot_root refuses a root whose parent mount is shared.
+fn chroot_hint(error: io::Error) -> anyhow::Error {
+    let invalid = error.raw_os_error() == Some(libc::EINVAL);
+    let error = anyhow::Error::from(error);
+    if invalid && crate::system::secureboot::in_chroot() {
+        return error.context(
+            "this chroot's root is a mount under a shared one, which pivot_root refuses; outside the chroot, run `mount --make-private` on the mount that holds it (`archix mount-deployment` does), then try again",
+        );
+    }
+    error
 }
 
 fn describe<S: AsRef<OsStr>>(argv: &[S]) -> String {

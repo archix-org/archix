@@ -89,11 +89,14 @@ case $stage in
     for n in $(deployments); do
       in_store "sed -i 's|^root:[^:]*:|root:$lost:|' /archix/deploy/$n/etc/shadow" || fail "losing deployment $n's root password"
     done
+    # And the newer deployment's boot entry gone, which `use` builds again through its own `archix rollback` in a chroot.
+    rm -f "/efi/loader/entries/archix-$(recall newer).conf" "/efi/loader/entries/archix-$(recall newer)+"*.conf
     sync
     {
       printf '%s\t%s\n' 'rescue> ' 'password root --all' 'new password for root: ' 'rescued pass' 'again: ' 'rescued pass'
       for n in $(deployments); do printf '%s\t\n' "set root's password in deployment $n"; done
-      printf '%s\t%s\n' 'rescue> ' "use $(recall newer)" "deployment $(recall newer) is current and the boot default" '' 'rescue> ' 'reboot'
+      printf '%s\t%s\n' 'rescue> ' "use $(recall newer)" "deployment $(recall newer) has no boot entry; building it" '' \
+        "deployment $(recall newer) is current and the boot default with a new entry" '' 'rescue> ' 'reboot'
     } | script
     to_rescue 4
     ;;
@@ -106,6 +109,7 @@ case $stage in
       [ "$(openssl passwd -6 -salt "$salt" 'rescued pass')" = "$hash" ] || fail "deployment $d's root password should be the one set in the rescue: $hash"
     done
     passwd -S root | grep -q ' P ' || fail "root should have a usable password: $(passwd -S root)"
+    ls /efi/loader/entries | grep -qE "^archix-$n[.+]" || fail "the rescue should have built deployment $n's entry again: $(ls /efi/loader/entries | tr '\n' ' ')"
     check_menu
     say "PASS: the rescue reset root's password in every deployment, and deployment $n booted normally"
     next done

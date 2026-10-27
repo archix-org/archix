@@ -224,7 +224,7 @@ fn strip(root: &Path, paths: &Paths, number: u32, restore_originals: bool) -> Re
 }
 
 /// Mounts proc, sys and dev into a root that isn't this namespace's own, for mkinitcpio run chrooted there.
-fn mount_api_filesystems(root: &Path) -> Result<()> {
+pub fn mount_api_filesystems(root: &Path) -> Result<()> {
     for (dir, source, fstype, flags) in [
         ("proc", "proc", Some("proc"), 0),
         ("sys", "/sys", None, libc::MS_BIND | libc::MS_REC),
