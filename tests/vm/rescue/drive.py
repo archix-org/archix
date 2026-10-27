@@ -104,6 +104,8 @@ while True:
         script.pop(0)
         waiting_since = time.time()
         if send:
+            # cryptsetup turns echo off with TCSAFLUSH after its prompt shows, which drops a line typed in between.
+            time.sleep(2)
             note(f"typing {send!r} after {expect!r}")
             console.sendall((b"" if send == "<enter>" else send.encode()) + b"\r")
         else:

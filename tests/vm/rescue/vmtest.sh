@@ -167,8 +167,8 @@ case $stage in
       login admin "$admin_pass"
       printf '%s\t%s\n' 'rescue> ' 'shell' '[rescue ' 'echo SHELL-$((40 + 2)); exit' 'SHELL-42' '' \
         'rescue> ' "open $volume vmtest" "$volume is encrypted: its passphrase opens it here" '' \
-        "Enter passphrase for $volume" 'not the passphrase' 'No key available with this passphrase' '' \
-        "Enter passphrase for $volume" "$luks_pass" "opened $volume as /dev/mapper/vmtest" '' 'rescue> ' 'reboot'
+        "Enter passphrase for $volume: " 'not the passphrase' 'No key available with this passphrase' '' \
+        "Enter passphrase for $volume: " "$luks_pass" "opened $volume as /dev/mapper/vmtest" '' 'rescue> ' 'reboot'
     } | script
     to_rescue 7
     ;;
