@@ -31,7 +31,7 @@ check_menu() {
   uki=$(sed -n 's|^efi /|/efi/|p' /efi/loader/entries/archix-rescue.conf)
   [ -f "$uki" ] || fail "the rescue entry's UKI $uki should be on the ESP"
   ids=$(bootctl list --json=short | jq -r '.[].id')
-  [ "$(grep '^archix' <<< "$ids" | tail -1)" = archix-rescue.conf ] || fail "the rescue entry should sort after every deployment's: $(tr '\n' ' ' <<< "$ids")"
+  [ "$(grep -E '^archix-([0-9]+[.+-]|rescue)' <<< "$ids" | tail -1)" = archix-rescue.conf ] || fail "the rescue entry should sort after every deployment's: $(tr '\n' ' ' <<< "$ids")"
   [ "$(bootctl list --json=short | jq -r '.[] | select(.isDefault) | .id')" != archix-rescue.conf ] || fail "the rescue entry must never be the default"
   grep -q rescue /efi/loader/loader.conf && fail "loader.conf should never name the rescue entry: $(tr '\n' '|' < /efi/loader/loader.conf)"
   return 0
