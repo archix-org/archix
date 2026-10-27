@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# evidence: runs `tests/vm/run.sh powercut` from a clean checkout (FS and the rest as run.sh takes them) and bundles what it showed in ARCHIX_EVIDENCE (~/.cache/archix-powercut-evidence)/<commit>-<fs>/ for a release asset: its output and both consoles, the summary, the PASS lines, the retried states, meta.txt and SHA256SUMS, with this machine's home, user and hostname scrubbed.
+set -uo pipefail
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+[ -z "$(git -C "$root" status --porcelain)" ] || { echo "evidence: $root has uncommitted changes; a bundle names one commit" >&2; exit 2; }
+commit=$(git -C "$root" rev-parse HEAD)
+fs=${FS:-ext4}
+dir=${ARCHIX_EVIDENCE:-$HOME/.cache/archix-powercut-evidence}/${commit:0:7}-$fs
+[ ! -e "$dir" ] || { echo "evidence: $dir is already there" >&2; exit 2; }
+raw=$(mktemp -d)
+trap 'rm -rf "$raw"' EXIT
+mkdir -p "$raw/out"
+started=$(date -u +%FT%TZ) t0=$SECONDS
+FS=$fs SUMMARY=$raw/summary.json OUT=$raw/out SERIAL=$raw "$root/tests/vm/run.sh" powercut 2>&1 | tee "$raw/run.log"
+status=${PIPESTATUS[0]}
+mkdir -p "$dir"
+cp "$raw/run.log" "$dir/"
+for f in record-serial.log replay-serial.log summary.json; do [ ! -e "$raw/$f" ] || cp "$raw/$f" "$dir/"; done
+grep -a -h -o -E 'VMTEST: (PASS|OK|FAIL|RECORDED|baseline:|timing|booted again|ESP case).*' "$raw/record-serial.log" "$raw/replay-serial.log" 2> /dev/null | tr -d '\r' > "$dir/pass-lines.txt"
+if [ -s "$raw/out/retries.txt" ]; then cp "$raw/out/retries.txt" "$dir/retries.txt"; else : > "$dir/retries.txt"; fi
+python3 -I -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1])).get("retried", []), indent=1))' "$raw/summary.json" > "$dir/retried.json" 2> /dev/null || echo '[]' > "$dir/retried.json"
+[ ! -d "$raw/out" ] || { mkdir -p "$dir/out" && cp -r "$raw/out/." "$dir/out/"; }
+seed=$(grep -a -o -m1 'SEED=[^ ]*' "$raw/run.log" | cut -d= -f2)
+{
+  echo "commit $commit"
+  echo "fs $fs"
+  echo "seed $seed"
+  echo "log $(grep -a -o -m1 '^log [0-9a-f]*' "$raw/run.log" | cut -d' ' -f2) ($(grep -a -m1 '^log [0-9a-f]*:' "$raw/run.log" | cut -d: -f2- | sed 's/^ //'))"
+  echo "started $started"
+  echo "ended $(date -u +%FT%TZ)"
+  echo "duration $((SECONDS - t0)) s"
+  echo "exit $status ($([ "$status" = 0 ] && echo passed || echo failed))"
+  echo "settings SAMPLE=${SAMPLE-20} SUBSETS=${SUBSETS-16} REORDER_SAMPLE=${REORDER_SAMPLE-16} BOOT_TIMEOUT=${BOOT_TIMEOUT:-3600} BOOT_RATIO=${BOOT_RATIO:-3} BOOT_FLOOR=${BOOT_FLOOR:-10} RETRY_SHARE=${RETRY_SHARE:-3}${BREAK:+ BREAK=$BREAK}${ONLY:+ ONLY=$ONLY}${SHARD:+ SHARD=$SHARD}"
+  echo "reproduce: git checkout $commit && FS=$fs SEED=$seed tests/vm/run.sh powercut"
+} > "$dir/meta.txt"
+find "$dir" -type f -print0 | xargs -0 python3 -I "$root/tests/vm/powercut/scrub" || { echo "evidence: scrubbing $dir failed; don't publish it" >&2; exit 3; }
+(cd "$dir" && find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs -d '\n' sha256sum > SHA256SUMS)
+echo "evidence: $dir ($(du -sh "$dir" | cut -f1), exit $status)"
+exit "$status"

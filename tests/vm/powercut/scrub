@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+# scrub FILE...: replaces this machine's home directory, user name and hostname in each file, in place, so a published log carries none of them; exits 1 if any is still there.
+import getpass
+import os
+import re
+import socket
+import sys
+
+home = os.path.expanduser("~").encode()
+user = getpass.getuser().encode()
+host = socket.gethostname().split(".")[0].encode()
+left = []
+for path in sys.argv[1:]:
+    data = open(path, "rb").read()
+    data = data.replace(home, b"~")
+    for word, mark in ((user, b"<user>"), (host, b"<host>")):
+        data = re.sub(rb"(?<![A-Za-z0-9_])" + re.escape(word) + rb"(?![A-Za-z0-9_])", mark, data)
+    open(path, "wb").write(data)
+    if any(w in data for w in (home, user, host)):
+        left.append(path)
+for path in left:
+    print(f"scrub: {path} still names this machine's home, user or host", file=sys.stderr)
+sys.exit(1 if left else 0)
