@@ -82,6 +82,9 @@ case $stage in
     touch /usr/archix-vmtest 2> /dev/null && fail "/usr should be read-only"
     touch /boot/archix-vmtest 2> /dev/null && fail "/boot should be read-only"
     findmnt -no OPTIONS /archix | grep -qw ro || fail "/archix should be a read-only mount: $(findmnt -no OPTIONS /archix)"
+    rescue=$(sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2> /dev/null)
+    [ -n "$rescue" ] && [ -f "$rescue" ] || fail "the first switch should leave the rescue entry and its UKI: $(ls /efi/loader/entries)"
+    grep -q 'archix-rescue' "$loader" && fail "the rescue entry must never be loader.conf's default: $(cat "$loader")"
     for try in "chmod -R 700 /archix/deploy/1/usr/bin" "chown -R nobody /archix/deploy/1/usr/bin" \
       "setfacl -R -m u:nobody:rwx /archix/deploy/1/usr/bin" "setcap cap_net_raw+ep /archix/deploy/1/usr/bin/pacman"; do
       $try 2> /dev/null && fail "$try got through /archix"
