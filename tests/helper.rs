@@ -44,59 +44,62 @@ fn current(setup: &Setup) -> Option<u32> {
 
 #[test]
 #[ignore]
-fn declining_a_switch_leaves_the_lock_byte_for_byte() {
+fn declining_or_a_crash_before_or_inside_a_switch_leaves_the_lock_and_config_until_its_deployment_is_committed() {
     let _system = lock_system();
+    let checks = Checks::default();
     let setup = Setup::new(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-    let before = setup.read("archix.lock").unwrap();
 
+    let before = setup.read("archix.lock").unwrap();
     let declined = setup.answering_raw("n\n", &["install", "tree"]);
-    assert!(!declined.status.success());
+    assert!(!declined.status.success(), "declining `archix install tree` failed it");
     let after = setup.read("archix.lock").unwrap();
     println!(
         "archix.lock after declining `archix install tree`:\n{}",
         line_diff(&before, &after)
     );
-    assert!(
+    checks.check(
         after == before,
-        "declining changed archix.lock:\n{}",
-        line_diff(&before, &after)
+        format_args!(
+            "declining `archix install tree` changed archix.lock:\n{}",
+            line_diff(&before, &after)
+        ),
     );
-    assert!(installed_lua(&setup).is_none());
-    assert!(installed("tree").is_none());
+    checks.check(
+        installed_lua(&setup).is_none(),
+        "declining `archix install tree` wrote installed.lua",
+    );
+    checks.check(
+        installed("tree").is_none(),
+        "declining `archix install tree` installed tree",
+    );
 
     let init = setup.read("init.lua").unwrap();
     let edited = init.replacen("packages = { ", "packages = { \"tree\", ", 1);
     fs::write(setup.dir.path().join("init.lua"), &edited).unwrap();
     let declined = setup.answering_raw("n\n", &["switch"]);
-    assert!(!declined.status.success());
+    assert!(!declined.status.success(), "declining `archix switch` failed it");
     let after = setup.read("archix.lock").unwrap();
     println!(
         "archix.lock after declining `archix switch` with tree added by hand:\n{}",
         line_diff(&before, &after)
     );
-    assert!(
+    checks.check(
         after == before,
-        "declining changed archix.lock:\n{}",
-        line_diff(&before, &after)
+        format_args!(
+            "declining `archix switch` changed archix.lock:\n{}",
+            line_diff(&before, &after)
+        ),
     );
-    assert_eq!(
+    checks.eq(
         setup.read("init.lua").unwrap(),
         edited,
-        "the hand edit to the config is the user's and stays"
+        "the hand edit to the config is the user's and stays after declining",
     );
     fs::write(setup.dir.path().join("init.lua"), init).unwrap();
-}
 
-#[test]
-#[ignore]
-fn a_crash_before_the_switch_leaves_the_config_and_lock_untouched() {
-    let _system = lock_system();
-    let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
     let before = setup.read("archix.lock").unwrap();
     let generation = current(&setup);
-
     let crashed = setup.run_env(
         &[("ARCHIX_TEST_CRASH", "lock-resolved")],
         &["install", "tree", "--noconfirm"],
@@ -109,55 +112,72 @@ fn a_crash_before_the_switch_leaves_the_config_and_lock_untouched() {
     let after = setup.read("archix.lock").unwrap();
     println!("archix.lock right after the kill:\n{}", line_diff(&before, &after));
     println!("installed.lua right after the kill: {:?}", installed_lua(&setup));
-    assert!(
+    checks.check(
         after == before,
-        "the kill came before the switch, yet archix.lock changed:\n{}",
-        line_diff(&before, &after)
+        format_args!(
+            "the kill came before the switch, yet archix.lock changed:\n{}",
+            line_diff(&before, &after)
+        ),
     );
-    assert!(
+    checks.check(
         installed_lua(&setup).is_none(),
-        "the kill came before the switch, yet installed.lua was written"
+        "the kill came before the switch, yet installed.lua was written",
     );
-    assert!(installed("tree").is_none());
-    assert_eq!(current(&setup), generation);
-}
+    checks.check(
+        installed("tree").is_none(),
+        "the kill came before the switch, yet tree is installed",
+    );
+    checks.eq(
+        current(&setup),
+        generation,
+        "a kill before the switch leaves the current generation",
+    );
 
-#[test]
-#[ignore]
-fn a_crash_inside_the_switch_writes_the_config_only_once_its_deployment_is_committed() {
-    let _system = lock_system();
-    let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
     let before = setup.read("archix.lock").unwrap();
     let deployments = setup.machine.deployments();
-
     let crashed = setup.run_env(
         &[("ARCHIX_TEST_CRASH", "deploy-transact")],
         &["install", "tree", "--noconfirm"],
     );
     assert_eq!(crashed.status.signal(), Some(9), "archix should die while staging");
     let after = setup.read("archix.lock").unwrap();
-    assert!(
+    checks.check(
         after == before,
-        "the deployment wasn't committed, yet archix.lock changed:\n{}",
-        line_diff(&before, &after)
+        format_args!(
+            "the deployment wasn't committed, yet archix.lock changed:\n{}",
+            line_diff(&before, &after)
+        ),
     );
-    assert!(
+    checks.check(
         installed_lua(&setup).is_none(),
-        "the deployment wasn't committed, yet installed.lua was written"
+        "the deployment wasn't committed, yet installed.lua was written",
     );
-    assert_eq!(setup.machine.deployments(), deployments);
-    assert!(installed("tree").is_none());
+    checks.eq(
+        setup.machine.deployments(),
+        deployments,
+        "a kill while staging commits no deployment",
+    );
+    checks.check(
+        installed("tree").is_none(),
+        "the deployment wasn't committed, yet tree is installed",
+    );
 
     setup.ok(&["install", "tree", "--noconfirm"]);
     let lock = setup.read("archix.lock").unwrap();
-    assert!(lock.contains("tree = {"), "a committed switch writes its lock");
-    assert!(
+    checks.check(lock.contains("tree = {"), "a committed switch writes its lock");
+    checks.check(
         installed_lua(&setup).is_some_and(|text| text.contains("\"tree\"")),
-        "a committed switch writes installed.lua"
+        "a committed switch writes installed.lua",
     );
-    assert!(installed("tree").is_some());
-    assert!(setup.machine.leftovers().is_empty(), "{:?}", setup.machine.leftovers());
+    checks.check(installed("tree").is_some(), "a committed switch installs tree");
+    checks.check(
+        setup.machine.leftovers().is_empty(),
+        format_args!(
+            "neither kill leaves anything the committed switch keeps: {:?}",
+            setup.machine.leftovers()
+        ),
+    );
+    checks.finish();
 }
 
 #[test]

@@ -219,8 +219,10 @@ fn rollback_to_a_kept_deployment_repoints_current_and_the_boot_default_without_r
 
 #[test]
 #[ignore]
-fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_package_cache() {
+fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_package_cache_unless_the_esp_cant_hold_its_entry()
+ {
     let _system = lock_system();
+    let checks = Checks::default();
     let keep = "deployments = { keep = 1 }";
     let setup = Setup::new(&["tree"], keep);
     setup.lay_out();
@@ -237,20 +239,57 @@ fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_pa
         !machine.deployments().contains(&with_tree),
         "keep = 1 drops what isn't booted, current or the default:\n{out}"
     );
-    assert!(
+    checks.check(
         machine.deployments().contains(&with_lemon),
-        "the booted deployment stays"
+        "the booted deployment stays",
     );
-    assert!(
+    checks.check(
         setup.ok(&["generations"]).contains(&format!("{with_tree:>4}")),
-        "the dropped generation stays as a record"
+        "the dropped generation stays as a record",
     );
-    assert!(
+    checks.check(
         machine
             .entries()
             .iter()
-            .all(|e| !e.starts_with(&format!("archix-{with_tree}")))
+            .all(|e| !e.starts_with(&format!("archix-{with_tree}"))),
+        format_args!("the dropped deployment's entry goes: {:?}", machine.entries()),
     );
+
+    {
+        let esp = FatEsp::new(machine, "160M");
+        esp.fill(1 << 20);
+        let before = (
+            machine.deployments(),
+            machine.current(),
+            machine.entries(),
+            machine.loader_conf(),
+        );
+        let output = setup.run(&["rollback", &with_tree.to_string(), "--noconfirm"]);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "a rollback onto a full ESP wasn't refused");
+        checks.check(
+            err.contains("the ESP at") && err.contains("nothing was changed"),
+            format_args!("a rollback onto a full ESP says why and that nothing changed: {err}"),
+        );
+        checks.eq(
+            (
+                machine.deployments(),
+                machine.current(),
+                machine.entries(),
+                machine.loader_conf(),
+            ),
+            before,
+            "a rollback refused for a full ESP changes nothing",
+        );
+        checks.check(
+            machine.leftovers().is_empty(),
+            format_args!(
+                "a rollback refused for a full ESP leaves nothing behind: {:?}",
+                machine.leftovers()
+            ),
+        );
+    }
+
     let record = setup
         .paths
         .state
@@ -260,41 +299,62 @@ fn rollback_to_a_generation_whose_deployment_was_dropped_rebuilds_it_from_the_pa
     assert!(text.contains(&field), "records carry their format:\n{text}");
     fs::write(&record, text.replace(&field, "\"format\": 99,")).unwrap();
     let refused = setup.fails(&["rollback", &with_tree.to_string(), "--noconfirm"]);
-    assert!(
+    checks.check(
         refused.contains("written by a newer archix (record format 99") && refused.contains("nothing was changed"),
-        "{refused}"
+        format_args!("a newer archix's record is refused: {refused}"),
     );
-    assert_eq!(machine.current(), Some(newest));
-    assert!(setup.ok(&["generations"]).contains(&format!("{with_tree:>4}")));
+    checks.eq(machine.current(), Some(newest), "a refused newer record leaves current");
+    checks.check(
+        setup.ok(&["generations"]).contains(&format!("{with_tree:>4}")),
+        "a refused newer record stays listed",
+    );
     fs::write(&record, &text).unwrap();
 
     let out = setup.ok(&["rollback", &with_tree.to_string(), "--noconfirm"]);
-    assert!(out.contains("rebuilding it from deployment"), "{out}");
-    assert_eq!(
+    checks.check(
+        out.contains("rebuilding it from deployment"),
+        format_args!("the rollback rebuilds: {out}"),
+    );
+    checks.eq(
         machine.current(),
         Some(with_tree),
-        "the rebuilt deployment keeps its generation's number"
+        "the rebuilt deployment keeps its generation's number",
     );
-    assert!(machine.installed_in(with_tree, "tree").is_some());
-    assert_eq!(machine.installed_in(with_tree, "lemon"), None);
-    assert!(
+    checks.check(
+        machine.installed_in(with_tree, "tree").is_some(),
+        "the rebuilt deployment has tree",
+    );
+    checks.eq(
+        machine.installed_in(with_tree, "lemon"),
+        None,
+        "the rebuilt deployment lacks lemon",
+    );
+    checks.check(
         machine.entries().contains(&format!("archix-{with_tree}.conf")),
-        "{:?}",
-        machine.entries()
+        format_args!("the rebuilt deployment gets its entry: {:?}", machine.entries()),
     );
-    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
-    assert!(
+    checks.check(
+        machine.leftovers().is_empty(),
+        format_args!("the rebuild leaves nothing behind: {:?}", machine.leftovers()),
+    );
+    checks.check(
         machine.deployments().contains(&with_lemon),
-        "the booted deployment stays"
+        "the booted deployment stays after the rebuild",
     );
-    assert!(
+    checks.check(
         !machine.deployments().contains(&newest),
-        "a rebuilding rollback runs gc like a switch: {:?}",
-        machine.deployments()
+        format_args!(
+            "a rebuilding rollback runs gc like a switch: {:?}",
+            machine.deployments()
+        ),
     );
     assert_bootable(machine, "after the rebuild");
     machine.reboot(None);
-    assert!(machine.root.join("usr/bin/tree").is_file());
+    checks.check(
+        machine.root.join("usr/bin/tree").is_file(),
+        "the rebuilt deployment boots with tree",
+    );
+    checks.finish();
 }
 
 #[test]
@@ -805,49 +865,6 @@ impl Drop for FatEsp {
         let _ = Command::new("umount").arg("-l").arg(&self.at).status();
         let _ = Command::new("losetup").arg("-d").arg(&self.dev).status();
     }
-}
-
-#[test]
-#[ignore]
-fn a_rollback_that_rebuilds_is_refused_before_anything_changes_when_the_esp_cant_hold_its_entry() {
-    let _system = lock_system();
-    let keep = "deployments = { keep = 1 }";
-    let setup = Setup::new(&["tree"], keep);
-    setup.lay_out();
-    let machine = &setup.machine;
-    let with_tree = machine.current().unwrap();
-    setup.set_body(&["lemon"], keep);
-    setup.ok(&["switch", "--noconfirm"]);
-    let with_lemon = machine.current().unwrap();
-    machine.reboot(Some(&format!("archix-{with_lemon}.conf")));
-    setup.set_body(&[], keep);
-    setup.ok(&["switch", "--noconfirm"]);
-    assert!(!machine.deployments().contains(&with_tree));
-    let esp = FatEsp::new(machine, "160M");
-    esp.fill(1 << 20);
-    let before = (
-        machine.deployments(),
-        machine.current(),
-        machine.entries(),
-        machine.loader_conf(),
-    );
-    let output = setup.run(&["rollback", &with_tree.to_string(), "--noconfirm"]);
-    let err = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "a rollback onto a full ESP wasn't refused");
-    assert!(
-        err.contains("the ESP at") && err.contains("nothing was changed"),
-        "{err}"
-    );
-    assert_eq!(
-        (
-            machine.deployments(),
-            machine.current(),
-            machine.entries(),
-            machine.loader_conf()
-        ),
-        before
-    );
-    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
 }
 
 #[test]

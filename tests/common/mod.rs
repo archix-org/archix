@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -37,6 +37,52 @@ fn test_package(name: &str) -> bool {
 
 pub fn lock_system() -> MutexGuard<'static, ()> {
     SYSTEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Checks a test that runs several behaviours on one setup collects, so one failing doesn't hide the others; `finish` fails naming them all.
+#[derive(Default)]
+pub struct Checks {
+    failed: RefCell<Vec<String>>,
+    finished: Cell<bool>,
+}
+
+impl Checks {
+    pub fn check(&self, ok: bool, what: impl std::fmt::Display) -> bool {
+        if !ok {
+            eprintln!("check failed: {what}");
+            self.failed.borrow_mut().push(what.to_string());
+        }
+        ok
+    }
+
+    pub fn eq<T: PartialEq + std::fmt::Debug>(&self, left: T, right: T, what: impl std::fmt::Display) -> bool {
+        let ok = left == right;
+        self.check(ok, format_args!("{what}: {left:?} != {right:?}"))
+    }
+
+    pub fn finish(&self) {
+        self.finished.set(true);
+        let failed = self.failed.borrow();
+        assert!(
+            failed.is_empty(),
+            "{} checks failed:\n- {}",
+            failed.len(),
+            failed.join("\n- ")
+        );
+    }
+}
+
+impl Drop for Checks {
+    fn drop(&mut self) {
+        let failed = self.failed.borrow();
+        if !self.finished.get() && !failed.is_empty() {
+            eprintln!(
+                "before the test stopped, {} checks had failed:\n- {}",
+                failed.len(),
+                failed.join("\n- ")
+            );
+        }
+    }
 }
 
 fn sh(script: &str) {
