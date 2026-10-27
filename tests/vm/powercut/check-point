@@ -63,8 +63,13 @@ breaks_chain() {
   unsnap
   return $r
 }
-# The most archix's units may take in a replayed state's boot, in ms, given the pristine image's: BOOT_RATIO times that or BOOT_FLOOR s more, whichever is longer.
-boot_limit() { local r=$((BOOT_RATIO * $1)) f=$(($1 + BOOT_FLOOR * 1000)); echo $((r > f ? r : f)); }
+# boot_limit UNITS QKK NOW: the most archix's units may take in a boot whose pacman -Qkk took NOW ms, given a pristine boot's UNITS and QKK ms: BOOT_RATIO times UNITS or BOOT_FLOOR s more, whichever is longer, scaled up by how much slower NOW's machine ran than QKK's.
+boot_limit() {
+  local p=$(($1 * ($3 > $2 ? $3 : $2) / ($2 > 0 ? $2 : 1)))
+  local r=$((BOOT_RATIO * p)) f=$((p + BOOT_FLOOR * 1000))
+  echo $((r > f ? r : f))
+}
+field() { grep -o " $1=[0-9]*" <<< "$2" | cut -d= -f2; }
 # boot_state: boots a fresh snapshot of the state for real, setting real (the report), secs (QEMU's run), took (the guest's time to its report), units (archix's units' ms) and watch (what a boot that never reported still ran).
 boot_state() {
   snap
@@ -73,7 +78,7 @@ boot_state() {
     slow-boot)
       mount ${opts:+-o $opts} "/dev/mapper/$rootdev" /check/root
       for d in /check/root/archix/deploy/*/etc/systemd/system; do
-        mkdir -p "$d/archix-deploy-activate.service.d" && printf '[Service]\nExecStartPre=/usr/bin/sleep %s\n' $((2 * $(boot_limit "$(cat "$state/baseline-units")") / 1000 + 1)) > "$d/archix-deploy-activate.service.d/slow.conf"
+        mkdir -p "$d/archix-deploy-activate.service.d" && printf '[Service]\nExecStartPre=/usr/bin/sleep %s\n' $((2 * $(boot_limit "$(cat "$state/baseline-units")" 1 1) / 1000 + 1)) > "$d/archix-deploy-activate.service.d/slow.conf"
       done
       umount /check/root
       ;;
@@ -82,8 +87,10 @@ boot_state() {
   real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
   took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
   took=${took:-$secs}
-  units=$(grep -o ' archix=[0-9]*' <<< "$real" | cut -d= -f2)
+  units=$(field archix "$real")
   units=${units:-0}
+  qkk=$(field qkk "$real")
+  qkk=${qkk:-0}
   watch=
   [ -n "$real" ] || watch=$(awk '/POWERCUT-WATCH at / { buf = "" } /POWERCUT-WATCH/ { sub(/.*POWERCUT-WATCH /, ""); buf = buf $0 "|" } END { print buf }' /dev/shm/boot.log | tr -d '\r' | cut -c1-1500)
   unsnap
@@ -99,7 +106,7 @@ check_state() {
   # systemd-boot's own reading is the ground truth: the replayed disk boots in QEMU as it is, and reports what it booted.
   real=
   if [ "$boot" = 1 ]; then
-    local secs units took limit
+    local secs units qkk took limit
     boot_state
     if [ -z "$real" ]; then
       cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
@@ -111,27 +118,30 @@ check_state() {
       [[ $real == *" failed=" ]] || problems+=("the real boot has failed units: ${real##* failed=}: $({ grep -a -o 'POWERCUT-KERNEL.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-FAILED.*' /dev/shm/boot.log; grep -a -o 'POWERCUT-JOURNAL.*' /dev/shm/boot.log; } | tr -d '\r' | tr '\n' '|' | cut -c1-6000)")
       [ -z "$BOOT_CEILING" ] || [ "$took" -le "$BOOT_CEILING" ] || problems+=("the real boot took $took s, over BOOT_CEILING=$BOOT_CEILING s")
       [ ${#problems[@]} = 0 ] || cp /dev/shm/boot.log "$state/boot-${at/\//-}.log"
-      # What archix's own units took is judged, not the whole boot, whose kernel, udev, fsck and report time follow the runner's load and what fsck repairs; a slow verdict stands only if a second boot of the state, right after a second one of the pristine image, is slow against that one too.
-      limit=$(boot_limit "$(cat "$state/baseline-units")")
+      # What archix's own units took is judged, not the whole boot, whose kernel, udev, fsck and report time follow the runner's load and what fsck repairs, and against the pristine boot's scaled by the two boots' pacman -Qkk times; a slow verdict stands only if a second boot of the state, right after a second one of the pristine image, is slow against that one too.
+      local p_units p_qkk
+      p_units=$(cat "$state/baseline-units") p_qkk=$(cat "$state/baseline-qkk")
+      limit=$(boot_limit "$p_units" "$p_qkk" "$qkk")
       if [ "$units" -gt "$limit" ]; then
         cp /dev/shm/boot.log "$state/boot-${at/\//-}-slow.log"
-        local first="$units ms against the pristine image's $(cat "$state/baseline-units") ms (limit $limit ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))" again limit2
-        again=$("$lib/esp-case" pristine > /dev/null && grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | grep -o ' archix=[0-9]*' | cut -d= -f2)
-        if [ -z "$again" ]; then
+        local first="$units ms (pacman -Qkk $qkk ms) against the pristine image's $p_units ms ($p_qkk ms; limit $limit ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))" again again_qkk limit2 report
+        report=$("$lib/esp-case" pristine > /dev/null && grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1)
+        again=$(field archix "$report") again_qkk=$(field qkk "$report")
+        if [ -z "$again" ] || [ -z "$again_qkk" ]; then
           problems+=("archix's units took $first, and the pristine image didn't boot again to judge it by")
         else
-          limit2=$(boot_limit "$again")
           real_first=$real secs_first=$secs
           boot_state
+          limit2=$(boot_limit "$again" "$again_qkk" "$qkk")
           if [ -z "$real" ]; then
             cp /dev/shm/boot.log "$state/boot-${at/\//-}-again.log"
             problems+=("archix's units took $first, and the second boot didn't finish in $secs s")
           elif [ "$units" -gt "$limit2" ]; then
             cp /dev/shm/boot.log "$state/boot-${at/\//-}-again.log"
-            problems+=("archix's units took $first, and again $units ms against the pristine image's $again ms booted just before (limit $limit2 ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))")
+            problems+=("archix's units took $first, and again $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms) booted just before (limit $limit2 ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))")
           else
-            echo "$at ($step): archix's units took $first, then $units ms against the pristine image's $again ms (limit $limit2 ms)" >> "$state/slow-once"
-            notes+=("slow once: archix's units took $first, then $units ms against the pristine image's $again ms")
+            echo "$at ($step): archix's units took $first, then $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms; limit $limit2 ms)" >> "$state/slow-once"
+            notes+=("slow once: archix's units took $first, then $units ms ($qkk ms) against the pristine image's $again ms ($again_qkk ms)")
           fi
           real=$real_first secs=$secs_first
         fi

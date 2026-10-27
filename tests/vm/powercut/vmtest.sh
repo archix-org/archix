@@ -237,10 +237,12 @@ real=$(grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1 | tr -d '\r')
 [[ $real == *" esp=rw "*" altered=0 "* && $real == *" failed=" ]] || fail "the pristine image's real boot isn't clean: $real $(grep -a -o 'POWERCUT-[A-Z]*.*' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-5000)"
 took=$(grep -o ' boot=[0-9]*' <<< "$real" | cut -d= -f2)
 units=$(grep -o ' archix=[0-9]*' <<< "$real" | cut -d= -f2)
-[ -n "$units" ] || fail "the pristine image's report has no archix units' time: $real"
+qkk=$(grep -o ' qkk=[0-9]*' <<< "$real" | cut -d= -f2)
+[ -n "$units" ] && [ -n "$qkk" ] || fail "the pristine image's report has no archix units' or pacman -Qkk time: $real"
 echo "${took:-$secs}" > "$state/baseline-boot"
 echo "$units" > "$state/baseline-units"
-say "baseline: the pristine image boots for real in ${took:-$secs} s to its report, $secs s with it, $units ms of it in archix's units ($real; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r')); a replayed state's archix units may take ${BOOT_RATIO}x that or $BOOT_FLOOR s more, whichever is longer, unless a second boot of it and of the pristine image says otherwise${BOOT_CEILING:+, and its boot at most $BOOT_CEILING s}"
+echo "$qkk" > "$state/baseline-qkk"
+say "baseline: the pristine image boots for real in ${took:-$secs} s to its report, $secs s with it, $units ms of it in archix's units, and its pacman -Qkk in $qkk ms ($real; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r')); a replayed state's archix units may take ${BOOT_RATIO}x that or $BOOT_FLOOR s more, whichever is longer, scaled by how much longer its pacman -Qkk takes, unless a second boot of it and of the pristine image says otherwise${BOOT_CEILING:+, and its boot at most $BOOT_CEILING s}"
 # Each way the ESP can be mounted, with a file on it whose FAT chain runs into a free cluster, as a power cut can leave one; then what fsck's repair of current's entry or UKI leaves.
 cases=0
 for c in passno-2 passno-0 gpt-auto drop-entry drop-uki empty-uki only-fallback; do
@@ -283,7 +285,7 @@ if [ -s "$state/reorder-points" ]; then
   say "PASS: reordered $(awk '{ n += $4 } END { print n }' "$state/reorder-points") ESP subsets in $(awk '{ s += $5 } END { print s }' "$state/reorder-points") s at $(wc -l < "$state/reorder-points") flush points (seed $SEED, windows of up to $(sort -n -k2 "$state/reorder-points" | tail -1 | cut -d' ' -f2) ESP writes); $(subset_count real-boots) booted for real; fsck notes: $(subset_count vfat-notes) ESP; $(subset_count repaired) ESP repairs checked; $(subset_count leftover-points) leave leftovers the next switch clears"
 fi
 spread() { grep -o " $1=[0-9]*" "$state/real-boots" 2> /dev/null | cut -d= -f2 | sort -n | awk -v u="$2" '{ a[NR] = $1; s += $1 } END { if (NR) printf "%d %s mean, %d %s median, %d %s max", s / NR, u, a[int((NR + 1) / 2)], u, a[NR], u; else printf "none" }'; }
-say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(spread secs s), $(spread boot s) to the report, against the baseline's $(cat "$state/baseline-boot") s; archix's units $(spread archix ms) against the baseline's $(cat "$state/baseline-units") ms"
+say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(spread secs s), $(spread boot s) to the report, against the baseline's $(cat "$state/baseline-boot") s; archix's units $(spread archix ms) against the baseline's $(cat "$state/baseline-units") ms; pacman -Qkk $(spread qkk ms) against the baseline's $(cat "$state/baseline-qkk") ms"
 [ ! -s "$state/slow-once" ] || while read -r line; do say "slow once: $line"; done < "$state/slow-once"
 if [ -s "$state/orphans" ]; then
   while read -r n line; do say "orphan at $n points: $line"; done < <(cut -d' ' -f2- "$state/orphans" | sort | uniq -c)
