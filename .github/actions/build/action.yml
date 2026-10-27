@@ -25,6 +25,10 @@ runs:
         path: ${{ runner.temp }}/build
         compression-level: 0
         retention-days: 3
+    # The container wrote them as root, some crates' files mode 0600.
+    - if: steps.cargo.outputs.cache-hit != 'true'
+      shell: bash
+      run: sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/cargo"
     - if: steps.cargo.outputs.cache-hit != 'true'
       uses: actions/cache/save@v4
       with:
