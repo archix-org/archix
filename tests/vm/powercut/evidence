@@ -25,7 +25,7 @@ seed=$(grep -a -o -m1 'SEED=[^ ]*' "$raw/run.log" | cut -d= -f2)
   echo "commit $commit"
   echo "fs $fs"
   echo "seed $seed"
-  echo "log $(grep -a -o -m1 '^log [0-9a-f]*' "$raw/run.log" | cut -d' ' -f2) ($(grep -a -m1 '^log [0-9a-f]*:' "$raw/run.log" | cut -d: -f2- | sed 's/^ //'))"
+  grep -a -o -m1 'log [0-9a-f]\{16\}: fs .*' "$raw/run.log" || echo "log unknown"
   echo "started $started"
   echo "ended $(date -u +%FT%TZ)"
   echo "duration $((SECONDS - t0)) s"
