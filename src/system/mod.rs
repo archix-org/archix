@@ -12,6 +12,7 @@ pub mod merge;
 pub mod password;
 pub mod reboot;
 pub mod rescue;
+pub mod rescue_auth;
 pub mod revoke;
 pub mod secureboot;
 pub mod sleep;

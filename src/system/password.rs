@@ -1,4 +1,4 @@
-//! Setting a user's password in a deployment's /etc from the rescue boot, where neither PAM nor chpasswd runs: SHA-512 crypt hashes, which libxcrypt and PAM accept.
+//! Passwords in a deployment's /etc from the rescue boot, where neither PAM nor chpasswd runs: setting SHA-512 crypt hashes, which libxcrypt and PAM accept, and checking the rescue's login against shadow.
 
 use std::fs;
 use std::path::Path;
@@ -82,6 +82,28 @@ pub fn sha512_crypt(password: &[u8], salt: &str) -> String {
     }
     push(0, 0, c[63], 2);
     out
+}
+
+/// Whether `hash` is a password `verify` can check: yescrypt, SHA-512 or SHA-256 crypt, not locked (`!`, `*`) or empty.
+pub fn checkable(hash: &str) -> bool {
+    ["$y$", "$6$", "$5$"].iter().any(|id| hash.starts_with(id))
+}
+
+/// Whether `password` matches the crypt `hash` from shadow, as libxcrypt checks it; None for a hash `checkable` refuses or that doesn't parse.
+pub fn verify(password: &[u8], hash: &str) -> Option<bool> {
+    use sha_crypt::password_hash::{Error, PasswordVerifier};
+    if !checkable(hash) {
+        return None;
+    }
+    let result = match hash.as_bytes()[1] {
+        b'y' => yescrypt::Yescrypt::default().verify_password(password, hash),
+        _ => sha_crypt::ShaCrypt::SHA512.verify_password(password, hash),
+    };
+    match result {
+        Ok(()) => Some(true),
+        Err(Error::PasswordInvalid) => Some(false),
+        Err(_) => None,
+    }
 }
 
 /// A random 16-character salt from crypt's alphabet.

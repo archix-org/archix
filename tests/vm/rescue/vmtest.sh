@@ -1,5 +1,5 @@
 #!/bin/bash
-# The rescue suite's guest side: every deployment broken at once, then a lost root password, each repaired from the rescue entry through `archix rescue` alone, which tests/vm/rescue/drive.py types at its prompt.
+# The rescue suite's guest side: every deployment broken at once, then a lost root password, each repaired from the rescue entry through `archix rescue` alone, which tests/vm/rescue/drive.py types at its login and prompt; then under Secure Boot with root locked, wrong and empty passwords get no prompt or shell, a wheel user's does, and a LUKS volume a TPM opens under this Secure Boot state asks the rescue for its passphrase.
 set -u
 state=/var/lib/archix-vmtest
 mkdir -p "$state"
@@ -41,6 +41,11 @@ systemd_ok() { head -c 4 "/archix/deploy/$1/usr/lib/systemd/systemd" | grep -q E
 root_hash() { grep '^root:' "/archix/deploy/$1/etc/shadow" | cut -d: -f2; }
 # Runs a shell command with /archix writable, which the boot binds read-only.
 in_store() { unshare -m sh -c "mount -o remount,bind,rw /archix && $1"; }
+root_pass='rescue root pass' admin_pass='rescue admin pass' luks_pass=archix-vmtest-passphrase
+# The script steps that log in to the rescue as user $1 with password $2.
+login() { printf '%s\t%s\n' 'rescue login (root or a wheel user): ' "$1" 'password: ' "$2" "logged in as $1" ''; }
+volume=/dev/vdb
+cryptsetup_bin=$(command -v systemd-cryptsetup || echo /usr/lib/systemd/systemd-cryptsetup)
 
 say "stage $stage: entry $selected, deployment $booted, current $(current), deployments $(deployments), rescue from $(rescue_source)"
 case $stage in
@@ -51,6 +56,9 @@ case $stage in
     first=$(deployments | cut -d' ' -f1)
     [ "$(rescue_source)" = "$first" ] || fail "the image's switch should build the rescue entry from deployment $first, the system it laid out and ran on, as nothing had booted from an entry"
     ls /var/cache/pacman/pkg | grep -qE '^systemd-[0-9]' || fail "the image should keep systemd's package, which the repair restores from"
+    # The rescue opens only for root or a wheel user with a password.
+    useradd -m -G wheel admin || fail "useradd admin"
+    printf 'root:%s\nadmin:%s\n' "$root_pass" "$admin_pass" | chpasswd || fail "chpasswd"
     sed -i 's|\["/etc/archix-vmtest-mark"\] = { text = "1" }|["/etc/archix-vmtest-mark"] = { text = "2" }|' "$config"
     ax switch --noconfirm > "$state/switch.log" 2>&1 || fail "the switch: $(tail -8 "$state/switch.log" | tr '\n' '|')"
     [ "$(current)" -gt "$booted" ] || fail "the switch should commit a deployment"
@@ -63,6 +71,7 @@ case $stage in
     ;;
   2)
     [ "$booted" = "$(recall newer)" ] || fail "deployment $(recall newer) should boot"
+    grep -qE '^admin:\$y\$' /etc/shadow || fail "the switch should have carried admin's password into deployment $booted"
     # Every deployment's init replaced by a new file with garbage in it, so none of them can boot.
     for n in $(deployments); do
       in_store "printf 'broken\n' > /archix/deploy/$n/usr/lib/systemd/systemd.new && mv /archix/deploy/$n/usr/lib/systemd/systemd.new /archix/deploy/$n/usr/lib/systemd/systemd" || fail "breaking deployment $n"
@@ -71,6 +80,7 @@ case $stage in
     sync
     say "PASS: broke /usr/lib/systemd/systemd in deployments $(deployments)"
     {
+      login root "$root_pass"
       printf '%s\t%s\n' 'rescue> ' 'list' "deployment $(recall newer)" '' 'rescue> ' 'check' 'the root and the ESP are clean' '' 'rescue> ' 'verify --repair'
       for n in $(deployments); do printf '%s\t\n' "deployment $n: repaired 1 files"; done
       printf '%s\t%s\n' 'rescue> ' "use $(recall older)" "deployment $(recall older) is current and the boot default" '' 'rescue> ' 'reboot'
@@ -94,6 +104,7 @@ case $stage in
     rm -f "/efi/loader/entries/archix-$(recall newer).conf" "/efi/loader/entries/archix-$(recall newer)+"*.conf
     sync
     {
+      login admin "$admin_pass"
       printf '%s\t%s\n' 'rescue> ' 'password root --all' 'new password for root: ' 'rescued pass' 'again: ' 'rescued pass'
       for n in $(deployments); do printf '%s\t\n' "set root's password in deployment $n"; done
       printf '%s\t%s\n' 'rescue> ' "use $(recall newer)" "deployment $(recall newer) has no boot entry; building it" '' \
@@ -112,7 +123,59 @@ case $stage in
     passwd -S root | grep -q ' P ' || fail "root should have a usable password: $(passwd -S root)"
     ls /efi/loader/entries | grep -qE "^archix-$n[.+]" || fail "the rescue should have built deployment $n's entry again: $(ls /efi/loader/entries | tr '\n' ' ')"
     check_menu
-    say "PASS: the rescue reset root's password in every deployment, and deployment $n booted normally"
+    say "PASS: with root's password lost, admin of wheel logged in to the rescue, which reset root's password in every deployment, and deployment $n booted normally"
+    archix secure-boot setup > /dev/console 2>&1 || fail "archix secure-boot setup"
+    sed -i 's|boot = { loader = "systemd-boot" }|boot = { loader = "systemd-boot", secure_boot = true }|' "$config"
+    ax switch --noconfirm > "$state/switch-sb.log" 2>&1 || fail "the switch with Secure Boot: $(tail -8 "$state/switch-sb.log" | tr '\n' '|')"
+    remember signed "$(current)"
+    next 5
+    systemctl reboot
+    ;;
+  5)
+    [ "$booted" = "$(recall signed)" ] || fail "deployment $(recall signed) should boot"
+    bootctl status 2> /dev/null | grep -q "Secure Boot: enabled (user)" || fail "Secure Boot should be enforcing"
+    check_menu
+    uki=$(sed -n 's|^efi /|/efi/|p' /efi/loader/entries/archix-rescue.conf)
+    sbctl verify "$uki" 2>&1 | grep -q "is signed" || fail "the rescue UKI should be signed: $(sbctl verify "$uki" 2>&1)"
+    inspected=$(ukify inspect "$uki")
+    grep -q 'archix.rescue' <<< "$inspected" || fail "the rescue UKI should carry its command line: $inspected"
+    grep -q pcrsig <<< "$inspected" && fail "the rescue UKI must carry no signed PCR policy"
+    # A volume a TPM opens under this Secure Boot state alone, PCR 7, which the signed rescue UKI shares.
+    printf %s "$luks_pass" | cryptsetup luksFormat --type luks2 --batch-mode "$volume" - || fail "luksFormat"
+    PASSWORD=$luks_pass systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$volume" > /dev/console 2>&1 || fail "systemd-cryptenroll"
+    "$cryptsetup_bin" attach vmtest-tpm "$volume" - tpm2-device=auto,headless=true > /dev/console 2>&1 || fail "the TPM alone should open the volume in this boot"
+    "$cryptsetup_bin" detach vmtest-tpm || cryptsetup close vmtest-tpm
+    passwd -l root > /dev/null || fail "passwd -l root"
+    passwd -S root | grep -q ' L ' || fail "root should be locked: $(passwd -S root)"
+    sync
+    say "PASS: Secure Boot enforces, the rescue UKI is signed with its command line inside and no PCR policy, root is locked, and the TPM alone opens $volume under PCR 7"
+    # Nothing at the rescue opens for a wrong or empty password, and three tries end it.
+    {
+      printf '%s\t\n' '!rescue> ' '![rescue ' '![rootfs '
+      printf '%s\t%s\n' 'rescue login (root or a wheel user): ' admin 'password: ' 'not the password' 'wrong user or password' '' \
+        'rescue login (root or a wheel user): ' root 'password: ' '<enter>' 'wrong user or password' '' \
+        'rescue login (root or a wheel user): ' admin 'password: ' '<enter>' 'wrong user or password' '' \
+        '3 wrong logins' '' 'the machine restarts in 15 s' ''
+    } | script
+    to_rescue 6
+    ;;
+  6)
+    [ "$booted" = "$(recall signed)" ] || fail "after the closed rescue, deployment $(recall signed) should boot, not ${booted:-none}"
+    case $selected in archix-rescue*) fail "the rescue entry should have been a one-shot: $selected" ;; esac
+    say "PASS: with root locked, a wrong and an empty password got no prompt or shell, and three tries restarted the machine"
+    {
+      login admin "$admin_pass"
+      printf '%s\t%s\n' 'rescue> ' 'shell' '[rescue ' 'echo SHELL-$((40 + 2)); exit' 'SHELL-42' '' \
+        'rescue> ' "open $volume vmtest" "$volume is encrypted: its passphrase opens it here" '' \
+        "Enter passphrase for $volume" 'not the passphrase' 'No key available with this passphrase' '' \
+        "Enter passphrase for $volume" "$luks_pass" "opened $volume as /dev/mapper/vmtest" '' 'rescue> ' 'reboot'
+    } | script
+    to_rescue 7
+    ;;
+  7)
+    [ "$booted" = "$(recall signed)" ] || fail "deployment $(recall signed) should boot after the rescue"
+    passwd -S root | grep -q ' L ' || fail "root should still be locked: $(passwd -S root)"
+    say "PASS: admin's password opened the rescue and its shell under Secure Boot, and the TPM-bound volume asked for its passphrase, refused a wrong one and opened with the right one"
     next done
     say "OK"
     systemctl poweroff

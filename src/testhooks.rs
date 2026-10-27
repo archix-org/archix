@@ -40,6 +40,11 @@ pub fn kernel_cmdline() -> String {
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
 
+/// Whether `archix rescue` asks for its login outside an initramfs too, with ARCHIX_TEST_RESCUE_LOGIN=1 in a debug build.
+pub fn rescue_login() -> bool {
+    cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_RESCUE_LOGIN").as_deref() == Ok("1")
+}
+
 /// A caching proxy of archive.archlinux.org that requests for it go to instead, ARCHIX_TEST_ARCHIVE in a debug build, so the test suites don't depend on reaching the archive.
 pub fn archive_proxy() -> Option<String> {
     if !cfg!(debug_assertions) {

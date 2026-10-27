@@ -39,6 +39,9 @@ build() {
     # Ahead of busybox's on the rescue's PATH: eject copies with GNU cp's --reflink and --no-target-directory.
     add_binary /usr/bin/cp /usr/lib/archix-rescue/cp
     map add_module 'vfat?' 'nls_cp437?' 'nls_iso8859_1?' 'nls_ascii?' 'efivarfs?' 'dm_mod?' 'dm_crypt?'
+    # The ciphers LUKS volumes use, as mkinitcpio's encrypt hook adds them.
+    add_all_modules '/crypto/'
+    add_all_modules '/lib/crypto/'
     add_runscript
 }
 
@@ -47,23 +50,51 @@ help() {
 }
 "#;
 
-/// The rescue hook's boot script, run after udev has found the disks.
+/// The rescue hook's boot script, run after udev has found the disks: whatever the command line says it opens `archix rescue`, whose login guards its prompt and shell, and restarts after, never falling through to mkinitcpio's shells.
 pub const RUN_HOOK: &str = r#"#!/usr/bin/ash
 
 run_hook() {
-    case " $(cat /proc/cmdline) " in
-        *" archix.rescue "*) ;;
-        *) return 0 ;;
-    esac
     export PATH="/usr/lib/archix-rescue:$PATH"
-    if ! cttyhack /usr/bin/archix rescue; then
-        err "archix rescue failed; this shell is what's left, and the machine restarts when it exits"
-        launch_interactive_shell
+    if cttyhack /usr/bin/archix rescue; then
+        echo ":: archix rescue: restarting"
+    else
+        err "archix rescue stopped or stayed closed; the machine restarts in 15 s"
+        sleep 15
     fi
-    echo ":: archix rescue: restarting"
     reboot -f
+    poweroff -f
 }
 "#;
+
+/// Kernel command line words that would start a shell instead of, or after, the rescue's init, which its command line never carries over from boot.cmdline.
+const SHELL_WORDS: &[&str] = &[
+    "init=",
+    "rdinit=",
+    "break",
+    "rd.break",
+    "rd.shell",
+    "rd.emergency",
+    "emergency",
+    "single",
+    "systemd.unit=",
+    "systemd.debug_shell",
+    "systemd.debug-shell",
+];
+
+/// The rescue UKI's command line: `cmdline` without SHELL_WORDS, then FLAG.
+pub fn rescue_cmdline(cmdline: &str) -> String {
+    let mut words: Vec<&str> = cmdline
+        .split_whitespace()
+        .filter(|word| {
+            !SHELL_WORDS.iter().any(|shell| match shell.strip_suffix('=') {
+                Some(key) => word.split('=').next() == Some(key),
+                None => word.split('=').next() == Some(shell),
+            })
+        })
+        .collect();
+    words.push(FLAG);
+    words.join(" ")
+}
 
 /// Whether a kernel command line asks for the rescue prompt.
 pub fn requested(cmdline: &str) -> bool {
@@ -414,7 +445,7 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, store: &Store) -> Result<String> 
             "Secure Boot is on, but the rescue entry wouldn't be signed, so the firmware would refuse it; the rescue entry stays as it was"
         );
     }
-    let cmdline = format!("{} {FLAG}", plan.cmdline.trim());
+    let cmdline = rescue_cmdline(&plan.cmdline);
     let key = key(
         &super::activate::deployment_id(&deployment, source)?,
         &kernel,
@@ -598,6 +629,51 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(left, ["rescue-new.efi"]);
+    }
+
+    /// RUN_HOOK under sh with `archix` standing in for the rescue, mkinitcpio's shell and the reboot stubbed.
+    fn run_hook_with(archix: &str, cmdline: &str) -> std::process::Output {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cmdline");
+        fs::write(&file, cmdline).unwrap();
+        let script = format!(
+            "{}\nerr() {{ echo \"ERR $*\"; }}\nlaunch_interactive_shell() {{ echo SHELL; }}\ncttyhack() {{ \"$@\"; }}\nsleep() {{ echo \"SLEEP $*\"; }}\nreboot() {{ echo \"REBOOT $*\"; exit 4; }}\npoweroff() {{ echo \"POWEROFF $*\"; exit 5; }}\nrun_hook\necho FELL THROUGH\n",
+            RUN_HOOK
+                .replace("/usr/bin/archix rescue", archix)
+                .replace("/proc/cmdline", &file.display().to_string())
+        );
+        std::process::Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+
+    #[test]
+    fn the_rescue_hook_restarts_after_the_rescue_and_never_opens_a_shell() {
+        for (archix, cmdline) in [
+            ("false", "root=UUID=x archix.rescue"),
+            ("true", "root=UUID=x archix.rescue"),
+            ("true", "root=UUID=x break=premount"),
+            ("false", "root=UUID=x"),
+        ] {
+            let out = run_hook_with(archix, cmdline);
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(out.status.code(), Some(4), "{archix} with {cmdline}: {text}");
+            assert!(
+                text.contains("REBOOT -f") && !text.contains("SHELL") && !text.contains("FELL THROUGH"),
+                "{archix} with {cmdline}: {text}"
+            );
+        }
+        let failed = String::from_utf8_lossy(&run_hook_with("false", "archix.rescue").stdout).into_owned();
+        assert!(failed.contains("SLEEP 15"), "{failed}");
+    }
+
+    #[test]
+    fn the_rescue_command_line_drops_words_that_would_start_a_shell() {
+        assert_eq!(
+            rescue_cmdline(
+                " root=UUID=x rw init=/bin/sh rdinit=/bin/sh break=premount rd.break rd.shell=1 systemd.unit=emergency.target emergency single quiet initrd=x "
+            ),
+            "root=UUID=x rw quiet initrd=x archix.rescue"
+        );
+        assert_eq!(rescue_cmdline("root=/dev/vda2 rw"), "root=/dev/vda2 rw archix.rescue");
     }
 
     #[test]

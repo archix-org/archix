@@ -19,6 +19,9 @@ src/system/authenticode.rs	test:boot
 src/system/blobs.rs	test:boot
 src/system/revoke.rs	test:boot
 src/system/deploy_boot.rs	test:deploy_boot test:deploy
+src/system/rescue	test:rescue test:boot
+src/system/password.rs	test:rescue
+src/commands/rescue.rs	test:rescue
 src/system/	test:system test:switch
 src/flatpak.rs	test:flatpak
 src/fetch.rs	test:fetch test:archlinux

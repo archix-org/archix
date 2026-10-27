@@ -9,13 +9,17 @@ use clap::{Args, Parser, Subcommand};
 
 use archix::deploy;
 use archix::paths::Paths;
-use archix::system::{boot, password, rescue};
+use archix::system::{boot, password, rescue, rescue_auth};
 
 use super::confirm;
 
 /// Where the rescue boot mounts the root, and the ESP when the root can't say where it goes.
 const ROOT_MOUNT: &str = "/run/archix-rescue/root";
 const ESP_MOUNT: &str = "/run/archix-rescue/esp";
+/// Where the login mounts the root read-only to read the current deployment's /etc/shadow.
+const LOGIN_MOUNT: &str = "/run/archix-rescue/login";
+/// The name an encrypted root opens as when the kernel command line names none.
+const LUKS_NAME: &str = "rescue-root";
 
 /// Account files that hold the machine's users, which restoring the packaged copy would wipe.
 const ACCOUNTS: &[&str] = &["passwd", "shadow", "group", "gshadow"];
@@ -86,6 +90,12 @@ pub enum Action {
         #[arg(long)]
         noconfirm: bool,
     },
+    /// Open a LUKS volume with its passphrase as /dev/mapper/NAME; never with a TPM, FIDO2 or PKCS#11 token
+    Open {
+        device: String,
+        #[arg(default_value = "rescue-data")]
+        name: String,
+    },
     /// Open a shell; `exit` comes back to the prompt
     Shell,
     /// Unmount everything and restart
@@ -112,9 +122,10 @@ const HELP: &str = "\
   password USER [--all]        set USER's password in the current deployment's /etc (--deployment N, or all)
   restore-etc PATH [--all]     put a packaged /etc file (PAM, sudoers) back as its package ships it
   eject [--deployment N]       make the current deployment plain Arch, without archix
+  open DEVICE [NAME]           open a LUKS volume with its passphrase as /dev/mapper/NAME (never with a TPM)
   shell                        a shell; each deployment's /etc is under /run/archix-rescue/root/archix/deploy/N/etc
   reboot, poweroff
-  Before a command: --root DEVICE [--rootflags OPTIONS] for another root, as after `cryptsetup open` in the shell";
+  Before a command: --root DEVICE [--rootflags OPTIONS] for another root, such as /dev/mapper/NAME after `open`";
 
 /// Whether this runs in an initramfs: mkinitcpio's has /init and its hooks, systemd's /etc/initrd-release.
 fn in_initrd() -> bool {
@@ -168,31 +179,80 @@ fn mounted_at(device: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The block device a spec names: a path, or UUID=, PARTUUID=, LABEL= and PARTLABEL= through udev's /dev/disk links.
-fn resolve(spec: &str) -> Result<PathBuf> {
-    let path = match spec.split_once('=') {
+/// The path a spec names: a path, or UUID=, PARTUUID=, LABEL= and PARTLABEL= through udev's /dev/disk links.
+fn spec_path(spec: &str) -> PathBuf {
+    match spec.split_once('=') {
         Some(("UUID", value)) => Path::new("/dev/disk/by-uuid").join(value),
         Some(("PARTUUID", value)) => Path::new("/dev/disk/by-partuuid").join(value.to_lowercase()),
         Some(("LABEL", value)) => Path::new("/dev/disk/by-label").join(value),
         Some(("PARTLABEL", value)) => Path::new("/dev/disk/by-partlabel").join(value),
         _ => PathBuf::from(spec),
-    };
-    for _ in 0..50 {
+    }
+}
+
+/// The block device a spec names, once udev has made it, looking `tries` times 200 ms apart.
+fn find(spec: &str, tries: u32) -> Option<PathBuf> {
+    let path = spec_path(spec);
+    for _ in 0..tries {
         if path.exists() {
-            return Ok(path);
+            return Some(path);
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    None
+}
+
+/// The block device a spec names.
+fn resolve(spec: &str) -> Result<PathBuf> {
+    if let Some(path) = find(spec, 50) {
+        return Ok(path);
     }
     let encrypted = ["rd.luks", "cryptdevice=", "luks"]
         .iter()
         .any(|word| archix::testhooks::kernel_cmdline().contains(word));
     let hint = match encrypted {
         true => {
-            "; it's on an encrypted disk, so open it first: `shell`, `cryptsetup open /dev/<partition> root`, `exit`, then `--root /dev/mapper/root list`"
+            "; it's on an encrypted disk, so open it first: `open /dev/<partition> root`, then `--root /dev/mapper/root list`"
         }
         false => "; `shell` and `blkid` list the disks, then `--root DEVICE list` uses one",
     };
-    bail!("there's no device {spec} ({}){hint}", path.display())
+    bail!("there's no device {spec} ({}){hint}", spec_path(spec).display())
+}
+
+/// Opens the LUKS volume on `device` as /dev/mapper/`name` with a passphrase typed at the console, unless it's open already.
+fn open_luks(device: &Path, name: &str) -> Result<PathBuf> {
+    let mapped = Path::new("/dev/mapper").join(name);
+    if mapped.exists() {
+        return Ok(mapped);
+    }
+    println!(
+        "{} is encrypted: its passphrase opens it here, never a TPM, FIDO2 or PKCS#11 token",
+        device.display()
+    );
+    let argv = rescue_auth::open_argv(&device.to_string_lossy(), name);
+    let status = Command::new("cryptsetup")
+        .args(&argv)
+        .status()
+        .context("running cryptsetup; is it in this rescue image?")?;
+    if !status.success() {
+        bail!("cryptsetup didn't open {} ({status})", device.display());
+    }
+    Ok(mapped)
+}
+
+/// The LUKS volumes on this machine, from blkid.
+fn luks_devices() -> Vec<PathBuf> {
+    let output = Command::new("blkid")
+        .args(["-t", "TYPE=crypto_LUKS", "-o", "device"])
+        .output();
+    output
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn fs_type(device: &Path) -> Result<String> {
@@ -299,6 +359,97 @@ impl Session {
             .context("the kernel command line has no root=; give the root with --root DEVICE")
     }
 
+    /// The root filesystem's block device; on an encrypted root, the volume the kernel command line names (or each LUKS volume blkid finds) opened with its passphrase first.
+    fn root_device(&self) -> Result<PathBuf> {
+        let spec = self.root_spec()?;
+        if find(&spec, 25).is_none() {
+            let named = rescue_auth::luks_on_cmdline(&archix::testhooks::kernel_cmdline());
+            let volumes: Vec<(PathBuf, String)> = match named.is_empty() {
+                false => named
+                    .iter()
+                    .filter_map(|(device, name)| Some((find(device, 50)?, name.clone())))
+                    .collect(),
+                true => {
+                    let name = spec.strip_prefix("/dev/mapper/").unwrap_or(LUKS_NAME).to_string();
+                    luks_devices()
+                        .into_iter()
+                        .map(|device| (device, name.clone()))
+                        .collect()
+                }
+            };
+            for (device, name) in volumes {
+                open_luks(&device, &name)?;
+                if find(&spec, 25).is_some() {
+                    break;
+                }
+            }
+        }
+        let device = resolve(&spec)?;
+        if fs_type(&device).is_ok_and(|fs| fs == "crypto_LUKS") {
+            return open_luks(&device, LUKS_NAME);
+        }
+        Ok(device)
+    }
+
+    /// The login before the rescue opens: the root's current deployment's /etc/shadow, read from a read-only mount, must hold a password for root or a wheel user, and one of them must be typed.
+    pub fn authenticate(&self) -> Result<()> {
+        let mounted = match &self.options.root_dir {
+            Some(dir) => dir.clone(),
+            None => {
+                let device = self.root_device()?;
+                let dir = PathBuf::from(LOGIN_MOUNT);
+                if !is_mount_point(&dir) {
+                    let fs = fs_type(&device)?;
+                    let flags = self.options.rootflags.clone().or_else(|| cmdline_value("rootflags"));
+                    let with = |options: &str| flags.as_ref().map_or(options.to_string(), |f| format!("{options},{f}"));
+                    let fallback = match fs.as_str() {
+                        "btrfs" => "ro,rescue=all",
+                        "ext2" | "ext3" | "ext4" => "ro,noload",
+                        _ => "ro",
+                    };
+                    run_mount(&device, &dir, &fs, &with("ro"))
+                        .or_else(|_| run_mount(&device, &dir, &fs, &with(fallback)))
+                        .with_context(|| {
+                            format!(
+                                "the root on {} doesn't mount even read-only, so there's no /etc/shadow to check a login against; recover from a live USB: {}",
+                                device.display(),
+                                rescue_auth::GUIDE
+                            )
+                        })?;
+                }
+                dir
+            }
+        };
+        let found = (|| {
+            let store = deploy::Store::open(&mounted)?;
+            let current = store
+                .current()?
+                .context("there's no current deployment, so no /etc/shadow to check a login against")?;
+            let accounts = rescue_auth::accounts(&store.path(current).join("etc"))?;
+            Ok::<_, anyhow::Error>((current, accounts))
+        })();
+        if self.options.root_dir.is_none() {
+            let _ = unmount(Path::new(LOGIN_MOUNT));
+        }
+        let (current, accounts) = found.map_err(|e| {
+            e.context(format!(
+                "the rescue stays closed; recover from a live USB: {}",
+                rescue_auth::GUIDE
+            ))
+        })?;
+        if accounts.is_empty() {
+            bail!("{}", rescue_auth::refusal(current));
+        }
+        let user = rescue_auth::login(
+            &accounts,
+            &mut |prompt, secret| read_answer(prompt, secret),
+            &mut std::thread::sleep,
+            &mut |line| println!("{line}"),
+        )?;
+        println!("archix rescue: logged in as {user}");
+        Ok(())
+    }
+
     /// The archix root, mounted read-write.
     fn root(&self) -> Result<PathBuf> {
         let dir = match &self.options.root_dir {
@@ -309,8 +460,7 @@ impl Session {
             None => {
                 let dir = PathBuf::from(ROOT_MOUNT);
                 if !is_mount_point(&dir) {
-                    let spec = self.root_spec()?;
-                    let device = resolve(&spec)?;
+                    let device = self.root_device()?;
                     if let Some(at) = mounted_at(&device) {
                         bail!(
                             "{} is mounted at {} already; unmount it first",
@@ -419,6 +569,11 @@ impl Session {
             Action::Password { user, deployment, all } => self.password(&user, deployment, all),
             Action::RestoreEtc { path, deployment, all } => self.restore_etc(&path, deployment, all),
             Action::Eject { deployment, noconfirm } => self.eject(deployment, noconfirm),
+            Action::Open { device, name } => {
+                let mapped = open_luks(&resolve(&device)?, &name)?;
+                println!("opened {device} as {}", mapped.display());
+                Ok(())
+            }
             Action::Shell => self.shell(),
             Action::Reboot => self.power(libc::RB_AUTOBOOT),
             Action::Poweroff => self.power(libc::RB_POWER_OFF),
@@ -547,7 +702,7 @@ impl Session {
         let esp_mounted = mount_source(&self.esp_target()).or_else(|| mount_source(Path::new(ESP_MOUNT)));
         self.unmount_all()?;
         let mut failed = Vec::new();
-        match self.root_spec().and_then(|spec| resolve(&spec)) {
+        match self.root_device() {
             Ok(device) => {
                 if let Err(e) = fsck(&device, repair_btrfs) {
                     failed.push(format!("the root: {e:#}"));
@@ -747,11 +902,16 @@ fn fsck(device: &Path, repair_btrfs: bool) -> Result<()> {
 
 /// Reads a line from the console without echoing it when that's a terminal.
 fn read_password(prompt: &str) -> Result<String> {
+    Ok(read_answer(prompt, true)?.unwrap_or_default())
+}
+
+/// Reads a line from the console, without echoing it when `secret` and that's a terminal; None at the end of input.
+fn read_answer(prompt: &str, secret: bool) -> Result<Option<String>> {
     print!("{prompt}");
     io::stdout().flush()?;
     let fd = libc::STDIN_FILENO;
     let mut saved: libc::termios = unsafe { std::mem::zeroed() };
-    let tty = unsafe { libc::tcgetattr(fd, &mut saved) } == 0;
+    let tty = secret && unsafe { libc::tcgetattr(fd, &mut saved) } == 0;
     if tty {
         let mut quiet = saved;
         quiet.c_lflag &= !libc::ECHO;
@@ -763,8 +923,10 @@ fn read_password(prompt: &str) -> Result<String> {
         unsafe { libc::tcsetattr(fd, libc::TCSANOW, &saved) };
         println!();
     }
-    read.context("reading the password")?;
-    Ok(line.trim_end_matches(['\n', '\r']).to_string())
+    if read.context("reading from the console")? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim_end_matches(['\n', '\r']).to_string()))
 }
 
 extern "C" fn ignore(_: libc::c_int) {}
@@ -772,6 +934,13 @@ extern "C" fn ignore(_: libc::c_int) {}
 /// `archix rescue`: one command, or with none the rescue prompt.
 pub fn run(options: Options, action: Option<Action>) -> Result<()> {
     let mut session = Session::new(options)?;
+    if in_initrd() || archix::testhooks::rescue_login() {
+        // Handlers, not SIG_IGN, which children would keep: Ctrl-C, Ctrl-\ and Ctrl-Z neither end nor stop the login.
+        for signal in [libc::SIGINT, libc::SIGQUIT, libc::SIGTSTP] {
+            unsafe { libc::signal(signal, ignore as *const () as libc::sighandler_t) };
+        }
+        session.authenticate()?;
+    }
     match action {
         Some(action) => session.run(action),
         None => prompt(&mut session),

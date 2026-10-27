@@ -1,5 +1,5 @@
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "e2fsprogs", "openssl", "jq" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "e2fsprogs", "openssl", "jq", "sbctl", "efitools", "tpm2-tss" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },

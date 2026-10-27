@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The rescue suite's console: copies QEMU's serial socket into serial.log and types each `expect<TAB>send` step of the script the guest last announced (`VMTEST: rescue script: <base64>`) once `expect` shows."""
+"""The rescue suite's console: copies QEMU's serial socket into serial.log and types each `expect<TAB>send` step of the script the guest last announced (`VMTEST: rescue script: <base64>`) once `expect` shows; `<enter>` sends an empty line, and a step `!text` fails the run if text shows before the script's last step does."""
 
 import base64
 import json
@@ -46,6 +46,8 @@ console.settimeout(1)
 
 seen = b""
 script = []
+forbidden = []
+watched = b""
 # Only a whole line: the console arrives in chunks, and half an announcement decodes to nothing.
 announced = re.compile(rb"VMTEST: rescue script: ([A-Za-z0-9+/=]+)\r?\n")
 
@@ -64,6 +66,8 @@ while True:
             break
         log.write(data)
         seen += data
+        if forbidden:
+            watched += data
     except socket.timeout:
         pass
     except OSError:
@@ -78,8 +82,20 @@ while True:
             sys.exit(1)
         note(f"got a script of {len(script)} steps")
         seen = seen[match.end():]
+        forbidden, watched = [], b""
         waiting_since = time.time()
+    while script and script[0][0].startswith("!"):
+        forbidden.append(script.pop(0)[0][1:].encode())
+        watched = seen
+        note(f"watching for {forbidden[-1]!r}, which must not show")
+    shown = [text for text in forbidden if text in watched]
+    if shown:
+        fail(f"{shown[0]!r} showed")
+        break
     if not script:
+        if forbidden:
+            note(f"none of {forbidden!r} showed")
+            forbidden, watched = [], b""
         continue
     expect, send = script[0]
     at = seen.find(expect.encode())
@@ -89,7 +105,7 @@ while True:
         waiting_since = time.time()
         if send:
             note(f"typing {send!r} after {expect!r}")
-            console.sendall(send.encode() + b"\r")
+            console.sendall((b"" if send == "<enter>" else send.encode()) + b"\r")
         else:
             note(f"saw {expect!r}")
     elif time.time() - waiting_since > step_timeout:

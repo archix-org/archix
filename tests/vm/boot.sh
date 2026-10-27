@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report, with QEMU's view of the NIC when the guest reports one networkd didn't configure; SUITE=pcr adds a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on, SUITE=rescue a console socket that tests/vm/rescue/drive.py types the rescue prompt at.
+# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report, with QEMU's view of the NIC when the guest reports one networkd didn't configure; SUITE=pcr and SUITE=rescue add a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on, SUITE=rescue a console socket that tests/vm/rescue/drive.py types the rescue prompt at.
 set -euo pipefail
 vars=/work/vars.fd
 qmp=/work/qmp.sock
@@ -53,7 +53,7 @@ fi
 [ -f "$vars" ] || cp /usr/share/edk2/x64/OVMF_VARS.4m.fd "$vars"
 extra=() net=user,id=net0
 need() { command -v "$1" > /dev/null || pacman -S --noconfirm --needed "$2" > /dev/null; }
-if [ "${SUITE:-}" = pcr ]; then
+if [ "${SUITE:-}" = pcr ] || [ "${SUITE:-}" = rescue ]; then
   need swtpm swtpm
   mkdir -p /work/swtpm
   swtpm socket --tpm2 --tpmstate dir=/work/swtpm --ctrl type=unixio,path=/work/swtpm/sock --daemon

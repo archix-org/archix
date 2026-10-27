@@ -143,6 +143,21 @@ fn every_switch_keeps_a_signed_rescue_entry_from_the_newest_deployment_that_boot
         !root.join("hooks/archix-deploy").exists(),
         "the rescue mounts no deployment"
     );
+    let hook = fs::read_to_string(root.join("hooks/archix-rescue")).unwrap();
+    assert!(
+        !hook.contains("launch_interactive_shell") && hook.contains("reboot -f"),
+        "the rescue hook never falls back to a shell:\n{hook}"
+    );
+    let found = Command::new("find")
+        .arg(&root)
+        .args(["-name", "libcryptsetup-token-*"])
+        .output()
+        .unwrap();
+    assert!(
+        found.stdout.is_empty(),
+        "no LUKS2 token plugin, so a TPM can't open a volume in the rescue: {}",
+        text(&found)
+    );
     assert_eq!(
         fs::read(root.join("usr/bin/archix")).unwrap(),
         fs::read(machine.deployment(first).join("usr/lib/archix/archix-static")).unwrap(),
@@ -432,5 +447,119 @@ fn rescue_check_repairs_the_esp_and_refuses_a_mounted_root() {
         text(&mounted).contains(&format!("is mounted at {}", at.display())),
         "{}",
         text(&mounted)
+    );
+}
+
+/// `archix rescue` behind its login, as the rescue boot runs it, on a root nothing runs from; how long it took.
+fn rescue_login(setup: &Setup, input: &str, args: &[&str]) -> (Output, std::time::Duration) {
+    let root = setup.machine.root.display().to_string();
+    let esp = setup.machine.esp().display().to_string();
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["--config", setup.config.to_str().unwrap(), "--host", "box"])
+        .args(["rescue", "--root-dir", &root, "--esp-dir", &esp])
+        .args(args)
+        .envs(setup.machine.env())
+        .env("ARCHIX_TEST_RESCUE_LOGIN", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
+    let output = child.wait_with_output().unwrap();
+    (output, started.elapsed())
+}
+
+/// `etc`'s file `name` with the lines starting `prefix` replaced by `line`.
+fn set_line(etc: &Path, name: &str, prefix: &str, line: &str) {
+    let path = etc.join(name);
+    let text = fs::read_to_string(&path).unwrap_or_default();
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.starts_with(prefix))
+        .map(str::to_string)
+        .collect();
+    lines.push(line.to_string());
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
+}
+
+/// chpasswd's yescrypt hash of "correct horse battery" on Arch, as libxcrypt writes it.
+const WHEEL_HASH: &str = "$y$j9T$kMqcsJASkGTKWEBuc18hd1$2I2nh.vdW7uIPYraHA5FxOpLQZ5yNdM39PxvIPOsMJ7";
+
+#[test]
+#[ignore]
+fn the_rescue_opens_only_for_root_or_a_wheel_users_password_from_the_current_deployment() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "deployments = { keep = 3 }");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let current = machine.current().unwrap();
+    machine.power_off();
+    let etc = machine.deployment(current).join("etc");
+    let openssl = Command::new("openssl")
+        .args(["passwd", "-6", "root pass"])
+        .output()
+        .unwrap();
+    let root_hash = String::from_utf8_lossy(&openssl.stdout).trim().to_string();
+    set_line(&etc, "shadow", "root:", &format!("root:{root_hash}:20000::::::"));
+    set_line(&etc, "passwd", "alice:", "alice:x:1000:1000::/home/alice:/bin/bash");
+    set_line(&etc, "passwd", "bob:", "bob:x:1001:1001::/home/bob:/bin/bash");
+    set_line(&etc, "shadow", "alice:", &format!("alice:{WHEEL_HASH}:20000::::::"));
+    set_line(&etc, "shadow", "bob:", &format!("bob:{WHEEL_HASH}:20000::::::"));
+    set_line(&etc, "group", "wheel:", "wheel:x:998:alice");
+
+    let out = ok(rescue_login(&setup, "root\nroot pass\n", &["list"]).0);
+    assert!(
+        out.contains("logged in as root") && out.contains(&format!("* deployment {current:<4}")),
+        "root's password opens it:\n{out}"
+    );
+    let out = ok(rescue_login(&setup, "alice\ncorrect horse battery\n", &["list"]).0);
+    assert!(
+        out.contains("logged in as alice"),
+        "a wheel user's password opens it:\n{out}"
+    );
+
+    let (refused, took) = rescue_login(
+        &setup,
+        "bob\ncorrect horse battery\nalice\nwrong\nroot\n\nalice\ncorrect horse battery\necho SHELL-RAN\n",
+        &["shell"],
+    );
+    let out = text(&refused);
+    assert!(!refused.status.success(), "{out}");
+    assert!(
+        out.matches("wrong user or password").count() == 3 && out.contains("3 wrong logins"),
+        "bob isn't in wheel, a wrong password and none fail, and the fourth try never comes:\n{out}"
+    );
+    assert!(
+        !out.contains("logged in") && !out.contains("SHELL-RAN") && !out.contains("a shell in"),
+        "{out}"
+    );
+    assert!(
+        took >= std::time::Duration::from_secs(6),
+        "2 s and 4 s between the tries: {took:?}"
+    );
+    let (ended, _) = rescue_login(&setup, "", &["shell"]);
+    assert!(
+        !ended.status.success() && text(&ended).contains("no login"),
+        "{}",
+        text(&ended)
+    );
+
+    set_line(&etc, "shadow", "root:", "root:*:14871::::::");
+    set_line(&etc, "shadow", "alice:", &format!("alice:!{WHEEL_HASH}:20000::::::"));
+    let (locked, _) = rescue_login(&setup, "root\n\nalice\ncorrect horse battery\n", &["shell"]);
+    let out = text(&locked);
+    assert!(!locked.status.success(), "{out}");
+    assert!(
+        out.contains("root is locked and no wheel user has a password")
+            && out.contains(archix::system::rescue_auth::GUIDE)
+            && !out.contains("rescue login"),
+        "a locked root and no wheel password: refused before any prompt:\n{out}"
+    );
+    let out = ok(rescue(&setup, &["list"]));
+    assert!(
+        !out.contains("rescue login"),
+        "outside the rescue boot, as from a live USB, there's no login:\n{out}"
     );
 }

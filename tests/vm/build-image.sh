@@ -28,7 +28,7 @@ elif [ "$suite" = selfupgrade ]; then
 elif [ "$suite" = firewall ]; then
   dir=/vm/firewall packages=(base linux mkinitcpio systemd-ukify openssh nftables)
 elif [ "$suite" = rescue ]; then
-  dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq)
+  dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq sbctl tpm2-tss)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
 elif [ "$suite" = recovery ]; then
@@ -39,8 +39,8 @@ fs=${FS:-ext4}
 img=/work/disk.img
 rm -f "$img" /work/vars.fd /work/data.img
 truncate -s "$size" "$img"
-# The pcr suite's LUKS volume, a second virtual disk.
-[ "$suite" != pcr ] || truncate -s 64M /work/data.img
+# The pcr and rescue suites' LUKS volume, a second virtual disk.
+case $suite in pcr | rescue) truncate -s 64M /work/data.img ;; esac
 # 1 GiB, as the Arch installation guide suggests: keep = 1 holds the booted, current and new deployments' UKIs and protected twins, the fallback copy and the plain UKI.
 sfdisk --quiet "$img" <<SFDISK
 label: gpt
