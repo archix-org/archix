@@ -27,6 +27,8 @@ elif [ "$suite" = selfupgrade ]; then
   dir=/vm/selfupgrade size=12G packages=(base linux mkinitcpio systemd-ukify)
 elif [ "$suite" = firewall ]; then
   dir=/vm/firewall packages=(base linux mkinitcpio systemd-ukify openssh nftables)
+elif [ "$suite" = rescue ]; then
+  dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
 fi

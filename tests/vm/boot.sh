@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report, with QEMU's view of the NIC when the guest reports one networkd didn't configure; SUITE=pcr adds a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on.
+# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report, with QEMU's view of the NIC when the guest reports one networkd didn't configure; SUITE=pcr adds a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on, SUITE=rescue a console socket that tests/vm/rescue/drive.py types the rescue prompt at.
 set -euo pipefail
 vars=/work/vars.fd
 qmp=/work/qmp.sock
@@ -61,6 +61,14 @@ if [ "${SUITE:-}" = pcr ]; then
   extra+=(-chardev socket,id=chrtpm,path=/work/swtpm/sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0)
 fi
 [ ! -f /work/data.img ] || extra+=(-drive file=/work/data.img,format=raw,if=virtio)
+serial=(-serial file:/work/serial.log)
+if [ "${SUITE:-}" = rescue ]; then
+  # The rescue prompt is typed at: the console is a socket drive.py copies into serial.log, and QEMU waits for it to connect.
+  rm -f /work/serial.sock
+  serial=(-chardev socket,id=console,path=/work/serial.sock,server=on,wait=on -serial chardev:console)
+  python /vm/rescue/drive.py /work/serial.sock /work/serial.log "$qmp" &
+  watchers+=($!)
+fi
 if [ "${SUITE:-}" = firewall ]; then
   need ssh openssh
   port=$(python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
@@ -75,7 +83,7 @@ timeout "${VM_TIMEOUT:-2400}" qemu-system-x86_64 -enable-kvm -cpu host -m "${VM_
   -drive file=/work/disk.img,format=raw,if=virtio \
   "${extra[@]}" \
   -netdev "$net" -device virtio-net-pci,netdev=net0,romfile= \
-  -display none -serial file:/work/serial.log "${monitor[@]}" || true
+  -display none "${serial[@]}" "${monitor[@]}" || true
 # The console log carries escape and NUL bytes, which make grep call it binary and hide every line.
 grep -a VMTEST /work/serial.log || true
 [ ! -f /work/probe.log ] || sed 's/^/probe: /' /work/probe.log
