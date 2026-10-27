@@ -32,6 +32,7 @@ seed=$(grep -a -o -m1 'SEED=[^ ]*' "$raw/run.log" | cut -d= -f2)
   echo "exit $status ($([ "$status" = 0 ] && echo passed || echo failed))"
   echo "settings SAMPLE=${SAMPLE-20} SUBSETS=${SUBSETS-16} REORDER_SAMPLE=${REORDER_SAMPLE-16} BOOT_TIMEOUT=${BOOT_TIMEOUT:-3600} BOOT_RATIO=${BOOT_RATIO:-3} BOOT_FLOOR=${BOOT_FLOOR:-10} RETRY_SHARE=${RETRY_SHARE:-3}${BREAK:+ BREAK=$BREAK}${ONLY:+ ONLY=$ONLY}${SHARD:+ SHARD=$SHARD}"
   echo "reproduce: git checkout $commit && FS=$fs SEED=$seed tests/vm/run.sh powercut"
+  echo "note: a re-record splits the UKI copies' writes into different requests, so SEED picks different subsets in those two flush windows; only this run's own log (LOG=) replays them exactly"
 } > "$dir/meta.txt"
 find "$dir" -type f -print0 | xargs -0 python3 -I "$root/tests/vm/powercut/scrub" || { echo "evidence: scrubbing $dir failed; don't publish it" >&2; exit 3; }
 (cd "$dir" && find . -type f ! -name SHA256SUMS -printf '%P\n' | sort | xargs -d '\n' sha256sum > SHA256SUMS)
