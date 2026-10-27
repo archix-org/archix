@@ -613,6 +613,34 @@ pub fn cached_file(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("no cached {name} package in {}", dir.display()))
 }
 
+/// Puts a file back as it was, or removes it if it didn't exist, when dropped, also when the test panics.
+pub struct RestoreFile {
+    path: PathBuf,
+    was: Option<Vec<u8>>,
+}
+
+impl RestoreFile {
+    pub fn new(path: &Path) -> RestoreFile {
+        RestoreFile {
+            path: path.to_path_buf(),
+            was: fs::read(path).ok(),
+        }
+    }
+}
+
+impl Drop for RestoreFile {
+    fn drop(&mut self) {
+        match &self.was {
+            Some(bytes) => {
+                let _ = fs::write(&self.path, bytes);
+            }
+            None => {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+    }
+}
+
 /// A package published to the local test AUR.
 pub struct TestPkg<'a> {
     pub name: &'a str,
