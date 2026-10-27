@@ -204,6 +204,8 @@ jobs:
           FS: ${{ matrix.fs }}
           LOG: ${{ runner.temp }}/powercut-log/powercut-log-${{ matrix.fs }}.tar.zst
           SHARD: ${{ matrix.shard }}/6
+          # Under the job's 340 min, so a shard that runs long still ends in time to upload its serial log.
+          VM_TIMEOUT: "18600"
           LOG_ARTIFACT: "powercut-log-${{ matrix.fs }} of run ${{ github.run_id }} (gh run download ${{ github.run_id }} -n powercut-log-${{ matrix.fs }})"
           SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
       - if: always()

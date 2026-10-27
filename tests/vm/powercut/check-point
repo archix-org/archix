@@ -94,6 +94,16 @@ boot_state() {
   watch=
   [ -n "$real" ] || watch=$(awk '/POWERCUT-WATCH at / { buf = "" } /POWERCUT-WATCH/ { sub(/.*POWERCUT-WATCH /, ""); buf = buf $0 "|" } END { print buf }' /dev/shm/boot.log | tr -d '\r' | cut -c1-1500)
   unsnap
+  # A disk's bytes are the same at every boot, so a crash or hang the second boot doesn't repeat was the runner's (gate 40429132019: a pristine boot's segfault on a page of zeros, a boot 20x slower than the one before it).
+  if [ -z "$real" ] && [ -z "${1:-}" ]; then
+    local why
+    why=$(grep -a -m2 -e 'segfault at' -e 'Caught <' -e 'Kernel panic' /dev/shm/boot.log | tr -d '\r' | tr '\n' '|' | cut -c1-400)
+    if [ -n "$why" ]; then why="crashed: $why"; else why="didn't report in $secs s; still running: ${watch:0:600}"; fi
+    cp /dev/shm/boot.log "$state/boot-${at/\//-}-once.log"
+    echo "$at ($step): $why" >> "$state/rebooted"
+    notes+=("the real boot $why, so it booted again")
+    boot_state again
+  fi
 }
 
 # check_state BOOT: checks the snapshot of the replayed disk, with the ESP writes $mask keeps when set, booting it for real when BOOT is 1 or it is the point's first subset to break a FAT chain.
@@ -125,7 +135,7 @@ check_state() {
       if [ "$units" -gt "$limit" ]; then
         cp /dev/shm/boot.log "$state/boot-${at/\//-}-slow.log"
         local first="$units ms (pacman -Qkk $qkk ms) against the pristine image's $p_units ms ($p_qkk ms; limit $limit ms, boot $took s; $(grep -a -o 'POWERCUT-UNITS.*' /dev/shm/boot.log | tail -1 | tr -d '\r'))" again again_qkk limit2 report
-        report=$("$lib/esp-case" pristine > /dev/null && grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1)
+        report=$({ "$lib/esp-case" pristine > /dev/null || "$lib/esp-case" pristine > /dev/null; } && grep -a -o 'POWERCUT-BOOTED.*' /dev/shm/boot.log | tail -1)
         again=$(field archix "$report") again_qkk=$(field qkk "$report")
         if [ -z "$again" ] || [ -z "$again_qkk" ]; then
           problems+=("archix's units took $first, and the pristine image didn't boot again to judge it by")

@@ -13,7 +13,7 @@ keep_logs() {
   [ "$PHASE" = replay ] && [ -d "$state" ] || return 0
   rm -rf "$state/out" && mkdir -p "$state/out"
   cp "$state"/check.log "$state"/replay.log "$state"/boot-*.log "$state"/case-*.log "$state/out/" 2> /dev/null
-  for f in real-boots point-times reorder-points slow-once; do [ ! -e "$state/$f" ] || cp "$state/$f" "$state/out/$f.txt"; done
+  for f in real-boots point-times reorder-points slow-once rebooted; do [ ! -e "$state/$f" ] || cp "$state/$f" "$state/out/$f.txt"; done
   tar -C "$state/out" -cf /dev/vdg . 2> /dev/null
 }
 fail() { say "FAIL: $*"; keep_logs; systemctl poweroff; exit 1; }
@@ -292,6 +292,7 @@ fi
 spread() { grep -o " $1=[0-9]*" "$state/real-boots" 2> /dev/null | cut -d= -f2 | sort -n | awk -v u="$2" '{ a[NR] = $1; s += $1 } END { if (NR) printf "%d %s mean, %d %s median, %d %s max", s / NR, u, a[int((NR + 1) / 2)], u, a[NR], u; else printf "none" }'; }
 say "timing: point checks $(awk '$3 == 0 { n++; s += $4 } END { printf "%d without a real boot, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"), $(awk '$3 == 1 { n++; s += $4 } END { printf "%d with one, %.1f s each", n, n ? s / n : 0 }' "$state/point-times"); real boots $(spread secs s), $(spread boot s) to the report, against the baseline's $(cat "$state/baseline-boot") s; archix's units $(spread archix ms) against the baseline's $(cat "$state/baseline-units") ms; pacman -Qkk $(spread qkk ms) against the baseline's $(cat "$state/baseline-qkk") ms"
 [ ! -s "$state/slow-once" ] || while read -r line; do say "slow once: $line"; done < "$state/slow-once"
+[ ! -s "$state/rebooted" ] || while read -r line; do say "booted again: $line"; done < "$state/rebooted"
 if [ -s "$state/orphans" ]; then
   while read -r n line; do say "orphan at $n points: $line"; done < <(cut -d' ' -f2- "$state/orphans" | sort | uniq -c)
   fail "$(count orphans) points and $(subset_count orphans) ESP subsets leave orphans after the next boot and gc"
