@@ -1,5 +1,6 @@
 # Agent instructions
 
 - Any change to behaviour, CLI, config syntax or options needs a matching docs PR in archix-org/archix.dev (`src/content/docs/docs/`).
-- Run `tests/arch/run.sh` before pushing anything outside `tests/vm/` and `.github/`; it runs the full suite, including the pacman and network tests, inside Arch. While iterating, run only the tests a change touches (`tests/arch/run.sh <filter>`, one VM suite on one filesystem).
+- Run the full suite, `tests/arch/run.sh --jobs 2` (two containers, both heavy slots; without `--jobs 2` it takes one), before pushing anything outside `tests/vm/` and `.github/`, and always before pushing a change to `src/`; it runs every test, including the pacman and network tests, inside Arch.
+- While iterating, run `tests/arch/run.sh --quick` (the unit tests plus the test files `tests/quick.tsv` maps your change to; it lists what it skipped), `tests/arch/run.sh <cargo test args>` for one test, or one VM suite on one filesystem.
 - Long VM confirmation runs go to the release gate on GitHub (`gh workflow run release-gate.yml --ref <branch> -f suites=<suite,...>`), not the local machine; run the full gate once, for the commit being released.
