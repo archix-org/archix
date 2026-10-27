@@ -7,13 +7,26 @@ inputs:
 runs:
   using: composite
   steps:
+    # The compiled dependencies and crate registry, keyed on what they're built from; archix itself is always rebuilt.
+    - id: cargo
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/cargo
+        key: cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tests/arch/Dockerfile') }}
     - shell: bash
-      run: tests/arch/run.sh
+      run: mkdir -p "$RUNNER_TEMP/cargo/target" "$RUNNER_TEMP/cargo/registry" && tests/arch/run.sh
       env:
         ARCHIX_BUILD_OUT: ${{ runner.temp }}/build
+        ARCHIX_TARGET_VOLUME: ${{ runner.temp }}/cargo/target
+        ARCHIX_CARGO_VOLUME: ${{ runner.temp }}/cargo/registry
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.name }}
         path: ${{ runner.temp }}/build
         compression-level: 0
         retention-days: 3
+    - if: steps.cargo.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/cargo
+        key: cargo-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'tests/arch/Dockerfile') }}

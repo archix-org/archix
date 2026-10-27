@@ -16,9 +16,11 @@ listed=
 [ -z "$quick${ARCHIX_BUILD_OUT:-}${ARCHIX_TEST_LIST:-}" ] && [ "$jobs" = 1 ] || listed=1
 [ -z "$listed" ] || [ $# = 0 ] || { echo "--quick, --jobs and the CI modes take no cargo test arguments" >&2; exit 2; }
 # One build volume per checkout: cargo goes by mtimes, so a worktree sharing one could run another checkout's binary.
-target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
+volume=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
+# ARCHIX_TARGET_VOLUME and ARCHIX_CARGO_VOLUME, a volume or host directory each, stand in for the build volume and the crate registry (CI caches them).
+target=${ARCHIX_TARGET_VOLUME:-$volume} registry=${ARCHIX_CARGO_VOLUME:-archix-cargo}
 # A second run on the same volume would rebuild the debug binaries this one's tests are running.
-exec 9> "${XDG_RUNTIME_DIR:-/tmp}/$target.lock"
+exec 9> "${XDG_RUNTIME_DIR:-/tmp}/$volume.lock"
 flock -n 9 || { echo "another test run is using the build volume $target; waiting for it" >&2; flock 9; }
 . "$root/tests/heavy-slot.sh"
 [ "$jobs" = 1 ] || . "$root/tests/heavy-slot.sh"
@@ -56,7 +58,7 @@ archive=()
 # start: boots a test container, sets $cid, and points it at the archive proxy when there is one.
 start() {
   cid=$(docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
-    -v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry ${relay_dir:+-v "$relay_dir":/archive-relay} \
+    -v "$root":/src:ro -v "$target":/target -v "$registry":/root/.cargo/registry ${relay_dir:+-v "$relay_dir":/archive-relay} \
     ${out:+-v "$out":/out} ${ARCHIX_PREBUILT:+-v "$ARCHIX_PREBUILT":/prebuilt:ro} archix-arch-test /usr/lib/systemd/systemd)
   cids+=("$cid")
   until state=$(docker exec "$cid" systemctl is-system-running 2>/dev/null); [[ $state == running || $state == degraded ]]; do sleep 1; done
@@ -98,6 +100,12 @@ if [ -n "${ARCHIX_BUILD_OUT:-}" ]; then
   docker exec "$cid" sh -c 'tar -I "zstd -T0" -cf /out/target.tar.zst /target/release/archix /target/debug/archix \
     /target/x86_64-unknown-linux-musl/release/archix $(cut -f2 /out/tests.tsv | sort -u)'
   ls -l "$out"
+  # A cached target keeps only the dependencies: archix's own artifacts would go stale against a fresh checkout's mtimes.
+  [ -z "${ARCHIX_TARGET_VOLUME:-}" ] || docker exec "$cid" sh -c 'rm -rf /target/*/incremental /target/*/*/incremental
+    find /target -path "*/deps/*" \( -name "libarchix-*" -o ! -name "lib*" ! -name "*.d" \) -delete
+    find /target -maxdepth 4 \( -path "*/.fingerprint/archix-*" -o -path "*/build/archix-*" \) -prune -exec rm -rf {} +
+    find /target -maxdepth 3 -type f -name "archix*" -delete
+    du -sh /target /root/.cargo/registry'
   exit
 fi
 selected=$out/selected.tsv

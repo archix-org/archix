@@ -10,6 +10,14 @@ if [ "${KVM:-true}" = true ]; then
   sudo udevadm trigger --name-match=kvm --settle
   "$here/check-kvm.sh"
 fi
+# ubuntu-26.04's Docker keeps images in containerd's store, which compresses every layer of the 4.5 GB test image at each build (about 80 s a job).
+if docker info -f '{{json .DriverStatus}}' | grep -q containerd.snapshotter; then
+  conf=/etc/docker/daemon.json
+  { [ -s "$conf" ] && sudo cat "$conf" || echo '{}'; } | jq '.features["containerd-snapshotter"] = false' > "$RUNNER_TEMP/daemon.json"
+  sudo cp "$RUNNER_TEMP/daemon.json" "$conf"
+  sudo systemctl restart docker
+  docker info -f '{{.Driver}}'
+fi
 # Privileged containers see only the loop nodes that exist when they start, and the image builds and power-cut runs attach several.
 for i in $(seq 0 63); do [ -e "/dev/loop$i" ] || sudo mknod -m 0660 "/dev/loop$i" b 7 "$i"; done
 free_gb() { df -BG --output=avail "$1" | tail -1 | tr -dc 0-9; }
