@@ -924,13 +924,14 @@ fn a_package_pacman_would_reject_stops_the_switch_before_anything_is_staged() {
         cached_file(&setup.paths.packages(), "tree").display()
     ));
     // The cache is shared with later tests in this container, so the real signature comes back even if this test panics.
-    let _restore = RestoreFile::new(&sig);
+    let restore = RestoreFile::new(&sig);
     let shared = Path::new("/var/cache/archix/pkg").join(sig.file_name().unwrap());
-    let _restore_shared = (shared != sig).then(|| RestoreFile::new(&shared));
+    let restore_shared = (shared != sig).then(|| RestoreFile::new(&shared));
     fs::write(&sig, "not a signature").unwrap();
     setup.set_body(&["tree"], "");
     let deployments = machine.deployments();
     let err = setup.fails(&["switch", "--noconfirm"]);
+    drop((restore, restore_shared));
     assert!(err.contains("nothing was changed"), "{err}");
     assert_eq!(
         machine.deployments(),
