@@ -106,11 +106,11 @@ pub fn sha256_entries(variable: &[u8]) -> Vec<([u8; 16], [u8; 32])> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// A PE32+ image: headers up to 0x200, two sections listed out of file order, trailing data, then a certificate table.
-    fn image() -> Vec<u8> {
+    pub(crate) fn image() -> Vec<u8> {
         let mut image = vec![0u8; 0x400];
         image[0..2].copy_from_slice(b"MZ");
         image[0x3c..0x40].copy_from_slice(&0x80u32.to_le_bytes());

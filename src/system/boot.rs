@@ -35,6 +35,13 @@ pub struct BootPlan {
     /// What a new deployment's counted boot must reach before it counts as good.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<super::health::HealthCheck>,
+    /// Keep a rescue entry on the ESP that boots no deployment, refreshed after each switch.
+    #[serde(default = "rescue_default")]
+    pub rescue: bool,
+}
+
+fn rescue_default() -> bool {
+    true
 }
 
 /// Makes a new PCR policy signing key, puts it in place of the old one in every deployment's /etc (the running one's included), then binds each LUKS device's TPM2 slot to it; the next switch builds UKIs whose policies it signs.
@@ -136,12 +143,12 @@ pub fn pcr_key_fingerprint(etc: &Path) -> Option<String> {
 }
 
 /// The fallback's sort key: below every distribution's id, so systemd-boot starts it when loader.conf names no entry it has.
-const FALLBACK_SORT_KEY: &str = "0archix-fallback";
+pub(crate) const FALLBACK_SORT_KEY: &str = "0archix-fallback";
 /// The fallback's title in the boot menu, which tells it from the generations' own entries.
 pub const FALLBACK_TITLE: &str = "archix (fallback)";
 
 pub const MODULES: &str = "/usr/lib/modules";
-const MARGIN: u64 = 16 * 1024 * 1024;
+pub(crate) const MARGIN: u64 = 16 * 1024 * 1024;
 /// Where a deployment keeps the UKIs its switch built, which the ESP step copies.
 const BUILT: &str = "/boot/archix";
 
@@ -304,6 +311,23 @@ pub fn follow_with_fallback(paths: &Paths, esp: &Path, generation: u32) -> Resul
     install_fallback(paths, esp, generation, &uki)?;
     retire_fallbacks(paths, esp, generation)?;
     Ok(true)
+}
+
+/// Makes kept deployment `number` the boot default, the fallback UKI's and then `current`, as `archix rollback` and `archix rescue use` do; `write_entry` writes its entry when the fallback finds none. The default goes first: a crash between leaves it on `number`, whose boot makes it current.
+pub fn repoint(
+    paths: &Paths,
+    esp: &Path,
+    store: &crate::deploy::Store,
+    number: u32,
+    write_entry: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    set_default_entry(esp, number)?;
+    crate::durable::sync_esp(esp)?;
+    if !follow_with_fallback(paths, esp, number)? {
+        write_entry()?;
+    }
+    store.point_current(number)?;
+    store.choose(number)
 }
 
 /// A generation's normal entry, with systemd-boot's boot counter when it gets `tries` attempts: archix-N+3.conf becomes archix-N.conf once a boot reaches boot-complete.target, and archix-N+0-3.conf is skipped for an older entry after three failed ones.
@@ -571,6 +595,28 @@ pub fn mark_bad(esp: &Path, generation: u32) -> Result<bool> {
     Ok(false)
 }
 
+/// Gives a generation's entry that used up its tries as many again (archix-N+0-3.conf becomes archix-N+3.conf), so systemd-boot tries it once more and still falls back when it fails; false when it isn't bad.
+pub fn retry_entry(esp: &Path, generation: u32) -> Result<bool> {
+    for (number, extra, path) in entries(esp) {
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if number != generation || extra || !is_bad(&name) {
+            continue;
+        }
+        let Some((stem, counters)) = name.strip_suffix(".conf").and_then(|n| n.split_once('+')) else {
+            continue;
+        };
+        let done: u32 = counters
+            .split_once('-')
+            .and_then(|(_, done)| done.parse().ok())
+            .unwrap_or(0);
+        let fresh = path.with_file_name(format!("{stem}+{}.conf", done.max(1)));
+        fs::rename(&path, &fresh).with_context(|| format!("renaming {}", path.display()))?;
+        crate::durable::sync_esp(esp)?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// An entry systemd-boot has given up on: no tries left.
 pub fn is_bad(name: &str) -> bool {
     name.split_once('+')
@@ -676,7 +722,7 @@ fn remove_unused_ukis_but(esp: &Path, keep: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn free_bytes(dir: &Path) -> Result<u64> {
+pub(crate) fn free_bytes(dir: &Path) -> Result<u64> {
     let path = CString::new(dir.as_os_str().as_encoded_bytes())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
@@ -1156,6 +1202,11 @@ fn loader_var_entry(name: &str) -> Option<String> {
     efivar_string(&fs::read(loader_var(name)?).ok()?).filter(|entry| !entry.is_empty())
 }
 
+/// The partition systemd-boot started from (LoaderDevicePartUUID), lowercase, which is the ESP.
+pub fn loader_partition() -> Option<String> {
+    loader_var_entry("LoaderDevicePartUUID").map(|uuid| uuid.trim().to_lowercase())
+}
+
 /// The default picked in the boot menu or with `bootctl set-default`, which overrides loader.conf's.
 pub fn default_override() -> Option<String> {
     loader_var_entry("LoaderEntryDefault")
@@ -1312,6 +1363,7 @@ pub fn hand_over(esp: &str, kernels: &[(String, String)], default: &str, sign: b
         fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
     }
     crate::durable::sync_esp(Path::new(esp))?;
+    super::rescue::remove_from_esp(Path::new(esp))?;
     match fs::remove_dir_all(uki_dir(Path::new(esp))) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e).context("removing archix's UKIs"),
         _ => {}
@@ -1461,8 +1513,14 @@ pub fn uki_count(plan: &BootPlan, local_db: &Path) -> u64 {
     2 + u64::from(plan.anticheat) + others as u64
 }
 
-/// Checked before a switch changes anything: the `ukis` new UKIs must fit in what's free plus what dropping the entries of deployments outside `pinned` would free; `kernel` stands in for a UKI when the ESP has none yet.
-pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, ukis: u64) -> Result<()> {
+/// What a switch's boot entries need on the ESP: `ukis` the size of the newest, the rescue UKI written again beside the one there (`rescue`, its size if known) when the rescue entry is on, and a margin.
+pub fn space_needed(newest: u64, ukis: u64, rescue: Option<Option<u64>>) -> u64 {
+    let rescue = rescue.map_or(0, |size| size.unwrap_or(newest));
+    newest * ukis.max(1) + rescue + MARGIN
+}
+
+/// Checked before a switch changes anything: the `ukis` new UKIs, and with `rescue` a new rescue UKI, must fit in what's free plus what dropping the entries of deployments outside `pinned` would free; `kernel` stands in for a UKI when the ESP has none yet. The rescue UKI is never dropped, so it frees nothing.
+pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, ukis: u64, rescue: bool) -> Result<()> {
     let existing: Vec<(u32, bool, PathBuf)> = entries(esp)
         .into_iter()
         .filter_map(|(number, extra, entry)| Some((number, extra, uki_of(esp, &entry)?)))
@@ -1477,7 +1535,7 @@ pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, uk
     else {
         return Ok(());
     };
-    let needed = newest * ukis.max(1) + MARGIN;
+    let needed = space_needed(newest, ukis, rescue.then(|| super::rescue::uki_size(esp)));
     let pinned_ukis: BTreeSet<&PathBuf> = existing
         .iter()
         .filter(|(number, _, _)| pinned.contains(number))
@@ -1500,11 +1558,12 @@ pub fn check_space(esp: &Path, pinned: &BTreeSet<u32>, kernel: Option<&Path>, uk
     if free + reclaimable < needed {
         let mib = |bytes: u64| bytes / (1024 * 1024);
         bail!(
-            "the ESP at {} has {} MiB free ({} MiB more after dropping the deployments it may), but this switch's boot entries need about {} MiB; nothing was changed. Free up space on it, or set deployments.keep lower",
+            "the ESP at {} has {} MiB free ({} MiB more after dropping the deployments it may), but this switch's boot entries need about {} MiB{}; nothing was changed. Free up space on it, or set deployments.keep lower",
             esp.display(),
             mib(free),
             mib(reclaimable),
-            mib(needed)
+            mib(needed),
+            if rescue { ", the rescue entry's included" } else { "" }
         );
     }
     Ok(())
@@ -2346,5 +2405,99 @@ mod tests {
             !entry_unchanged(&paths, "archix-3.conf"),
             "a temporary file a power cut left isn't the entry"
         );
+    }
+
+    /// An ESP with deployment entries, a fallback and the rescue entry with its UKI.
+    fn esp_with_rescue() -> (tempfile::TempDir, PathBuf) {
+        let esp = esp_with(&["archix-2.conf", "archix-3+2-1.conf"], "default archix-2.conf\n");
+        fs::create_dir_all(uki_dir(esp.path())).unwrap();
+        fs::write(uki_dir(esp.path()).join("a.efi"), "uki a").unwrap();
+        for entry in ["archix-2.conf", "archix-3+2-1.conf"] {
+            fs::write(entries_dir(esp.path()).join(entry), "title t\nefi /EFI/archix/a.efi\n").unwrap();
+        }
+        let rescue = esp.path().join(super::super::rescue::DIR).join("rescue-x.efi");
+        fs::create_dir_all(rescue.parent().unwrap()).unwrap();
+        fs::write(&rescue, "rescue uki").unwrap();
+        fs::write(
+            super::super::rescue::entry_path(esp.path()),
+            super::super::rescue::entry_text("rescue-x.efi", 2, "7.1"),
+        )
+        .unwrap();
+        (esp, rescue)
+    }
+
+    #[test]
+    fn gc_and_record_pruning_never_touch_the_rescue_entry() {
+        let (esp, rescue) = esp_with_rescue();
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        drop_entries(&paths, esp.path(), 2).unwrap();
+        drop_entries(&paths, esp.path(), 3).unwrap();
+        remove_unused_ukis_but(esp.path(), &[]).unwrap();
+        prune_records(&paths, esp.path()).unwrap();
+        crate::deploy::commit::clean_esp(esp.path()).unwrap();
+        assert!(entries(esp.path()).is_empty(), "both deployments' entries went");
+        assert!(
+            !uki_dir(esp.path()).join("a.efi").exists(),
+            "and the UKI only they used"
+        );
+        assert!(super::super::rescue::entry_path(esp.path()).is_file() && rescue.is_file());
+        assert_eq!(super::super::rescue::uki(esp.path()), Some(rescue));
+    }
+
+    #[test]
+    fn the_rescue_entry_never_becomes_the_default_or_counts_as_a_generation() {
+        let (esp, _) = esp_with_rescue();
+        let loader = || fs::read_to_string(esp.path().join("loader/loader.conf")).unwrap();
+        set_default_entry(esp.path(), 2).unwrap();
+        assert_eq!(loader(), "default archix-2.conf\n");
+        set_default_entry(esp.path(), 3).unwrap();
+        assert_eq!(loader(), "default archix-2.conf\npreferred archix-3.conf\n");
+        assert!(!loader().contains("rescue"));
+        assert!(entries(esp.path()).iter().all(|(n, _, _)| [2, 3].contains(n)));
+        assert_eq!(crate::deploy::keep::boot_default("default archix-rescue.conf\n"), None);
+        assert!(!loader_names(esp.path(), 0));
+        assert!(!counting(esp.path(), 0) && !is_bad(super::super::rescue::ENTRY));
+    }
+
+    #[test]
+    fn eject_takes_the_rescue_entry_off_with_archixs_own() {
+        let (esp, rescue) = esp_with_rescue();
+        assert!(super::super::rescue::remove_from_esp(esp.path()).unwrap());
+        assert!(!rescue.exists() && !super::super::rescue::entry_path(esp.path()).exists());
+        assert!(!esp.path().join(super::super::rescue::DIR).exists());
+        assert!(!super::super::rescue::remove_from_esp(esp.path()).unwrap());
+    }
+
+    #[test]
+    fn the_space_check_counts_a_new_rescue_uki_beside_the_old_one() {
+        let mib = 1024 * 1024;
+        assert_eq!(space_needed(40 * mib, 3, None), 120 * mib + MARGIN);
+        assert_eq!(
+            space_needed(40 * mib, 3, Some(Some(30 * mib))),
+            150 * mib + MARGIN,
+            "the rescue UKI as big as the one on the ESP"
+        );
+        assert_eq!(
+            space_needed(40 * mib, 3, Some(None)),
+            160 * mib + MARGIN,
+            "without one yet, as big as the newest UKI"
+        );
+        let (esp, _) = esp_with_rescue();
+        assert_eq!(super::super::rescue::uki_size(esp.path()), Some(10));
+    }
+
+    #[test]
+    fn a_bad_entry_gets_its_tries_again() {
+        let esp = esp_with(&["archix-2.conf", "archix-3+0-3.conf", "archix-4+1-2.conf"], "");
+        assert!(retry_entry(esp.path(), 3).unwrap());
+        assert!(!retry_entry(esp.path(), 2).unwrap(), "not counted");
+        assert!(!retry_entry(esp.path(), 4).unwrap(), "still has a try");
+        let mut names: Vec<String> = entries(esp.path())
+            .into_iter()
+            .map(|(_, _, path)| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["archix-2.conf", "archix-3+3.conf", "archix-4+1-2.conf"]);
     }
 }

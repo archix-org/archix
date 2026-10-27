@@ -335,6 +335,26 @@ mod tests {
     }
 
     #[test]
+    fn the_rescue_uki_on_the_esp_is_never_revoked_and_a_replaced_one_is() {
+        let esp = tempfile::tempdir().unwrap();
+        let current = super::super::authenticode::tests::image();
+        let mut replaced = current.clone();
+        replaced[0x250] ^= 0xff;
+        let dir = esp.path().join(super::super::rescue::DIR);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("rescue-new.efi"), &current).unwrap();
+        let hash = |image: &[u8]| hex(&authenticode::hash(image).unwrap());
+        let all = [
+            signed(&hash(&replaced), "rescue-old.efi"),
+            signed(&hash(&current), "rescue-new.efi"),
+        ];
+        assert_eq!(
+            to_revoke(&all, &on_esp(esp.path()), &BTreeSet::new()),
+            [signed(&hash(&replaced), "rescue-old.efi")]
+        );
+    }
+
+    #[test]
     fn archix_entries_carry_archix_owner_guid() {
         assert_eq!(
             OWNER,

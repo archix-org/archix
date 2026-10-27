@@ -556,6 +556,53 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool) -> Result<Ve
     Ok(written)
 }
 
+/// Ejects the root mounted at `paths.root` from the rescue boot, where nothing runs from it: deployment `number` (current by default) becomes the root's own trees, the ESP at `esp`, mounted under the root, boots them through a plain UKI, and /archix goes; each phase is recorded, so a rerun, from the rescue or the booted system, finishes an eject a crash cut off.
+pub fn offline(paths: &Paths, number: Option<u32>, esp: &Path) -> Result<Vec<String>> {
+    let root = &paths.root;
+    let store = Store::open(root)?;
+    let lock = store.lock()?;
+    let mut state = match read_state(&paths.state)? {
+        Some(state) => state,
+        None => {
+            let deployment = match number {
+                Some(number) => number,
+                None => store.current()?.context("there's no current deployment")?,
+            };
+            if !store.deployments()?.contains(&deployment) {
+                bail!("deployment {deployment} isn't complete; nothing was changed");
+            }
+            State {
+                deployment,
+                phase: Phase::Copying,
+                restore_originals: false,
+            }
+        }
+    };
+    write_state(&paths.state, &state)?;
+    if state.phase < Phase::Copied {
+        in_plain_view(root, |view| {
+            copy_trees(view, &store, state.deployment)?;
+            strip(view, paths, state.deployment, state.restore_originals)
+        })?;
+        crate::durable::sync_filesystems_checked(&[root])?;
+        state.phase = Phase::Copied;
+        write_state(&paths.state, &state)?;
+        mark("eject-copied");
+    }
+    let mut written = Vec::new();
+    if state.phase < Phase::Plain {
+        written = hand_over(root, esp, &default_kernel(paths, state.deployment))?;
+        state.phase = Phase::Plain;
+        write_state(&paths.state, &state)?;
+        mark("eject-plain");
+    }
+    drop(lock);
+    remove_store(root)?;
+    crate::durable::sync_filesystems_checked(&[root])?;
+    clear_state(&paths.state)?;
+    Ok(written)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -120,7 +120,7 @@ impl Machine {
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
             cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json id-registry.json etc-merge outside-changes.json \
-              pending-hooks notes layout-pruned eject"#,
+              pending-hooks notes layout-pruned eject activated"#,
             root = root.display(),
             template = template.display(),
         ));
@@ -223,8 +223,8 @@ impl Machine {
         }
     }
 
-    /// Restarts the machine into the boot entry `entry`, or into `current` without one: the deployment binds go, and the initramfs's `archix deploy-mount` binds the deployment it picks.
-    pub fn reboot(&self, entry: Option<&str>) -> String {
+    /// Shuts the machine down as far as its root goes: the deployment binds and the store's read-only bind go, and nothing records a booted deployment, as when the rescue boot or a live USB mounts it.
+    pub fn power_off(&self) {
         for (_, at) in archix::system::deploy_boot::TREES {
             Machine::unmount_all(&self.root.join(at));
         }
@@ -232,6 +232,12 @@ impl Machine {
         while Machine::mounts_under(&store).contains(&store) {
             sh(&format!("umount {}", store.display()));
         }
+        let _ = fs::remove_file(self.root.join("run/archix/deployment"));
+    }
+
+    /// Restarts the machine into the boot entry `entry`, or into `current` without one: the deployment binds go, and the initramfs's `archix deploy-mount` binds the deployment it picks.
+    pub fn reboot(&self, entry: Option<&str>) -> String {
+        self.power_off();
         let efivar = self.root.join("run/test-efivar");
         match entry {
             Some(entry) => {
@@ -330,7 +336,7 @@ pub struct Setup {
 /// The boot settings every test config gets unless it sets its own, for a machine's ESP.
 pub fn boot_body(machine: &Machine) -> String {
     format!(
-        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux" }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
+        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", rescue_entry = false }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
         machine.esp().display()
     )
 }

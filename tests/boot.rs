@@ -11,7 +11,7 @@ use common::*;
 
 fn boot_body(setup_esp: &Path, extra: &str) -> String {
     format!(
-        r#"boot = {{ loader = "systemd-boot", esp = "{}" {extra} }}, kernel_params = {{ "root=/dev/vda2", "rw" }}"#,
+        r#"boot = {{ loader = "systemd-boot", esp = "{}", rescue_entry = false {extra} }}, kernel_params = {{ "root=/dev/vda2", "rw" }}"#,
         setup_esp.display()
     )
 }
@@ -86,7 +86,7 @@ fn signed_images_are_recorded_by_hash_and_listed_for_revoking_once_off_the_esp()
     sbctl_keys(&esp);
     let body = |n: u32| {
         format!(
-            r#"deployments = {{ keep = 1 }}, boot = {{ loader = "systemd-boot", esp = "{}", secure_boot = true }}, kernel_params = {{ "root=/dev/vda2", "rw", "archix.test={n}" }}"#,
+            r#"deployments = {{ keep = 1 }}, boot = {{ loader = "systemd-boot", esp = "{}", secure_boot = true, rescue_entry = false }}, kernel_params = {{ "root=/dev/vda2", "rw", "archix.test={n}" }}"#,
             esp.display()
         )
     };
@@ -902,7 +902,7 @@ fn gc_keeps_every_uki_a_remaining_entry_starts() {
             r#""root=/dev/vda2", "rw", "quiet""#
         };
         format!(
-            r#"boot = {{ loader = "systemd-boot", esp = "{}" }}, kernel_params = {{ {params} }}, deployments = {{ keep = 2 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#,
+            r#"boot = {{ loader = "systemd-boot", esp = "{}", rescue_entry = false }}, kernel_params = {{ {params} }}, deployments = {{ keep = 2 }}, files = {{ ["/etc/archix-test-gc"] = {{ text = "{n}" }} }}"#,
             esp.display()
         )
     };

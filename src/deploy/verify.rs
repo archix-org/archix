@@ -229,6 +229,48 @@ pub fn repair(paths: &Paths, deployment: &Path, problems: &[Problem]) -> Result<
     Ok(repaired)
 }
 
+/// Puts back the file at `rel` under `deployment`'s etc as its package installed it, from the package cache, through a new name renamed over the old; returns the package's name.
+pub fn restore_etc(paths: &Paths, deployment: &Path, rel: &str) -> Result<String> {
+    let path = format!("etc/{}", rel.trim_start_matches('/'));
+    let packages = packages(&deployment.join("pacman"))?;
+    let Some((package, entry)) = packages
+        .iter()
+        .find_map(|package| Some((package, package.entries.iter().find(|entry| entry.path == path)?)))
+    else {
+        bail!("no package of {} installs /{path}", deployment.display());
+    };
+    let Some(file) = cached(paths, &package.file) else {
+        bail!(
+            "{} isn't in the package cache, so /{path} can't be restored; copy it into {}",
+            package.file,
+            paths.packages().display()
+        );
+    };
+    let scratch = std::env::temp_dir().join(format!("archix-restore-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&scratch);
+    fs::create_dir_all(&scratch)?;
+    let output = Command::new("bsdtar")
+        .args(["-xpf"])
+        .arg(&file)
+        .args(["--numeric-owner", "--xattrs", "-C"])
+        .arg(&scratch)
+        .arg(&path)
+        .output()
+        .context("running bsdtar")?;
+    let restored = match output.status.success() {
+        true => put_back(&scratch.join(&path), &deployment.join(&path), entry),
+        false => Err(anyhow::anyhow!(
+            "extracting /{path} from {} failed: {}",
+            file.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    };
+    let _ = fs::remove_dir_all(&scratch);
+    restored?;
+    crate::durable::sync_filesystems_checked(&[deployment])?;
+    Ok(package.name.clone())
+}
+
 fn put_back(from: &Path, to: &Path, entry: &crate::repack::Entry) -> Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;

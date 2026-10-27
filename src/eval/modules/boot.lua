@@ -39,6 +39,11 @@ return {
         default = false,
         description = "Also write an 'archix protected' entry for each deployment with the kernel command line Easy Anti-Cheat Linux v2 asks for (integrity lockdown, kexec off, the BPF LSM, IOMMU without passthrough). It can't make the kernel well-known-signed; `archix secure-boot check --anticheat` shows what's still missing.",
       },
+      rescue_entry = archix.option {
+        type = t.bool,
+        default = true,
+        description = "Keep an 'archix rescue' entry in the boot menu, after the deployments and never the default: the kernel of the newest deployment that booted fine with an initramfs of its own that mounts no deployment and opens `archix rescue`, to list and repoint deployments, check the root and the ESP, restore broken files from the package cache, reset a password or eject, without a live USB. Refreshed after each switch, signed when Secure Boot signing is on. It gives whoever is at the console a root shell without a password, as a live USB would, but on an encrypted root it needs the passphrase and it never unlocks a TPM-bound volume; turn it off on machines whose firmware locks out other boot media.",
+      },
       health_check = {
         units = archix.option {
           type = t.list_of(t.str),

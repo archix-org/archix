@@ -162,11 +162,12 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Gone: every kept deployment boots from its own entry without pacman, so pick an older one in the boot menu
-    #[command(hide = true)]
+    /// Repair a machine from the rescue boot entry, which mounts no deployment; with no command, the rescue prompt
     Rescue {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        rest: Vec<String>,
+        #[command(flatten)]
+        options: commands::rescue::Options,
+        #[command(subcommand)]
+        action: Option<commands::rescue::Action>,
     },
     /// Run at boot by archix-boot.service: make the deployment whose boot entry was chosen current
     #[command(hide = true)]
@@ -545,9 +546,13 @@ fn run() -> Result<ExitCode> {
         Command::Recover { .. } => anyhow::bail!(
             "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
         ),
-        Command::Rescue { .. } => anyhow::bail!(
-            "`archix rescue` is gone: every kept deployment boots from its own entry without pacman, so pick an older one in the boot menu, or run `archix rollback`"
-        ),
+        Command::Rescue { options, action } => {
+            if !is_root() {
+                anyhow::bail!("`archix rescue` mounts filesystems, so it needs root");
+            }
+            commands::rescue::run(options, action)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         command => command,
     };
     if let Some(name) = needs_root(&command)

@@ -507,7 +507,7 @@ fn a_failed_health_check_falls_back_says_why_and_names_unsafe_downgrades_and_hib
     let setup = Setup::new(&["lemon"], "");
     let machine = &setup.machine;
     let body = format!(
-        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", health_check = {{ listening = {{ 1 }}, timeout = 1 }} }}, kernel_params = {{ "root=/dev/vda2 rw" }}, unsafe_downgrades = {{ lemon = {{ "3.54" }} }}"#,
+        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", rescue_entry = false, health_check = {{ listening = {{ 1 }}, timeout = 1 }} }}, kernel_params = {{ "root=/dev/vda2 rw" }}, unsafe_downgrades = {{ lemon = {{ "3.54" }} }}"#,
         machine.esp().display()
     );
     setup.set_body(&["lemon"], &body);
@@ -959,7 +959,7 @@ fn a_switch_without_systemd_boot_or_with_the_esp_in_boot_is_refused_before_anyth
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("boot.loader = \"systemd-boot\""), "{err}");
     let esp_in_boot = format!(
-        r#"boot = {{ loader = "systemd-boot", esp = "{}" }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
+        r#"boot = {{ loader = "systemd-boot", esp = "{}", rescue_entry = false }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
         setup.machine.root.join("boot/efi").display()
     );
     fs::create_dir_all(setup.machine.root.join("boot/efi")).unwrap();
@@ -1519,7 +1519,7 @@ fn an_old_lock_is_called_out() {
 
 #[test]
 #[ignore]
-fn recover_and_rescue_are_gone_with_a_note_on_what_replaced_them() {
+fn recover_is_gone_and_rescue_runs_only_from_the_rescue_boot() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
     let err = setup.fails(&["recover", "--continue"]);
@@ -1527,11 +1527,13 @@ fn recover_and_rescue_are_gone_with_a_note_on_what_replaced_them() {
         err.contains("archix recover` is gone") && err.contains("nothing to recover"),
         "{err}"
     );
-    let err = setup.fails(&["rescue", "--root", "/mnt"]);
+    let err = setup.fails(&["rescue", "list"]);
     assert!(
-        err.contains("archix rescue` is gone") && err.contains("boot menu"),
+        err.contains("runs in the rescue boot") && err.contains("archix-rescue.conf"),
         "{err}"
     );
+    let err = setup.fails(&["rescue", "--root-dir", "/", "list"]);
+    assert!(err.contains("the running system"), "{err}");
 }
 
 #[test]

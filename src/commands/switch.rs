@@ -370,7 +370,13 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     };
     let kernel = boot::owned_version(&db, &boot.kernel)
         .map(|version| here.join("usr/lib/modules").join(version).join("vmlinuz"));
-    system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot::uki_count(&boot, &db))?;
+    system::boot::check_space(
+        &esp,
+        &pinned,
+        kernel.as_deref(),
+        boot::uki_count(&boot, &db),
+        boot.rescue,
+    )?;
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
         noconfirm,
@@ -701,7 +707,7 @@ fn after_commit(
     }
     collect_and_revoke(
         paths,
-        declared.boot.as_ref().is_some_and(|boot| boot.revoke_unused),
+        declared.boot.as_ref().map(|boot| boot.plan()).as_ref(),
         &mut soft_failures,
     )?;
     println!(
@@ -825,14 +831,6 @@ pub(super) fn carry_config(config_dir: &Path, paths: &Paths, deployment: &Path) 
     fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))
 }
 
-/// Makes the fallback UKI boot deployment `number`, a copy of its entry's UKI, writing the entry first if the ESP lost it.
-fn follow_with_fallback(paths: &Paths, boot: &BootPlan, deployments: &deploy::Store, number: u32) -> Result<()> {
-    if system::boot::follow_with_fallback(paths, Path::new(&boot.esp), number)? {
-        return Ok(());
-    }
-    deploy::build::entry_for(deployments, paths, boot, number)
-}
-
 /// Carries the running system's users, groups and passwords into the /etc of a deployment a rollback makes current, so none reverts or vanishes while their files keep the number.
 fn carry_accounts(paths: &Paths, etc: &Path, soft_failures: &mut Vec<String>) {
     carry_accounts_from(paths, &paths.root.join("etc"), etc, soft_failures);
@@ -894,13 +892,24 @@ fn print_hooks(change: &SystemChange) {
     }
 }
 
-/// gc and revoking the boot images no entry uses, after every switch or rollback that commits a deployment.
-fn collect_and_revoke(paths: &Paths, revoke_unused: bool, soft_failures: &mut Vec<String>) -> Result<()> {
+/// gc, the rescue entry's refresh, then revoking the boot images no entry uses (a replaced rescue UKI among them), after every switch or rollback that commits a deployment.
+fn collect_and_revoke(paths: &Paths, boot: Option<&BootPlan>, soft_failures: &mut Vec<String>) -> Result<()> {
     match gc::collect(paths, &user_cache()?) {
         Ok(report) => print_gc(&report, false),
         Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
     }
-    if revoke_unused && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true)) {
+    if let Some(plan) = boot
+        && layout::laid_out(&paths.root)
+    {
+        match deploy::Store::open(&paths.root).and_then(|store| system::rescue::refresh(paths, plan, &store)) {
+            Ok(done) if !done.is_empty() => println!("{done}"),
+            Ok(_) => {}
+            Err(e) => soft_failures.push(format!("refreshing the rescue entry: {e:#}")),
+        }
+    }
+    if boot.is_some_and(|plan| plan.revoke_unused)
+        && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true))
+    {
         soft_failures.push(format!("revoking boot images no entry uses: {e:#}"));
     }
     Ok(())
@@ -1472,7 +1481,13 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                 .join(version)
                 .join("vmlinuz")
         });
-        system::boot::check_space(&esp, &pinned, kernel.as_deref(), boot::uki_count(&boot, &base_db))?;
+        system::boot::check_space(
+            &esp,
+            &pinned,
+            kernel.as_deref(),
+            boot::uki_count(&boot, &base_db),
+            boot.rescue,
+        )?;
     }
     guard_downgrades(&risky, noconfirm, allow_unsafe)?;
     if !noconfirm && !confirm(&format!("roll back to {name}?"))? {
@@ -1485,12 +1500,9 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         deploy::verify::ensure_intact(&paths, &deployments, number)?;
         ensure_entry(&paths, &boot, number)?;
         carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
-        // The default first: a crash between the two leaves the boot default on `number`, whose boot makes it current.
-        boot::set_default_entry(&esp, number)?;
-        archix::durable::sync_esp(&esp)?;
-        follow_with_fallback(&paths, &boot, &deployments, number)?;
-        deployments.point_current(number)?;
-        deployments.choose(number)?;
+        boot::repoint(&paths, &esp, &deployments, number, &|| {
+            deploy::build::entry_for(&deployments, &paths, &boot, number)
+        })?;
     } else {
         let archive = archix::archive::for_system(&paths.state);
         let repos = third_party_repos(&paths);
@@ -1560,7 +1572,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         false
     });
     if !kept {
-        collect_and_revoke(&paths, boot.revoke_unused, &mut soft_failures)?;
+        collect_and_revoke(&paths, Some(&boot), &mut soft_failures)?;
     }
     println!(
         "rolled back to {name}; it boots at the next restart. archix.lock is unchanged, so the next `archix switch` returns to the config"

@@ -303,6 +303,18 @@ pub fn bind_trees(root: &Path, deployment: &Path) -> Result<()> {
 
 /// In the initramfs: binds the chosen deployment's trees over `root` and records its generation in `run_dir`/deployment.
 pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
+    mount_for(root, efivar, run_dir, &crate::testhooks::kernel_cmdline())
+}
+
+/// `mount` for a boot with kernel command line `cmdline`, which with archix.rescue mounts nothing.
+fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Result<u32> {
+    if crate::system::rescue::requested(cmdline) {
+        bail!(
+            "{} is on the kernel command line, so no deployment is mounted; the rescue entry ({}) opens `archix rescue`",
+            crate::system::rescue::FLAG,
+            crate::system::rescue::ENTRY
+        );
+    }
     let archix = root.join("archix");
     if !is_dir(&archix) {
         bail!(
@@ -369,7 +381,9 @@ pub fn hook_files(root: &Path) -> Vec<(PathBuf, String)> {
         (
             root.join("etc/initcpio/hooks/archix-deploy"),
             format!(
-                "#!/usr/bin/ash\n\nrun_latehook() {{\n    if ! /usr/bin/archix deploy-mount {BUSYBOX_ROOT}; then\n        \
+                "#!/usr/bin/ash\n\nrun_latehook() {{\n    case \" $(cat /proc/cmdline) \" in\n        *\" archix.rescue \"*)\n            \
+                 /usr/bin/archix rescue --root-dir {BUSYBOX_ROOT}\n            reboot -f\n            ;;\n    esac\n    \
+                 if ! /usr/bin/archix deploy-mount {BUSYBOX_ROOT}; then\n        \
                  err \"archix couldn't mount this boot's deployment; the machine halts when this shell exits\"\n        \
                  launch_interactive_shell\n        \
                  err \"archix: halting rather than booting the root without its deployment; pick another boot entry\"\n        \
@@ -629,18 +643,52 @@ mod tests {
         assert_eq!(at, ["/var", "/usr", "/opt", "/boot"]);
     }
 
-    fn run_hook(archix: &str) -> std::process::Output {
+    #[test]
+    fn with_archix_rescue_on_the_command_line_no_deployment_is_mounted() {
+        let dir = layout();
+        let root = dir.path();
+        let run = root.join("run");
+        let efivar = root.join("no-efivar");
+        let err = mount_for(root, &efivar, &run, "root=UUID=x rw archix.rescue").unwrap_err();
+        assert!(format!("{err:#}").contains("no deployment is mounted"), "{err:#}");
+        assert!(!run.exists(), "nothing recorded as booted");
+        assert!(!root.join("usr").exists(), "nothing bound");
+    }
+
+    fn run_hook_with(archix: &str, cmdline: &str) -> std::process::Output {
         let hook = hook_files(Path::new("/"))
             .into_iter()
             .find(|(path, _)| path.ends_with("hooks/archix-deploy"))
             .unwrap()
             .1;
         assert!(hook.contains("/usr/bin/archix deploy-mount /new_root;"), "{hook}");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cmdline");
+        fs::write(&file, cmdline).unwrap();
         let script = format!(
-            "{}\nerr() {{ echo \"ERR $*\"; }}\nlaunch_interactive_shell() {{ echo SHELL; }}\nhalt() {{ echo \"HALT $*\"; exit 3; }}\nrun_latehook\necho BOOTING ON\n",
+            "{}\nerr() {{ echo \"ERR $*\"; }}\nlaunch_interactive_shell() {{ echo SHELL; }}\nhalt() {{ echo \"HALT $*\"; exit 3; }}\nreboot() {{ echo \"REBOOT $*\"; exit 4; }}\nrun_latehook\necho BOOTING ON\n",
             hook.replace("/usr/bin/archix deploy-mount", archix)
+                .replace("/usr/bin/archix rescue", "echo RESCUE")
+                .replace("/proc/cmdline", &file.display().to_string())
         );
         std::process::Command::new("sh").arg("-c").arg(script).output().unwrap()
+    }
+
+    fn run_hook(archix: &str) -> std::process::Output {
+        run_hook_with(archix, "root=UUID=x rw")
+    }
+
+    #[test]
+    fn the_busybox_hook_opens_the_rescue_prompt_instead_of_mounting_with_archix_rescue() {
+        let rescued = run_hook_with("echo MOUNTED", "root=UUID=x archix.rescue rw");
+        let out = String::from_utf8_lossy(&rescued.stdout);
+        assert_eq!(rescued.status.code(), Some(4), "{out}");
+        assert_eq!(out, "RESCUE --root-dir /new_root\nREBOOT -f\n");
+        let normal = run_hook_with("echo MOUNTED", "root=UUID=x archix.rescued rw");
+        assert_eq!(
+            String::from_utf8_lossy(&normal.stdout),
+            "MOUNTED /new_root\nBOOTING ON\n"
+        );
     }
 
     #[test]

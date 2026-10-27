@@ -47,14 +47,23 @@ pub fn hooks(retry: bool, number: Option<u32>) -> Result<()> {
 /// `archix verify`: checks each kept deployment's usr, opt and boot against its packages, and with `repair` restores what differs from the package cache.
 pub fn verify(repair: bool) -> Result<()> {
     require_root("verify")?;
-    let paths = Paths::system();
+    verify_in(&Paths::system(), repair, &[], "sudo archix verify --repair")
+}
+
+/// `archix verify` on the system whose root and state `paths` name, for the deployments `only` lists or every kept one; `repair_hint` is the command that repairs.
+pub fn verify_in(paths: &Paths, repair: bool, only: &[u32], repair_hint: &str) -> Result<()> {
+    let paths = paths.clone();
     if !layout::laid_out(&paths.root) {
         println!("there are no deployments yet");
         return Ok(());
     }
     let store = deploy::Store::open(&paths.root)?;
     let mut changed = Vec::new();
-    for number in store.deployments()? {
+    let kept = store.deployments()?;
+    if let Some(missing) = only.iter().find(|n| !kept.contains(n)) {
+        bail!("there's no complete deployment {missing}");
+    }
+    for number in kept.into_iter().filter(|n| only.is_empty() || only.contains(n)) {
         let deployment = store.path(number);
         let (mut problems, mut missing) = deploy::verify::changed(deploy::verify::check(&deployment)?);
         if !problems.is_empty() && repair {
@@ -83,9 +92,9 @@ pub fn verify(repair: bool) -> Result<()> {
     }
     if !changed.is_empty() {
         let hint = if repair {
-            ""
+            String::new()
         } else {
-            "; `sudo archix verify --repair` restores them"
+            format!("; `{repair_hint}` restores them")
         };
         bail!(
             "{} changed{hint}",

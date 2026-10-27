@@ -3,6 +3,7 @@ mod eject;
 mod helper;
 mod init;
 mod lock;
+pub mod rescue;
 mod switch;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -136,6 +137,7 @@ struct BootSettings {
     tries: u32,
     revoke_unused: bool,
     health_check: Option<archix::system::health::HealthCheck>,
+    rescue_entry: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -158,6 +160,7 @@ impl BootSettings {
             revoke_unused: self.revoke_unused,
             pcr_key: archix::system::boot::pcr_key_fingerprint(&switch::current_root(&Paths::system()).join("etc")),
             health_check: self.health_check.clone(),
+            rescue: self.rescue_entry,
         }
     }
 }
@@ -417,6 +420,7 @@ fn declared(config: &Value) -> Result<Declared> {
                     },
                     revoke_unused: boot.get("revoke_unused") == Some(&Value::Bool(true)),
                     health_check: health_check(boot.get("health_check"))?,
+                    rescue_entry: boot.get("rescue_entry") != Some(&Value::Bool(false)),
                 })
             }
             _ => None,

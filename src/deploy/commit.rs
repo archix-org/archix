@@ -70,6 +70,7 @@ impl EspStep for SystemdBoot {
 pub fn clean_esp(esp: &Path) -> Result<()> {
     for (dir, prefix) in [
         ("EFI/archix", ""),
+        (crate::system::rescue::DIR, ""),
         ("EFI/Linux", "archix-fallback-"),
         ("loader/entries", "archix-"),
         ("loader", "loader.conf"),

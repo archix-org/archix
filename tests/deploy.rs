@@ -823,6 +823,7 @@ fn deploy_helper() {
                 revoke_unused: false,
                 pcr_key: None,
                 health_check: None,
+                rescue: false,
             };
             let built = Built::single("test", &name, &format!("archix {number}"));
             let entries = Entries {
@@ -1706,6 +1707,7 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
         revoke_unused: false,
         pcr_key: None,
         health_check: None,
+        rescue: false,
     };
     let packages = archix::packages::Packages {
         install: Vec::new(),

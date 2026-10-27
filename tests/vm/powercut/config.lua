@@ -3,7 +3,7 @@ return {
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot" },
+  boot = { loader = "systemd-boot", rescue_entry = false },
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
     -- What a real boot of a replayed state reports before powering off: the seconds from the kernel's start to this report, before its own checks take any, the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines, and the kernel's FAT and the ESP fsck's messages.
