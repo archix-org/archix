@@ -1,7 +1,7 @@
 # A reset (QMP system_reset, not a power cut: that is tests/vm/powercut's) a second into a switch's staging leaves the old deployment booting and current, and the next switch clears the staging tree.
 import time
 
-from boot.common import HOST, bind, boot, current, deployments, listing, number, ok
+from boot.common import HOST, bind, boot, current, deployments, edit_config, listing, number, ok
 
 
 def run(m, t):
@@ -21,3 +21,6 @@ def run(m, t):
         m.succeed(f"{HOST} install jq --noconfirm", what="the switch after the reset")
         t.check(number(current()) > number(before), "installing jq should make a newer deployment")
         t.check(not ok("ls -d /archix/deploy/.staging-*"), f"the next switch should clear the reset switch's staging tree: {listing()}")
+        # boot2 btrfs once failed here with ENOENT, building from the pending deployment the switch after the reset made.
+        edit_config("'s|\"console=ttyS0\" }|\"console=ttyS0\", \"archix.second\" }|'")
+        m.succeed(f"{HOST} switch --noconfirm", what="a switch from the pending deployment the switch after the reset made")

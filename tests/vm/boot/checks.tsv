@@ -86,6 +86,7 @@ plain	'/boot should be read-only once laid out'
 6	"switch to a deployment that can't boot"
 6	f"the new entry should count three boot tries: {out('ls /efi/loader/entries')}"
 6	f'loader.conf should prefer deployment {bad} and fall back to {good}: {text}'
+6	'a switch from the pending deployment the switch after the reset made'	added
 7	f'after three failed boots of deployment {bad}, systemd-boot should start {good}, not {booted}'
 7	f'archix should make deployment {good} current after {bad} failed to boot'
 7	f"deployment {bad}'s entry should be marked bad: {out('ls /efi/loader/entries')}"
