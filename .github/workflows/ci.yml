@@ -167,7 +167,7 @@ jobs:
           path: ${{ runner.temp }}/archive/base
           key: archive-base-${{ github.run_id }}-${{ github.run_attempt }}-container
 
-  # The split boot tests (docs/vm-testing.md), one job each; a pass is kept in the Actions cache with its logs by its inputs' hash, the test image's QEMU, OVMF and swtpm and the runner's kernel among them, so the test is skipped next time.
+  # The split boot tests (docs/vm-testing.md), two jobs per filesystem, each running its tests side by side as `tests/vm/run.sh boot` does, two at a time; GitHub runs too few jobs at once for one each. A pass is kept in the Actions cache per test with its logs by its inputs' hash, the test image's QEMU, OVMF and swtpm and the runner's kernel among them, so the test is skipped next time whichever job runs it.
   boot:
     needs: [image, build]
     runs-on: ubuntu-latest
@@ -175,8 +175,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test: [fallback, layout, revoke, secureboot, etc-merge, counting, reset-mid-switch]
+        # Balanced by CI 40649673183's times, longest first: revoke (136 s) beside fallback (114), then secureboot (54); layout (95) beside reset-mid-switch (82), then etc-merge (77) and counting (74).
+        tests: ["revoke fallback secureboot", "layout reset-mid-switch etc-merge counting"]
         fs: [ext4, btrfs]
+    name: boot (${{ matrix.tests }}, ${{ matrix.fs }})
     env:
       FS: ${{ matrix.fs }}
     steps:
@@ -185,29 +187,65 @@ jobs:
       - uses: ./.github/actions/vm-setup
         with:
           group: boot
-          need-gb: "20"
+          need-gb: "30"
       - uses: actions/download-artifact@v4
         with:
           name: archix-build
           path: ${{ runner.temp }}/build
-      - id: key
-        run: echo "key=vm-result-boot-${{ matrix.test }}-${{ matrix.fs }}-$(python3 tests/vm/driver/cache.py key boot-${{ matrix.test }})" >> "$GITHUB_OUTPUT"
-      - id: result
+      - id: keys
+        run: tests/ci/boot-results.sh keys ${{ matrix.tests }}
+      # One cache per test, at a path of its own so its key and version don't depend on the grouping; boot-results.sh caps a job at four.
+      - if: steps.keys.outputs.test1
         uses: actions/cache/restore@v4
         with:
-          path: ${{ runner.temp }}/vm-results
-          key: ${{ steps.key.outputs.key }}
-      - run: tests/vm/run.sh boot ${{ matrix.test }}
-      - if: steps.result.outputs.cache-hit != 'true'
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
+          key: ${{ steps.keys.outputs.key1 }}
+      - if: steps.keys.outputs.test2
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test2 }}
+          key: ${{ steps.keys.outputs.key2 }}
+      - if: steps.keys.outputs.test3
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test3 }}
+          key: ${{ steps.keys.outputs.key3 }}
+      - if: steps.keys.outputs.test4
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test4 }}
+          key: ${{ steps.keys.outputs.key4 }}
+      - run: tests/ci/boot-results.sh gather
+      - run: tests/vm/run.sh boot ${{ matrix.tests }}
+      # A test that passed is saved even when another in its job failed.
+      - id: split
+        if: always() && steps.keys.outcome == 'success'
+        run: tests/ci/boot-results.sh split
+      - if: always() && steps.split.outputs.save1
         uses: actions/cache/save@v4
         with:
-          path: ${{ runner.temp }}/vm-results
-          key: ${{ steps.key.outputs.key }}
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
+          key: ${{ steps.keys.outputs.key1 }}
+      - if: always() && steps.split.outputs.save2
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test2 }}
+          key: ${{ steps.keys.outputs.key2 }}
+      - if: always() && steps.split.outputs.save3
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test3 }}
+          key: ${{ steps.keys.outputs.key3 }}
+      - if: always() && steps.split.outputs.save4
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test4 }}
+          key: ${{ steps.keys.outputs.key4 }}
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: boot
-          name: boot-${{ matrix.test }}-${{ matrix.fs }}
+          name: boot-${{ steps.keys.outputs.test1 || strategy.job-index }}-${{ matrix.fs }}
           status: ${{ job.status }}
 
   deploy-boot:

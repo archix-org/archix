@@ -24,6 +24,13 @@ done
 [ "$suite" != boot ] || [ ${#names[@]} -gt 0 ] || names=("${boot_tests[@]}")
 "$root/tests/arch/image.sh"
 cache_py=$root/tests/vm/driver/cache.py
+# On GitHub each test's outcome is a row of the job's summary, and a failure an annotation naming the test, as one job runs several.
+summary() {
+  [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
+  [ -s "$GITHUB_STEP_SUMMARY" ] || printf '| Test | FS | Result | Took |\n| --- | --- | --- | --- |\n' >> "$GITHUB_STEP_SUMMARY"
+  echo "| ${1#boot-} | ${FS:-ext4} | $2 | ${3:-} |" >> "$GITHUB_STEP_SUMMARY"
+  [ "$2" != failed ] || echo "::error title=${1#boot-} failed on ${FS:-ext4}::${1#boot-} failed after $3; its console and timeline are in this job's logs artifact"
+}
 # Each driver test by its result-cache name, those still to run and their keys.
 declare -A keys=()
 pending=()
@@ -37,7 +44,13 @@ if [ ${#pending[@]} -gt 0 ] && [ -z "$interactive" ]; then
   while read -r name key; do keys[$name]=$key; done < <(python3 "$cache_py" keys "${pending[@]}")
   if [ -n "$cache" ]; then
     left=()
-    for name in "${pending[@]}"; do python3 "$cache_py" hit "$name" "${keys[$name]}" || left+=("$name"); done
+    for name in "${pending[@]}"; do
+      if python3 "$cache_py" hit "$name" "${keys[$name]}"; then
+        summary "$name" cached
+      else
+        left+=("$name")
+      fi
+    done
     pending=("${left[@]}")
     [ ${#pending[@]} -gt 0 ] || exit 0
   fi
@@ -147,8 +160,10 @@ while [ ${#running[@]} -gt 0 ]; do
     echo "== $test passed: $seconds s, started at +$offset s"
     sed -n '/^steps passed/,$p' "$work/$test/output.log"
     record "boot-$test" "$seconds" "$work/$test"
+    summary "$test" passed "$seconds s"
   else
     failed+=("$test")
+    summary "$test" failed "$seconds s"
     echo "== $test FAILED (exit $status) after $seconds s, started at +$offset s; its last lines:"
     tail -n 60 "$work/$test/output.log"
   fi
