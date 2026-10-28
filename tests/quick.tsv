@@ -13,6 +13,7 @@ src/options/	test:system test:home
 src/value.rs	test:system test:home
 src/luagen.rs	test:init
 src/capture.rs	test:init
+src/capture.json	test:init
 src/system/boot.rs	test:boot test:switch
 src/system/secureboot.rs	test:boot test:switch
 src/system/authenticode.rs	test:boot

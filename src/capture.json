@@ -1,29 +1,20 @@
 {
-  "scan": [
-    "/etc/systemd/system",
-    "/etc/systemd/network",
-    "/etc/systemd/logind.conf.d",
-    "/etc/systemd/journald.conf.d",
-    "/etc/systemd/resolved.conf.d",
-    "/etc/systemd/sleep.conf.d",
-    "/etc/sudoers.d",
-    "/etc/modprobe.d",
-    "/etc/modules-load.d",
-    "/etc/sysctl.d",
-    "/etc/udev/rules.d",
-    "/etc/X11/xorg.conf.d",
-    "/etc/tmpfiles.d",
-    "/etc/mkinitcpio.conf.d",
-    "/etc/environment.d",
-    "/etc/pacman.d/hooks",
-    "/etc/polkit-1/rules.d",
-    "/etc/NetworkManager/conf.d",
-    "/etc/ssh/sshd_config.d",
-    "/etc/sddm.conf.d",
-    "/etc/pipewire",
-    "/etc/wireplumber",
-    "/etc/dracut.conf.d",
-    "/etc/snapper/configs"
+  "backups": [
+    ".pacnew",
+    ".pacsave",
+    ".pacorig",
+    "-",
+    "~",
+    ".bak",
+    ".old",
+    ".OLD",
+    ".orig",
+    ".swp",
+    ".log"
+  ],
+  "links_elsewhere": [
+    "/etc/systemd/",
+    "/etc/xdg/systemd/"
   ],
   "never": [
     "/etc/pacman.conf",
@@ -44,7 +35,15 @@
     "/etc/modules-load.d/archix.conf",
     "/etc/pacman.d/gnupg/",
     "/etc/ca-certificates/extracted/",
-    "/etc/ssl/certs/"
+    "/etc/ssl/certs/",
+    "/etc/.pwd.lock",
+    "/etc/.updated",
+    "/etc/adjtime",
+    "/etc/udev/hwdb.bin",
+    "/etc/xml/catalog",
+    "/etc/texmf/ls-R",
+    "/etc/archix/",
+    "/etc/fonts/conf.d/"
   ],
   "secret": [
     "/etc/ssh/ssh_host_",
@@ -59,6 +58,9 @@
     "/etc/ssl/private/",
     "/etc/cryptsetup-keys.d/",
     "/etc/krb5.keytab",
+    "/etc/letsencrypt/",
+    "/etc/docker/key.json",
+    "/etc/rancher/",
     "secret",
     "password",
     "passwd",
@@ -83,7 +85,12 @@
     "aws_secret_access_key",
     "\"refresh_token\"",
     "psk=",
-    "password="
+    "password=",
+    "TunnelSecret"
+  ],
+  "secret_elsewhere": [
+    "/var/lib/dkms/mok.key",
+    "/var/lib/sbctl/keys/"
   ],
   "recommended": [
     "/etc/fstab",
@@ -117,6 +124,12 @@
     "/etc/sddm.conf",
     "/etc/gdm/custom.conf",
     "/etc/tlp.conf",
+    "/etc/crontab",
+    "/etc/exports",
+    "/etc/nginx/",
+    "/etc/ld.so.conf.d/",
+    "/etc/cron.d/",
+    "/etc/cloudflared/",
     "/etc/systemd/system/",
     "/etc/systemd/network/",
     "/etc/systemd/logind.conf.d/",

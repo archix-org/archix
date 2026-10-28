@@ -269,3 +269,136 @@ fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_con
         "its build stays out of package caches: {in_cache:?}"
     );
 }
+
+/// Runs a command on the container, which must succeed.
+fn sh(command: &str) {
+    let status = Command::new("sh").arg("-c").arg(command).status().unwrap();
+    assert!(status.success(), "{command}");
+}
+
+/// Writes a file on the container, creating its directory.
+fn put(path: &str, text: &str) {
+    fs::create_dir_all(std::path::Path::new(path).parent().unwrap()).unwrap();
+    fs::write(path, text).unwrap();
+}
+
+const UNITS: &str = "/usr/lib/systemd/system/archix-init-handmade";
+
+#[test]
+#[ignore]
+fn init_takes_over_what_was_set_up_by_hand_and_names_everything_it_leaves_out() {
+    let _system = lock_system();
+    let _restore: Vec<RestoreFile> = ["/etc/vconsole.conf", "/etc/locale.gen", "/etc/locale.conf"]
+        .into_iter()
+        .map(|path| RestoreFile::new(std::path::Path::new(path)))
+        .collect();
+    let default_target = fs::read_link("/etc/systemd/system/default.target").ok();
+    put(
+        &format!("{UNITS}.service"),
+        "[Service]\nType=oneshot\nExecStart=/bin/true\n",
+    );
+    put(
+        &format!("{UNITS}.timer"),
+        "[Timer]\nOnCalendar=daily\n\n[Install]\nWantedBy=timers.target\n",
+    );
+    put(
+        &format!("{UNITS}.target"),
+        "[Unit]\nDescription=handmade\n\n[Install]\nWantedBy=multi-user.target\n",
+    );
+    put(
+        "/usr/lib/systemd/system/archix-init-masked.service",
+        "[Service]\nExecStart=/bin/true\n",
+    );
+    sh("systemctl daemon-reload \
+        && systemctl enable archix-init-handmade.timer archix-init-handmade.target \
+        && systemctl mask archix-init-masked.service && systemctl set-default multi-user.target");
+    sh(
+        "groupadd -r -g 941 archix-init-grp && useradd -r -M -u 940 -d /var/lib/archix-init-sys -s /usr/bin/nologin archix-init-sys",
+    );
+    put("/etc/archix-init-app/config.yml", "port: 1\n");
+    put("/etc/archix-init-app/config.yml.pacnew", "port: 2\n");
+    put(
+        "/etc/wireguard/archix-init.conf",
+        "[Interface]\nAddress = 10.0.0.1/24\n",
+    );
+    put(
+        "/etc/vconsole.conf",
+        "# Written by systemd-localed(8)\nKEYMAP=us\nXKBLAYOUT=us\n",
+    );
+    put("/etc/locale.gen", "# en_US.UTF-8 UTF-8\nen_US.UTF-8 UTF-8  \n");
+    put("/etc/locale.conf", "LANG=en_US.UTF-8\n");
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("cfg");
+    let config = config.to_str().unwrap();
+
+    let (ok, out) = archix(config, &["init", "--defaults"]);
+    let host = fs::read_to_string(format!("{config}/lua/hosts/initbox/init.lua"))
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let copied = fs::read_to_string(format!(
+        "{config}/files/initbox/etc/systemd/system/archix-init-handmade.timer"
+    ))
+    .unwrap_or_default();
+
+    sh(
+        "systemctl disable archix-init-handmade.timer archix-init-handmade.target \
+        && systemctl unmask archix-init-masked.service",
+    );
+    match &default_target {
+        Some(target) => sh(&format!(
+            "ln -sfn {} /etc/systemd/system/default.target",
+            target.display()
+        )),
+        None => fs::remove_file("/etc/systemd/system/default.target").unwrap(),
+    }
+    for unit in ["service", "timer", "target"] {
+        fs::remove_file(format!("{UNITS}.{unit}")).unwrap();
+    }
+    fs::remove_file("/usr/lib/systemd/system/archix-init-masked.service").unwrap();
+    sh("systemctl daemon-reload && userdel archix-init-sys && groupdel archix-init-grp");
+    fs::remove_dir_all("/etc/archix-init-app").unwrap();
+    fs::remove_file("/etc/wireguard/archix-init.conf").unwrap();
+
+    assert!(ok, "init failed:\n{out}");
+    assert!(
+        host.contains("[\"archix-init-handmade.timer\"] = true")
+            && host.contains("[\"archix-init-handmade.target\"] = true"),
+        "a hand-installed unit and a target enabled against its preset keep their enablement:\n{host}\n{out}"
+    );
+    assert!(
+        host.contains("[\"/etc/systemd/system/archix-init-handmade.service\"]")
+            && copied == "[Timer]\nOnCalendar=daily\n\n[Install]\nWantedBy=timers.target\n",
+        "unit files no package installed are copied to /etc/systemd/system:\n{host}"
+    );
+    assert!(!out.contains("left out, since no package"), "{out}");
+    assert!(
+        host.contains("masked_units = {")
+            && host.contains("\"archix-init-masked.service\"")
+            && host.contains("default_target = \"multi-user.target\""),
+        "{host}"
+    );
+    assert!(
+        host.contains("[\"archix-init-sys\"] = { uid = 940, system = true,")
+            && host.contains("[\"archix-init-grp\"] = { gid = 941, system = true }"),
+        "hand-made system accounts keep their ids:\n{host}"
+    );
+    assert!(
+        host.contains("locales = { \"en_US.UTF-8\" }") && !host.contains("keymap ="),
+        "{host}"
+    );
+    assert!(
+        host.contains("[\"/etc/vconsole.conf\"]")
+            && out.contains("keymap: /etc/vconsole.conf it sets more than KEYMAP"),
+        "a vconsole.conf the keymap option can't say is kept as a file, and init says so:\n{out}"
+    );
+    assert!(
+        out.contains("\n      /etc/archix-init-app/config.yml\n") && !out.contains(".pacnew"),
+        "every unmanaged file is named, leftovers aren't:\n{out}"
+    );
+    assert!(
+        out.contains("left out as secrets") && out.contains("/etc/wireguard/ (1 file)"),
+        "{out}"
+    );
+}

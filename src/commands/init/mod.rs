@@ -89,6 +89,12 @@ enum BootFacts {
         kernel: String,
         microcode: Vec<String>,
         params: Vec<String>,
+        /// Why the first switch can't lay this system out as deployments, if it can't.
+        blocker: Option<String>,
+        /// The ESP is mounted in /boot, which the config moves to boot.esp's default, /efi.
+        esp_in_boot: bool,
+        /// mkinitcpio's microcode hook already puts microcode in the initramfs, so boot.microcode stays empty.
+        microcode_hook: bool,
     },
 }
 
@@ -113,10 +119,13 @@ struct Facts {
     unreproducible: Vec<String>,
     settings: Vec<(String, Lua)>,
     settings_summary: Vec<String>,
+    /// Settings left to files, with why.
+    settings_notes: Vec<String>,
     accounts: Accounts,
     services: BTreeMap<String, bool>,
     files: Vec<FoundFile>,
-    secrets: usize,
+    /// The secrets left out, by path, a secret directory standing for what's in it, and ones outside /etc.
+    secret_paths: Vec<String>,
     btrfs: bool,
     boot: BootFacts,
     flatpak_apps: BTreeMap<String, InstalledApp>,
@@ -325,13 +334,30 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool, repack: &[String]) ->
     let chosen = answers.location(config_dir);
     let fresh = !chosen.exists();
     let result = write_and_lock(&facts, &answers, &paths, config_dir, &chosen, host, interactive);
-    if result.is_err() && fresh {
-        let _ = fs::remove_dir_all(&chosen);
-        if chosen != config_dir && fs::symlink_metadata(config_dir).is_ok_and(|m| m.file_type().is_symlink()) {
-            let _ = fs::remove_file(config_dir);
-        }
+    match result {
+        Err(e) if fresh => Err(match set_aside(&chosen, config_dir) {
+            Some(aside) => e.context(format!(
+                "init failed, and kept what it wrote in {}; fix the cause and run init again, or move it back and finish it with `archix lock`",
+                aside.display()
+            )),
+            None => e,
+        }),
+        result => result,
     }
-    result
+}
+
+/// Moves a config init didn't finish to `<dir>.failed`, replacing an older one, so it can be looked at and init run again; drops the link to it init made.
+fn set_aside(chosen: &Path, config_dir: &Path) -> Option<PathBuf> {
+    if chosen != config_dir && fs::symlink_metadata(config_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = fs::remove_file(config_dir);
+    }
+    if fs::symlink_metadata(chosen).is_err() {
+        return None;
+    }
+    let aside = PathBuf::from(format!("{}.failed", chosen.display()));
+    let _ = fs::remove_dir_all(&aside);
+    fs::rename(chosen, &aside).ok()?;
+    Some(aside)
 }
 
 /// Everything after the questions: writing the config, locking it and showing what the first switch would do.
@@ -463,7 +489,13 @@ fn write_and_lock(
         }
     }
     print_warned(&warned);
-    summary(&dir, host, &config, answers.git);
+    summary(
+        &dir,
+        host,
+        &config,
+        answers.git,
+        first_step(facts, host).filter(|_| answers.boot),
+    );
     Ok(())
 }
 
@@ -534,16 +566,35 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .chain(integration::boot_files(&exe))
         .map(|(path, _)| path.to_string_lossy().into_owned())
         .collect();
-    let (settings, settings_summary) = host_settings(&mut skip);
-    let found = capture::config_files(&machine.details, &skip)?;
+    let Settings {
+        fields: mut settings,
+        summary: mut settings_summary,
+        notes: settings_notes,
+    } = host_settings(&mut skip);
+    let root = Path::new("/");
+    let found = capture::config_files(root, &machine.details, &skip)?;
+    let units = capture::unowned_units(root, &machine.details);
+    let mut files: Vec<FoundFile> = found
+        .files
+        .into_iter()
+        .chain(units.files)
+        .filter(|file| !Path::new(&file.path).starts_with(default_dir))
+        .collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut secret_paths = found.secrets;
+    secret_paths.extend(units.secrets);
+    let mut secret_paths = capture::group_secrets(&secret_paths);
+    secret_paths.extend(capture::secrets_elsewhere(root));
 
     let accounts = capture::parse_accounts(
         &fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?,
         &fs::read_to_string("/etc/group").context("reading /etc/group")?,
+        &capture::sysusers(root),
     );
     let dotfiles = accounts
         .users
         .iter()
+        .filter(|(_, user)| !user.system)
         .map(|(name, user)| {
             let dir = PathBuf::from(user.home.clone().unwrap_or_else(|| format!("/home/{name}")));
             let (offered, secrets) = capture::dotfiles(&dir);
@@ -568,16 +619,33 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
                     .map(|(base, _)| base)
                     .collect();
                 let kernel = boot_kernel(&machine.local, running.as_deref(), &installed);
+                let mut mkinitcpio: Vec<String> = fs::read_to_string("/etc/mkinitcpio.conf").into_iter().collect();
+                let mut drop_ins: Vec<PathBuf> = fs::read_dir("/etc/mkinitcpio.conf.d")
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+                    .collect();
+                drop_ins.sort();
+                mkinitcpio.extend(drop_ins.iter().filter_map(|path| fs::read_to_string(path).ok()));
+                let microcode_hook = microcode_hook(&mkinitcpio);
                 let microcode = ["amd-ucode.img", "intel-ucode.img"]
                     .into_iter()
-                    .filter(|image| Path::new("/boot").join(image).is_file())
+                    .filter(|image| !microcode_hook && Path::new("/boot").join(image).is_file())
                     .map(str::to_string)
                     .collect();
+                let blocker = archix::deploy::layout::unsupported(root, Path::new(&esp));
+                let esp_in_boot = fs::canonicalize(&esp)
+                    .is_ok_and(|esp| esp.starts_with(fs::canonicalize("/boot").unwrap_or_else(|_| "/boot".into())));
                 BootFacts::Ready {
                     esp,
                     kernel,
                     microcode,
                     params,
+                    blocker,
+                    esp_in_boot,
+                    microcode_hook,
                 }
             } else {
                 BootFacts::NoRoot
@@ -598,20 +666,32 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .filter(|(name, _)| name != "flathub" && flatpak_apps.values().any(|app| app.origin == *name))
         .collect();
 
-    let owned: BTreeSet<String> = machine
-        .details
-        .values()
-        .flat_map(|pkg| pkg.files.iter().map(|f| format!("/{f}")))
-        .collect();
-    let mut services = capture::changed_services()?;
+    let owned = capture::owned(&machine.details);
+    let states = capture::unit_states()?;
+    let mut services = states.changed;
+    let copied = |path: &str| files.iter().any(|file| file.source.as_deref() == Some(path));
     let unreproducible: Vec<String> = services
         .keys()
         .filter(|unit| {
-            capture::unit_path(unit).is_some_and(|path| !path.starts_with("/etc/") && !owned.contains(&path))
+            capture::unit_path(unit)
+                .is_some_and(|path| !path.starts_with("/etc/") && !owned.contains(&path) && !copied(&path))
         })
         .cloned()
         .collect();
     services.retain(|unit, _| !unreproducible.contains(unit));
+    let masked: Vec<String> = states
+        .masked
+        .into_iter()
+        .filter(|unit| capture::masked_in_etc(root, unit))
+        .collect();
+    if !masked.is_empty() {
+        settings_summary.push(count(masked.len(), "masked unit", "masked units"));
+        settings.push(("masked_units".to_string(), Lua::strings(&masked)));
+    }
+    if let Some(target) = capture::default_target(root) {
+        settings_summary.push(format!("default target {target}"));
+        settings.push(("default_target".to_string(), Lua::str(&target)));
+    }
     Ok(Facts {
         machine,
         default_dir: default_dir.to_path_buf(),
@@ -627,11 +707,12 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         optional,
         settings,
         settings_summary,
+        settings_notes,
         accounts,
         services,
         unreproducible,
-        files: found.files,
-        secrets: found.secrets.len(),
+        files,
+        secret_paths,
         btrfs: capture::is_btrfs(Path::new("/")),
         boot,
         flatpak_apps,
@@ -862,6 +943,9 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
             .filter(|(name, _)| answers.users.contains(*name))
             .map(|(name, user)| {
                 let mut fields = vec![("uid".to_string(), Lua::Int(user.uid.into()))];
+                if user.system {
+                    fields.push(("system".into(), Lua::Bool(true)));
+                }
                 if let Some(group) = &user.group {
                     fields.push(("group".into(), Lua::str(group)));
                 }
@@ -888,7 +972,13 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
             .groups
             .iter()
             .filter(|(name, _)| answers.groups.contains(*name))
-            .map(|(name, gid)| (name.clone(), Lua::Table(vec![("gid".into(), Lua::Int((*gid).into()))])))
+            .map(|(name, gid)| {
+                let mut fields = vec![("gid".to_string(), Lua::Int((*gid).into()))];
+                if facts.accounts.system_groups.contains(name) {
+                    fields.push(("system".into(), Lua::Bool(true)));
+                }
+                (name.clone(), Lua::Table(fields))
+            })
             .collect();
         config.set("groups", Lua::Table(groups));
     }
@@ -899,7 +989,7 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
                 facts
                     .services
                     .iter()
-                    .filter(|(unit, _)| answers.services.contains(*unit))
+                    .filter(|(unit, _)| answers.services.contains(*unit) && !left_behind(facts, answers, unit))
                     .map(|(unit, on)| (unit.clone(), Lua::Bool(*on)))
                     .collect(),
             ),
@@ -908,8 +998,13 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     let mut table = Vec::new();
     for i in &answers.files {
         let file = &facts.files[*i];
+        if let Some(target) = &file.link {
+            table.push((file.path.clone(), Lua::Table(vec![("link".into(), Lua::str(target))])));
+            continue;
+        }
         let source = format!("files/{host}{}", file.path);
-        config.copies.push((PathBuf::from(&file.path), dir.join(&source)));
+        let from = file.source.as_deref().unwrap_or(&file.path);
+        config.copies.push((PathBuf::from(from), dir.join(&source)));
         let mut fields = vec![("source".to_string(), Lua::str(&source))];
         if file.mode != 0o644 {
             fields.push(("mode".into(), Lua::str(format!("{:04o}", file.mode))));
@@ -931,11 +1026,13 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         kernel,
         microcode,
         params,
+        esp_in_boot,
+        ..
     } = &facts.boot
         && answers.boot
     {
         boot.push(("loader".to_string(), Lua::str("systemd-boot")));
-        if esp != "/efi" {
+        if esp != "/efi" && !esp_in_boot {
             boot.push(("esp".into(), Lua::str(esp)));
         }
         if kernel != "linux" {
@@ -992,6 +1089,16 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     config
 }
 
+/// Whether `unit` is a unit file init would copy out of /usr/lib that `answers` leaves out, so enabling it would fail.
+fn left_behind(facts: &Facts, answers: &Answers, unit: &str) -> bool {
+    let vendor = format!("/usr/lib/systemd/system/{unit}");
+    facts
+        .files
+        .iter()
+        .enumerate()
+        .any(|(i, file)| file.source.as_deref() == Some(vendor.as_str()) && !answers.files.contains(&i))
+}
+
 /// What `--defaults` captured, in the same sections the interactive steps use.
 fn report(facts: &Facts, answers: &Answers) {
     section("Packages");
@@ -1046,12 +1153,43 @@ fn report(facts: &Facts, answers: &Answers) {
     if !facts.settings_summary.is_empty() {
         done(facts.settings_summary.join(", "));
     }
-    let users: Vec<String> = facts.accounts.users.keys().cloned().collect();
+    for note_text in &facts.settings_notes {
+        warn(note_text);
+    }
+    let accounts = |system: bool| -> Vec<String> {
+        facts
+            .accounts
+            .users
+            .iter()
+            .filter(|(_, user)| user.system == system)
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
+    let (users, system) = (accounts(false), accounts(true));
     if !users.is_empty() {
         done(format!(
             "{}: {}",
             count(users.len(), "user", "users"),
             some_of(&users, 6)
+        ));
+    }
+    if !system.is_empty() {
+        done(format!(
+            "{} made by hand rather than by a package's sysusers.d, kept with their ids: {}",
+            count(system.len(), "system user", "system users"),
+            some_of(&system, 6)
+        ));
+    }
+    let copied: Vec<String> = facts
+        .files
+        .iter()
+        .filter_map(|file| file.source.as_ref())
+        .map(|source| source.rsplit('/').next().unwrap_or(source).to_string())
+        .collect();
+    if !copied.is_empty() {
+        note(format!(
+            "unit files no package installed in /usr/lib/systemd/system are copied to /etc/systemd/system, since each deployment's /usr holds only what packages install: {}",
+            some_of(&copied, 6)
         ));
     }
     if !facts.unreproducible.is_empty() {
@@ -1067,21 +1205,30 @@ fn report(facts: &Facts, answers: &Answers) {
         ));
     }
     section("Config files");
-    if facts.secrets > 0 {
-        note(secret_note(facts.secrets, "file"));
-    }
     for i in &answers.files {
         done(&facts.files[*i].path);
     }
     if answers.files.is_empty() {
         note("none");
     }
-    let left = facts.files.len() - answers.files.len();
-    if left > 0 {
+    let left: Vec<&str> = (0..facts.files.len())
+        .filter(|i| !answers.files.contains(i))
+        .map(|i| facts.files[i].path.as_str())
+        .collect();
+    if !left.is_empty() {
         note(format!(
-            "{} left unmanaged; the wizard (`archix init` without --defaults) lets you pick them",
-            count(left, "more file", "more files")
+            "{} left unmanaged; add them to files, or pick them in the wizard (`archix init` without --defaults):",
+            count(left.len(), "more file", "more files")
         ));
+        for path in left {
+            println!("      {path}");
+        }
+    }
+    if !facts.secret_paths.is_empty() {
+        warn("left out as secrets, which a config never holds; bring them to another machine yourself:");
+        for path in &facts.secret_paths {
+            println!("      {path}");
+        }
     }
     section("Boot");
     for line in boot_lines(facts) {
@@ -1109,27 +1256,65 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
             false,
             "the kernel command line has no root=, which deployment entries need; `archix switch` refuses until kernel_params has it".to_string(),
         )],
-        BootFacts::Ready { esp, kernel, .. } => {
+        BootFacts::Ready {
+            esp,
+            kernel,
+            blocker,
+            esp_in_boot,
+            microcode_hook,
+            ..
+        } => {
             let mut lines = vec![(true, format!("boot entries on {esp}, kernel {kernel}"))];
-            if let Some(why) = archix::deploy::layout::unsupported(Path::new("/"), Path::new(esp)) {
+            if *microcode_hook {
+                lines.push((
+                    true,
+                    "mkinitcpio's microcode hook puts the microcode in the initramfs, so boot.microcode stays empty rather than loading it twice".to_string(),
+                ));
+            }
+            if let Some(why) = blocker {
                 lines.push((false, format!("the first switch can't lay this system out as deployments: {why}")));
+                if *esp_in_boot {
+                    lines.push((
+                        false,
+                        "the config leaves boot.esp at its default, /efi, where the ESP has to move".to_string(),
+                    ));
+                }
             }
             lines
         }
     };
-    let staging = if facts.btrfs {
-        "a btrfs snapshot"
-    } else {
-        "copies and overlays"
-    };
-    lines.push((
-        true,
-        format!("the first switch lays the system out as deployment 1; each switch then builds the next deployment from {staging} beside the running one, and it boots at the next restart"),
-    ));
+    if first_step(facts, "").is_none() {
+        let staging = if facts.btrfs {
+            "a btrfs snapshot"
+        } else {
+            "copies and overlays"
+        };
+        lines.push((
+            true,
+            format!("the first switch lays the system out as deployment 1; each switch then builds the next deployment from {staging} beside the running one, and it boots at the next restart"),
+        ));
+    }
     lines
 }
 
-fn summary(dir: &Path, host: &str, config: &Host, git: bool) {
+/// What has to change on this machine before `archix switch` can lay it out as deployments, if anything.
+fn first_step(facts: &Facts, host: &str) -> Option<String> {
+    match &facts.boot {
+        BootFacts::NoLoader => Some("install systemd-boot (`bootctl install`)".to_string()),
+        BootFacts::NoRoot => Some("add the root= kernel parameter to kernel_params".to_string()),
+        BootFacts::Ready {
+            blocker: Some(_),
+            esp_in_boot: true,
+            ..
+        } => Some(format!(
+            "mount the ESP at /efi instead of /boot: change its line in /etc/fstab and in the config's copy, files/{host}/etc/fstab, then mount it there"
+        )),
+        BootFacts::Ready { blocker: Some(why), .. } => Some(why.clone()),
+        BootFacts::Ready { blocker: None, .. } => None,
+    }
+}
+
+fn summary(dir: &Path, host: &str, config: &Host, git: bool, first: Option<String>) {
     println!("\n  Config written to {}", style(dir.display()).bold());
     let mut rows = vec![
         ("init.lua".to_string(), "loads this host"),
@@ -1156,10 +1341,18 @@ fn summary(dir: &Path, host: &str, config: &Host, git: bool) {
     if git {
         note("it's a git repository now; nothing is committed yet");
     }
-    println!(
-        "\n  Next: look it over, then run {}\n",
-        style("sudo archix switch").bold()
-    );
+    match first {
+        Some(step) => println!(
+            "\n  {} {}\n    {step}\n  Then look the config over and run {}\n",
+            style("!").yellow().bold(),
+            style("Before the first switch:").yellow().bold(),
+            style("sudo archix switch").bold()
+        ),
+        None => println!(
+            "\n  Next: look it over, then run {}\n",
+            style("sudo archix switch").bold()
+        ),
+    }
 }
 
 fn refuse_existing(dir: &Path) -> Result<()> {
@@ -1202,57 +1395,141 @@ fn settle_location(default: &Path, chosen: &Path) -> Result<PathBuf> {
     Ok(chosen.to_path_buf())
 }
 
-fn exact(path: &str, content: &str) -> bool {
-    fs::read_to_string(path).is_ok_and(|text| text == content)
+/// A shell-style config file's settings, without comments, blank lines or quotes.
+fn assignments(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| match line.split_once('=') {
+            Some((key, value)) => (
+                key.trim().to_string(),
+                value.trim().trim_matches(['"', '\'']).to_string(),
+            ),
+            None => (line.to_string(), String::new()),
+        })
+        .collect()
 }
 
-/// Hostname, timezone, locales and keymap, but only where the option would write exactly what's there now.
-fn host_settings(skip: &mut BTreeSet<String>) -> (Vec<(String, Lua)>, Vec<String>) {
-    let (mut fields, mut summary) = (Vec::new(), Vec::new());
+/// The locales option for these locale.gen and locale.conf, the one LANG names first; or why the option can't say what they do.
+fn locales_from(locale_gen: &str, locale_conf: &str) -> std::result::Result<Vec<String>, String> {
+    let mut locales = Vec::new();
+    for line in locale_gen
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let [locale, charset] = fields[..] else {
+            return Err(format!("its line {line:?} isn't a locale and a charset"));
+        };
+        if locale.split_once('.').map_or("ISO-8859-1", |(_, charset)| charset) != charset {
+            return Err(format!(
+                "it generates {locale} as {charset}, which the locales option can't"
+            ));
+        }
+        locales.push(locale.to_string());
+    }
+    let settings = assignments(locale_conf);
+    let lang = match &settings[..] {
+        [(key, lang)] if key == "LANG" => lang.clone(),
+        [] => return Err("/etc/locale.conf sets no LANG".into()),
+        _ => {
+            let keys: Vec<&str> = settings.iter().map(|(key, _)| key.as_str()).collect();
+            return Err(format!("/etc/locale.conf sets more than LANG ({})", keys.join(", ")));
+        }
+    };
+    let Some(at) = locales.iter().position(|locale| *locale == lang) else {
+        return Err(format!("LANG is {lang}, which /etc/locale.gen doesn't generate"));
+    };
+    let first = locales.remove(at);
+    locales.insert(0, first);
+    Ok(locales)
+}
+
+/// The keymap option for this vconsole.conf, or why the option can't say what it does.
+fn keymap_from(vconsole: &str) -> std::result::Result<String, String> {
+    let settings = assignments(vconsole);
+    match &settings[..] {
+        [(key, keymap)] if key == "KEYMAP" && !keymap.is_empty() => Ok(keymap.clone()),
+        _ => {
+            let keys: Vec<&str> = settings.iter().map(|(key, _)| key.as_str()).collect();
+            Err(format!("it sets more than KEYMAP ({})", keys.join(", ")))
+        }
+    }
+}
+
+/// Settings init takes over, what it says about them, and notes on files it keeps as files because their option can't say what they do.
+struct Settings {
+    fields: Vec<(String, Lua)>,
+    summary: Vec<String>,
+    notes: Vec<String>,
+}
+
+/// Hostname, timezone, locales and keymap where the option says what the files there do; the first switch writes them in its own form, dropping comments.
+fn host_settings(skip: &mut BTreeSet<String>) -> Settings {
+    let mut out = Settings {
+        fields: Vec::new(),
+        summary: Vec::new(),
+        notes: Vec::new(),
+    };
     let hostname = fs::read_to_string("/etc/hostname").unwrap_or_default();
     let hostname = hostname.trim();
-    if !hostname.is_empty() && exact("/etc/hostname", &format!("{hostname}\n")) {
-        fields.push(("hostname".to_string(), Lua::str(hostname)));
+    if !hostname.is_empty() && !hostname.contains(char::is_whitespace) {
+        out.fields.push(("hostname".to_string(), Lua::str(hostname)));
         skip.insert("/etc/hostname".into());
-        summary.push(format!("hostname {hostname}"));
+        out.summary.push(format!("hostname {hostname}"));
     }
     if let Ok(target) = fs::read_link("/etc/localtime")
         && let Some(zone) = target.to_string_lossy().strip_prefix("/usr/share/zoneinfo/")
     {
-        fields.push(("timezone".to_string(), Lua::str(zone)));
-        summary.push(format!("timezone {zone}"));
+        out.fields.push(("timezone".to_string(), Lua::str(zone)));
+        skip.insert("/etc/localtime".into());
+        out.summary.push(format!("timezone {zone}"));
     }
-    let gen_text = fs::read_to_string("/etc/locale.gen").unwrap_or_default();
-    let locales: Vec<String> = gen_text
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .map(str::to_string)
-        .collect();
-    let rendered: Vec<String> = locales
-        .iter()
-        .map(|locale| {
-            let charset = locale.split_once('.').map_or("ISO-8859-1", |(_, charset)| charset);
-            format!("{locale} {charset}")
-        })
-        .collect();
-    if let Some(first) = locales.first()
-        && !gen_text.contains('#')
-        && gen_text == format!("{}\n", rendered.join("\n"))
-        && exact("/etc/locale.conf", &format!("LANG={first}\n"))
-    {
-        fields.push(("locales".to_string(), Lua::strings(&locales)));
-        skip.extend(["/etc/locale.gen".to_string(), "/etc/locale.conf".to_string()]);
-        summary.push(format!("locales {}", locales.join(" ")));
+    if let Ok(locale_gen) = fs::read_to_string("/etc/locale.gen") {
+        match locales_from(&locale_gen, &fs::read_to_string("/etc/locale.conf").unwrap_or_default()) {
+            Ok(locales) if !locales.is_empty() => {
+                out.fields.push(("locales".to_string(), Lua::strings(&locales)));
+                skip.extend(["/etc/locale.gen".to_string(), "/etc/locale.conf".to_string()]);
+                out.summary.push(format!("locales {}", locales.join(" ")));
+            }
+            Ok(_) => {}
+            Err(why) => out.notes.push(format!(
+                "locales: {why}, so /etc/locale.gen and /etc/locale.conf are offered as files instead"
+            )),
+        }
     }
-    let vconsole = fs::read_to_string("/etc/vconsole.conf").unwrap_or_default();
-    if let Some(keymap) = vconsole.strip_prefix("KEYMAP=").map(str::trim)
-        && vconsole == format!("KEYMAP={keymap}\n")
-    {
-        fields.push(("keymap".to_string(), Lua::str(keymap)));
-        skip.insert("/etc/vconsole.conf".into());
-        summary.push(format!("keymap {keymap}"));
+    if let Ok(vconsole) = fs::read_to_string("/etc/vconsole.conf") {
+        match keymap_from(&vconsole) {
+            Ok(keymap) => {
+                out.fields.push(("keymap".to_string(), Lua::str(&keymap)));
+                skip.insert("/etc/vconsole.conf".into());
+                out.summary.push(format!("keymap {keymap}"));
+            }
+            Err(why) => out.notes.push(format!(
+                "keymap: /etc/vconsole.conf {why}, so it's offered as a file instead"
+            )),
+        }
     }
-    (fields, summary)
+    out
+}
+
+/// Whether mkinitcpio's HOOKS, as these configs set them in order, has the microcode hook, which puts microcode in the initramfs itself.
+fn microcode_hook(configs: &[String]) -> bool {
+    let mut hooks = Vec::new();
+    for text in configs {
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("HOOKS=(") {
+            let line_start = rest[..at].rfind('\n').map_or(0, |i| i + 1);
+            let after = &rest[at + "HOOKS=(".len()..];
+            let end = after.find(')').unwrap_or(after.len());
+            if rest[line_start..at].trim().is_empty() {
+                hooks = after[..end].split_whitespace().map(str::to_string).collect();
+            }
+            rest = &after[end..];
+        }
+    }
+    hooks.iter().any(|hook| hook == "microcode")
 }
 
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
@@ -1446,6 +1723,171 @@ mod tests {
                 (name.to_string(), pkg)
             })
             .collect()
+    }
+
+    #[test]
+    fn an_esp_in_boot_is_named_as_what_to_fix_first_and_never_written_to_the_config() {
+        let mut facts = super::tui::tests::facts();
+        let BootFacts::Ready {
+            blocker, esp_in_boot, ..
+        } = &mut facts.boot
+        else {
+            unreachable!()
+        };
+        *blocker = Some("the ESP is mounted at /boot, in /boot".into());
+        *esp_in_boot = true;
+        let lines = boot_lines(&facts);
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, line)| line.contains("lays the system out as deployment 1")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|(good, line)| !good && line.contains("in /boot")),
+            "{lines:?}"
+        );
+        let step = first_step(&facts, "box").unwrap();
+        assert!(step.contains("/efi") && step.contains("files/box/etc/fstab"), "{step}");
+        let answers = Answers::recommended(&facts);
+        let config = build(&facts, &answers, Path::new("/cfg"), "box");
+        let boot = Lua::Table(config.fields.clone()).render(0);
+        assert!(
+            boot.contains("loader = \"systemd-boot\"") && !boot.contains("esp ="),
+            "{boot}"
+        );
+
+        let ready = super::tui::tests::facts();
+        assert_eq!(first_step(&ready, "box"), None);
+        assert!(
+            boot_lines(&ready)
+                .iter()
+                .any(|(_, line)| line.contains("lays the system out as deployment 1"))
+        );
+    }
+
+    #[test]
+    fn system_accounts_links_and_unit_copies_go_into_the_config() {
+        let mut facts = super::tui::tests::facts();
+        facts.accounts.users.insert(
+            "scanner".into(),
+            capture::Account {
+                uid: 950,
+                system: true,
+                group: None,
+                groups: Vec::new(),
+                shell: "/bin/false".into(),
+                home: Some("/opt/scanner".into()),
+                description: String::new(),
+            },
+        );
+        facts.accounts.groups.insert("i2c".into(), 961);
+        facts.accounts.system_groups.insert("i2c".into());
+        let file = |path: &str, source: Option<&str>, link: Option<&str>| FoundFile {
+            path: path.into(),
+            mode: 0o644,
+            owner: "root".into(),
+            group: "root".into(),
+            recommended: true,
+            edited: false,
+            source: source.map(str::to_string),
+            link: link.map(str::to_string),
+        };
+        facts.files = vec![
+            file(
+                "/etc/nginx/sites-enabled/site",
+                None,
+                Some("/etc/nginx/sites-available/site"),
+            ),
+            file(
+                "/etc/systemd/system/handmade.timer",
+                Some("/usr/lib/systemd/system/handmade.timer"),
+                None,
+            ),
+        ];
+        facts.services.insert("handmade.timer".into(), true);
+        let mut answers = Answers::recommended(&facts);
+        let config = build(&facts, &answers, Path::new("/cfg"), "box");
+        let host = Lua::Table(config.fields.clone()).render(0);
+        assert!(
+            host.contains("scanner = { uid = 950, system = true, shell = \"/bin/false\", home = \"/opt/scanner\" }"),
+            "{host}"
+        );
+        assert!(host.contains("i2c = { gid = 961, system = true }"), "{host}");
+        assert!(
+            host.contains("[\"/etc/nginx/sites-enabled/site\"] = { link = \"/etc/nginx/sites-available/site\" }"),
+            "{host}"
+        );
+        assert!(host.contains("[\"handmade.timer\"] = true"), "{host}");
+        let files: Vec<&(PathBuf, PathBuf)> = config
+            .copies
+            .iter()
+            .filter(|(_, to)| to.starts_with("/cfg/files"))
+            .collect();
+        assert_eq!(
+            files,
+            [&(
+                PathBuf::from("/usr/lib/systemd/system/handmade.timer"),
+                PathBuf::from("/cfg/files/box/etc/systemd/system/handmade.timer")
+            )]
+        );
+        answers.files.remove(&1);
+        let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            !host.contains("handmade.timer"),
+            "without its unit file, its enablement goes too:\n{host}"
+        );
+    }
+
+    #[test]
+    fn locales_and_keymap_are_taken_over_when_their_options_say_the_same() {
+        assert_eq!(
+            locales_from(
+                "# en_US.UTF-8 UTF-8\nen_US.UTF-8 UTF-8  \ntr_TR.UTF-8 UTF-8\n",
+                "# set by localectl\nLANG=\"tr_TR.UTF-8\"\n"
+            ),
+            Ok(vec!["tr_TR.UTF-8".to_string(), "en_US.UTF-8".to_string()])
+        );
+        assert!(
+            locales_from("en_US.UTF-8 UTF-8\n", "LANG=en_US.UTF-8\nLC_TIME=en_GB.UTF-8\n")
+                .is_err_and(|why| why.contains("LC_TIME"))
+        );
+        assert!(locales_from("de_DE ISO-8859-15\n", "LANG=de_DE\n").is_err());
+        assert_eq!(
+            keymap_from("# Written by systemd-localed(8)\nKEYMAP=us\n"),
+            Ok("us".to_string())
+        );
+        assert!(keymap_from("KEYMAP=us\nXKBLAYOUT=us\nXKBMODEL=pc105\n").is_err_and(|why| why.contains("XKBLAYOUT")));
+    }
+
+    #[test]
+    fn the_microcode_hook_is_found_where_mkinitcpio_would_take_it() {
+        let conf =
+            "#HOOKS=(base udev)\nMODULES=(btrfs)\nHOOKS=(base udev autodetect microcode modconf block filesystems)\n";
+        assert!(microcode_hook(&[conf.to_string()]));
+        assert!(!microcode_hook(&[
+            conf.to_string(),
+            "HOOKS=(\n  base systemd autodetect\n  block filesystems\n)\n".to_string()
+        ]));
+        assert!(!microcode_hook(&[
+            "HOOKS=(base udev)\n# HOOKS=(microcode)\n".to_string()
+        ]));
+    }
+
+    #[test]
+    fn a_config_init_failed_to_finish_is_kept_aside_and_the_link_to_it_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = dir.path().join("mine");
+        let default = dir.path().join("archix");
+        fs::create_dir_all(chosen.join("lua")).unwrap();
+        fs::write(chosen.join("init.lua"), "return {}\n").unwrap();
+        symlink(&chosen, &default).unwrap();
+        fs::create_dir_all(dir.path().join("mine.failed")).unwrap();
+        let aside = set_aside(&chosen, &default).unwrap();
+        assert_eq!(aside, dir.path().join("mine.failed"));
+        assert_eq!(fs::read_to_string(aside.join("init.lua")).unwrap(), "return {}\n");
+        assert!(fs::symlink_metadata(&chosen).is_err() && fs::symlink_metadata(&default).is_err());
+        assert_eq!(set_aside(&chosen, &chosen), None, "nothing written, nothing kept");
     }
 
     #[test]

@@ -20,14 +20,18 @@ use crate::repos::{Custom, is_official};
 /// Which config files init scans for, never touches, treats as secrets and recommends; kept in capture.json.
 #[derive(Debug, Deserialize)]
 pub struct Lists {
-    /// Directories whose files no package owns are config someone wrote.
-    pub scan: Vec<String>,
+    /// Endings of backups and leftovers (.pacnew, passwd-), which are never offered.
+    pub backups: Vec<String>,
+    /// Where symlinks belong to services, default_target and masked_units rather than to files.
+    pub links_elsewhere: Vec<String>,
     /// Files archix or other tools own; an entry ending in `/` covers everything under it.
     pub never: Vec<String>,
     /// Any path containing one of these holds credentials and is never copied.
     pub secret: Vec<String>,
     /// Text that only shows up in credentials; a file containing any of it is treated as a secret too.
     pub secret_content: Vec<String>,
+    /// Credentials outside /etc that stay on this machine, named so they aren't forgotten; an entry ending in `/` is a directory.
+    pub secret_elsewhere: Vec<String>,
     /// Worth managing by default; an entry ending in `/` covers everything under it.
     pub recommended: Vec<String>,
     pub dotfiles: DotfileLists,
@@ -87,6 +91,10 @@ pub struct FoundFile {
     pub recommended: bool,
     /// Edited from what its package shipped, rather than written from scratch.
     pub edited: bool,
+    /// Where to copy it from when that isn't `path`, as for a unit file put under /usr/lib by hand.
+    pub source: Option<String>,
+    /// A symlink to this target rather than a file.
+    pub link: Option<String>,
 }
 
 /// Config files init can offer, and the secret ones it leaves out without asking.
@@ -99,6 +107,8 @@ pub struct Found {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Account {
     pub uid: u32,
+    /// Below uid 1000 and made by hand, not by a sysusers.d file.
+    pub system: bool,
     /// None when it's the user's own group.
     pub group: Option<String>,
     pub groups: Vec<String>,
@@ -111,8 +121,10 @@ pub struct Account {
 #[derive(Debug, Default)]
 pub struct Accounts {
     pub users: BTreeMap<String, Account>,
-    /// Groups in the regular id range that aren't some captured user's own group.
+    /// Groups in the regular id range, and system ones no sysusers.d file makes, that aren't some captured user's own group.
     pub groups: BTreeMap<String, u32>,
+    /// Which of `groups` are system groups.
+    pub system_groups: BTreeSet<String>,
 }
 
 /// One package's entry in the local database, as far as init cares.
@@ -215,65 +227,155 @@ pub fn holds_secret(path: &Path) -> bool {
     false
 }
 
-fn found(path: &str, edited: bool) -> Result<Option<FoundFile>> {
-    let meta = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => meta,
-        _ => return Ok(None),
+fn is_backup(path: &str) -> bool {
+    LISTS.backups.iter().any(|ending| path.ends_with(ending.as_str()))
+}
+
+/// `path`, absolute on the machine, inside `root`.
+fn on_disk(root: &Path, path: &str) -> std::path::PathBuf {
+    root.join(path.trim_start_matches('/'))
+}
+
+fn found(root: &Path, path: &str, edited: bool) -> Option<FoundFile> {
+    let meta = fs::symlink_metadata(on_disk(root, path)).ok()?;
+    let link = match meta.file_type().is_symlink() {
+        true => Some(fs::read_link(on_disk(root, path)).ok()?.to_string_lossy().into_owned()),
+        false if meta.is_file() => None,
+        false => return None,
     };
-    Ok(Some(FoundFile {
+    Some(FoundFile {
         path: path.to_string(),
         mode: meta.mode() & 0o7777,
         owner: user_name(meta.uid()).unwrap_or_else(|| meta.uid().to_string()),
         group: group_name(meta.gid()).unwrap_or_else(|| meta.gid().to_string()),
         recommended: listed(&LISTS.recommended, path),
         edited,
-    }))
+        source: None,
+        link,
+    })
 }
 
-/// Backup files edited since their package installed them, plus files nobody owns in the scanned directories.
-pub fn config_files(installed: &BTreeMap<String, Installed>, skip: &BTreeSet<String>) -> Result<Found> {
+/// Every path the installed packages own, absolute.
+pub fn owned(installed: &BTreeMap<String, Installed>) -> BTreeSet<String> {
+    installed
+        .values()
+        .flat_map(|pkg| pkg.files.iter().map(|f| format!("/{f}")))
+        .collect()
+}
+
+/// Files and symlinks under `dir` (absolute, inside `root`) that no package owns, as absolute paths.
+fn unowned_under(root: &Path, dir: &str, owned: &BTreeSet<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![on_disk(root, dir)];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            let relative = entry.path();
+            let path = format!("/{}", relative.strip_prefix(root).unwrap_or(&relative).display());
+            if kind.is_dir() {
+                if !listed(&LISTS.never, &format!("{path}/")) {
+                    stack.push(entry.path());
+                }
+            } else if !owned.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+/// Backup files edited since their package installed them, plus every file and symlink in /etc no package owns, but for leftovers, generated files and archix's own.
+pub fn config_files(root: &Path, installed: &BTreeMap<String, Installed>, skip: &BTreeSet<String>) -> Result<Found> {
     let mut candidates: BTreeMap<String, bool> = BTreeMap::new();
     for pkg in installed.values() {
         for (path, sum) in &pkg.backups {
-            if Path::new(path).is_file() && md5(Path::new(path)).is_ok_and(|now| now != *sum) {
+            let file = on_disk(root, path);
+            if file.is_file() && md5(&file).is_ok_and(|now| now != *sum) {
                 candidates.insert(path.clone(), true);
             }
         }
     }
-    let owned: BTreeSet<String> = installed
-        .values()
-        .flat_map(|pkg| pkg.files.iter().map(|f| format!("/{f}")))
-        .collect();
-    for dir in &LISTS.scan {
-        let mut stack = vec![Path::new(dir).to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let Ok(entries) = fs::read_dir(&dir) else { continue };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(kind) = entry.file_type() else { continue };
-                if kind.is_dir() {
-                    stack.push(path);
-                } else if kind.is_file() {
-                    let text = path.to_string_lossy().into_owned();
-                    if !owned.contains(&text) {
-                        candidates.entry(text).or_insert(false);
-                    }
-                }
-            }
-        }
+    for path in unowned_under(root, "/etc", &owned(installed)) {
+        candidates.entry(path).or_insert(false);
     }
     let mut out = Found::default();
     for (path, edited) in candidates {
-        if excluded(&path, skip) {
+        if excluded(&path, skip) || is_backup(&path) {
             continue;
         }
-        if is_secret(&path) || holds_secret(Path::new(&path)) {
+        let file = on_disk(root, &path);
+        let link = fs::symlink_metadata(&file).is_ok_and(|meta| meta.file_type().is_symlink());
+        if link && listed(&LISTS.links_elsewhere, &path) {
+            continue;
+        }
+        if is_secret(&path) || (!link && holds_secret(&file)) {
             out.secrets.push(path);
-        } else if let Some(file) = found(&path, edited)? {
+        } else if let Some(file) = found(root, &path, edited) {
             out.files.push(file);
         }
     }
     Ok(out)
+}
+
+/// Unit files no package owns in /usr/lib/systemd/system, put there by hand (a `make install`), as copies for /etc/systemd/system: each deployment's /usr holds only what packages install.
+pub fn unowned_units(root: &Path, installed: &BTreeMap<String, Installed>) -> Found {
+    const VENDOR: &str = "/usr/lib/systemd/system/";
+    let mut out = Found::default();
+    let mut paths = unowned_under(root, VENDOR.trim_end_matches('/'), &owned(installed));
+    paths.sort();
+    for source in paths {
+        let relative = &source[VENDOR.len()..];
+        let path = format!("/etc/systemd/system/{relative}");
+        if fs::symlink_metadata(on_disk(root, &path)).is_ok() {
+            continue;
+        }
+        if is_secret(&source) || holds_secret(&on_disk(root, &source)) {
+            out.secrets.push(source);
+            continue;
+        }
+        if let Some(found) = found(root, &source, false).filter(|found| found.link.is_none()) {
+            out.files.push(FoundFile {
+                path,
+                recommended: true,
+                source: Some(source),
+                ..found
+            });
+        }
+    }
+    out
+}
+
+/// Secret paths as a reader wants them: everything under one of the secret directories as that directory with a count.
+pub fn group_secrets(paths: &[String]) -> Vec<String> {
+    let mut dirs: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    for path in paths {
+        match LISTS
+            .secret
+            .iter()
+            .find(|entry| entry.ends_with('/') && path.starts_with(entry.as_str()))
+        {
+            Some(dir) => *dirs.entry(dir).or_default() += 1,
+            None => out.push(path.clone()),
+        }
+    }
+    out.extend(dirs.into_iter().map(|(dir, n)| match n {
+        1 => format!("{dir} (1 file)"),
+        n => format!("{dir} ({n} files)"),
+    }));
+    out.sort();
+    out
+}
+
+/// The credentials outside /etc this machine has, which no config carries.
+pub fn secrets_elsewhere(root: &Path) -> Vec<String> {
+    LISTS
+        .secret_elsewhere
+        .iter()
+        .filter(|path| fs::symlink_metadata(on_disk(root, path)).is_ok())
+        .cloned()
+        .collect()
 }
 
 fn user_name(uid: u32) -> Option<String> {
@@ -352,9 +454,21 @@ pub fn parse_pacman_conf(text: &str, read: impl Fn(&str) -> Option<String>) -> (
     (official, custom)
 }
 
-/// Units whose enabled state differs from their preset, from `systemctl list-unit-files --no-legend`.
-pub fn parse_unit_files(text: &str) -> BTreeMap<String, bool> {
-    let mut out = BTreeMap::new();
+/// The kinds of unit `services` can enable; targets too, such as nfs-client.target.
+pub const UNIT_TYPES: &str = "service,socket,timer,path,target,mount,automount,swap";
+
+/// What `systemctl list-unit-files` says init should keep.
+#[derive(Debug, Default, PartialEq)]
+pub struct UnitStates {
+    /// Units whose enabled state differs from their preset.
+    pub changed: BTreeMap<String, bool>,
+    /// Units masked in /etc (not just for this boot).
+    pub masked: Vec<String>,
+}
+
+/// Reads `systemctl list-unit-files --no-legend`.
+pub fn parse_unit_files(text: &str) -> UnitStates {
+    let mut out = UnitStates::default();
     for line in text.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let [unit, state, preset, ..] = fields[..] else {
@@ -364,25 +478,39 @@ pub fn parse_unit_files(text: &str) -> BTreeMap<String, bool> {
             continue;
         }
         match (state, preset) {
-            ("enabled", "disabled") => out.insert(unit.to_string(), true),
-            ("disabled", "enabled") => out.insert(unit.to_string(), false),
-            _ => None,
-        };
+            ("enabled", "disabled") => {
+                out.changed.insert(unit.to_string(), true);
+            }
+            ("disabled", "enabled") => {
+                out.changed.insert(unit.to_string(), false);
+            }
+            ("masked", _) => out.masked.push(unit.to_string()),
+            _ => {}
+        }
     }
     out
 }
 
-pub fn changed_services() -> Result<BTreeMap<String, bool>> {
+pub fn unit_states() -> Result<UnitStates> {
     let output = Command::new("systemctl")
-        .args([
-            "list-unit-files",
-            "--no-legend",
-            "--no-pager",
-            "--type=service,socket,timer,path",
-        ])
+        .args(["list-unit-files", "--no-legend", "--no-pager"])
+        .arg(format!("--type={UNIT_TYPES}"))
         .output()
         .context("running systemctl")?;
     Ok(parse_unit_files(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The target /etc/systemd/system/default.target points to, when it's set there rather than left to systemd's default.
+pub fn default_target(root: &Path) -> Option<String> {
+    let target = fs::read_link(on_disk(root, "/etc/systemd/system/default.target")).ok()?;
+    let name = target.file_name()?.to_string_lossy().into_owned();
+    name.ends_with(".target").then_some(name)
+}
+
+/// Whether a masked unit's mask is a link to /dev/null in /etc/systemd/system, which masked_units writes.
+pub fn masked_in_etc(root: &Path, unit: &str) -> bool {
+    fs::read_link(on_disk(root, &format!("/etc/systemd/system/{unit}")))
+        .is_ok_and(|target| target == Path::new("/dev/null"))
 }
 
 /// Where a unit's file lives, per systemd.
@@ -404,8 +532,39 @@ pub fn kernel_params(cmdline: &str) -> Vec<String> {
         .collect()
 }
 
-/// Regular users (uid 1000 to 59999) and the regular groups that aren't one of their own groups.
-pub fn parse_accounts(passwd: &str, group: &str) -> Accounts {
+/// The users and groups sysusers.d lines (`u`, `g`, `m`) make, which packages bring along.
+pub fn parse_sysusers(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields[..] {
+            [kind, name, ..] if kind.starts_with('u') || kind.starts_with('g') => {
+                names.insert(name.to_string());
+            }
+            [kind, user, group, ..] if kind.starts_with('m') => {
+                names.extend([user.to_string(), group.to_string()]);
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// The users and groups every sysusers.d file under `root` makes.
+pub fn sysusers(root: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for dir in ["/usr/lib/sysusers.d", "/etc/sysusers.d", "/run/sysusers.d"] {
+        for entry in fs::read_dir(on_disk(root, dir)).into_iter().flatten().flatten() {
+            if entry.file_name().to_string_lossy().ends_with(".conf") {
+                names.extend(parse_sysusers(&fs::read_to_string(entry.path()).unwrap_or_default()));
+            }
+        }
+    }
+    names
+}
+
+/// Regular users (uid 1000 to 59999), system ones (uid 1 to 999) that `sysusers` doesn't make, and the groups of either kind that aren't one of their own groups.
+pub fn parse_accounts(passwd: &str, group: &str, sysusers: &BTreeSet<String>) -> Accounts {
     let groups: Vec<(String, u32, Vec<String>)> = group
         .lines()
         .filter_map(|line| {
@@ -422,6 +581,7 @@ pub fn parse_accounts(passwd: &str, group: &str) -> Accounts {
         })
         .collect();
     let regular = |id: u32| (1000..60000).contains(&id);
+    let hand_made = |id: u32, name: &str| (1..1000).contains(&id) && !sysusers.contains(name);
     let mut accounts = Accounts::default();
     for line in passwd.lines() {
         let fields: Vec<&str> = line.split(':').collect();
@@ -431,10 +591,14 @@ pub fn parse_accounts(passwd: &str, group: &str) -> Accounts {
         let (Ok(uid), Ok(gid)) = (uid.parse::<u32>(), gid.parse::<u32>()) else {
             continue;
         };
-        if !regular(uid) {
+        let system = hand_made(uid, name);
+        if !regular(uid) && !system {
             continue;
         }
         let primary = groups.iter().find(|(_, id, _)| *id == gid).map(|(n, _, _)| n.clone());
+        if system && primary.is_none() {
+            continue;
+        }
         let mut supplementary: Vec<String> = groups
             .iter()
             .filter(|(_, _, members)| members.iter().any(|m| m == name))
@@ -445,6 +609,7 @@ pub fn parse_accounts(passwd: &str, group: &str) -> Accounts {
             name.to_string(),
             Account {
                 uid,
+                system,
                 group: primary.filter(|g| g != name),
                 groups: supplementary,
                 shell: shell.to_string(),
@@ -455,8 +620,14 @@ pub fn parse_accounts(passwd: &str, group: &str) -> Accounts {
     }
     for (name, gid, _) in &groups {
         let own = accounts.users.get(name).is_some_and(|user| user.group.is_none());
-        if regular(*gid) && !own {
+        if own {
+            continue;
+        }
+        if regular(*gid) {
             accounts.groups.insert(name.clone(), *gid);
+        } else if hand_made(*gid, name) {
+            accounts.groups.insert(name.clone(), *gid);
+            accounts.system_groups.insert(name.clone());
         }
     }
     accounts
@@ -543,6 +714,7 @@ pub fn dotfiles(home: &Path) -> (Vec<Dotfile>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn pacman_conf_repos_and_mirrorlists() {
@@ -570,12 +742,25 @@ mod tests {
                     getty@.service enabled enabled\nfoo@.service enabled disabled\nstatic.service static -\n\
                     bar.timer enabled enabled\n";
         assert_eq!(
-            parse_unit_files(text),
+            parse_unit_files(text).changed,
             BTreeMap::from([
                 ("sshd.service".to_string(), true),
                 ("systemd-networkd.service".to_string(), false)
             ])
         );
+    }
+
+    #[test]
+    fn targets_count_as_services_and_masks_are_kept() {
+        assert!(UNIT_TYPES.split(',').any(|kind| kind == "target"), "{UNIT_TYPES}");
+        let states = parse_unit_files(
+            "nfs-client.target enabled disabled\nsleep.target masked disabled\nfoo.service masked-runtime disabled\n",
+        );
+        assert_eq!(
+            states.changed,
+            BTreeMap::from([("nfs-client.target".to_string(), true)])
+        );
+        assert_eq!(states.masked, ["sleep.target"]);
     }
 
     #[test]
@@ -593,7 +778,11 @@ mod tests {
         let passwd = "root:x:0:0::/root:/bin/bash\nme:x:1000:1000:Me:/home/me:/usr/bin/zsh\n\
                       other:x:1001:100::/srv/other:/bin/bash\nnobody:x:65534:65534::/:/usr/bin/nologin\n";
         let group = "root:x:0:\nwheel:x:998:me,other\nusers:x:100:\nme:x:1000:\nshared:x:1500:me\n";
-        let accounts = parse_accounts(passwd, group);
+        let accounts = parse_accounts(
+            passwd,
+            group,
+            &BTreeSet::from(["wheel".to_string(), "users".to_string()]),
+        );
         assert_eq!(accounts.users.keys().collect::<Vec<_>>(), ["me", "other"]);
         let me = &accounts.users["me"];
         assert_eq!((me.group.as_deref(), me.home.as_deref()), (None, None));
@@ -605,18 +794,37 @@ mod tests {
     }
 
     #[test]
-    fn lists_parse_and_sort_files() {
-        assert!(
-            LISTS
-                .scan
-                .iter()
-                .all(|dir| dir.starts_with("/etc/") && !dir.ends_with('/'))
+    fn system_users_and_groups_made_by_hand_are_kept() {
+        let passwd = "root:x:0:0::/root:/bin/bash\npostgres:x:975:975::/var/lib/postgres:/usr/bin/bash\n\
+                      scanner:x:950:950::/opt/scanner:/bin/false\nmetrics:x:220:220::/:/usr/bin/nologin\n\
+                      me:x:1000:1000::/home/me:/bin/bash\n";
+        let group =
+            "root:x:0:\npostgres:x:975:\nscanner:x:950:\nmetrics:x:220:\ni2c:x:961:me\ndocker:x:972:me\nme:x:1000:\n";
+        let sysusers = parse_sysusers(
+            "# made by packages\nu postgres 975 - /var/lib/postgres\ng docker 972\nu! root 0\nm me wheel\n",
         );
+        let accounts = parse_accounts(passwd, group, &sysusers);
+        assert_eq!(accounts.users.keys().collect::<Vec<_>>(), ["me", "metrics", "scanner"]);
+        let scanner = &accounts.users["scanner"];
+        assert!(scanner.system && scanner.uid == 950 && scanner.group.is_none());
+        assert_eq!(
+            (scanner.home.as_deref(), scanner.shell.as_str()),
+            (Some("/opt/scanner"), "/bin/false")
+        );
+        assert!(!accounts.users["me"].system);
+        assert_eq!(accounts.users["me"].groups, ["docker", "i2c"]);
+        assert_eq!(accounts.groups, BTreeMap::from([("i2c".to_string(), 961)]));
+        assert_eq!(accounts.system_groups, BTreeSet::from(["i2c".to_string()]));
+    }
+
+    #[test]
+    fn lists_parse_and_sort_files() {
         assert!(
             LISTS
                 .never
                 .iter()
                 .chain(&LISTS.recommended)
+                .chain(&LISTS.links_elsewhere)
                 .all(|path| path.starts_with("/etc/"))
         );
         assert!(is_secret("/etc/NetworkManager/system-connections/home.nmconnection"));
@@ -626,6 +834,106 @@ mod tests {
         assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
         assert!(!listed(&LISTS.recommended, "/etc/shells"));
         assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));
+    }
+
+    #[test]
+    fn every_unowned_file_in_etc_is_offered_but_leftovers_and_secrets() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = root.path().join(path.trim_start_matches('/'));
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        for path in [
+            "/etc/docker/daemon.json",
+            "/etc/app/config.yml",
+            "/etc/nginx/sites-available/site",
+            "/etc/systemd/zram-generator.conf",
+            "/etc/ld.so.conf.d/app.conf",
+            "/etc/vconsole.conf",
+            "/etc/owned.conf",
+            "/etc/crontab.pacnew",
+            "/etc/passwd-",
+            "/etc/sshd_config.bak",
+            "/etc/.pwd.lock",
+            "/etc/wireguard/wg0.conf",
+            "/etc/letsencrypt/live/site/privkey.pem",
+            "/etc/letsencrypt/renewal/site.conf",
+            "/etc/archix/init.lua",
+            "/usr/lib/systemd/system/handmade.timer",
+            "/usr/lib/systemd/system/handmade.service",
+            "/usr/lib/systemd/system/packaged.service",
+        ] {
+            write(path, "x = 1\n");
+        }
+        fs::create_dir_all(root.path().join("etc/nginx/sites-enabled")).unwrap();
+        symlink(
+            "/etc/nginx/sites-available/site",
+            root.path().join("etc/nginx/sites-enabled/site"),
+        )
+        .unwrap();
+        fs::create_dir_all(root.path().join("etc/systemd/system/multi-user.target.wants")).unwrap();
+        symlink(
+            "/usr/lib/systemd/system/handmade.service",
+            root.path()
+                .join("etc/systemd/system/multi-user.target.wants/handmade.service"),
+        )
+        .unwrap();
+        let installed = BTreeMap::from([(
+            "pkg".to_string(),
+            Installed {
+                files: vec![
+                    "etc/owned.conf".into(),
+                    "usr/lib/systemd/system/packaged.service".into(),
+                ],
+                ..Default::default()
+            },
+        )]);
+        let found = config_files(root.path(), &installed, &BTreeSet::new()).unwrap();
+        let offered: Vec<(&str, Option<&str>, bool)> = found
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.link.as_deref(), f.recommended))
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                ("/etc/app/config.yml", None, false),
+                ("/etc/docker/daemon.json", None, true),
+                ("/etc/ld.so.conf.d/app.conf", None, true),
+                ("/etc/nginx/sites-available/site", None, true),
+                (
+                    "/etc/nginx/sites-enabled/site",
+                    Some("/etc/nginx/sites-available/site"),
+                    true
+                ),
+                ("/etc/systemd/zram-generator.conf", None, true),
+                ("/etc/vconsole.conf", None, true),
+            ]
+        );
+        assert_eq!(
+            group_secrets(&found.secrets),
+            ["/etc/letsencrypt/ (2 files)", "/etc/wireguard/ (1 file)"]
+        );
+        let units = unowned_units(root.path(), &installed);
+        let units: Vec<(&str, Option<&str>)> = units
+            .files
+            .iter()
+            .map(|f| (f.path.as_str(), f.source.as_deref()))
+            .collect();
+        assert_eq!(
+            units,
+            [
+                (
+                    "/etc/systemd/system/handmade.service",
+                    Some("/usr/lib/systemd/system/handmade.service")
+                ),
+                (
+                    "/etc/systemd/system/handmade.timer",
+                    Some("/usr/lib/systemd/system/handmade.timer")
+                ),
+            ]
+        );
     }
 
     #[test]

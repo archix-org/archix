@@ -926,6 +926,9 @@ impl<'a> App<'a> {
                 for control in self.controls() {
                     self.control(control, lines, cursor_line);
                 }
+                for text in &facts.settings_notes {
+                    lines.push(warn(text.clone()));
+                }
                 if facts.accounts.users.is_empty() {
                     lines.push(note("no users in the regular uid range".into()));
                 }
@@ -940,8 +943,11 @@ impl<'a> App<'a> {
                 }
             }
             Step::Files => {
-                if facts.secrets > 0 {
-                    lines.push(note(secret_note(facts.secrets, "file")));
+                if !facts.secret_paths.is_empty() {
+                    lines.push(note(format!(
+                        "left out as secrets, which a config never holds; bring them to another machine yourself: {}",
+                        some_of(&facts.secret_paths, 6)
+                    )));
                 }
                 if facts.files.is_empty() {
                     lines.push(note("no edited or hand-written config files found".into()));
@@ -1257,7 +1263,7 @@ impl<'a> App<'a> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -1268,7 +1274,7 @@ mod tests {
     use crate::commands::init::Machine;
     use archix::capture::{Account, Accounts, FoundFile};
 
-    fn facts() -> Facts {
+    pub(in crate::commands::init) fn facts() -> Facts {
         let file = |path: &str, recommended: bool| FoundFile {
             path: path.into(),
             mode: 0o644,
@@ -1276,9 +1282,12 @@ mod tests {
             group: "root".into(),
             recommended,
             edited: true,
+            source: None,
+            link: None,
         };
         let me = Account {
             uid: 1000,
+            system: false,
             group: None,
             groups: vec!["wheel".into()],
             shell: "/usr/bin/zsh".into(),
@@ -1305,19 +1314,24 @@ mod tests {
             unreproducible: vec!["zapret-list-update.timer".into()],
             settings: vec![("hostname".into(), archix::luagen::Lua::str("box"))],
             settings_summary: vec!["hostname box".into()],
+            settings_notes: Vec::new(),
             accounts: Accounts {
                 users: BTreeMap::from([("me".to_string(), me)]),
                 groups: BTreeMap::new(),
+                system_groups: Default::default(),
             },
             services: BTreeMap::from([("sshd.service".to_string(), true)]),
             files: vec![file("/etc/fstab", true), file("/etc/shells", false)],
-            secrets: 2,
+            secret_paths: vec!["/etc/wireguard/ (2 files)".into()],
             btrfs: true,
             boot: BootFacts::Ready {
                 esp: "/boot".into(),
                 kernel: "linux".into(),
                 microcode: Vec::new(),
                 params: vec!["root=UUID=x".into(), "rw".into()],
+                blocker: None,
+                esp_in_boot: false,
+                microcode_hook: false,
             },
             flatpak_apps: BTreeMap::new(),
             flatpak_remotes: BTreeMap::new(),
