@@ -37,7 +37,7 @@ seed_dbx() {
   efi-updatevar -a -f /var/tmp/seed.auth dbx || fail "appending the seeded entries to dbx"
 }
 complete() { local t; for t in usr etc opt boot pacman dkms; do [ -d "/archix/deploy/$1/$t" ] || return 1; done; }
-findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+findings() { /opt/archix-vmtest/bin/archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
 max() { [ "$1" -gt "$2" ] && echo "$1" || echo "$2"; }
 # Everything that must hold every week.
 invariants() {

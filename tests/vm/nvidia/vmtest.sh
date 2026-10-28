@@ -58,7 +58,7 @@ driver() {
   modprobe -n nvidia || fail "modprobe should find the nvidia module for $kernel"
 }
 # What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
-findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+findings() { /opt/archix-vmtest/bin/archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
 baseline() { findings "$1" > "$state/baseline-$1"; }
 unchanged() { findings "$2" | diff "$state/baseline-$2" - > "$state/diff-$2" || fail "$1 changed deployment $2's files: $(head -c 600 "$state/diff-$2")"; }
 no_driver() {

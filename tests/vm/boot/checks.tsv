@@ -36,11 +36,17 @@ plain	'/boot should be read-only once laid out'
 1	'the running system should keep the marker until the next boot'
 1	f'loader.conf should prefer deployment 3 and fall back to 2: {text}'
 1	f"the rescue UKI's initramfs must not hold the test driver's backdoor: {backdoor}"	added
+1	f'/usr/local should be the shared /var/usrlocal: {source}'	added
+1	'/usr/local should be writable'	added
+1	"the first switch should move the plain system's /usr/local into /var/usrlocal"	added
+1	'a declared /usr/local file should be in the shared tree'	added
+1	f"each deployment's own /usr/local should hold only the filesystem package's skeleton: {stray}"	added
 2	'the restart should boot deployment 3'
 2	'deployment 3 should have tree'
 2	'deployment 3 drops the marker'
 2	'the boot of deployment 3 should take the waiting-updates note away'
 2	bootctl set-oneshot 'archix-2.conf'
+2	'what was written to /usr/local should outlive a switch and its boot'	added
 3	"should have booted deployment 2's entry"
 3	"booting deployment 2's entry should make it current"
 3	f'deployment 2 should be the default now: {text}'
@@ -50,10 +56,15 @@ plain	'/boot should be read-only once laid out'
 3	'rolling back to deployment 3 should make it current'
 3	f'rolling back to deployment 3 should make it the default: {loader()}'
 3	f'a rollback to a kept deployment builds nothing: {deployments()}'
+3	'a boot of an older entry than current should leave /usr/local out'	added
+3	"the deployment's own /usr/local should be read-only"	added
+3	f"the login notes should say /usr/local was left out: {out('cat /var/lib/archix/notes')}"	added
 4	'the rollback should boot deployment 3'
 4	'deployment 3 should have tree'
 4	f'loader.conf should name deployment 2: {loader()}'
 4	'current should still be 3'
+4	'a rollback should leave /usr/local as it was'	added
+4	f"a boot with /usr/local should take its note away: {out('cat /var/lib/archix/notes')}"	added
 4b	f"after a crash between the rollback's two writes, deployment 2's entry should boot, not {booted}"
 4b	'booting deployment 2 should have made it current after the crash'
 4b	f'deployment 2 should stay the default: {loader()}'
@@ -136,6 +147,8 @@ fallback	'Secure Boot should be enforcing once set up'	added
 9	f'the fallback UKI should boot deployment {c}, not {running}'
 9	f'deployment {c} should have tree'
 9	bootctl set-oneshot 'archix-fallback-999.efi'
+9	'the fallback UKI should leave /usr/local out'	added
+9	f"the fallback UKI's boot should say why /usr/local is out: {out('cat /run/archix/usr-local /var/lib/archix/notes')}"	added
 10	f'systemd-boot should have started archix-fallback-999.efi, not {selected}'
 10	f"the fallback of a deployment that's gone should boot current, {c}, not {running}"
 10	'deploy-mount should say it booted current instead'
@@ -148,6 +161,7 @@ fallback	'Secure Boot should be enforcing once set up'	added
 11	"eject left archix's boot entries"
 11	'the finished eject left its state'
 11	'the running system lost tree'
+11	f"eject should make /var/usrlocal the root's own /usr/local: {out('ls -la /usr/local/bin /var/usrlocal 2>&1')}"	added
 12	f'plain Arch should boot through arch-linux.efi, not {selected}'
 12	'a plain boot mounts no deployment'
 12	"/usr should be the root's own"
@@ -159,3 +173,24 @@ fallback	'Secure Boot should be enforcing once set up'	added
 12	'plain pacman -Syu after the eject'
 12	'plain pacman -S after the eject'
 12	'pacman -S cowsay should install it'
+12	"plain Arch should keep /usr/local's files in its own /usr/local"	added
+ul1	'archix install tree'	added
+ul1	f"the new entry should count three boot tries: {out('ls /efi/loader/entries')}"	added
+ul1	f'archix status should warn about the boot-time files in /usr/local: {status}'	added
+ul1	f'archix verify should warn about the boot-time files in /usr/local: {verify}'	added
+ul2	f'after the failed tries of deployment {bad}, systemd-boot should start {good}, not {selected}'	added
+ul2	f"deployment {bad}'s entry should be marked bad: {out('ls /efi/loader/entries')}"	added
+ul2	f'the unit in /usr/local should have failed each counted try: {broken_boots()} boots'	added
+ul2	'the fallback boot should leave /usr/local out'	added
+ul2	f"deploy-mount should say why: {out('cat /run/archix/usr-local')}"	added
+ul2	f'the login notes should say /usr/local is out and where it is: {notes}'	added
+ul2	f'archix should make deployment {good} current after {bad} failed to boot'	added
+ul2	bootctl set-oneshot f'archix-{good}.conf'	added
+ul3	f"after the failed boot of deployment {good}'s entry, systemd-boot should start its fallback UKI, not {selected}"	added
+ul3	f'the boot of the current deployment {good} with /usr/local should have failed once: {broken_boots()} boots, {failures} before'	added
+ul3	'the fallback UKI should leave /usr/local out'	added
+ul4	f"deployment {good}'s own entry should boot, not {selected}"	added
+ul4	f'/usr/local should be the shared /var/usrlocal again: {source}'	added
+ul4	'no boot should fail once the unit is gone'	added
+ul4	f"the boot with /usr/local should take its note away: {out('cat /var/lib/archix/notes')}"	added
+ul4	'archix status should have nothing to warn about in /usr/local'	added

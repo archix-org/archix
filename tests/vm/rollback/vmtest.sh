@@ -82,7 +82,7 @@ needs_newer_glibc() {
 # Files pacman owns that are missing from disk.
 missing_files() { pacman -Qk 2>&1 | grep -c 'No such file or directory'; }
 # What pacman -Qkk finds wrong in deployment $1's /usr, /opt and /boot, the trees a staged deployment shares with it.
-findings() { archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
+findings() { /opt/archix-vmtest/bin/archix-check-deployment "$1" | grep -E ': /(usr|opt|boot)/' || true; }
 baseline() { local n; for n in "$@"; do findings "$n" > "$state/baseline-$n"; done; }
 # Fails unless each deployment's files are, by content, what its baseline found.
 unchanged() {

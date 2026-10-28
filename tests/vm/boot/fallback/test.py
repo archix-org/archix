@@ -24,6 +24,8 @@ def run(m, t):
         t.check(selected == f"archix-fallback-{c}.efi", f"without loader/entries systemd-boot should start the fallback UKI of deployment {c}, not {selected}")
         t.check(running == c, f"the fallback UKI should boot deployment {c}, not {running}")
         t.check(ok("command -v tree"), f"deployment {c} should have tree")
+        t.check(not ok("findmnt /usr/local") and not ok("[ -e /usr/local/bin/archix-vmtest-declared ]"), "the fallback UKI should leave /usr/local out")
+        t.check(ok("grep -q 'fallback UKI' /run/archix/usr-local && grep -q 'left /usr/local unmounted' /var/lib/archix/notes"), f"the fallback UKI's boot should say why /usr/local is out: {out('cat /run/archix/usr-local /var/lib/archix/notes')}")
         m.succeed(f"cp /efi/EFI/Linux/archix-fallback-{c}.efi /efi/EFI/Linux/archix-fallback-999.efi")
         m.succeed("printf 'uki /EFI/Linux/archix-fallback-999.efi\\n' > /var/lib/archix/boot/entries/archix-fallback-999.efi && sync -f /efi")
         m.select_entry("archix-fallback-999.efi")
@@ -57,6 +59,7 @@ def run(m, t):
         t.check(not ok("ls /efi/loader/entries/archix-* /efi/EFI/Linux/archix-fallback-* > /dev/null 2>&1"), "eject left archix's boot entries")
         t.check(not ok("[ -e /var/lib/archix/eject ]"), "the finished eject left its state")
         t.check(ok("command -v tree"), "the running system lost tree")
+        t.check(ok("[ -x /usr/local/bin/archix-vmtest-declared ] && [ ! -e /var/usrlocal ]"), f"eject should make /var/usrlocal the root's own /usr/local: {out('ls -la /usr/local/bin /var/usrlocal 2>&1')}")
         m.reboot()
 
     with t.step("12: plain Arch boots with the deployment's packages; plain pacman works"):
@@ -64,6 +67,7 @@ def run(m, t):
         t.check(selected == "arch-linux.efi", f"plain Arch should boot through arch-linux.efi, not {selected}")
         t.check(running == "" and not ok("[ -e /archix ]"), "a plain boot mounts no deployment")
         t.check("archix" not in out("findmnt -no SOURCE /usr"), "/usr should be the root's own")
+        t.check(ok("[ -x /usr/local/bin/archix-vmtest-declared ]") and not ok("findmnt /usr/local"), "plain Arch should keep /usr/local's files in its own /usr/local")
         t.check(secure_boot(), "Secure Boot should still be enforcing")
         now = out("pacman -Q")
         t.check(now == packages, f"plain Arch has other packages than the deployment had: {diff(packages, now)}")

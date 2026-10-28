@@ -60,7 +60,7 @@ def hidden_usr():
 
 
 def findings(n):
-    return out(f"archix-check-deployment {n} | grep -E ': /(usr|opt|boot)/' || true")
+    return out(f"/opt/archix-vmtest/bin/archix-check-deployment {n} | grep -E ': /(usr|opt|boot)/' || true")
 
 
 def edit_config(sed):

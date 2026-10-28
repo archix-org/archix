@@ -53,8 +53,8 @@ if [ "${INITRAMFS:-systemd}" = busybox ]; then
   sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect microcode modconf kms keyboard keymap consolefont block filesystems fsck)/' /mnt/etc/mkinitcpio.conf
 fi
 grep '^HOOKS=' /mnt/etc/mkinitcpio.conf
-install -Dm755 /vm/deploy-boot/vmtest.sh /mnt/usr/local/bin/archix-vm-test
-printf '[Unit]\nDescription=archix deployment boot test\nAfter=multi-user.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vm-test\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target\n' \
+install -Dm755 /vm/deploy-boot/vmtest.sh /mnt/opt/archix-vm/archix-vm-test
+printf '[Unit]\nDescription=archix deployment boot test\nAfter=multi-user.target\n\n[Service]\nType=oneshot\nExecStart=/opt/archix-vm/archix-vm-test\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target\n' \
   > /mnt/etc/systemd/system/archix-vm-test.service
 arch-chroot /mnt systemctl enable archix-vm-test > /dev/null 2>&1
 
@@ -68,6 +68,10 @@ mkdir -p "$deploy"
 if [ "$fs" = btrfs ]; then btrfs -q subvolume create "$deploy/1"; else mkdir "$deploy/1"; fi
 for tree in usr etc opt boot; do mv "/mnt/$tree" "$deploy/1/$tree"; mkdir "/mnt/$tree"; done
 mv /mnt/var/lib/pacman/local "$deploy/1/pacman"
+# As the first switch does: /usr/local's contents go to the shared /var/usrlocal, and each deployment keeps an empty mountpoint.
+cp -a "$deploy/1/usr/local" /mnt/var/usrlocal
+find "$deploy/1/usr/local" -mindepth 1 -delete
+echo shared > /mnt/var/usrlocal/archix-vm-shared
 mkdir /mnt/var/lib/pacman/local "$deploy/1/dkms"
 for tree in usr etc opt boot; do mount --bind "$deploy/1/$tree" "/mnt/$tree"; done
 mount --bind "$deploy/1/pacman" /mnt/var/lib/pacman/local

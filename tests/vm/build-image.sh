@@ -165,14 +165,17 @@ sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s
 [ ! -f "$dir/vmtest.sh" ] || install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 # The driver's suites (tests/vm/driver) have no vmtest.sh: the guest runs the driver's root shell, which config.lua takes from here.
 [ "$dir" != /vm/boot ] || install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
-install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
+# The test tools go in /opt, which each deployment keeps, as boots of an older deployment and the fallback UKI leave /usr/local out.
+install -Dm755 /vm/deploy/proto/check-deployment /mnt/opt/archix-vmtest/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
 if [ "$dir" = /vm/boot ]; then
   # The boot tests lay the system out on their first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
-  install -Dm755 /vm/driver/backdoor.sh /mnt/usr/local/bin/archix-backdoor
-  printf "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/usr/local/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target\n" > /mnt/etc/systemd/system/archix-backdoor.service
+  install -Dm755 /vm/driver/backdoor.sh /mnt/opt/archix-vmtest/bin/archix-backdoor
+  # What the first switch must move to the shared /var/usrlocal.
+  install -Dm644 /dev/null /mnt/usr/local/share/archix-vmtest/plain
+  printf "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/opt/archix-vmtest/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target\n" > /mnt/etc/systemd/system/archix-backdoor.service
   printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' > /mnt/etc/systemd/network/20-wired.network
   # A service that reads /usr all the time from a read-only view of its own, as ProtectSystem=strict gives it.
   printf '[Service]\nProtectSystem=strict\nExecStart=/bin/sh -c "while cat /usr/lib/os-release > /dev/null && ls /usr/bin > /dev/null; do sleep 0.2; done; exit 1"\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-protected.service

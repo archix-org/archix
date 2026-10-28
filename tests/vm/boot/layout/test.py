@@ -1,4 +1,4 @@
-# The layout and deployments: deployment 2 boots read-only, a switch builds 3 beside it, booting an older entry makes it current, a rollback, and a reset between a rollback's two writes.
+# The layout and deployments: deployment 2 boots read-only with the shared /var/usrlocal on /usr/local, a switch builds 3 beside it, booting an older entry makes it current without /usr/local, a rollback, and a reset between a rollback's two writes.
 import re
 
 from boot.common import EFIVAR, HOST, LOADER, bind, boot, current, deployments, diff, edit_config, findings, has_line, hidden_usr, loader, ok, out
@@ -34,6 +34,13 @@ def run(m, t):
         attrs = out(f"od -An -tu4 -N4 {EFIVAR} 2>/dev/null | tr -d ' '").strip()
         t.check(attrs.isdigit() and int(attrs) & 1 == 0, f"LoaderEntrySelected should be volatile, but its attributes are {attrs or 'missing'}")
         t.check(ok("systemctl is-active -q archix-marker.service"), "deployment 2 should start the marker")
+        source = out("findmnt -no SOURCE /usr/local").strip()
+        t.check(source.endswith("/var/usrlocal]"), f"/usr/local should be the shared /var/usrlocal: {source}")
+        t.check(ok("echo handmade > /usr/local/bin/archix-vmtest-handmade"), "/usr/local should be writable")
+        t.check(ok("[ -e /var/usrlocal/share/archix-vmtest/plain ]"), "the first switch should move the plain system's /usr/local into /var/usrlocal")
+        t.check(out("/usr/local/bin/archix-vmtest-declared").strip() == "declared", "a declared /usr/local file should be in the shared tree")
+        stray = out("find /archix/deploy/*/usr/local -mindepth 1 ! -type d ! -path '*/usr/local/share/man'")
+        t.check(stray.strip() == "", f"each deployment's own /usr/local should hold only the filesystem package's skeleton: {stray}")
         edit_config("'/-- marker/d'")
         m.succeed(f"{HOST} install tree --noconfirm", what="archix install tree")
         t.check(current() == "3", "installing tree should make deployment 3 current")
@@ -55,6 +62,7 @@ def run(m, t):
         t.check(ok("command -v tree"), "deployment 3 should have tree")
         t.check(not ok("systemctl is-enabled -q archix-marker.service"), "deployment 3 drops the marker")
         t.check(not ok("grep -qs 'waiting for a reboot' /var/lib/archix/notes"), "the boot of deployment 3 should take the waiting-updates note away")
+        t.check(out("cat /usr/local/bin/archix-vmtest-handmade").strip() == "handmade", "what was written to /usr/local should outlive a switch and its boot")
         m.select_entry("archix-2.conf")
         m.reboot()
 
@@ -66,6 +74,9 @@ def run(m, t):
         t.check(has_line(text, "default archix-2.conf") and not re.search(r"^preferred", text, re.M), f"deployment 2 should be the default now: {text}")
         t.check(not ok("command -v tree"), "deployment 2 has no tree")
         t.check(ok("systemctl is-active -q archix-marker.service"), "deployment 2 should start the marker")
+        t.check(not ok("findmnt /usr/local") and not ok("[ -e /usr/local/bin/archix-vmtest-handmade ]"), "a boot of an older entry than current should leave /usr/local out")
+        t.check(not ok("touch /usr/local/archix-vmtest"), "the deployment's own /usr/local should be read-only")
+        t.check(ok("grep -q 'left /usr/local unmounted' /var/lib/archix/notes"), f"the login notes should say /usr/local was left out: {out('cat /var/lib/archix/notes')}")
         m.succeed("archix rollback 3 --noconfirm", what="archix rollback 3")
         t.check(current() == "3", "rolling back to deployment 3 should make it current")
         t.check(has_line(loader(), "default archix-3.conf"), f"rolling back to deployment 3 should make it the default: {loader()}")
@@ -76,6 +87,8 @@ def run(m, t):
         _, booted, _ = boot()
         t.check(booted == "3", "the rollback should boot deployment 3")
         t.check(ok("command -v tree"), "deployment 3 should have tree")
+        t.check(out("cat /usr/local/bin/archix-vmtest-handmade").strip() == "handmade", "a rollback should leave /usr/local as it was")
+        t.check(not ok("grep -qs /usr/local /var/lib/archix/notes"), f"a boot with /usr/local should take its note away: {out('cat /var/lib/archix/notes')}")
         baseline = findings(2)
         m.succeed(f"sed -i -e '/^preferred /d' -e 's/^default .*/default archix-2.conf/' {LOADER}")
         t.require(has_line(loader(), "default archix-2.conf"), f"loader.conf should name deployment 2: {loader()}")

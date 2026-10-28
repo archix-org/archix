@@ -45,7 +45,7 @@ def run(m, t):
         return number(out("mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root && ls -A /run/vmtest-root/usr | wc -l; umount /run/vmtest-root"))
 
     def findings(n):
-        return out(f"archix-check-deployment {n} | grep -E ': /(usr|opt|boot)/' || true")
+        return out(f"/opt/archix-vmtest/bin/archix-check-deployment {n} | grep -E ': /(usr|opt|boot)/' || true")
 
     def edit_config(sed):
         m.succeed(f"sed -i {sed} {CONFIG}")

@@ -8,7 +8,7 @@ return {
   files = {
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
     -- What a real boot of a replayed state reports before powering off: the seconds from the kernel's start to this report, before its own checks take any, the milliseconds archix's own units spent starting (archix-*.service and systemd-bless-boot.service, whose ExecStartPre is archix bless; each in POWERCUT-UNITS), the milliseconds its own pacman -Qkk took, a fixed workload that says how fast the machine ran then, the entry systemd-boot started, the deployment archix mounted, whether the ESP is still writable once a file with a broken FAT chain (esp-case's CHAIN.BIN) is read and whether systemd-fsck checked it (its result and how many lines fsck logged), how many device timeouts its journal has (each in POWERCUT-DEVTIMEOUT), the package files whose content pacman finds altered (modified backup files it leaves out), the failed units with their last journal lines and the ESP's mount, fsck and device lines, and the kernel's FAT messages and warnings and the ESP fsck's.
-    ["/usr/local/bin/archix-powercut-booted"] = { mode = "0755", text = [[#!/bin/sh
+    ["/opt/archix-vmtest/bin/archix-powercut-booted"] = { mode = "0755", text = [[#!/bin/sh
 boot=$(cut -d. -f1 /proc/uptime)
 now=$(awk '{ printf "%d", $1 * 1000000 }' /proc/uptime)
 archix=0 units=
@@ -46,7 +46,7 @@ echo "POWERCUT-BOOTED entry=$entry deployment=$(cat /run/archix/deployment) curr
 systemctl poweroff
 ]] },
     -- Every 120 s of a boot, the jobs systemd still runs, what the running ones' units log and the processes in uninterruptible sleep, so a boot that never reports shows what it waits on.
-    ["/usr/local/bin/powercut-watch"] = { mode = "0755", text = [[#!/bin/sh
+    ["/opt/archix-vmtest/bin/powercut-watch"] = { mode = "0755", text = [[#!/bin/sh
 while sleep 120; do
   { echo "at $(cut -d' ' -f1 /proc/uptime) s:"
     systemctl list-jobs --no-legend --no-pager | head -12
@@ -57,8 +57,8 @@ done
 ]] },
   },
   units = {
-    ["powercut-watch.service"] = "[Unit]\nDescription=power-cut boot watch\nDefaultDependencies=no\nConflicts=shutdown.target\nBefore=shutdown.target\n\n[Service]\nExecStart=/usr/local/bin/powercut-watch\n\n[Install]\nWantedBy=sysinit.target",
-    ["archix-powercut-booted.service"] = "[Unit]\nDescription=archix power-cut boot report\nAfter=multi-user.target archix-boot.service\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-powercut-booted\n\n[Install]\nWantedBy=multi-user.target",
+    ["powercut-watch.service"] = "[Unit]\nDescription=power-cut boot watch\nDefaultDependencies=no\nConflicts=shutdown.target\nBefore=shutdown.target\n\n[Service]\nExecStart=/opt/archix-vmtest/bin/powercut-watch\n\n[Install]\nWantedBy=sysinit.target",
+    ["archix-powercut-booted.service"] = "[Unit]\nDescription=archix power-cut boot report\nAfter=multi-user.target archix-boot.service\n\n[Service]\nType=oneshot\nExecStart=/opt/archix-vmtest/bin/archix-powercut-booted\n\n[Install]\nWantedBy=multi-user.target",
   },
   services = {
     ["systemd-networkd.service"] = true,
