@@ -367,7 +367,8 @@ mod tests {
         };
         let due = BTreeMap::from([
             ("/etc/a.conf".to_string(), script(None)),
-            ("/usr/local/bin/b".to_string(), script(None)),
+            ("/usr/bin/b".to_string(), script(None)),
+            ("/usr/local/bin/f".to_string(), script(None)),
             ("/srv/c".to_string(), script(None)),
             ("/home/alice/.config/d".to_string(), script(Some("alice"))),
             ("/home/bob/.config/e".to_string(), script(Some("bob"))),
@@ -375,12 +376,12 @@ mod tests {
         let (live, at_boot) = split_live(due, root.path());
         assert_eq!(
             live.keys().collect::<Vec<_>>(),
-            ["/home/alice/.config/d", "/srv/c"],
-            "files written at the switch whose user exists run now"
+            ["/home/alice/.config/d", "/srv/c", "/usr/local/bin/f"],
+            "files written at the switch, the shared /usr/local's too, whose user exists run now"
         );
         assert_eq!(
             at_boot.keys().collect::<Vec<_>>(),
-            ["/etc/a.conf", "/home/bob/.config/e", "/usr/local/bin/b"],
+            ["/etc/a.conf", "/home/bob/.config/e", "/usr/bin/b"],
             "deployment files, and a user only the new deployment has, wait for the boot"
         );
     }

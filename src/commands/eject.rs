@@ -150,6 +150,7 @@ fn from_deployments(
             println!(
                 "  system    deployment {deployment}, which runs now, becomes the root's own /usr, /etc, /opt, /boot and pacman database; the running system switches to them at once"
             );
+            println!("  /usr/local the shared /var/usrlocal becomes the root's own /usr/local, and /var/usrlocal goes");
             println!(
                 "  boot      a UKI that mkinitcpio's preset writes to EFI/Linux{}, the default instead of archix's entries, which go with the fallback UKI",
                 if boot::sbctl_has_keys() {

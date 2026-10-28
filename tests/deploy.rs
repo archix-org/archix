@@ -1454,13 +1454,16 @@ fn mkinitcpio_autodetect_in_the_view_sees_the_root_filesystem() {
     }
 }
 
-/// A plain Arch-like root on a fresh filesystem, as the first switch finds one: usr with a hardlinked pair and a file capability, etc, opt, boot, pacman's database, the static binary and an ESP directory.
+/// A plain Arch-like root on a fresh filesystem, as the first switch finds one: usr with a hardlinked pair and a file capability, a tool and filesystem's man link in /usr/local, etc, opt, boot, pacman's database, the static binary and an ESP directory.
 fn plain_root(fs_type: &str) -> LoopFs {
     let loop_fs = LoopFs::new(fs_type);
     let root = &loop_fs.mnt;
     for dir in [
         "usr/bin",
         "usr/lib/archix",
+        "usr/local/bin",
+        "usr/local/share",
+        "usr/local/man",
         "etc",
         "opt/app",
         "boot",
@@ -1485,6 +1488,9 @@ fn plain_root(fs_type: &str) -> LoopFs {
     fs::write(root.join("usr/bin/a"), "same file\n").unwrap();
     fs::hard_link(root.join("usr/bin/a"), root.join("usr/bin/b")).unwrap();
     fs::write(root.join("usr/lib/archix/archix-static"), "static\n").unwrap();
+    fs::write(root.join("usr/local/bin/mytool"), "made install\n").unwrap();
+    fs::set_permissions(root.join("usr/local/bin/mytool"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("../man", root.join("usr/local/share/man")).unwrap();
     fs::write(root.join("etc/hostname"), "plain\n").unwrap();
     fs::write(root.join("etc/shadow"), "root:!:1::::::\n").unwrap();
     fs::set_permissions(root.join("etc/shadow"), fs::Permissions::from_mode(0o600)).unwrap();
@@ -1508,6 +1514,11 @@ fn live_trees(root: &Path) -> BTreeMap<String, BTreeMap<PathBuf, Entry>> {
     .collect()
 }
 
+/// A snapshot of a usr tree without what is under local, which deployments leave to the shared /var/usrlocal.
+fn without_local(usr: &BTreeMap<PathBuf, Entry>) -> Vec<(&PathBuf, &Entry)> {
+    usr.iter().filter(|(rel, _)| !rel.starts_with("local")).collect()
+}
+
 fn mounted(path: &Path) -> bool {
     archix::deploy::view::mount_points(&fs::read("/proc/self/mountinfo").unwrap()).contains(&path.to_path_buf())
 }
@@ -1526,7 +1537,31 @@ fn the_first_layout_copies_the_live_trees_into_deployment_1_binds_them_back_and_
         assert_eq!(store.current().unwrap(), Some(1), "{fs_type}");
         let one = store.path(1);
         for (tree, entries) in &before {
-            assert_eq!(&snapshot(&one.join(tree)), entries, "{fs_type}: deployment 1's {tree}");
+            let copied = snapshot(&one.join(tree));
+            match tree.as_str() {
+                "usr" => assert_eq!(
+                    without_local(&copied),
+                    without_local(entries),
+                    "{fs_type}: deployment 1's usr"
+                ),
+                _ => assert_eq!(&copied, entries, "{fs_type}: deployment 1's {tree}"),
+            }
+        }
+        assert_eq!(
+            fs::read_dir(one.join("usr/local")).unwrap().count(),
+            0,
+            "{fs_type}: deployment 1's /usr/local is an empty mountpoint"
+        );
+        let shared = root.join("var/usrlocal");
+        let local: Vec<(PathBuf, Entry)> = snapshot(&root.join("usr/local")).into_iter().collect();
+        let moved: Vec<(PathBuf, Entry)> = snapshot(&shared).into_iter().collect();
+        assert_eq!(moved, local, "{fs_type}: /var/usrlocal holds the live /usr/local");
+        if fs_type == "ext4" {
+            assert_eq!(
+                ino(&shared.join("bin/mytool")),
+                ino(&root.join("usr/local/bin/mytool")),
+                "hardlinked"
+            );
         }
         assert!(one.join("dkms").is_dir() && one.join("var-upper").is_dir());
         assert_eq!(
@@ -1549,12 +1584,28 @@ fn the_first_layout_copies_the_live_trees_into_deployment_1_binds_them_back_and_
             );
         }
 
+        // As systemd leaves every mount of a booted system.
+        sh(Command::new("mount").arg("--make-shared").arg(&root));
         archix::deploy::layout::bind_live(&root, &store, 1).unwrap();
         for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
             assert!(mounted(&root.join(at)), "{fs_type}: {at} isn't bound");
         }
+        assert!(
+            !mounted(&one.join("usr/local")),
+            "{fs_type}: the /usr/local bind propagated onto deployment 1's own usr/local"
+        );
         let err = fs::write(root.join("usr/bin/new"), "x").unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{fs_type}: /usr is read-only");
+        assert!(mounted(&root.join("usr/local")), "{fs_type}: /usr/local isn't bound");
+        assert_eq!(
+            fs::read_to_string(root.join("usr/local/bin/mytool")).unwrap(),
+            "made install\n"
+        );
+        fs::write(root.join("usr/local/bin/new"), "x").unwrap();
+        assert!(
+            shared.join("bin/new").exists(),
+            "{fs_type}: /usr/local is the shared /var/usrlocal"
+        );
         fs::write(root.join("etc/new"), "x").unwrap();
         assert!(
             one.join("etc/new").exists(),
@@ -1563,9 +1614,15 @@ fn the_first_layout_copies_the_live_trees_into_deployment_1_binds_them_back_and_
         fs::remove_file(one.join("etc/new")).unwrap();
 
         archix::deploy::layout::prune_hidden(&root, Path::new(env!("CARGO_BIN_EXE_archix"))).unwrap();
+        sh(Command::new("umount").arg(root.join("usr/local")));
         for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local", "var/lib/dkms"] {
             sh(Command::new("umount").arg(root.join(at)));
         }
+        assert_eq!(
+            fs::read_to_string(shared.join("bin/mytool")).unwrap(),
+            "made install\n",
+            "{fs_type}: pruning the hidden /usr kept /var/usrlocal"
+        );
         for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local"] {
             assert_eq!(
                 fs::read_dir(root.join(at)).unwrap().count(),
@@ -1575,8 +1632,10 @@ fn the_first_layout_copies_the_live_trees_into_deployment_1_binds_them_back_and_
         }
         for (tree, entries) in &before {
             let now = snapshot(&one.join(tree));
-            // Writing etc/new above changed only the etc directory's own times.
-            let kept = |(rel, _): &(&PathBuf, &Entry)| tree != "etc" || !rel.as_os_str().is_empty();
+            // Writing etc/new above changed only the etc directory's own times; usr/local is checked above.
+            let kept = |(rel, _): &(&PathBuf, &Entry)| {
+                (tree != "etc" || !rel.as_os_str().is_empty()) && (tree != "usr" || !rel.starts_with("local"))
+            };
             assert!(
                 now.iter().filter(kept).eq(entries.iter().filter(kept)),
                 "{fs_type}: pruning touched deployment 1's {tree}"
@@ -1630,7 +1689,13 @@ fn a_layout_killed_partway_leaves_the_old_system_whole_and_starts_over_cleanly()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["1"], "{fs_type}: leftovers of the killed layouts");
-        assert_eq!(snapshot(&store.path(1).join("usr")), before["usr"], "{fs_type}");
+        let usr = snapshot(&store.path(1).join("usr"));
+        assert_eq!(without_local(&usr), without_local(&before["usr"]), "{fs_type}");
+        assert_eq!(
+            snapshot(&root.join("var/usrlocal")).into_iter().collect::<Vec<_>>(),
+            snapshot(&root.join("usr/local")).into_iter().collect::<Vec<_>>(),
+            "{fs_type}: the copies the killed layouts started merge into one"
+        );
     }
 }
 
@@ -2401,13 +2466,18 @@ fn assert_eject_bootable(root: &Path, usr: &BTreeMap<PathBuf, Entry>, qkk: &str,
     }
 }
 
-/// What a finished eject leaves: the deployment's packages on the root's own trees, archix's integration and boot paths gone, the plain UKI the default and no /archix.
+/// What a finished eject leaves: the deployment's packages and the shared /usr/local on the root's own trees, archix's integration and boot paths gone, the plain UKI the default and no /archix or /var/usrlocal.
 fn assert_ejected(root: &Path, usr: &BTreeMap<PathBuf, Entry>, qkk: &str, what: &str) {
     let esp = root.join("efi");
     assert!(!root.join("archix").exists(), "{what}: /archix is still there");
     for (_, at) in archix::system::deploy_boot::TREES {
         assert!(!mounted(&root.join(at)), "{what}: {at} is still bound");
     }
+    assert!(!mounted(&root.join("usr/local")), "{what}: /usr/local is still bound");
+    assert!(
+        !root.join("var/usrlocal").exists(),
+        "{what}: /var/usrlocal is still there"
+    );
     assert!(
         plain_usr(root) == *usr,
         "{what}: the root's /usr isn't the deployment's"
@@ -2458,7 +2528,12 @@ fn eject_lays_the_running_deployment_out_as_the_plain_root_and_removes_archix() 
     for fs_type in ["ext4", "btrfs"] {
         let loop_fs = ejectable_root(fs_type);
         let root = loop_fs.mnt.clone();
+        fs::write(root.join("usr/local/bin/after-layout"), "npm -g\n").unwrap();
         let usr = plain_usr(&root);
+        assert!(
+            usr.contains_key(Path::new("local/bin/after-layout")),
+            "{fs_type}: /usr/local is the shared tree"
+        );
         let qkk = pacman_qkk(&root, &["sed", "gzip"]);
         let out = helper("eject", &root, &[]).output().unwrap();
         assert!(out.status.success(), "{fs_type}: {}", stderr(&out));

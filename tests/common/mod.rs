@@ -566,10 +566,13 @@ pub fn installed(name: &str) -> Option<String> {
     read_local_db(&db).unwrap().remove(name).map(|pkg| pkg.version)
 }
 
-/// A file in the active machine's current deployment, or its root before the first layout; `path` is absolute.
+/// A file in the active machine's current deployment, or its root before the first layout, or for /usr/local the shared /var/usrlocal; `path` is absolute.
 pub fn system_path(path: &str) -> PathBuf {
     let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
     let rel = path.trim_start_matches('/');
+    if archix::system::usr_local::holds(path) {
+        return archix::system::usr_local::on_disk(&root, path);
+    }
     let booted = fs::read_to_string(root.join("run/archix/deployment")).unwrap_or_default();
     match fs::read_link(root.join("archix/current")) {
         Ok(target) if target.to_str() == Some(&format!("deploy/{}", booted.trim())) => root.join(rel),

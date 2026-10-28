@@ -160,6 +160,21 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path, root: &Pa
     for path in install {
         incoming.push(contents(path)?);
     }
+    let in_usr_local: Vec<String> = incoming
+        .iter()
+        .flat_map(|c| {
+            crate::system::usr_local::packaged(&c.name, &c.files)
+                .into_iter()
+                .map(move |file| format!("{} /{file}", c.name))
+        })
+        .collect();
+    if !in_usr_local.is_empty() {
+        let shown: Vec<&str> = in_usr_local.iter().take(20).map(String::as_str).collect();
+        bail!(
+            "these packages install files into /usr/local, which every deployment shares from /var/usrlocal and Arch packages must not install to; nothing was changed. Build them to install under /usr or /opt instead:\n  {}",
+            shown.join("\n  ")
+        );
+    }
     let mut replaced: BTreeSet<String> = incoming.iter().map(|c| c.name.clone()).collect();
     replaced.extend(incoming.iter().flat_map(|c| c.displaces.iter().cloned()));
     replaced.extend(removed.iter().cloned());

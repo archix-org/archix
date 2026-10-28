@@ -58,7 +58,7 @@ fn all_boot_files(root: &Path) -> Vec<(PathBuf, String)> {
     files
 }
 
-/// A root filesystem as the initramfs sees it, on its own tmpfs: deployments 1 and 2, an uncommitted staging tree, current at 1, an entry record for each and no /var/lib/dkms yet.
+/// A root filesystem as the initramfs sees it, on its own tmpfs: deployments 1 and 2, an uncommitted staging tree, current at 1, an entry record for each and no /var/lib/dkms or /var/usrlocal yet.
 struct Sysroot {
     dir: tempfile::TempDir,
 }
@@ -78,6 +78,7 @@ impl Sysroot {
                 fs::create_dir_all(&dir).unwrap();
                 fs::write(dir.join("which"), name).unwrap();
             }
+            fs::create_dir(root.join("archix/deploy").join(name).join("usr/local")).unwrap();
         }
         std::os::unix::fs::symlink("deploy/1", root.join("archix/current")).unwrap();
         let records = root.join("var/lib/archix/boot/entries");
@@ -178,6 +179,67 @@ fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_opt_and_boot_
         let err = fs::write(sysroot.root().join(at).join("written"), "x").expect_err(at);
         assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{at}: {err}");
         assert!(!sysroot.root().join("archix/deploy/2").join(at).join("written").exists());
+    }
+}
+
+#[test]
+#[ignore]
+fn the_initramfs_binds_var_usrlocal_over_usr_local_but_not_for_the_fallback_uki_or_an_older_deployment() {
+    let sysroot = Sysroot::new();
+    let root = sysroot.root();
+    let out = sysroot.mount(&sysroot.efivar("archix-2+2-1.conf"));
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(sysroot.dir.path().join("run/usr-local")).unwrap(),
+        "mounted\n"
+    );
+    sh("mount", &["-o", "remount,rw", root.to_str().unwrap()]);
+    fs::write(root.join("usr/local/written"), "x").unwrap_or_else(|e| panic!("/usr/local is writable: {e}"));
+    assert!(
+        root.join("var/usrlocal/written").exists(),
+        "/usr/local is /var/usrlocal"
+    );
+    assert!(!root.join("archix/deploy/2/usr/local/written").exists());
+    let err = fs::write(root.join("usr/written"), "x").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EROFS), "/usr stays read-only: {err}");
+    let _ = Command::new("umount").arg("-R").arg(&root).status();
+
+    for (entry, why) in [
+        ("archix-1.conf", "older than the current 2"),
+        ("archix-fallback-2.efi", "fallback UKI archix-fallback-2.efi"),
+    ] {
+        let sysroot = Sysroot::new();
+        let root = sysroot.root();
+        sh("mount", &["-o", "remount,rw", root.to_str().unwrap()]);
+        fs::remove_file(root.join("archix/current")).unwrap();
+        std::os::unix::fs::symlink("deploy/2", root.join("archix/current")).unwrap();
+        fs::write(
+            root.join("var/lib/archix/boot/entries/archix-fallback-2.efi"),
+            "uki /EFI/Linux/archix-fallback-2.efi\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("var/usrlocal")).unwrap();
+        fs::write(root.join("var/usrlocal/broken.service"), "x").unwrap();
+        sh("mount", &["-o", "remount,ro", root.to_str().unwrap()]);
+        let out = sysroot.mount(&sysroot.efivar(entry));
+        assert!(out.status.success(), "{entry}: {}", text(&out));
+        assert!(
+            text(&out).contains("leaving /usr/local unmounted"),
+            "{entry}: {}",
+            text(&out)
+        );
+        let record = fs::read_to_string(sysroot.dir.path().join("run/usr-local")).unwrap();
+        assert!(
+            record.starts_with("skipped ") && record.contains(why),
+            "{entry}: {record}"
+        );
+        assert_eq!(
+            fs::read_dir(root.join("usr/local")).unwrap().count(),
+            0,
+            "{entry}: the deployment's own empty /usr/local"
+        );
+        let err = fs::write(root.join("usr/local/written"), "x").unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(libc::EROFS), "{entry}: {err}");
     }
 }
 

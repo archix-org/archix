@@ -24,6 +24,7 @@ src/system/deploy_boot.rs	test:deploy_boot test:deploy
 src/system/rescue	test:rescue test:boot
 src/system/password.rs	test:rescue
 src/commands/rescue.rs	test:rescue
+src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
 src/system/	test:system test:switch
 src/flatpak.rs	test:flatpak
 src/fetch.rs	test:fetch test:archlinux
@@ -39,7 +40,7 @@ src/packages.rs	test:switch test:archlinux
 src/adopt.rs	test:switch
 src/downgrade.rs	test:switch
 src/unsafe_downgrades.json	test:switch
-src/conflicts.rs	test:switch
+src/conflicts.rs	test:switch test:aur
 src/installed.rs	test:switch test:system
 src/gc.rs	test:switch
 src/generations.rs	test:switch

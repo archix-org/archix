@@ -58,6 +58,9 @@ pub fn verify_in(paths: &Paths, repair: bool, only: &[u32], repair_hint: &str) -
         return Ok(());
     }
     let store = deploy::Store::open(&paths.root)?;
+    if let Some(warning) = system::usr_local::boot_files_warning(&paths.root) {
+        println!("{warning}");
+    }
     let mut changed = Vec::new();
     let kept = store.deployments()?;
     if let Some(missing) = only.iter().find(|n| !kept.contains(n)) {
@@ -112,7 +115,11 @@ pub fn verify_in(paths: &Paths, repair: bool, only: &[u32], repair_hint: &str) -
 pub fn mount_deployment(root: &std::path::Path, number: Option<u32>) -> Result<()> {
     require_root("mount-deployment")?;
     let number = system::deploy_boot::mount_for_chroot(root, number)?;
-    println!("bound deployment {number}'s trees over {}", root.display());
+    println!(
+        "bound deployment {number}'s trees over {}; its /usr/local stays empty, as nothing in the shared one, {}, should get in the way of a repair",
+        root.display(),
+        system::usr_local::dir(root).display()
+    );
     let esp = fs::read_to_string(Paths::under(root).state.join("boot/esp")).unwrap_or_default();
     let esp = esp.trim().trim_start_matches('/');
     if !esp.is_empty() && !system::boot::is_fat(&root.join(esp)) {

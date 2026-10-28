@@ -148,20 +148,22 @@ pub fn lay_out(root: &Path) -> Result<Store> {
             (&["-al"], &["-a"])
         }
     };
+    share_usr_local(root, store.backend())?;
     for (tree, at) in TREES {
         let from = root.join(at);
         let to = staging.join(tree);
         if from.is_dir() {
-            let how = if ["usr", "opt", "boot"].contains(tree) {
-                shared
-            } else {
-                own
-            };
-            cp(how, &from, &to)?;
+            let mut how = own.to_vec();
+            if ["usr", "opt", "boot"].contains(tree) {
+                // A filesystem mounted at /usr/local stays where fstab mounts it, and hardlinks can't cross into it.
+                how = [shared, &["--one-file-system"]].concat();
+            }
+            cp(&how, &from, &to)?;
         } else {
             fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
         }
     }
+    empty_usr_local(&staging.join("usr"), &staging.join("pacman"))?;
     fs::create_dir(staging.join("var-upper"))
         .with_context(|| format!("creating {}", staging.join("var-upper").display()))?;
     mark("layout-copied");
@@ -174,10 +176,41 @@ pub fn lay_out(root: &Path) -> Result<Store> {
     Ok(store)
 }
 
-/// Binds deployment `number`'s trees over the live root, as its boot would, and records it as the running one, so the system works on the deployment's files from now on.
+/// Copies the live /usr/local into the shared /var/usrlocal, which boots bind over each deployment's own: hardlinks on ext4, reflinks on btrfs, entries already there kept, so a layout cut off partway starts over without losing any; a filesystem mounted at /usr/local stays where fstab mounts it, over the bind.
+fn share_usr_local(root: &Path, backend: Backend) -> Result<()> {
+    let from = root.join("usr/local");
+    let to = crate::system::usr_local::dir(root);
+    if !from.is_dir() || mounted(root).contains(&from) {
+        if !to.is_dir() {
+            fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
+            fs::set_permissions(&to, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .with_context(|| format!("chmod {}", to.display()))?;
+        }
+        return Ok(());
+    }
+    let how: &[&str] = match backend {
+        Backend::Snapshot => &["-a", "--reflink=auto", "--update=none"],
+        Backend::Overlay => &["-al", "--update=none"],
+    };
+    cp(how, &from, &to)
+}
+
+/// Leaves a staged deployment's usr/local with nothing but the filesystem package's skeleton from pacman database `local_db`: the boot binds the shared /var/usrlocal over it.
+fn empty_usr_local(usr: &Path, local_db: &Path) -> Result<()> {
+    let local = usr.join("local");
+    if !local.is_dir() {
+        fs::create_dir(&local).with_context(|| format!("creating {}", local.display()))?;
+        return fs::set_permissions(&local, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .with_context(|| format!("chmod {}", local.display()));
+    }
+    crate::system::usr_local::strip_to_skeleton(&local, &crate::system::usr_local::skeleton(local_db))
+}
+
+/// Binds deployment `number`'s trees over the live root, and the shared /var/usrlocal over its /usr/local, as its boot would, and records it as the running one, so the system works on the deployment's files from now on.
 pub fn bind_live(root: &Path, store: &Store, number: u32) -> Result<()> {
     crate::system::deploy_boot::bind_trees(root, &store.path(number))
         .with_context(|| format!("mounting deployment {number} over the live system"))?;
+    crate::system::deploy_boot::bind_usr_local(root).context("mounting /var/usrlocal over the live /usr/local")?;
     let record = root.join(crate::system::boot::DEPLOYMENT_RECORD.trim_start_matches('/'));
     if let Some(dir) = record.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;

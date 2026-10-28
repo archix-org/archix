@@ -41,8 +41,11 @@ impl SystemChange {
 /// Where a managed path is on disk for one pass over the files, or None when the pass leaves it to another.
 pub type Locate<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
 
-/// The deployment tree a managed path belongs to, if any; everything else is written on the live system.
+/// The deployment tree a managed path belongs to, if any; everything else, /usr/local included, is written on the live system.
 pub fn deployment_tree(path: &str) -> Option<&'static str> {
+    if super::usr_local::holds(path) {
+        return None;
+    }
     ["usr", "etc", "opt", "boot"].into_iter().find(|tree| {
         path.strip_prefix('/')
             .and_then(|rest| rest.strip_prefix(tree))
@@ -1476,7 +1479,8 @@ mod tests {
     #[test]
     fn managed_paths_split_into_deployment_trees_and_the_live_system() {
         assert_eq!(deployment_tree("/etc/x"), Some("etc"));
-        assert_eq!(deployment_tree("/usr/local/bin/x"), Some("usr"));
+        assert_eq!(deployment_tree("/usr/local/bin/x"), None);
+        assert_eq!(deployment_tree("/usr/lib/x"), Some("usr"));
         assert_eq!(deployment_tree("/opt/x/y"), Some("opt"));
         assert_eq!(deployment_tree("/etcetera/x"), None);
         assert_eq!(deployment_tree("/home/u/.x"), None);

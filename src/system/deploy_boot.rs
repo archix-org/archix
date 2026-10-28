@@ -301,6 +301,23 @@ pub fn bind_trees(root: &Path, deployment: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Binds the shared /var/usrlocal read-write over `root`'s /usr/local, which the read-only /usr of the deployment bound there keeps as its mountpoint; the shared tree is made when missing.
+pub fn bind_usr_local(root: &Path) -> Result<()> {
+    let shared = crate::system::usr_local::dir(root);
+    let target = root.join("usr/local");
+    if !is_dir(&target) {
+        bail!("{} isn't a directory to mount /var/usrlocal on", target.display());
+    }
+    if !is_dir(&shared) {
+        make_mountpoint(root, &shared)?;
+    }
+    // On a shared root the /usr bind is a peer of the root's mount, so a mount on /usr/local would also land on the deployment's own usr/local under /archix; a slave that is shared again keeps it to /usr and its own copies.
+    let usr = root.join("usr");
+    sys_mount(None, &usr, libc::MS_SLAVE).with_context(|| format!("making {} a slave mount", usr.display()))?;
+    sys_mount(None, &usr, libc::MS_SHARED).with_context(|| format!("making {} a shared mount", usr.display()))?;
+    bind(&shared, &target, false).with_context(|| format!("binding {} on {}", shared.display(), target.display()))
+}
+
 /// In the initramfs: binds the chosen deployment's trees over `root` and records its generation in `run_dir`/deployment.
 pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     mount_for(root, efivar, run_dir, &crate::testhooks::kernel_cmdline())
@@ -339,8 +356,22 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
         eprintln!("archix: warning: fstab mounts {at} separately, which hides this deployment's {what}");
     }
     bind_trees(root, &deployment).with_context(|| format!("mounting deployment {}", chosen.generation))?;
+    let skipped =
+        crate::system::usr_local::skip_reason(selected.as_deref(), chosen.generation, current(&archix).ok().flatten());
+    let usr_local = match &skipped {
+        Some(why) => format!("skipped {why}\n"),
+        None => match bind_usr_local(root) {
+            Ok(()) => "mounted\n".to_string(),
+            Err(e) => format!("skipped binding /var/usrlocal failed ({e:#})\n"),
+        },
+    };
+    if let Some(why) = usr_local.strip_prefix("skipped ") {
+        println!("archix: leaving /usr/local unmounted: {}", why.trim());
+    }
     protect_store(root)?;
     fs::create_dir_all(run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
+    fs::write(run_dir.join("usr-local"), usr_local)
+        .with_context(|| format!("writing {}", run_dir.join("usr-local").display()))?;
     fs::write(run_dir.join("deployment"), format!("{}\n", chosen.generation))
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;
     let why = match (&selected, chosen.selected) {
@@ -370,7 +401,7 @@ fn complete_deployments(archix: &Path) -> Vec<u32> {
     numbers
 }
 
-/// From a live USB: binds deployment `number`'s trees, current's by default, over the archix root mounted at `root`, and the store read-only as a boot does, so `arch-chroot` into `root` runs that deployment; the mount above `root` is made private, as the staging root's pivot_root needs.
+/// From a live USB: binds deployment `number`'s trees, current's by default, over the archix root mounted at `root`, and the store read-only as a boot does, but not /var/usrlocal over /usr/local, so `arch-chroot` into `root` runs that deployment; the mount above `root` is made private, as the staging root's pivot_root needs.
 pub fn mount_for_chroot(root: &Path, number: Option<u32>) -> Result<u32> {
     let root = &fs::canonicalize(root).with_context(|| format!("reading {}", root.display()))?;
     let archix = root.join("archix");
@@ -437,7 +468,7 @@ pub fn hook_files(root: &Path) -> Vec<(PathBuf, String)> {
                 "#!/bin/bash\n\nbuild() {{\n    add_binary {static_binary} /usr/bin/archix\n    add_runscript\n    \
                  add_file /usr/lib/archix/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n    \
                  add_symlink /usr/lib/systemd/system/initrd-root-fs.target.requires/archix-deploy-mount.service /usr/lib/systemd/system/archix-deploy-mount.service\n}}\n\n\
-                 help() {{\n    echo \"archix deployments: mounts the booted deployment's /usr, /etc, /opt, /boot, pacman database and DKMS state on the root\"\n}}\n"
+                 help() {{\n    echo \"archix deployments: mounts the booted deployment's /usr, /etc, /opt, /boot, pacman database and DKMS state on the root, and /var/usrlocal on /usr/local\"\n}}\n"
             ),
         ),
         (

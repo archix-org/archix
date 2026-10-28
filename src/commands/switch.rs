@@ -63,21 +63,20 @@ fn place_in(paths: &Paths) -> impl Fn(&str) -> Option<PathBuf> {
     let here = current_root(paths);
     let root = paths.root.clone();
     move |path: &str| {
-        let rel = path.trim_start_matches('/');
         Some(match deployment_tree(path) {
-            Some(_) => here.join(rel),
-            None => root.join(rel),
+            Some(_) => here.join(path.trim_start_matches('/')),
+            None => system::usr_local::on_disk(&root, path),
         })
     }
 }
 
-/// Where the live pass writes a managed path outside the deployment trees.
+/// Where the live pass writes a managed path outside the deployment trees, /usr/local's in the shared /var/usrlocal.
 fn live_place(paths: &Paths) -> impl Fn(&str) -> Option<PathBuf> {
     let root = paths.root.clone();
     move |path: &str| {
         deployment_tree(path)
             .is_none()
-            .then(|| root.join(path.trim_start_matches('/')))
+            .then(|| system::usr_local::on_disk(&root, path))
     }
 }
 
@@ -347,8 +346,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     }
     if !laid_out {
         println!(
-            "lay out   the system as deployment 1: /usr, /etc, /opt, /boot and pacman's database move into {}, with a boot entry of its own",
-            paths.root.join("archix/deploy/1").display()
+            "lay out   the system as deployment 1: /usr, /etc, /opt, /boot and pacman's database move into {}, with a boot entry of its own, and /usr/local into {}, which every deployment shares",
+            paths.root.join("archix/deploy/1").display(),
+            system::usr_local::dir(&paths.root).display()
         );
     }
     if !(nothing_changes && !laid_out) {
@@ -1861,6 +1861,9 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
             }
             Err(e) => println!("archix: {e:#}"),
         }
+    }
+    if laid_out && let Err(e) = system::usr_local::sync_note(&paths) {
+        println!("archix: updating the login note about /usr/local: {e:#}");
     }
     let booted = match cmdline {
         Some(cmdline) => system::boot::booted_generation(&cmdline),

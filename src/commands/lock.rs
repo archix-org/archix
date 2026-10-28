@@ -361,10 +361,9 @@ pub(super) fn pending(
     );
     let here = super::switch::current_root(&paths);
     let place = |path: &str| {
-        let rel = path.trim_start_matches('/');
         Some(match system::apply::deployment_tree(path) {
-            Some(_) => here.join(rel),
-            None => paths.root.join(rel),
+            Some(_) => here.join(path.trim_start_matches('/')),
+            None => system::usr_local::on_disk(&paths.root, path),
         })
     };
     lines.extend(system::apply::describe(
@@ -475,6 +474,9 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 println!("{}", archix::system::reboot::line(&waiting));
             }
             archix::deploy::verify::print_status(&paths);
+            if let Some(warning) = archix::system::usr_local::boot_files_warning(&paths.root) {
+                println!("{warning}");
+            }
             for line in archix::system::activate::boot_failures(&paths.root) {
                 println!("{line}");
             }

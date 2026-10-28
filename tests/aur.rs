@@ -586,3 +586,51 @@ fn an_aur_package_standing_in_for_a_repo_package_is_used_only_when_declared() {
     fs::write(setup.dir.path().join("init.lua"), init).unwrap();
     fs::write(setup.dir.path().join("archix.lock"), before).unwrap();
 }
+
+#[test]
+#[ignore]
+fn a_package_that_installs_or_writes_into_usr_local_is_refused_naming_its_files() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        package: "install -Dm755 /dev/null \"$pkgdir/usr/local/bin/archix-test-local\"",
+        ..TestPkg::new("archix-test-local", "1.0")
+    });
+    // A package's own pacman hook, run in the staging root as an install script is, writes what the package file doesn't ship.
+    aur.publish(TestPkg {
+        package: "install -d \"$pkgdir/usr/share/libalpm/hooks\"\n  printf '[Trigger]\\nOperation = Install\\nType = Package\\nTarget = archix-test-sneaky\\n\\n[Action]\\nWhen = PostTransaction\\nExec = /usr/bin/sh -c \"mkdir -p /usr/local/lib/sneaky && echo x > /usr/local/lib/sneaky/file\"\\n' > \"$pkgdir/usr/share/libalpm/hooks/archix-test-sneaky.hook\"",
+        ..TestPkg::new("archix-test-sneaky", "1.0")
+    });
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&[], &body);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let before = (machine.current(), machine.deployments());
+
+    setup.set_body(&["archix-test-local"], &body);
+    let out = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("install files into /usr/local")
+            && out.contains("archix-test-local /usr/local/bin/archix-test-local"),
+        "{out}"
+    );
+    assert_eq!(
+        (machine.current(), machine.deployments()),
+        before,
+        "nothing was changed"
+    );
+
+    setup.set_body(&["archix-test-sneaky"], &body);
+    let out = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        out.contains("put files into /usr/local") && out.contains("/usr/local/lib/sneaky/file"),
+        "{out}"
+    );
+    assert_eq!(
+        (machine.current(), machine.deployments()),
+        before,
+        "nothing was changed"
+    );
+    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+    assert!(!machine.root.join("var/usrlocal/lib/sneaky").exists());
+}

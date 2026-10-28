@@ -16,6 +16,7 @@ pub mod rescue_auth;
 pub mod revoke;
 pub mod secureboot;
 pub mod sleep;
+pub mod usr_local;
 
 use std::collections::BTreeMap;
 use std::fs;

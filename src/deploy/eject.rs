@@ -165,7 +165,7 @@ fn cp(args: &[&str], from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Fills the usr, etc, opt, boot, pacman database and DKMS state under `root`, a bind of the root filesystem without its submounts, from deployment `number` there, emptying them first: hardlinks for usr, opt and boot on ext4 (the deployment's files outlive /archix through them) and real copies of the rest, reflinks on btrfs; archix's built UKIs stay behind.
+/// Fills the usr, etc, opt, boot, pacman database and DKMS state under `root`, a bind of the root filesystem without its submounts, from deployment `number` there, emptying them first: hardlinks for usr, opt and boot on ext4 (the deployment's files outlive /archix through them) and real copies of the rest, reflinks on btrfs; then /usr/local from the shared /var/usrlocal, the same way; archix's built UKIs stay behind.
 fn copy_trees(root: &Path, store: &Store, number: u32) -> Result<()> {
     let deployment = root.join("archix/deploy").join(number.to_string());
     for (i, (tree, at)) in TREES.iter().enumerate() {
@@ -184,7 +184,24 @@ fn copy_trees(root: &Path, store: &Store, number: u32) -> Result<()> {
             mark("eject-copying");
         }
     }
+    let shared = crate::system::usr_local::dir(root);
+    if shared.is_dir() {
+        let local = root.join("usr/local");
+        for entry in fs::read_dir(&local).with_context(|| format!("reading {}", local.display()))? {
+            super::stage::remove_any(&entry.with_context(|| format!("reading {}", local.display()))?.path())?;
+        }
+        let how: &[&str] = match store.backend() {
+            Backend::Snapshot => &["-a", "--reflink=auto"],
+            Backend::Overlay => &["-al"],
+        };
+        cp(how, &shared, &local)?;
+    }
     super::stage::remove_any(&root.join("boot/archix"))
+}
+
+/// Deletes the shared /var/usrlocal once the root's own /usr/local holds its files and nothing boots deployments any more.
+fn remove_shared_usr_local(root: &Path) -> Result<()> {
+    super::stage::remove_any(&crate::system::usr_local::dir(root))
 }
 
 /// Takes archix's integration off the root's own trees and puts back or unlocks the files generation `number` manages, as the eject of a plain system does.
@@ -551,6 +568,7 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool) -> Result<Ve
     mark("eject-unbound");
     drop(lock);
     remove_store(root)?;
+    remove_shared_usr_local(root)?;
     crate::durable::sync_filesystems_checked(&[root])?;
     mark("eject-removed");
     Ok(written)
@@ -598,6 +616,7 @@ pub fn offline(paths: &Paths, number: Option<u32>, esp: &Path) -> Result<Vec<Str
     }
     drop(lock);
     remove_store(root)?;
+    remove_shared_usr_local(root)?;
     crate::durable::sync_filesystems_checked(&[root])?;
     clear_state(&paths.state)?;
     Ok(written)

@@ -233,6 +233,22 @@ impl Staging {
         for scratch in [".upper", ".work", VAR_LOWER, VAR_BASE] {
             remove_any(&self.dir.join(scratch))?;
         }
+        let stray = crate::system::usr_local::staged_files(&self.dir);
+        if !stray.is_empty() {
+            let shown: Vec<&str> = stray.iter().take(20).map(String::as_str).collect();
+            bail!(
+                "the new deployment's packages or their install scripts put files into /usr/local, which every deployment shares from /var/usrlocal and which no package may install to: {}{}; nothing was changed. Build such a package to install under /usr or /opt instead",
+                shown.join(", "),
+                match stray.len() - shown.len() {
+                    0 => String::new(),
+                    n => format!(" and {n} more"),
+                }
+            );
+        }
+        if !self.dir.join("usr/local").is_dir() {
+            fs::create_dir(self.dir.join("usr/local"))
+                .context("creating the new deployment's /usr/local mountpoint")?;
+        }
         let carried_record = self.base.join(crate::system::activate::VAR_BACKUP);
         crate::system::activate::write_var_backup(
             &self.dir,
@@ -354,7 +370,7 @@ fn split_tree(path: &Path) -> Result<(&'static str, &Path)> {
     bail!("{} isn't in a deployment's usr, etc, opt or boot", path.display())
 }
 
-pub(super) fn remove_any(path: &Path) -> Result<()> {
+pub(crate) fn remove_any(path: &Path) -> Result<()> {
     let result = match fs::symlink_metadata(path) {
         Ok(meta) if meta.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),

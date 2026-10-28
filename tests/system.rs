@@ -553,3 +553,126 @@ fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
         after >> 20
     );
 }
+
+fn usr_local_body(text: &str) -> String {
+    format!(
+        r#"files = {{ ["/usr/local/bin/archix-declared"] = {{ text = {text:?}, mode = "0755", on_change = "echo ran >> /var/tmp/archix-usr-local-on-change" }} }}"#
+    )
+}
+
+#[test]
+#[ignore]
+fn usr_local_is_shared_writable_written_at_once_and_never_rolled_back() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], &usr_local_body("one"));
+    let machine = &setup.machine;
+    let root = machine.root.clone();
+    let live = |rel: &str| fs::read_to_string(root.join("usr/local").join(rel)).unwrap_or_default();
+    let ran = || fs::read_to_string(root.join("var/tmp/archix-usr-local-on-change")).unwrap_or_default();
+    setup.ok(&["switch", "--noconfirm"]);
+    let first = machine.current().unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("var/usrlocal/bin/archix-declared")).unwrap(),
+        "one\n",
+        "a /usr/local file is written to the shared /var/usrlocal right after the commit"
+    );
+    assert_eq!(
+        live("bin/archix-declared"),
+        "one\n",
+        "the first layout bound /var/usrlocal over the running /usr/local"
+    );
+    assert_eq!(ran(), "ran\n", "its on_change runs right away");
+    for n in machine.deployments() {
+        assert_eq!(
+            archix::system::usr_local::staged_files(&machine.deployment(n)),
+            Vec::<String>::new(),
+            "deployment {n}'s own /usr/local holds only the filesystem package's skeleton"
+        );
+    }
+    machine.reboot(Some(&format!("archix-{first}.conf")));
+    assert_eq!(
+        fs::read_to_string(root.join("run/archix/usr-local")).unwrap(),
+        "mounted\n"
+    );
+    fs::write(root.join("usr/local/bin/handmade"), "curl | sh\n").unwrap();
+    assert!(
+        root.join("var/usrlocal/bin/handmade").exists(),
+        "/usr/local is writable and shared"
+    );
+    let err = fs::write(root.join("usr/handmade"), "x").unwrap_err();
+    assert_eq!(err.raw_os_error(), Some(libc::EROFS), "/usr stays read-only");
+    assert!(setup.ok(&["diff"]).contains("matches the lock and the config"));
+
+    fs::write(root.join("usr/local/bin/archix-declared"), "edited by hand\n").unwrap();
+    assert!(
+        setup
+            .ok(&["diff"])
+            .contains("/usr/local/bin/archix-declared (edited outside archix")
+    );
+    setup.set_body(&[], &usr_local_body("two"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        live("bin/archix-declared"),
+        "two\n",
+        "written now, not at the next boot"
+    );
+    assert_eq!(ran(), "ran\nran\n");
+
+    setup.ok(&["rollback", &first.to_string(), "--noconfirm"]);
+    assert_eq!(machine.current(), Some(first));
+    assert_eq!(
+        live("bin/archix-declared"),
+        "one\n",
+        "a managed file follows the generation, as /srv's do"
+    );
+    assert_eq!(
+        live("bin/handmade"),
+        "curl | sh\n",
+        "a rollback leaves what was installed to /usr/local by hand"
+    );
+    machine.reboot(Some(&format!("archix-{first}.conf")));
+    assert_eq!(
+        live("bin/handmade"),
+        "curl | sh\n",
+        "and so does the boot of the rolled-back deployment"
+    );
+
+    setup.set_body(&[], &usr_local_body("three"));
+    setup.ok(&["switch", "--noconfirm"]);
+    let newest = machine.current().unwrap();
+    let out = machine.reboot(Some(&format!("archix-{first}.conf")));
+    assert!(out.contains("leaving /usr/local unmounted"), "{out}");
+    assert!(
+        !root.join("usr/local/bin/handmade").exists(),
+        "a boot of an older deployment than current leaves /usr/local out"
+    );
+    let cmdline = ("ARCHIX_TEST_CMDLINE", "root=/dev/vda2 rw");
+    let entry = format!("archix-{first}.conf");
+    setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(
+        notes.contains("left /usr/local unmounted") && notes.contains(&format!("older than the current {newest}")),
+        "{notes}"
+    );
+    machine.reboot(Some(&format!("archix-{first}.conf")));
+    setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    assert_eq!(
+        live("bin/handmade"),
+        "curl | sh\n",
+        "the next boot, of what is current now, binds it again"
+    );
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(!notes.contains("/usr/local"), "{notes}");
+
+    let unit = root.join("usr/local/lib/systemd/system/archix-local.service");
+    fs::create_dir_all(unit.parent().unwrap()).unwrap();
+    fs::write(&unit, "[Service]\nExecStart=/usr/bin/true\n").unwrap();
+    for command in ["status", "verify"] {
+        let out = setup.ok(&[command]);
+        assert!(
+            out.contains("/usr/local/lib/systemd/system/archix-local.service")
+                && out.contains("no rollback undoes them"),
+            "{command}: {out}"
+        );
+    }
+}

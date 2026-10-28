@@ -126,12 +126,15 @@ pub fn changed(problems: Vec<Problem>) -> (Vec<Problem>, usize) {
     (changed, missing.len())
 }
 
-/// Checks every file the packages of `deployment` installed under usr, opt and boot against their mtree, as `pacman -Qkk` does, backup files aside.
+/// Checks every file the packages of `deployment` installed under usr, opt and boot against their mtree, as `pacman -Qkk` does, backup files and /usr/local, which the boot covers with the shared one, aside.
 pub fn check(deployment: &Path) -> Result<Vec<Problem>> {
     let mut problems = Vec::new();
     for package in packages(&deployment.join("pacman"))? {
         for entry in &package.entries {
-            if !SHARED.iter().any(|tree| entry.path.starts_with(tree)) || package.backups.contains(&entry.path) {
+            if !SHARED.iter().any(|tree| entry.path.starts_with(tree))
+                || entry.path.starts_with("usr/local/")
+                || package.backups.contains(&entry.path)
+            {
                 continue;
             }
             if let Some(what) = differs(&deployment.join(&entry.path), entry)? {
