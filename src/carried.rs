@@ -45,7 +45,7 @@ pub fn find(scan: &Scan) -> Result<Carried> {
     let owned = capture::owned(scan.installed);
     let mut trees = Vec::new();
     for top in ["usr", "opt"] {
-        unowned_tree(scan.trees, top, &owned, &mut trees);
+        unowned_tree(scan.trees, top, &owned, scan.declared, &mut trees);
     }
     trees.sort();
     let found = capture::config_files_owned(scan.root, scan.installed, &owned, scan.declared)?;
@@ -109,8 +109,8 @@ fn with_count(dir: &str, n: usize) -> String {
     }
 }
 
-/// Paths under `/top` of `base` no package owns, but what pacman hooks make anyway, /usr/local and other filesystems.
-fn unowned_tree(base: &Path, top: &str, owned: &BTreeSet<String>, out: &mut Vec<String>) {
+/// Paths under `/top` of `base` no package owns, but what pacman hooks make anyway, what the config or archix writes, /usr/local and other filesystems.
+fn unowned_tree(base: &Path, top: &str, owned: &BTreeSet<String>, declared: &BTreeSet<String>, out: &mut Vec<String>) {
     let Ok(meta) = fs::symlink_metadata(base.join(top)) else {
         return;
     };
@@ -127,7 +127,7 @@ fn unowned_tree(base: &Path, top: &str, owned: &BTreeSet<String>, out: &mut Vec<
             let Ok(kind) = entry.file_type() else { continue };
             let path = format!("{dir}/{}", entry.file_name().to_string_lossy());
             if !kind.is_dir() {
-                if !owned.contains(&path) && !capture::is_generated(&path) {
+                if !owned.contains(&path) && !declared.contains(&path) && !capture::is_generated(&path) {
                     out.push(path);
                 }
                 continue;
@@ -139,7 +139,7 @@ fn unowned_tree(base: &Path, top: &str, owned: &BTreeSet<String>, out: &mut Vec<
             if owned.contains(&as_dir) {
                 stack.push(path);
             } else if !capture::is_generated(&as_dir) {
-                let n = files_under(base, &path, device);
+                let n = files_under(base, &path, device, declared);
                 if n > 0 {
                     out.push(with_count(&as_dir, n));
                 }
@@ -148,8 +148,8 @@ fn unowned_tree(base: &Path, top: &str, owned: &BTreeSet<String>, out: &mut Vec<
     }
 }
 
-/// Files and symlinks under `dir` but those pacman hooks make, on `device` only.
-fn files_under(base: &Path, dir: &str, device: u64) -> usize {
+/// Files and symlinks under `dir` but those pacman hooks make and `declared` ones, on `device` only.
+fn files_under(base: &Path, dir: &str, device: u64, declared: &BTreeSet<String>) -> usize {
     let mut n = 0;
     let mut stack = vec![dir.to_string()];
     while let Some(dir) = stack.pop() {
@@ -165,7 +165,7 @@ fn files_under(base: &Path, dir: &str, device: u64) -> usize {
                 {
                     stack.push(path);
                 }
-            } else if !capture::is_generated(&path) {
+            } else if !capture::is_generated(&path) && !declared.contains(&path) {
                 n += 1;
             }
         }
@@ -251,6 +251,8 @@ mod tests {
             "/usr/lib/modules/7.0-arch1/updates/dkms/vbox.ko.zst",
             "/usr/share/icons/hicolor/icon-theme.cache",
             "/usr/local/bin/mine",
+            "/usr/bin/appimage",
+            "/opt/archix/appimages/appimage.AppImage",
             "/etc/app/config.yml",
             "/etc/app/extra.yml",
             "/etc/declared.conf",
@@ -304,7 +306,14 @@ mod tests {
             trees: root,
             root,
             installed: &installed,
-            declared: &BTreeSet::from(["/etc/declared.conf".to_string()]),
+            declared: &BTreeSet::from(
+                [
+                    "/etc/declared.conf",
+                    "/usr/bin/appimage",
+                    "/opt/archix/appimages/appimage.AppImage",
+                ]
+                .map(String::from),
+            ),
             ignored: &BTreeSet::from(["left-alone".to_string()]),
             config_dir: None,
         })

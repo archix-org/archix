@@ -79,6 +79,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let log = store.root().join("var/log/pacman.log");
     let logged = std::fs::metadata(&log).map_or(0, |meta| meta.len());
     crate::packages::transact(&tx, plan.packages, &staging.tree("pacman")).map_err(|e| exdev_hint(e, &log, logged))?;
+    refuse_packaged_usr_files(plan.system, &staging.tree("pacman"))?;
     let run = |argv: &[String]| -> Result<()> {
         let output = tx.output(argv)?;
         if !output.status.success() {
@@ -134,6 +135,36 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         records.save(plan.record)?;
     }
     Ok(Built { users, failures })
+}
+
+/// Refuses a deployment in which a file archix writes into /usr, an AppImage's command or menu entry, is one a package in pacman database `local_db` ships, which it would replace.
+fn refuse_packaged_usr_files(system: &SystemChange, local_db: &Path) -> Result<()> {
+    let ours: Vec<&str> = system
+        .to
+        .files
+        .keys()
+        .filter(|path| deployment_tree(path) == Some("usr"))
+        .map(|path| &path[1..])
+        .collect();
+    if ours.is_empty() {
+        return Ok(());
+    }
+    let taken: Vec<String> = crate::conflicts::owners(local_db)
+        .into_iter()
+        .flat_map(|(package, files)| {
+            files
+                .into_iter()
+                .filter(|file| ours.contains(&file.as_str()))
+                .map(move |file| format!("/{file} is {package}'s"))
+        })
+        .collect();
+    if taken.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "the config's AppImages would replace files packages ship: {}; give the AppImage another name in appimages; nothing was changed",
+        taken.join(", ")
+    )
 }
 
 /// Explains a failed transaction whose scriptlet output in pacman's log, from byte `from` on, shows a rename refused across the staging overlay.

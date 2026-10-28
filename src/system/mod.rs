@@ -383,6 +383,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         );
     }
     render_environment(&mut b, root("environment"));
+    render_appimages(&mut b, root("appimages"));
     if let Some(boot) = root("boot") {
         let esp = str_of(boot, "esp").unwrap_or("/boot").trim_end_matches('/').to_string();
         for (name, text) in map(boot, "extra_entries").into_iter().flatten() {
@@ -465,6 +466,42 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         blobs: b.blobs,
         fetches: b.fetches,
     })
+}
+
+/// Where the appimages module puts AppImage `name` in each deployment's /opt.
+pub fn appimage_path(name: &str) -> String {
+    format!("/opt/archix/appimages/{name}.AppImage")
+}
+
+/// Each AppImage's command in /usr/bin and menu entry in /usr/share/applications, inside the deployment beside the AppImage in its /opt, so they come and go with it on a switch or rollback; the appimages module checks the names.
+fn render_appimages(b: &mut Builder, appimages: Option<&Value>) {
+    let Some(Value::Map(appimages)) = appimages else {
+        return;
+    };
+    for (name, image) in appimages {
+        let target = appimage_path(name);
+        b.link(&format!("/usr/bin/{name}"), &target);
+        if get(image, "desktop") == Some(&Value::Bool(false)) {
+            continue;
+        }
+        let mut lines = vec![
+            "[Desktop Entry]".to_string(),
+            "Type=Application".to_string(),
+            format!("Name={}", str_of(image, "name").unwrap_or(name)),
+            format!("Exec={target} %U"),
+        ];
+        if let Some(icon) = str_of(image, "icon") {
+            lines.push(format!("Icon={icon}"));
+        }
+        let categories = strings(get(image, "categories"));
+        if !categories.is_empty() {
+            lines.push(format!("Categories={};", categories.join(";")));
+        }
+        b.text(
+            &format!("/usr/share/applications/archix-{name}.desktop"),
+            &format!("{}\n", lines.join("\n")),
+        );
+    }
 }
 
 /// `environment.variables` for login shells and systemd user sessions, and `environment.shell_aliases` for login shells.

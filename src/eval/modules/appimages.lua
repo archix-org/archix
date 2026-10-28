@@ -14,26 +14,19 @@ return {
     appimages = archix.option {
       type = t.attrs_of(app),
       default = {},
-      description = "AppImages to download, keyed by command name: installed to /opt/archix/appimages, linked into /usr/local/bin and added to app menus. Declares fuse2, which AppImages need.",
+      description = "AppImages to download, keyed by command name: installed to /opt/archix/appimages, linked as /usr/bin/<name> and added to app menus in /usr/share/applications, all inside the deployment, so a rollback takes them back together; a name a package's /usr/bin file has is refused. Declares fuse2, which AppImages need.",
     },
   },
   config = function(cfg)
     local files = {}
     local any = false
     for name, image in pairs(cfg.appimages) do
-      if not name:match("^[%w._-]+$") then
+      if not name:match("^[%w._-]+$") or name:match("^%.") then
         error("appimages: " .. name .. " isn't a valid command name")
       end
       any = true
-      local target = "/opt/archix/appimages/" .. name .. ".AppImage"
-      files[target] = { url = image.url, sha256 = image.sha256, mode = "0755" }
-      files["/usr/local/bin/" .. name] = { link = target }
-      if image.desktop then
-        local lines = { "[Desktop Entry]", "Type=Application", "Name=" .. (image.name or name), "Exec=" .. target .. " %U" }
-        if image.icon then lines[#lines + 1] = "Icon=" .. image.icon end
-        if #image.categories > 0 then lines[#lines + 1] = "Categories=" .. table.concat(image.categories, ";") .. ";" end
-        files["/usr/local/share/applications/archix-" .. name .. ".desktop"] = { text = table.concat(lines, "\n") .. "\n" }
-      end
+      -- The command and menu entry go into the deployment's /usr, which `files` refuses; system.render writes them.
+      files["/opt/archix/appimages/" .. name .. ".AppImage"] = { url = image.url, sha256 = image.sha256, mode = "0755" }
     end
     if not any then return {} end
     return { files = files, packages = { "fuse2" } }
