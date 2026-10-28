@@ -3,7 +3,7 @@
 set -euo pipefail
 suite=${SUITE:-boot}
 archive=${ARCHIVE:-https://archive.archlinux.org}
-dir=/vm date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl) archix=/work/archix
+dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl) archix=/work/archix
 # The rollback suite starts at an older snapshot and rolls glibc back, so archix itself must not need the build host's glibc.
 if [ "$suite" = rollback ]; then
   dir=/vm/rollback date=2026-06-01 size=16G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static
@@ -31,8 +31,6 @@ elif [ "$suite" = rescue ]; then
   dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq sbctl tpm2-tss)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
-elif [ "$suite" = boot ] || [ "$suite" = boot2 ]; then
-  dir=/vm/boot
 elif [ "$suite" = recovery ]; then
   dir=/vm/recovery
 fi
@@ -171,21 +169,14 @@ install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
-if [ "$suite" = boot-sh ] || [ "$dir" = /vm/boot ]; then
-  # The boot suite lays the system out on its first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
-  if [ "$suite" = boot-sh ]; then
-    test_unit=archix-vmtest.service
-    install -Dm755 "$dir/vmtest.sh" /mnt/usr/local/bin/archix-vmtest
-    printf '[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vmtest\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-vmtest.service
-  else
-    test_unit=archix-backdoor.service
-    install -Dm755 /vm/driver/backdoor.sh /mnt/usr/local/bin/archix-backdoor
-    printf "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/usr/local/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target\n" > /mnt/etc/systemd/system/archix-backdoor.service
-  fi
+if [ "$dir" = /vm/boot ]; then
+  # The boot tests lay the system out on their first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
+  install -Dm755 /vm/driver/backdoor.sh /mnt/usr/local/bin/archix-backdoor
+  printf "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/usr/local/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target\n" > /mnt/etc/systemd/system/archix-backdoor.service
   printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' > /mnt/etc/systemd/network/20-wired.network
   # A service that reads /usr all the time from a read-only view of its own, as ProtectSystem=strict gives it.
   printf '[Service]\nProtectSystem=strict\nExecStart=/bin/sh -c "while cat /usr/lib/os-release > /dev/null && ls /usr/bin > /dev/null; do sleep 0.2; done; exit 1"\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-protected.service
-  arch-chroot /mnt systemctl enable "$test_unit" archix-protected.service systemd-networkd.service systemd-resolved.service
+  arch-chroot /mnt systemctl enable archix-backdoor.service archix-protected.service systemd-networkd.service systemd-resolved.service
   sed -n 's/.*kernel_params = { \(.*\) },$/\1/p' /mnt/etc/archix/init.lua | tr -d '",' > /mnt/etc/kernel/cmdline
   kernel=$(basename "$(dirname "$(ls /mnt/usr/lib/modules/*/vmlinuz | head -1)")")
   mkdir -p /mnt/efi/EFI/Linux

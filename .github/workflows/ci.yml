@@ -167,36 +167,6 @@ jobs:
           path: ${{ runner.temp }}/archive/base
           key: archive-base-${{ github.run_id }}-${{ github.run_attempt }}-container
 
-  # The old shell boot suite, beside the split tests until they have been compared on the same commit.
-  boot-sh:
-    needs: [image, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    strategy:
-      fail-fast: false
-      matrix:
-        fs: [ext4, btrfs]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: boot
-          need-gb: "25"
-      - uses: actions/download-artifact@v4
-        with:
-          name: archix-build
-          path: ${{ runner.temp }}/build
-      - run: tests/vm/run.sh boot-sh
-        env:
-          FS: ${{ matrix.fs }}
-          ARCHIX_PREBUILT: ${{ runner.temp }}/build
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: boot
-          name: boot-sh-${{ matrix.fs }}
-          status: ${{ job.status }}
-
   # The split boot tests (docs/vm-testing.md), one job each; a pass is kept in the Actions cache with its logs by its inputs' hash, the test image's QEMU, OVMF and swtpm and the runner's kernel among them, so the test is skipped next time.
   boot:
     needs: [image, build]

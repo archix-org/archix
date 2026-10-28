@@ -1,4 +1,4 @@
-# The boot suite (tests/vm/vmtest.sh) on the driver: the first layout on a booted system, deployments, boot entries, boot counting, Secure Boot, the /etc merge, the fallback UKI and eject.
+# The boot checks as one sequential walk (boot2; the split tests beside it run each area alone), ported from the retired tests/vm/vmtest.sh:the first layout on a booted system, deployments, boot entries, boot counting, Secure Boot, the /etc merge, the fallback UKI and eject.
 import difflib
 import re
 import time
