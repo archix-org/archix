@@ -961,6 +961,7 @@ case "$1" in
   etc-merge-wrote-passwd) touch $d/watcher-mid; wait_for $d/staged ;;
   deploy-stage)
     mkdir $d/edited 2>/dev/null || exit 0
+    systemctl is-active --quiet {unit} && touch $d/watcher-live-at-edit
     add passwd 'carol:x:1050:1050::/home/carol:/bin/bash' 644
     add group 'carol:x:1050:' 644
     add shadow 'carol:$c:20000:0:99999:7:::' 600
@@ -977,6 +978,7 @@ exit 0
             edits = edits.display(),
             deploy = machine.root.join("archix/deploy").display(),
             archix = env!("CARGO_BIN_EXE_archix"),
+            unit = etcmerge::unit_name(&machine.root),
         ),
     )
     .unwrap();
@@ -1014,6 +1016,10 @@ exit 0
         "the record was saved while another archix read the store: {said}"
     );
     assert_ne!(next, pending, "{said}");
+    assert!(
+        flags.join("edited").exists() && !flags.join("watcher-live-at-edit").exists(),
+        "carol was added while the build ran and the watcher was stopped: {said}"
+    );
     assert!(
         setup
             .ok(&["generations"])
