@@ -117,7 +117,11 @@ if [ "${names[*]}" = base ]; then
   "${vm[@]}" python -m driver /vm/boot/base.py "${args[@]}"
   exit
 fi
-"${vm[@]}" python -m driver /vm/boot/base.py
+if ! "${vm[@]}" python -m driver /vm/boot/base.py; then
+  for name in "${pending[@]}"; do summary "$name" failed "the base, which it needs, failed"; done
+  echo "boot: the base failed, so none of ${pending[*]#boot-} ran on ${FS:-ext4}"
+  exit 1
+fi
 echo "base: laid out in $(($(date +%s) - started)) s from the start"
 overlay() { echo "qemu-img create -q -f qcow2 -b /work/disk.img -F raw /work/$1/disk.qcow2 && cp /work/vars.fd /work/$1/vars.fd && exec python -m driver /vm/boot/$1/test.py --work /work/$1 ${args[*]}"; }
 if [ -n "$interactive" ]; then
@@ -155,17 +159,18 @@ while [ ${#running[@]} -gt 0 ]; do
   wait -n -p done_pid || true
   test=${running[$done_pid]}
   unset "running[$done_pid]"
-  read -r status seconds offset < "$work/$test/status"
+  # A test whose runner died without its status still counts as failed, and the others still get reported.
+  read -r status seconds offset < "$work/$test/status" 2> /dev/null || { status=died seconds=? offset=?; }
   if [ "$status" = 0 ]; then
     echo "== $test passed: $seconds s, started at +$offset s"
     sed -n '/^steps passed/,$p' "$work/$test/output.log"
-    record "boot-$test" "$seconds" "$work/$test"
+    record "boot-$test" "$seconds" "$work/$test" || echo "warning: recording $test's pass failed"
     summary "$test" passed "$seconds s"
   else
     failed+=("$test")
     summary "$test" failed "$seconds s"
     echo "== $test FAILED (exit $status) after $seconds s, started at +$offset s; its last lines:"
-    tail -n 60 "$work/$test/output.log"
+    tail -n 60 "$work/$test/output.log" || true
   fi
 done
 echo "boot: ${#pending[@]} test(s) in $(($(date +%s) - started)) s on ${FS:-ext4}${failed[*]:+; failed: ${failed[*]}}"
