@@ -5,7 +5,7 @@ mod common;
 use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -131,7 +131,8 @@ impl Lab {
         let nm = self
             .root()
             .join("run/NetworkManager/system-connections/home.nmconnection");
-        for mounted in [nm, self.root().join("run/archix/secrets")] {
+        let nm_dir = nm.parent().unwrap().to_path_buf();
+        for mounted in [nm, nm_dir, self.root().join("run/archix/secrets")] {
             while mounted_type(&mounted).is_some() {
                 assert!(Command::new("umount").arg(&mounted).status().unwrap().success());
             }
@@ -370,6 +371,17 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
     c.eq(fs::read_to_string(&nm_path).ok(), Some(nm.clone()), "a path under /run");
     c.eq(mode_of(&nm_path), Some((0o600, 0)), "the path's mode");
     c.eq(
+        mounted_type(nm_path.parent().unwrap()),
+        Some("ramfs".to_string()),
+        "the path's directory is a ramfs, so an app's save by rename stays there",
+    );
+    let saved = nm_path.with_extension("tmp");
+    fs::write(&saved, format!("{nm}# edited\n")).unwrap();
+    c.check(
+        fs::rename(&saved, &nm_path).is_ok(),
+        "an app saving the profile by renaming a new file over it succeeds",
+    );
+    c.eq(
         shadow_hash(&etc, "alice"),
         pw_hash.clone(),
         "alice's password from the secret",
@@ -584,7 +596,21 @@ fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and
         diff.contains("secret     wg0: changed"),
         format!("diff tells a new value:\n{diff}"),
     );
-    lab.ok(&["switch", "--noconfirm"]);
+    let vmlck = tempfile::NamedTempFile::new().unwrap();
+    let (switched, out) = lab.run(
+        &["switch", "--noconfirm"],
+        &[("ARCHIX_TEST_VMLCK", vmlck.path().to_str().unwrap())],
+        None,
+    );
+    let locked: u64 = fs::read_to_string(vmlck.path())
+        .unwrap_or_default()
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    c.check(
+        switched && locked > 4096,
+        format!("the switch decrypts and scans with every page locked: VmLck {locked} kB\n{out}"),
+    );
     let second = lab.machine().current().unwrap();
     lab.boot();
     c.eq(
@@ -981,6 +1007,28 @@ fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_onl
         refused.contains("secret pin in /etc/archix-plain") && !refused.contains(&long),
         format!("a value written into a managed file is refused:\n{refused}"),
     );
+    lab.setup.set_body(
+        &[],
+        &secrets_body(
+            &lab,
+            r#"pin = { file = "secrets/pin.age" }"#,
+            r#"files = { ["/etc/archix-pin"] = { secret = "pin" } }"#,
+        ),
+    );
+    let saved = lab
+        .root()
+        .join("etc/NetworkManager/system-connections/home.nmconnection");
+    fs::create_dir_all(saved.parent().unwrap()).unwrap();
+    fs::write(&saved, format!("[wireguard]\nprivate-key={long}\n")).unwrap();
+    let refused = lab.fails(&["switch", "--noconfirm"]);
+    c.check(
+        refused.contains("secret pin in /etc/NetworkManager/system-connections/home.nmconnection")
+            && refused.contains("nothing was changed")
+            && !refused.contains(&long),
+        format!("a profile NetworkManager saved to /etc with the value in it fails the next switch:\n{refused}"),
+    );
+    fs::remove_file(&saved).unwrap();
+    lab.ok(&["switch", "--noconfirm"]);
     fs::remove_file(&copy).unwrap();
     lab.sweep(
         &c,
@@ -1078,5 +1126,140 @@ fn secrets_are_refused_where_they_cant_go_and_the_boot_names_what_it_couldnt_ope
         format!("a login note:\n{notes}"),
     );
     lab.sweep(&c, "refusals and boot failures", &|_, _| false, &[]);
+    c.finish();
+}
+
+/// The running system's secrets for a build to look for: a ramfs at /run/archix/secrets holding a value, and an identity in /var/lib/archix/secrets, both readable by anyone so only the build's isolation keeps them out; gone when dropped.
+struct Planted {
+    value: String,
+    identity: String,
+}
+
+impl Planted {
+    fn new() -> Planted {
+        let (value, identity) = (marker(32), marker(32));
+        let run = Path::new(archix::secrets::RUN_DIR);
+        if mounted_type(run).is_none() {
+            fs::create_dir_all(run).unwrap();
+            assert!(
+                Command::new("mount")
+                    .args(["-t", "ramfs", "-o", "mode=0711", "ramfs"])
+                    .arg(run)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        fs::write(run.join("wg0"), &value).unwrap();
+        fs::set_permissions(run.join("wg0"), fs::Permissions::from_mode(0o444)).unwrap();
+        let state = Path::new("/var/lib/archix/secrets");
+        fs::create_dir_all(state).unwrap();
+        fs::set_permissions(state, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(state.join("identity"), format!("AGE-SECRET-KEY-1{identity}\n")).unwrap();
+        fs::set_permissions(state.join("identity"), fs::Permissions::from_mode(0o444)).unwrap();
+        Planted { value, identity }
+    }
+}
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        let _ = Command::new("umount").arg(archix::secrets::RUN_DIR).status();
+        let _ = fs::remove_dir_all("/var/lib/archix/secrets");
+    }
+}
+
+/// A build step that writes what the build can see of the secrets, its environment and every process's command line into the build directory.
+const PEEK: &str = r#"{ ls -la /run/archix/secrets /var/lib/archix/secrets; cat /run/archix/secrets/wg0 /run/archix/secrets/files/* /var/lib/archix/secrets/identity; env; for p in /proc/[0-9]*; do tr '\0' ' ' < $p/cmdline; echo; done; } > "$startdir/peek" 2>&1 || true"#;
+
+fn peek_recipe(name: &str, version: &str) -> String {
+    format!(
+        "pkgname={name}\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\nbuild() {{\n  {PEEK}\n}}\n\
+         package() {{\n  install -Dm644 \"$startdir/peek\" \"$pkgdir/usr/share/{name}/peek\"\n}}\n"
+    )
+}
+
+#[test]
+#[ignore]
+fn aur_and_recipe_builds_see_no_secret_no_identity_and_nothing_of_either_in_their_environment_argv_or_log() {
+    let _system = lock_system();
+    let c = Checks::default();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        build: PEEK,
+        package: "install -Dm644 \"$startdir/peek\" \"$pkgdir/usr/share/archix-test-aurpeek/peek\"",
+        ..TestPkg::new("archix-test-aurpeek", "1.0")
+    });
+    let body = |on_host: &str| format!("aur = {{ url = {:?}, build_on_host = {{ {on_host} }} }}", aur.url());
+    let setup = Setup::with_files(
+        &["archix-test-peek", "archix-test-aurpeek"],
+        &body(r#""archix-test-aurpeek""#),
+        &[(
+            "pkgbuilds/archix-test-peek/PKGBUILD",
+            &peek_recipe("archix-test-peek", "1.0"),
+        )],
+    );
+    let planted = Planted::new();
+    let mut outputs = Vec::new();
+    let look = |what: &str, report: &str| {
+        c.check(
+            !report.contains(&planted.value)
+                && !report.contains(&planted.identity)
+                && !report
+                    .lines()
+                    .any(|line| line.ends_with(" wg0") || line.ends_with(" identity")),
+            format!("{what} saw a secret, the identity or their names:\n{report}"),
+        );
+    };
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    c.check(
+        out.contains("in a clean chroot") && out.contains("on the host"),
+        format!("both kinds of build ran:\n{out}"),
+    );
+    look(
+        "the recipe built in the chroot (makechrootpkg)",
+        &fs::read_to_string(system_path("/usr/share/archix-test-peek/peek")).unwrap_or_default(),
+    );
+    look(
+        "the AUR package built on the host before the layout (makepkg as the build user)",
+        &fs::read_to_string(system_path("/usr/share/archix-test-aurpeek/peek")).unwrap_or_default(),
+    );
+    outputs.push(out);
+    setup
+        .machine
+        .reboot(Some(&format!("archix-{}.conf", setup.machine.current().unwrap())));
+    fs::write(
+        setup.config.join("pkgbuilds/archix-test-peek/PKGBUILD"),
+        peek_recipe("archix-test-peek", "2.0"),
+    )
+    .unwrap();
+    setup.set_body(
+        &["archix-test-peek", "archix-test-aurpeek"],
+        &body(r#""archix-test-aurpeek", "archix-test-peek""#),
+    );
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    look(
+        "the recipe built on the host in a build view of the laid-out system",
+        &fs::read_to_string(system_path("/usr/share/archix-test-peek/peek")).unwrap_or_default(),
+    );
+    c.check(
+        fs::read_to_string(system_path("/usr/share/archix-test-peek/peek"))
+            .is_ok_and(|r| r.contains("2.0") || r.contains("PATH=")),
+        "the second build ran",
+    );
+    outputs.push(out);
+    for (i, out) in outputs.iter().enumerate() {
+        look(&format!("the build log of switch {}", i + 1), out);
+    }
+    let markers = vec![
+        ("value".to_string(), planted.value.clone().into_bytes()),
+        ("identity".to_string(), planted.identity.clone().into_bytes()),
+    ];
+    for hit in leak_sweep(&setup.machine, &setup.config, &[], &markers, &outputs) {
+        c.check(
+            hit.marker == "identity" && hit.place.starts_with("/var/lib/archix/secrets/"),
+            format!("builds: marker {} leaked into {}", hit.marker, hit.place),
+        );
+    }
+    drop(planted);
     c.finish();
 }

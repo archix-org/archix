@@ -53,11 +53,15 @@ fn mounted_type(path: &Path) -> Option<String> {
 
 /// Mounts a ramfs, which never swaps, at `dir`, 0711 so names can't be listed, unless one is there.
 pub fn mount_ramfs(dir: &Path) -> Result<()> {
+    mount_ramfs_mode(dir, c"mode=0711")
+}
+
+fn mount_ramfs_mode(dir: &Path, data: &std::ffi::CStr) -> Result<()> {
     if mounted_type(dir).as_deref() == Some("ramfs") {
         return Ok(());
     }
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let (source, target, fstype, data) = (c"ramfs", c_path(dir)?, c"ramfs", c"mode=0711");
+    let (source, target, fstype) = (c"ramfs", c_path(dir)?, c"ramfs");
     let flags = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
     if unsafe {
         libc::mount(
@@ -131,6 +135,26 @@ pub fn place(dir: &Path, name: &str, value: &[u8], uid: u32, gid: u32, mode: u32
         let _ = fs::remove_file(&tmp);
     }
     done.with_context(|| format!("writing {}", target.display()))
+}
+
+/// Puts a secret at `at`, a path under /run: in a ramfs mounted on its directory, so an app that saves by writing a temporary file and renaming it (NetworkManager) edits it there, atomically and never swapped; a directory that already holds other files instead gets the ramfs file `from` bound over `at`.
+fn place_at_path(from: &Path, at: &Path, value: &[u8], (uid, gid, mode): (u32, u32, u32)) -> Result<()> {
+    let dir = at.parent().context("a path has a directory")?;
+    let name = at
+        .file_name()
+        .context("a path has a name")?
+        .to_string_lossy()
+        .into_owned();
+    let others = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.file_name().to_string_lossy() != name);
+    if mounted_type(dir).as_deref() != Some("ramfs") && others {
+        return bind_file(from, at);
+    }
+    mount_ramfs_mode(dir, c"mode=0755")?;
+    place(dir, &name, value, uid, gid, mode)
 }
 
 /// Binds the ramfs file `from` over a file at `at`, made empty if missing, so an app that refuses links reads it there while the value stays on the ramfs, never on /run's tmpfs, which swaps.
@@ -272,7 +296,12 @@ pub fn activate(root: &Path) -> Result<Report> {
         if written.is_ok()
             && let Some(path) = &entry.path
         {
-            written = bind_file(&run.join(name), &root.join(path.trim_start_matches('/')));
+            written = place_at_path(
+                &run.join(name),
+                &root.join(path.trim_start_matches('/')),
+                value.as_slice(),
+                (uid, gid, entry.mode),
+            );
         }
         match written {
             Ok(()) => report.written.push(name.clone()),

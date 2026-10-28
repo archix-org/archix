@@ -1,4 +1,4 @@
-# Declared secrets on a real boot: consumers read them (a wg-quick link, a NetworkManager profile under /run, LoadCredential=, EnvironmentFile=, a crypt_hash login), an older entry boots its own values, a lost identity fails closed without a fallback and is recovered with the admin key, a damaged ciphertext costs only its secret, a crash leaves no core, swap and hibernation; each scenario ends with the guest's leak sweep, the run with a grep of the raw root and swap partitions.
+# Declared secrets on a real boot: consumers read them (a wg-quick link, a NetworkManager profile under /run that `nmcli connection modify --temporary` edits in place, LoadCredential=, EnvironmentFile=, a crypt_hash login), an older entry boots its own values, a lost identity fails closed without a fallback and is recovered with the admin key, a damaged ciphertext costs only its secret, the rescue entry decrypts nothing and its password holds, a live-USB style chroot rolls back without the identity, a crash leaves no core, swap and hibernation; each scenario ends with the guest's leak sweep, the run with a grep of the raw root and swap partitions.
 import json
 import re
 import secrets as random
@@ -13,7 +13,7 @@ RAMFS = "/run/vmtest-ramfs"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 BACKDOOR = "archix-backdoor.service"
 SECRETS_UNIT = "archix-secrets.service"
-MACHINE = {"mem": "1536"}
+MACHINE = {"mem": "1536", "console_input": True}
 m = t = None
 markers = {}
 original = ""
@@ -125,6 +125,34 @@ def values_hash(name):
     return out(f"sha256sum < /run/archix/secrets/{name} 2>/dev/null | cut -d' ' -f1").strip()
 
 
+cursor = [0]
+
+
+def expect(regex, timeout=900):
+    """Waits for regex on the serial console after what the last expect matched, so a prompt shown before doesn't count again."""
+    import time
+    pattern = re.compile(regex)
+    deadline = time.monotonic() + timeout
+    while True:
+        with open(m.serial, "rb") as console:
+            console.seek(cursor[0])
+            text = console.read().decode("latin-1")
+        found = pattern.search(text)
+        if found:
+            cursor[0] += found.end()
+            t.log(f"console: {found.group(0)!r}")
+            return found.group(0)
+        if time.monotonic() > deadline:
+            raise MachineError(f"/{regex}/ didn't show on the console within {timeout} s: {text[-800:]}")
+        time.sleep(0.5)
+
+
+def su_works(password):
+    """Whether alice logs in with su and `password`, typed once su has turned echo off and asked for it."""
+    login = m.execute(f"(sleep 3; printf '%s\\n' {shlex.quote(password)}) | SHELL=/bin/sh setpriv --reuid=nobody --regid=nobody --clear-groups script -qec 'su alice -c \"id -un\"' /dev/null 2>&1")
+    return login[1].split()[-1:] == ["alice"]
+
+
 def sha(text):
     import hashlib
     return hashlib.sha256(text.encode()).hexdigest()
@@ -195,9 +223,14 @@ def run(machine, test):
         t.check(up[0] == 0 and out("wg show wg0 private-key").strip() == wg, f"wg-quick should bring wg0 up through the link: {up[1][-600:]}")
         t.log(f"wg-quick on the link: {'warns' if 'world accessible' in up[1] else 'no warning'} about permissions")
         m.execute("wg-quick down wg0")
-        t.check(out("findmnt -no FSTYPE /run/NetworkManager/system-connections/home.nmconnection").strip() == "ramfs", "the NetworkManager profile should be the ramfs file, bound there")
+        t.check(out("findmnt -no FSTYPE /run/NetworkManager/system-connections").strip() == "ramfs", "NetworkManager's /run profile directory should be a ramfs")
         m.succeed("nmcli connection reload")
         t.check(out("nmcli -g connection.id connection show home 2>&1").strip() == "home", f"NetworkManager should load the profile from /run: {out('nmcli connection show 2>&1')}")
+        # Without --temporary NetworkManager moves a /run profile to /etc, plain text included.
+        modified = m.execute("nmcli connection modify --temporary home connection.autoconnect-priority 7 2>&1")
+        t.check(modified[0] == 0, f"nmcli should edit the /run profile in place: {modified[1][-300:]}")
+        t.check(not ok("test -e /etc/NetworkManager/system-connections/home.nmconnection"), "a --temporary edit should leave /etc alone")
+        t.check(ok("grep -q '^autoconnect-priority=7' /run/NetworkManager/system-connections/home.nmconnection") and out("findmnt -no FSTYPE --target /run/NetworkManager/system-connections/home.nmconnection").strip() == "ramfs", "nmcli's edit should land in the ramfs")
         t.check(ok("systemctl start archix-test-cred.service"), f"LoadCredential= should get api: {out('journalctl -b -u archix-test-cred --no-pager | tail -5')}")
         t.check(ok("systemctl start archix-test-env.service"), f"EnvironmentFile= should get nb through the template: {out('journalctl -b -u archix-test-env --no-pager | tail -5')}")
         t.check(out("stat -c '%a %U' /run/archix/secrets/api").strip() == "400 alice", "api should be alice's, 0400")
@@ -266,6 +299,67 @@ def run(machine, test):
         boot()
         t.check(ok("test -s /run/archix/secrets/nb"), "the next deployment has it whole again")
         sweep("s4", lambda name, place: name == "pw" and shadow_place(place))
+
+    with t.step("s6: the rescue entry decrypts nothing; a password set there holds over the secret's"):
+        m.select_entry("archix-rescue.conf")
+        m.reboot()
+        cursor[0] = m.console_mark
+        expect(r"rescue login \(root or a wheel user\): ", timeout=600)
+        m.type("alice")
+        expect(r"password: ", timeout=60)
+        m.type(password)
+        expect(r"logged in as alice", timeout=60)
+        expect(r"rescue> ", timeout=60)
+        m.type("shell")
+        expect(r"\[rescue ", timeout=60)
+        m.type("echo VMTEST-RESCUE:$(grep -c ' ramfs ' /proc/mounts):$(test -e /run/archix/secrets && echo present || echo absent):$(ls /run/archix 2>/dev/null | tr '\\n' ,)")
+        seen = expect(r"VMTEST-RESCUE:\d+:(present|absent):[^\r\n]*", timeout=60)
+        t.check(seen.startswith("VMTEST-RESCUE:0:absent"), f"the rescue should mount no ramfs and have no /run/archix/secrets: {seen}")
+        t.check(not re.search(r"archix: secrets: |decrypted \d+ of", m.console_since(m.console_mark)), "nothing in the rescue boot decrypts")
+        m.type("exit")
+        expect(r"rescue> ", timeout=60)
+        m.type("password alice")
+        expect(r"new password for alice: ", timeout=60)
+        m.type("rescued pass")
+        expect(r"again: ", timeout=60)
+        m.type("rescued pass")
+        said = expect(r"boots keep it over the crypt_hash secret pw", timeout=120)
+        t.log(f"the rescue said: {said}")
+        expect(r"rescue> ", timeout=60)
+        m.type("reboot")
+        m.new_boot("rebooting from the rescue")
+        boot()
+        t.check(ok("test -s /var/lib/archix/accounts/password-override/alice"), "the rescue should record the override")
+        t.check("alice's password was set in the rescue entry" in out("cat /var/lib/archix/notes"), "a login note should say the boot kept it")
+        t.check(su_works("rescued pass"), "alice should log in with the rescue's password after a normal boot")
+        switched = m.succeed(f"{HOST} switch --noconfirm", what="a switch with the secret unchanged")
+        t.check("keeping alice's password set in the rescue entry over the crypt_hash secret pw" in switched, f"the switch should keep it: {switched[-600:]}")
+        m.reboot()
+        boot()
+        t.check(su_works("rescued pass"), "and the boot after that switch")
+        sweep("s6", lambda name, place: name == "pw" and shadow_place(place))
+
+    with t.step("s7: from a live-USB style chroot, mount-deployment and a rollback without the identity"):
+        running = out("cat /run/archix/deployment").strip()
+        older = [n for n in out("ls /archix/deploy | sort -n").split() if n != running][-1]
+        btrfs = out("findmnt -no FSTYPE /").strip() == "btrfs"
+        m.succeed("mv /var/lib/archix/secrets/identity /root/identity.away")
+        m.succeed(f"mkdir -p /mnt/live && mount {'-o subvol=@ ' if btrfs else ''}/dev/vda2 /mnt/live && mount /dev/vda1 /mnt/live/efi")
+        m.succeed(f"/mnt/live/archix/deploy/{running}/usr/lib/archix/archix-static mount-deployment /mnt/live {running}", what="mount-deployment")
+        rolled = m.execute(f"arch-chroot /mnt/live archix rollback {older} --noconfirm 2>&1", timeout=1800)
+        t.check(rolled[0] == 0, f"a rollback from the chroot needs no identity: {rolled[1][-800:]}")
+        m.succeed("umount -R /mnt/live")
+        m.succeed("mv /root/identity.away /var/lib/archix/secrets/identity")
+        m.reboot()
+        # The older deployment is s4's, whose nb ciphertext is damaged, so its secrets unit fails for nb alone.
+        _, booted = boot(allowed_failed=(SECRETS_UNIT,))
+        t.check(booted == older, f"the rollback should boot deployment {older}, not {booted}")
+        journal = out(f"journalctl -b -u {SECRETS_UNIT} --no-pager")
+        t.check(ok("test -s /run/archix/secrets/api") and "decrypted 4 of 5 secrets" in journal and "secret nb wasn't decrypted" in journal, f"it decrypts its own secrets at boot, all but s4's damaged nb: {journal[-800:]}")
+        m.succeed(f"archix rollback {running} --noconfirm")
+        m.reboot()
+        boot()
+        sweep("s7", lambda name, place: name == "pw" and shadow_place(place))
 
     with t.step("s9: a crash of the decrypt step with values in memory leaves no core dump"):
         crashed = m.execute("strace -f -o /dev/null -e inject=linkat,rename:signal=SEGV:when=1 archix secrets activate > /dev/null 2>&1; echo $?")

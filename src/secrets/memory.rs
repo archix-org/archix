@@ -94,6 +94,11 @@ impl SecretBuf {
         Ok(())
     }
 
+    /// Locks its pages again, as after a `LockAll` that unlocked everything.
+    pub fn relock(&self) {
+        unsafe { libc::mlock(self.ptr.cast(), self.cap) };
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
     }
@@ -157,6 +162,46 @@ pub fn harden(lock_all: bool) -> Result<()> {
     Ok(())
 }
 
+/// Locks every page of this process, now and later, while it lives, so buffers archix doesn't own (age's) can't be swapped out; dropping it unlocks them, after which each SecretBuf kept needs `relock`.
+pub struct LockAll(());
+
+/// How many LockAll guards live, so only the last one dropped unlocks.
+static LOCKS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+impl LockAll {
+    pub fn new() -> Result<LockAll> {
+        let mut held = LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *held == 0 && unsafe { libc::mlockall(libc::MCL_CURRENT | libc::MCL_FUTURE) } != 0 {
+            bail!("locking this process's memory: {}", std::io::Error::last_os_error());
+        }
+        *held += 1;
+        Ok(LockAll(()))
+    }
+}
+
+impl Drop for LockAll {
+    fn drop(&mut self) {
+        let mut held = LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *held -= 1;
+        if *held == 0 {
+            unsafe { libc::munlockall() };
+        }
+    }
+}
+
+/// How much of this process's memory is locked, in kB, from /proc/self/status.
+pub fn locked_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmLck:"))
+                .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
 /// Whether `needle` occurs in `haystack`.
 pub fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     find(haystack, needle).is_some()
@@ -182,6 +227,73 @@ pub fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Locked: kB of the mapping in /proc/self/smaps that holds `addr`, unlike VmLck untouched by other test threads.
+    fn locked_at(addr: usize) -> u64 {
+        let smaps = std::fs::read_to_string("/proc/self/smaps").unwrap();
+        let mut inside = false;
+        for line in smaps.lines() {
+            if let Some((range, _)) = line.split_once(' ')
+                && let Some((from, to)) = range.split_once('-')
+                && let (Ok(from), Ok(to)) = (usize::from_str_radix(from, 16), usize::from_str_radix(to, 16))
+            {
+                inside = (from..to).contains(&addr);
+            } else if inside && let Some(kb) = line.strip_prefix("Locked:") {
+                return kb.trim().trim_end_matches(" kB").trim().parse().unwrap();
+            }
+        }
+        panic!("no mapping holds {addr:#x}");
+    }
+
+    fn mapped(len: usize) -> usize {
+        let at = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(at, libc::MAP_FAILED);
+        unsafe { std::ptr::write_bytes(at as *mut u8, 1, len) };
+        at as usize
+    }
+
+    #[test]
+    fn lock_all_locks_every_page_while_it_lives_and_a_relocked_buffer_stays_locked() {
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let len = 4 << 20;
+        let buf = SecretBuf::from_slice(b"value").unwrap();
+        let at = |buf: &SecretBuf| buf.as_slice().as_ptr() as usize;
+        assert!(locked_at(at(&buf)) >= 4, "a buffer's own page is locked");
+        let before = mapped(len);
+        assert_eq!(locked_at(before), 0, "a plain mapping isn't locked");
+        let guard = LockAll::new().unwrap();
+        drop(LockAll::new().unwrap());
+        // Locked mappings may merge with their locked neighbours, so a mapping's figure can exceed its own size.
+        assert!(
+            locked_at(before) >= (len / 1024) as u64,
+            "every mapped page is locked under the guard, a nested one dropped or not"
+        );
+        let later = mapped(len);
+        assert!(locked_at(later) >= (len / 1024) as u64, "and pages mapped later");
+        drop(guard);
+        assert_eq!(
+            (locked_at(before), locked_at(later)),
+            (0, 0),
+            "the guard lets go of everything"
+        );
+        buf.relock();
+        assert!(locked_at(at(&buf)) >= 4, "and relock locks the buffer again");
+        unsafe {
+            libc::munmap(before as *mut libc::c_void, len);
+            libc::munmap(later as *mut libc::c_void, len);
+        }
+    }
 
     #[test]
     fn a_buffer_holds_what_it_reads_up_to_its_limit_and_finds_needles() {

@@ -25,6 +25,53 @@ pub const MANIFEST: &str = "/usr/lib/archix/secrets/manifest.json";
 const OPEN: &str = "{{archix-secret:";
 const CLOSE: &str = "}}";
 
+/// Where secrets live on a running system that builds must never reach: the decrypted values and the machine's identity.
+pub const BUILD_HIDDEN: [&str; 2] = [RUN_DIR, "/var/lib/archix/secrets"];
+
+/// Runs `command` in a mount namespace of its own in which an empty read-only tmpfs covers each of BUILD_HIDDEN that exists, so a build (an AUR PKGBUILD is arbitrary code) can't read a value or the identity whatever its permissions.
+pub fn hide_from(command: &mut std::process::Command) {
+    use std::ffi::CString;
+    use std::os::unix::process::CommandExt;
+    let hidden: Vec<CString> = BUILD_HIDDEN
+        .iter()
+        .filter(|dir| Path::new(dir).is_dir())
+        .filter_map(|dir| CString::new(*dir).ok())
+        .collect();
+    let (none, slash, tmpfs, options) = (c"none", c"/", c"tmpfs", c"mode=000,size=4k");
+    if crate::testhooks::broken("secrets-build-mask") {
+        return;
+    }
+    unsafe {
+        command.pre_exec(move || {
+            if libc::unshare(libc::CLONE_NEWNS) != 0
+                || libc::mount(
+                    none.as_ptr(),
+                    slash.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_REC | libc::MS_PRIVATE,
+                    std::ptr::null(),
+                ) != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            for dir in &hidden {
+                let flags = libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
+                if libc::mount(
+                    tmpfs.as_ptr(),
+                    dir.as_ptr(),
+                    tmpfs.as_ptr(),
+                    flags,
+                    options.as_ptr().cast(),
+                ) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
+
 /// What `archix.secret(name)` evaluates to: a placeholder, never the value.
 pub fn placeholder(name: &str) -> String {
     format!("{OPEN}{name}{CLOSE}")

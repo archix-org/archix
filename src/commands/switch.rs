@@ -668,7 +668,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
         );
     }
-    let scan = |dir: &Path| scan_staged(&prepared, dir);
+    let scan = |dir: &Path| scan_staged(&prepared, dir, &paths.root);
     eprintln!(":: building deployment {number} from deployment {base}");
     let made = deploy::build::build(
         &deployments,
@@ -738,13 +738,12 @@ fn prepare_secrets(paths: &Paths, rendered: &mut system::Rendered) -> Result<arc
     } else {
         prepare::Mode::Check
     };
+    // Decrypting and scanning run with every page locked, age's own buffers too; the values stay locked after.
+    let locked = archix::secrets::memory::LockAll::new()?;
     let prepared = {
         let rendered: &system::Rendered = rendered;
         prepare::prepare(&paths.state, &mut manifest, &|sha| rendered.ciphertext(sha), mode)?
     };
-    for warning in &prepared.warnings {
-        eprintln!("warning: {warning}");
-    }
     rendered.set_secrets(manifest);
     let needles = prepared.needles(&[Kind::File, Kind::CryptHash]);
     let ciphertexts = format!("{}/", archix::secrets::DEPLOY_DIR);
@@ -755,15 +754,34 @@ fn prepare_secrets(paths: &Paths, rendered: &mut system::Rendered) -> Result<arc
             hits.extend(scan::blob(bytes, path, &needles, false));
         }
     }
+    archix::testhooks::record_locked_memory();
+    drop(needles);
+    drop(locked);
+    prepared.relock();
+    for warning in &prepared.warnings {
+        eprintln!("warning: {warning}");
+    }
     scan::judge(&hits, true)?;
     Ok(prepared)
 }
 
-/// The last check before a deployment with secrets commits: no value in its /etc (a short one only warns there) or, opened up, its UKIs and initramfs images.
-fn scan_staged(prepared: &archix::secrets::prepare::Prepared, dir: &Path) -> Result<()> {
+/// The last check before a deployment with secrets commits: no value in its /etc or the running one the /etc merge would carry into it (a short one only warns there), or, opened up, its UKIs and initramfs images.
+fn scan_staged(prepared: &archix::secrets::prepare::Prepared, dir: &Path, live: &Path) -> Result<()> {
     use archix::secrets::{Kind, scan};
     let files = prepared.needles(&[Kind::File]);
-    let warnings = scan::judge(&scan::tree(&dir.join("etc"), "/etc", &files, false), false)?;
+    let mut hits = scan::tree(&dir.join("etc"), "/etc", &files, false);
+    // A running file the new deployment makes a secret's link is one the switch replaces only when it holds exactly the value.
+    let replaced = |hit: &scan::Hit| dir.join(hit.path.trim_start_matches('/')).is_symlink();
+    for hit in scan::tree(&live.join("etc"), "/etc", &files, false) {
+        if !replaced(&hit)
+            && !hits
+                .iter()
+                .any(|seen| seen.secret == hit.secret && seen.path == hit.path)
+        {
+            hits.push(hit);
+        }
+    }
+    let warnings = scan::judge(&hits, false)?;
     let all = prepared.needles(&[Kind::File, Kind::CryptHash]);
     scan::judge(&scan::tree(&dir.join("boot"), "/boot", &all, true), true)?;
     for warning in warnings {

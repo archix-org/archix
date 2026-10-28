@@ -52,6 +52,8 @@ pub const SECRETS: &[&str] = &[
     "usr/share/secureboot/keys",
     "etc/systemd/tpm2-pcr-private-key.pem",
     "etc/kernel/secure-boot-private-key.pem",
+    "run/archix/secrets",
+    "var/lib/archix/secrets",
 ];
 
 impl Transaction {

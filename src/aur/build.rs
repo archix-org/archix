@@ -482,6 +482,7 @@ impl Builder<'_> {
         if nocheck {
             cmd.args(["--", "--nocheck"]);
         }
+        crate::secrets::hide_from(&mut cmd);
         run(&mut cmd, "makechrootpkg")
     }
 
@@ -685,17 +686,17 @@ impl Builder<'_> {
                 .env(TRANSACTION_ENV, "1");
             run(&mut cmd, "pacman -U")?;
         }
-        let built = run(
-            Command::new("runuser")
-                .args(["-u", BUILD_USER, "--", "env"])
-                .arg(format!("HOME={}", dir.display()))
-                .arg(format!("SRCDEST={}", dir.display()))
-                .arg(format!("GNUPGHOME={}", self.keyring().display()))
-                .args(["makepkg", "--noconfirm", "--clean"])
-                .args(nocheck.then_some("--nocheck"))
-                .current_dir(dir),
-            "makepkg",
-        );
+        let mut makepkg = Command::new("runuser");
+        makepkg
+            .args(["-u", BUILD_USER, "--", "env"])
+            .arg(format!("HOME={}", dir.display()))
+            .arg(format!("SRCDEST={}", dir.display()))
+            .arg(format!("GNUPGHOME={}", self.keyring().display()))
+            .args(["makepkg", "--noconfirm", "--clean"])
+            .args(nocheck.then_some("--nocheck"))
+            .current_dir(dir);
+        crate::secrets::hide_from(&mut makepkg);
+        let built = run(&mut makepkg, "makepkg");
         let installed_after = crate::pacman::read_local_db(&self.paths.local_db())?;
         let added: Vec<&String> = installed_after
             .keys()

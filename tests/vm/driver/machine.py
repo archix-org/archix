@@ -49,7 +49,7 @@ def short(text, limit=600):
 class Machine:
     """One QEMU+OVMF VM as tests/vm/boot.sh starts it, driven through the guest's archix-backdoor root shell."""
 
-    def __init__(self, timeline, work="/work", disks=None, mem=None, cpus=None, tpm=False, boot_timeout=900, global_timeout=None):
+    def __init__(self, timeline, work="/work", disks=None, mem=None, cpus=None, tpm=False, boot_timeout=900, global_timeout=None, console_input=False):
         self.timeline = timeline
         self.work = Path(work)
         overlay = self.work / "disk.qcow2"
@@ -60,6 +60,9 @@ class Machine:
         self.boot_timeout = boot_timeout
         self.global_timeout = global_timeout or int(os.environ.get("VM_TIMEOUT", "2400"))
         self.serial = self.work / "serial.log"
+        # With console_input the serial console is a socket too, which type() writes to, as for a prompt without the backdoor.
+        self.console_input = console_input
+        self.console_path = self.work / "console.sock"
         self.qmp_path = self.work / "qmp.sock"
         self.shell_path = self.work / "shell.sock"
         self.process = None
@@ -97,15 +100,30 @@ class Machine:
         cmd += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,romfile=",
                 "-device", "virtio-serial-pci", "-chardev", f"socket,id=shell,path={self.shell_path}",
                 "-device", "virtserialport,chardev=shell,name=archix.shell",
-                "-display", "none", "-serial", f"file:{self.serial}",
+                "-display", "none", *self.serial_args(),
                 "-qmp", f"unix:{self.qmp_path},server=on,wait=off", "-monitor", "none"]
         return cmd
+
+    def serial_args(self):
+        if not self.console_input:
+            return ["-serial", f"file:{self.serial}"]
+        return ["-chardev", f"socket,id=console,path={self.console_path},server=on,wait=off,logfile={self.serial},logappend=on", "-serial", "chardev:console"]
+
+    def type(self, text):
+        """Types text and Enter at the serial console, as a person at a prompt the backdoor doesn't reach, such as the rescue entry's."""
+        time.sleep(1)
+        sock = socket.socket(socket.AF_UNIX)
+        sock.connect(str(self.console_path))
+        sock.sendall(text.encode() + b"\r")
+        time.sleep(0.5)
+        sock.close()
+        self.log(f"typed at the console: {text!r}" if "pass" not in text else "typed a password at the console")
 
     def start(self):
         """Starts QEMU and returns at once; the first command waits for the guest's shell."""
         if self.process:
             return
-        for path in (self.qmp_path, self.shell_path):
+        for path in (self.qmp_path, self.shell_path, self.console_path):
             path.unlink(missing_ok=True)
         if self.tpm:
             (self.work / "swtpm").mkdir(exist_ok=True)

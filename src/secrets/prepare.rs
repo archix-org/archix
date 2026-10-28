@@ -39,6 +39,11 @@ impl Prepared {
             .collect()
     }
 
+    /// Locks every value's pages again, after a `LockAll` let go of them.
+    pub fn relock(&self) {
+        self.values.iter().for_each(|(_, _, value)| value.relock());
+    }
+
     pub fn value(&self, name: &str) -> Option<&SecretBuf> {
         self.values
             .iter()
@@ -271,6 +276,9 @@ pub fn hmacs(
     if super::memory::harden(false).is_err() {
         return BTreeMap::new();
     }
+    let Ok(_locked) = super::memory::LockAll::new() else {
+        return BTreeMap::new();
+    };
     let mut out = BTreeMap::new();
     for (name, entry) in &manifest.secrets {
         let Some(ct) = ciphertext(&entry.sha256) else { continue };

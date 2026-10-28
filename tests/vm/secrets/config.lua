@@ -1,5 +1,5 @@
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "age", "wireguard-tools", "networkmanager", "strace", "openssl" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "age", "wireguard-tools", "networkmanager", "strace", "openssl", "arch-install-scripts" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },

@@ -88,6 +88,15 @@ pub fn secrets_scratch() -> Option<std::path::PathBuf> {
     std::env::var_os("ARCHIX_TEST_SECRETS_SCRATCH").map(std::path::PathBuf::from)
 }
 
+/// Writes how much memory this process has locked (VmLck, kB) to ARCHIX_TEST_VMLCK in a debug build, so a test can see a phase run locked.
+pub fn record_locked_memory() {
+    if cfg!(debug_assertions)
+        && let Some(path) = std::env::var_os("ARCHIX_TEST_VMLCK")
+    {
+        let _ = std::fs::write(path, crate::secrets::memory::locked_kb().to_string());
+    }
+}
+
 /// systemd-boot's LoaderFeatures, or ARCHIX_TEST_LOADER_FEATURES in a debug build.
 pub fn loader_features() -> u64 {
     if cfg!(debug_assertions)
