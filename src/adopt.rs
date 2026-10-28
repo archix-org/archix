@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 
 use crate::archive::Archive;
 use crate::aur::git::AurGit;
+use crate::aur::sources::{Kind, floating};
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all, sha256};
@@ -206,6 +207,7 @@ pub fn fit(
                     aur.commits.borrow_mut().insert(base, commit);
                     moved = true;
                 }
+                None if vcs_commit(&version).is_some() => {}
                 None => eprintln!(
                     "warning: no {base} commit in the AUR builds {version}; switch will rebuild the locked one"
                 ),
@@ -216,6 +218,39 @@ pub fn fit(
         adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur)?;
         if let Some(previous) = previous {
             adopted.keep_pins(previous);
+        }
+    }
+    if let Some(aur) = aur {
+        for (name, locked) in adopted.packages.iter_mut() {
+            let Some(pkg) = installed.get(name) else { continue };
+            let (Some(base), Some(commit)) = (locked.base.clone(), locked.commit.clone()) else {
+                continue;
+            };
+            if locked.repo != AUR_REPO || !differs(&pkg.version, &locked.version) {
+                continue;
+            }
+            let Some(upstream) = vcs_commit(&pkg.version) else {
+                continue;
+            };
+            let info = aur
+                .git
+                .show(&base, &commit, ".SRCINFO")
+                .and_then(|text| srcinfo::parse(&text));
+            match info.ok().and_then(|info| vcs_sources(&info, upstream)) {
+                Some(sources) => {
+                    eprintln!(
+                        "{name}: locked at {upstream}, the upstream commit its installed {} was built from",
+                        pkg.version
+                    );
+                    locked.sources = sources;
+                    locked.version = pkg.version.clone();
+                    locked.file = format!("{name}-{}-{}.pkg.tar.zst", pkg.version, pkg.arch);
+                }
+                None => eprintln!(
+                    "warning: {name} {} names upstream commit {upstream}, but its recipe has no single git source to pin there; switch will rebuild it from the newest code",
+                    pkg.version
+                ),
+            }
         }
     }
     let mut pins = Vec::new();
@@ -273,6 +308,28 @@ pub fn fit(
     Ok(adopted)
 }
 
+/// The upstream commit a VCS package's version names, such as 1a2b3c4 in 0.4.0.r12.g1a2b3c4-1, as the pkgver functions of -git recipes write it.
+pub fn vcs_commit(version: &str) -> Option<&str> {
+    let pkgver = version.rsplit_once('-').map_or(version, |(pkgver, _)| pkgver);
+    let pkgver = pkgver.split_once(':').map_or(pkgver, |(_, pkgver)| pkgver);
+    pkgver
+        .split(['.', '+', '_'])
+        .filter_map(|part| part.strip_prefix('g'))
+        .rfind(|hash| (7..=40).contains(&hash.len()) && hash.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// The pinned sources that build a recipe's one git source at `commit`, None when it doesn't have exactly one.
+pub fn vcs_sources(info: &SrcInfo, commit: &str) -> Option<BTreeMap<String, String>> {
+    let git: Vec<_> = floating(info)
+        .into_iter()
+        .filter(|source| matches!(source.kind, Kind::Git { .. }))
+        .collect();
+    match &git[..] {
+        [one] => Some(BTreeMap::from([(one.entry.clone(), commit.to_string())])),
+        _ => None,
+    }
+}
+
 /// The newest commit whose .SRCINFO says `version`, skipping one whose PKGBUILD had moved on before its .SRCINFO caught up.
 pub fn commit_for_version(git: &AurGit, base: &str, version: &str) -> Result<Option<(String, SrcInfo)>> {
     git.sync(base)?;
@@ -328,6 +385,36 @@ mod tests {
         };
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", message]);
+    }
+
+    #[test]
+    fn a_vcs_package_is_pinned_at_the_commit_its_version_names() {
+        assert_eq!(vcs_commit("0.4.0.r12.g1a2b3c4-1"), Some("1a2b3c4"));
+        assert_eq!(vcs_commit("2:r1234+g0123456789ab-2"), Some("0123456789ab"));
+        assert_eq!(vcs_commit("1.2.3-1"), None);
+        assert_eq!(vcs_commit("r12.gcc-1"), None, "too short for a commit");
+        let info = srcinfo::parse(
+            "pkgbase = tool-git\n\tpkgver = 0.4.0.r20.g5d6e7f8\n\tpkgrel = 1\n\tarch = x86_64\n\
+             \tsource = tool::git+https://example.org/tool.git\n\tsource = fix.patch\n\tsha256sums = SKIP\n\tsha256sums = abc\n\npkgname = tool-git\n",
+        )
+        .unwrap();
+        assert_eq!(
+            vcs_sources(&info, "1a2b3c4"),
+            Some(BTreeMap::from([(
+                "tool::git+https://example.org/tool.git".to_string(),
+                "1a2b3c4".to_string()
+            )]))
+        );
+        let two = srcinfo::parse(
+            "pkgbase = two-git\n\tpkgver = 1\n\tpkgrel = 1\n\tarch = any\n\
+             \tsource = git+https://example.org/a.git\n\tsource = git+https://example.org/b.git\n\tsha256sums = SKIP\n\tsha256sums = SKIP\n\npkgname = two-git\n",
+        )
+        .unwrap();
+        assert_eq!(
+            vcs_sources(&two, "1a2b3c4"),
+            None,
+            "which clone the hash is from is unknown"
+        );
     }
 
     #[test]
