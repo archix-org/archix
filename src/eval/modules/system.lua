@@ -52,6 +52,16 @@ return {
       default = {},
       description = "System units to enable (true) or disable (false) in the next deployment; they start or stop at the next boot.",
     },
+    masked_units = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "System units to mask, such as sleep.target, so nothing can start them: each becomes a link to /dev/null in /etc/systemd/system in the next deployment.",
+    },
+    default_target = archix.option {
+      type = t.nullable(t.str),
+      default = archix.null,
+      description = "The target the next deployment boots into, such as multi-user.target for a machine without a desktop; by default systemd's, graphical.target.",
+    },
     user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user in the next deployment; they start or stop at the next boot." },
     sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf and applied at the next boot." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules." },

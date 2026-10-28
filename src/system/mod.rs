@@ -369,6 +369,18 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     if let Some(Value::Str(keymap)) = root("keymap") {
         b.text("/etc/vconsole.conf", &format!("KEYMAP={keymap}\n"));
     }
+    for unit in strings(root("masked_units")) {
+        b.link(&format!("/etc/systemd/system/{}", unit_name(&unit)?), "/dev/null");
+    }
+    if let Some(Value::Str(target)) = root("default_target") {
+        if !target.ends_with(".target") {
+            bail!("default_target {target:?} isn't a .target unit");
+        }
+        b.link(
+            "/etc/systemd/system/default.target",
+            &format!("/usr/lib/systemd/system/{}", unit_name(target)?),
+        );
+    }
     render_environment(&mut b, root("environment"));
     if let Some(boot) = root("boot") {
         let esp = str_of(boot, "esp").unwrap_or("/boot").trim_end_matches('/').to_string();
@@ -695,6 +707,28 @@ mod tests {
             Some("/usr/share/zoneinfo/Europe/Istanbul")
         );
         assert!(!rendered.state.services["cups.service"]);
+    }
+
+    #[test]
+    fn masked_units_and_the_default_target_are_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let rendered = render(
+            &config(serde_json::json!({
+                "masked_units": ["sleep.target", "suspend.target"],
+                "default_target": "multi-user.target",
+            })),
+            dir.path(),
+        )
+        .unwrap();
+        let link = |path: &str| rendered.state.files[path].link.clone();
+        assert_eq!(link("/etc/systemd/system/sleep.target").as_deref(), Some("/dev/null"));
+        assert_eq!(link("/etc/systemd/system/suspend.target").as_deref(), Some("/dev/null"));
+        assert_eq!(
+            link("/etc/systemd/system/default.target").as_deref(),
+            Some("/usr/lib/systemd/system/multi-user.target")
+        );
+        let wrong = serde_json::json!({ "default_target": "sshd.service" });
+        assert!(render(&config(wrong), dir.path()).is_err());
     }
 
     #[test]
