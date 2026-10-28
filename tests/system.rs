@@ -372,10 +372,10 @@ fn the_firewall_and_environment_come_from_the_config() {
         "{rules}"
     );
     for rule in [
-        "tcp dport { 1714-1764 } accept comment \"kdeconnect\"",
-        "udp dport { 1714-1764 } accept comment \"kdeconnect\"",
-        "udp dport { 10400, 10401, 27031-27035, 27036 } accept comment \"steam\"",
-        "udp dport { 2456 } accept comment \"game\"",
+        "\n    ip saddr @archix_lan4 tcp dport { 1714-1764 } accept comment \"kdeconnect\"\n",
+        "\n    ip6 saddr @archix_lan6 udp dport { 1714-1764 } accept comment \"kdeconnect\"\n",
+        "\n    ip saddr @archix_lan4 udp dport { 10400, 10401, 27031-27035, 27036 } accept comment \"steam\"\n",
+        "\n    udp dport { 2456 } accept comment \"game\"\n",
     ] {
         assert!(rules.contains(rule), "{rule} in {rules}");
     }
@@ -409,6 +409,21 @@ fn the_firewall_and_environment_come_from_the_config() {
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("the firewall rules don't load"), "{err}");
     assert_eq!(setup.machine.deployments(), deployments, "a bad rule builds nothing");
+
+    setup.set_body(
+        &[],
+        &format!(
+            r#"firewall = {{ enable = true, allowed_services = {{ "ssh" }} }},
+            units = {{ ["ufw.service"] = {UNIT:?} }},
+            services = {{ ["ufw.service"] = true }}"#
+        ),
+    );
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("ufw.service would run beside the archix firewall (the config enables it)"),
+        "{err}"
+    );
+    assert_eq!(setup.machine.deployments(), deployments, "ufw beside it builds nothing");
 
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);

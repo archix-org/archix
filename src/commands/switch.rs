@@ -252,6 +252,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     system::apply::check(&paths, &system_change, &place)?;
     if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
         system::firewall::validate(&String::from_utf8_lossy(&rendered.blobs[&rules.sha256]))?;
+        system::firewall::check_others(&rendered.state.services, |unit| {
+            system::apply::is_enabled(&here, unit, false)
+        })?;
         if system::apply::is_enabled(&here, "nftables.service", false)
             && rendered.state.services.get("nftables.service") != Some(&false)
         {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
@@ -83,8 +84,34 @@ fn set(spans: &[Span]) -> String {
     items.join(", ")
 }
 
-/// The services `allowed_services` names, sorted and once each, with their entries in `service_ports`.
-fn services(firewall: &Value) -> Result<Vec<(&str, &Value)>> {
+/// The sets `sources = "lan"` rules match: private and link-local addresses.
+const LAN4: &str = "archix_lan4";
+const LAN6: &str = "archix_lan6";
+pub const LAN_V4: [&str; 4] = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16"];
+pub const LAN_V6: [&str; 2] = ["fc00::/7", "fe80::/10"];
+
+/// Firewalls whose own tables would still drop what archix's opens.
+pub const OTHERS: [&str; 2] = ["ufw.service", "firewalld.service"];
+
+/// Refuses a deployment with archix's firewall that would also start ufw or firewalld, whether the config enables one or it's enabled here and the config doesn't disable it.
+pub fn check_others(services: &BTreeMap<String, bool>, enabled_here: impl Fn(&str) -> bool) -> Result<()> {
+    for unit in OTHERS {
+        let why = match services.get(unit) {
+            Some(true) => "the config enables it",
+            Some(false) => continue,
+            None if enabled_here(unit) => "it's enabled on this system, and the new deployment keeps it",
+            None => continue,
+        };
+        bail!(
+            "{unit} would run beside the archix firewall ({why}), and its rules would still drop what the firewall options open; set services[\"{unit}\"] = false to use archix's firewall, or firewall.enable = false to keep {}; nothing was changed",
+            unit.trim_end_matches(".service")
+        );
+    }
+    Ok(())
+}
+
+/// The services `allowed_services` names, sorted and once each, with whether they're open only to the LAN and their entries in `service_ports`.
+fn services(firewall: &Value) -> Result<Vec<(&str, bool, &Value)>> {
     let mut names = std::collections::BTreeSet::new();
     if let Some(Value::List(items)) = get(firewall, "allowed_services") {
         for item in items {
@@ -104,7 +131,7 @@ fn services(firewall: &Value) -> Result<Vec<(&str, &Value)>> {
             bail!("firewall service names are 1-64 letters, digits, '-', '_' or '.', not {name:?}");
         }
         match get(firewall, "service_ports").and_then(|ports| get(ports, name)) {
-            Some(ports) => out.push((name, ports)),
+            Some(ports) => out.push((name, text(get(ports, "sources")) == "lan", ports)),
             None => bail!("firewall.allowed_services names {name:?}, which firewall.service_ports doesn't define"),
         }
     }
@@ -144,6 +171,16 @@ pub fn ruleset(firewall: &Value) -> Result<Option<String>> {
     }
     let mut out = String::from("#!/usr/bin/nft -f\n# Written by archix from the firewall options.\n");
     out.push_str("table inet archix\ndelete table inet archix\n\ntable inet archix {\n");
+    let services = services(firewall)?;
+    if services.iter().any(|&(_, lan, _)| lan) {
+        let _ = writeln!(
+            out,
+            "  set {LAN4} {{\n    type ipv4_addr; flags interval;\n    elements = {{ {} }}\n  }}\n\n  \
+             set {LAN6} {{\n    type ipv6_addr; flags interval;\n    elements = {{ {} }}\n  }}\n",
+            LAN_V4.join(", "),
+            LAN_V6.join(", ")
+        );
+    }
     match text(get(firewall, "check_reverse_path")) {
         "off" => {}
         mode => {
@@ -180,36 +217,38 @@ pub fn ruleset(firewall: &Value) -> Result<Option<String>> {
     if get(firewall, "allow_ping") != Some(&Value::Bool(false)) {
         out.push_str("    icmp type echo-request accept\n");
     }
-    let services = services(firewall)?;
     for (proto, ports, spans) in [
         ("tcp", "allowed_tcp_ports", "allowed_tcp_port_ranges"),
         ("udp", "allowed_udp_ports", "allowed_udp_port_ranges"),
     ] {
-        let mut rules: Vec<(Option<&str>, Vec<Span>)> = Vec::new();
+        let mut rules: Vec<(Option<&str>, bool, Vec<Span>)> = Vec::new();
         let mut explicit: Vec<Span> = ints(get(firewall, ports))?.into_iter().map(|p| (p, p)).collect();
         explicit.extend(ranges(get(firewall, spans))?);
-        rules.push((None, explicit));
-        for &(name, entry) in &services {
+        rules.push((None, false, explicit));
+        for &(name, lan, entry) in &services {
             let mut open: Vec<Span> = ints(get(entry, proto))?.into_iter().map(|p| (p, p)).collect();
             open.extend(ranges(get(entry, &format!("{proto}_ranges")))?);
-            rules.push((Some(name), open));
+            rules.push((Some(name), lan, open));
         }
-        let mut opened: Vec<Span> = Vec::new();
-        for (name, spans) in rules {
+        // A port open to any source needs no LAN rule; one open to the LAN still needs a rule for any source.
+        let (mut anywhere, mut on_lan): (Vec<Span>, Vec<Span>) = (Vec::new(), Vec::new());
+        for (name, lan, spans) in rules {
             let mut spans = merged(spans, false);
+            let opened = if lan { &on_lan } else { &anywhere };
             spans.retain(|&(from, to)| !opened.iter().any(|&(a, b)| a <= from && to <= b));
             if spans.is_empty() {
                 continue;
             }
-            let _ = write!(out, "    {proto} dport {{ {} }} accept", set(&spans));
-            match name {
-                Some(name) => {
-                    let _ = writeln!(out, " comment \"{name}\"");
-                }
-                None => out.push('\n'),
+            let comment = name.map(|name| format!(" comment \"{name}\"")).unwrap_or_default();
+            let ports = set(&spans);
+            if lan {
+                let _ = writeln!(out, "    ip saddr @{LAN4} {proto} dport {{ {ports} }} accept{comment}");
+                let _ = writeln!(out, "    ip6 saddr @{LAN6} {proto} dport {{ {ports} }} accept{comment}");
+            } else {
+                let _ = writeln!(out, "    {proto} dport {{ {ports} }} accept{comment}");
+                anywhere = merged([anywhere, spans.clone()].concat(), true);
             }
-            opened.extend(spans);
-            opened = merged(opened, true);
+            on_lan = merged([on_lan, spans].concat(), true);
         }
     }
     for line in text(get(firewall, "extra_input_rules"))
@@ -307,6 +346,79 @@ mod tests {
             "service_ports": { "a\"b": { "tcp": [1] } },
         })));
         assert!(quote.is_err(), "a name can't break out of the comment");
+    }
+
+    #[test]
+    fn lan_services_admit_private_and_link_local_sources_on_both_families() {
+        let rules = ruleset(&value(serde_json::json!({
+            "enable": true,
+            "allowed_udp_ports": [21027],
+            "allowed_services": ["mdns", "syncthing", "wireguard"],
+            "service_ports": {
+                "mdns": { "udp": [5353], "sources": "lan" },
+                "syncthing": { "tcp": [22000], "udp": [21027, 22000], "sources": "lan" },
+                "wireguard": { "udp": [51820, 22000], "sources": "any" },
+            },
+        })))
+        .unwrap()
+        .unwrap();
+        assert!(
+            rules.contains(
+                "  set archix_lan4 {\n    type ipv4_addr; flags interval;\n    elements = { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 }\n  }\n"
+            ) && rules.contains("    elements = { fc00::/7, fe80::/10 }\n"),
+            "{rules}"
+        );
+        assert!(rules.find("set archix_lan6").unwrap() < rules.find("chain input").unwrap());
+        let input: Vec<&str> = rules
+            .lines()
+            .filter(|l| l.contains(" dport {") && !l.contains("sport"))
+            .collect();
+        assert_eq!(
+            input,
+            [
+                "    ip saddr @archix_lan4 tcp dport { 22000 } accept comment \"syncthing\"",
+                "    ip6 saddr @archix_lan6 tcp dport { 22000 } accept comment \"syncthing\"",
+                "    udp dport { 21027 } accept",
+                "    ip saddr @archix_lan4 udp dport { 5353 } accept comment \"mdns\"",
+                "    ip6 saddr @archix_lan6 udp dport { 5353 } accept comment \"mdns\"",
+                "    ip saddr @archix_lan4 udp dport { 22000 } accept comment \"syncthing\"",
+                "    ip6 saddr @archix_lan6 udp dport { 22000 } accept comment \"syncthing\"",
+                "    udp dport { 22000, 51820 } accept comment \"wireguard\"",
+            ],
+            "{rules}"
+        );
+        let any = ruleset(&value(serde_json::json!({
+            "enable": true,
+            "allowed_services": ["ssh"],
+            "service_ports": { "ssh": { "tcp": [22], "sources": "any" } },
+        })))
+        .unwrap()
+        .unwrap();
+        assert!(!any.contains("archix_lan"), "no LAN sets without a LAN service: {any}");
+    }
+
+    #[test]
+    fn ufw_or_firewalld_beside_archix_firewall_is_refused() {
+        let services = |pairs: &[(&str, bool)]| -> BTreeMap<String, bool> {
+            pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+        };
+        let none = |_: &str| false;
+        let ufw_here = |unit: &str| unit == "ufw.service";
+        assert!(check_others(&services(&[]), none).is_ok());
+        let err = check_others(&services(&[]), ufw_here).unwrap_err().to_string();
+        assert!(
+            err.contains("ufw.service would run beside the archix firewall (it's enabled on this system")
+                && err.contains("services[\"ufw.service\"] = false"),
+            "{err}"
+        );
+        assert!(check_others(&services(&[("ufw.service", false)]), ufw_here).is_ok());
+        let err = check_others(&services(&[("firewalld.service", true)]), none)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("firewalld.service would run beside the archix firewall (the config enables it)"),
+            "{err}"
+        );
     }
 
     #[test]

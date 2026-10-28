@@ -495,9 +495,49 @@ fn firewall_services_have_built_in_ports_that_modules_override_or_add_to() {
     let ports = &out["firewall"]["service_ports"];
     assert_eq!(
         ports["syncthing"],
-        json!({ "tcp": [22000], "udp": [21027, 22000], "tcp_ranges": [], "udp_ranges": [] })
+        json!({
+            "tcp": [22000],
+            "udp": [21027, 22000],
+            "tcp_ranges": [],
+            "udp_ranges": [],
+            "sources": "lan",
+            "source": "https://github.com/NixOS/nixpkgs/blob/nixos-unstable/nixos/modules/services/networking/syncthing.nix",
+        })
     );
     assert_eq!(ports["kdeconnect"]["udp_ranges"], json!([{ "from": 1714, "to": 1764 }]));
+    for (name, entry) in ports.as_object().unwrap() {
+        let source = entry["source"].as_str().unwrap_or_default();
+        assert!(
+            source.starts_with("https://"),
+            "{name} names no upstream source: {entry}"
+        );
+        assert!(
+            entry["sources"] == "lan" || entry["sources"] == "any",
+            "{name}: {entry}"
+        );
+    }
+    let open_to_any: Vec<&str> = ports
+        .as_object()
+        .unwrap()
+        .iter()
+        .filter(|(_, entry)| entry["sources"] == "any")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        open_to_any,
+        [
+            "http",
+            "https",
+            "minecraft",
+            "mosh",
+            "ssh",
+            "steam-dedicated-server",
+            "tailscale",
+            "transmission",
+            "wireguard"
+        ],
+        "only what is meant to be reached from anywhere is open to any source by default"
+    );
     assert_eq!(out["firewall"]["allowed_services"], json!(["ssh", "syncthing"]));
     assert_eq!(out["packages"], json!(["nftables"]));
 
@@ -508,7 +548,7 @@ fn firewall_services_have_built_in_ports_that_modules_override_or_add_to() {
         ),
         (
             "lua/a.lua",
-            r#"return { firewall = { allowed_services = { "ssh", "valheim" }, service_ports = { valheim = { udp_ranges = { { from = 2456, to = 2458 } } } } } }"#,
+            r#"return { firewall = { allowed_services = { "ssh", "valheim" }, service_ports = { valheim = { udp_ranges = { { from = 2456, to = 2458 } } }, kdeconnect = archix.default { sources = archix.force("any") } } } }"#,
         ),
         (
             "lua/b.lua",
@@ -523,6 +563,16 @@ fn firewall_services_have_built_in_ports_that_modules_override_or_add_to() {
     );
     assert_eq!(ports["mdns"]["udp"], json!([5353, 5354]));
     assert_eq!(ports["valheim"]["udp_ranges"], json!([{ "from": 2456, "to": 2458 }]));
+    assert_eq!(
+        ports["valheim"]["sources"], "any",
+        "a service of your own is open to any source unless it says"
+    );
+    assert_eq!(ports["ssh"]["sources"], "any");
+    assert_eq!(
+        (&ports["kdeconnect"]["sources"], &ports["kdeconnect"]["tcp_ranges"]),
+        (&json!("any"), &json!([{ "from": 1714, "to": 1764 }])),
+        "archix.default keeps a built-in's ports while archix.force changes its sources"
+    );
     assert_eq!(ports["https"]["tcp"], json!([443]), "the other built-ins stay");
     let mut services: Vec<&str> = out["firewall"]["allowed_services"]
         .as_array()

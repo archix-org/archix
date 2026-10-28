@@ -90,6 +90,14 @@ case $suite in
   rescue) mounts+=(-e VM_TIMEOUT=7200) ;;
 esac
 if [ -z "$driver" ]; then
+  if [ "$suite" = firewall ]; then
+    # The probe side of the VM's second NIC: a tap in a network namespace of its own, so the host's network is untouched.
+    rm -f "$work/reach.sock"
+    l2=$(docker run -d --rm --network none --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+      --sysctl net.ipv6.conf.default.disable_ipv6=0 -v "$work":/work -v "$root/tests/vm":/vm:ro archix-arch-test \
+      sh -c 'exec python -u /vm/firewall/l2.py /work/l2.sock /work/reach.sock > /work/l2.log 2>&1')
+    trap 'docker rm -f "$l2" > /dev/null 2>&1 || true' EXIT
+  fi
   docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh
   exit
 fi

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report; SUITE=pcr and SUITE=rescue add a swtpm TPM, SUITE=firewall an ssh port forward and a control channel the host answers probes on, SUITE=rescue a console socket that tests/vm/rescue/drive.py types the rescue prompt at.
+# Boots /work/disk.img under OVMF (Secure Boot capable) until the VM test powers off, then checks its report; SUITE=pcr and SUITE=rescue add a swtpm TPM, SUITE=firewall an ssh port forward, a second NIC tests/vm/firewall/l2.py probes over IPv4 and IPv6 and a control channel the host answers probes on, SUITE=rescue a console socket that tests/vm/rescue/drive.py types the rescue prompt at.
 set -euo pipefail
 vars=/work/vars.fd
 qmp=/work/qmp.sock
@@ -51,7 +51,10 @@ if [ "${SUITE:-}" = firewall ]; then
   port=$(python -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
   net+=",hostfwd=tcp:127.0.0.1:$port-:22"
   extra+=(-device virtio-serial-pci -chardev socket,id=ctl,path=/work/ctl.sock,server=on,wait=off -device virtserialport,chardev=ctl,name=archix.ctl)
-  python /vm/firewall/probe.py /work/ctl.sock "$port" /work/ssh-key > /work/probe.log 2>&1 &
+  # A second NIC whose frames tests/vm/run.sh's l2.py container puts on a tap with IPv4 and IPv6, which user networking can't forward to.
+  rm -f /work/l2.sock
+  extra+=(-netdev stream,id=net1,server=on,addr.type=unix,addr.path=/work/l2.sock -device virtio-net-pci,netdev=net1,mac=52:54:00:12:34:77,romfile=)
+  python /vm/firewall/probe.py /work/ctl.sock "$port" /work/ssh-key /work/reach.sock > /work/probe.log 2>&1 &
 fi
 # Boots until the VM powers off or $1 seconds pass, with its console in $2 and the disks that follow.
 vm() {
@@ -95,4 +98,5 @@ fi
 # The console log carries escape and NUL bytes, which make grep call it binary and hide every line.
 grep -a VMTEST /work/serial.log || true
 [ ! -f /work/probe.log ] || sed 's/^/probe: /' /work/probe.log
+[ ! -f /work/l2.log ] || sed 's/^/l2: /' /work/l2.log
 grep -aq "VMTEST: OK" /work/serial.log
