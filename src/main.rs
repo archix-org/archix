@@ -74,6 +74,9 @@ enum Command {
         /// When a locked AUR version can't be built, take the nearest newer or older one without asking
         #[arg(long, value_enum)]
         accept_nearest: Option<commands::Nearest>,
+        /// Commit even though secrets don't decrypt on this machine yet: those are left out of the deployment, and what uses them fails until a switch after `archix secrets rekey`
+        #[arg(long)]
+        without_secrets: bool,
     },
     /// Gone: a switch commits a whole new deployment or nothing, so there's nothing to recover
     #[command(hide = true)]
@@ -113,6 +116,9 @@ enum Command {
         /// Also delete /var/lib/archix and /var/cache/archix
         #[arg(long)]
         purge: bool,
+        /// What becomes of declared secrets, which plain Arch has nothing to decrypt: drop their links, or materialize them as real files from /run/archix/secrets (from a booted system only)
+        #[arg(long, value_enum)]
+        secrets: Option<archix::deploy::eject::SecretsMode>,
     },
     /// From a live USB: bind a deployment's trees over the archix root mounted at ROOT, so `arch-chroot ROOT` runs it and `archix rollback` there can repair booting; run it as /usr/lib/archix/archix-static from a deployment under ROOT/archix/deploy
     MountDeployment {
@@ -268,6 +274,9 @@ enum Command {
     /// Let boots bind the shared /usr/local again once a boot that left it out held it out
     #[command(subcommand)]
     UsrLocal(UsrLocal),
+    /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
+    #[command(subcommand)]
+    Secrets(Secrets),
     /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
     Verify {
         /// Restore what differs from the package cache
@@ -290,6 +299,52 @@ enum Hooks {
     Skip {
         /// The deployment whose hooks to drop; the running one by default
         deployment: Option<u32>,
+    },
+}
+
+#[derive(Subcommand)]
+enum Secrets {
+    /// Make this machine's age identity in /var/lib/archix/secrets and print the key for secrets.machine_key
+    Init {
+        /// Make a new identity even though one exists; the old one is retired, kept while a deployment needs it
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Print this machine's age recipient
+    Pubkey,
+    /// Decrypt a secret into an editor on a private ramfs and encrypt what you save to every recipient the config names
+    Edit {
+        name: String,
+        /// Decrypt with this machine's own key (root) instead of yours
+        #[arg(long)]
+        machine: bool,
+    },
+    /// Encrypt a value from --file or stdin as a secret, for piping from a password manager
+    Set {
+        name: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Re-encrypt secrets (all by default) to the recipients every host's config names now, as after adding a host or an admin
+    Rekey {
+        names: Vec<String>,
+        /// Decrypt with this machine's own key and its retired ones (root) instead of yours
+        #[arg(long)]
+        machine: bool,
+    },
+    /// Show for each secret who it should be encrypted to against who it was, whether this machine decrypts it, and what uses it
+    Check,
+    /// Make a new machine identity; the old one is retired until no kept deployment needs it (gc drops it then)
+    RotateMachineKey {
+        /// The old key leaked: delete it at once instead of retiring it
+        #[arg(long)]
+        compromised: bool,
+    },
+    /// Run at boot by archix-secrets.service: decrypt the booted deployment's secrets into /run/archix/secrets
+    #[command(hide = true)]
+    Activate {
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
     },
 }
 
@@ -444,6 +499,10 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Gc => Some("gc"),
         Command::Hooks(_) => Some("hooks"),
         Command::UsrLocal(_) => Some("usr-local"),
+        Command::Secrets(Secrets::Init { .. }) => Some("secrets init"),
+        Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
+        Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
+        Command::Secrets(Secrets::Rekey { machine: true, .. }) => Some("secrets rekey --machine"),
         Command::Verify { .. } => Some("verify"),
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
@@ -535,6 +594,13 @@ fn run() -> Result<ExitCode> {
                 archix::system::boot::reboot_counted_try("mounting this boot's deployment", &e, &root, true);
                 return Err(e);
             }
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Secrets(Secrets::Activate { root }) => {
+            if !is_root() {
+                anyhow::bail!("`archix secrets activate` runs at boot as root");
+            }
+            archix::secrets::activate::run(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::DeployActivate { root } => {
@@ -654,8 +720,30 @@ fn run() -> Result<ExitCode> {
             noconfirm,
             restore_originals,
             purge,
+            secrets,
         } => {
-            commands::eject(noconfirm, restore_originals, purge)?;
+            commands::eject(noconfirm, restore_originals, purge, secrets)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Secrets(Secrets::Init { replace }) => {
+            println!(
+                "{}",
+                archix::secrets::tool::init(&archix::paths::Paths::system().state, replace)?
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Secrets(Secrets::Pubkey) => {
+            println!(
+                "{}",
+                archix::secrets::crypto::machine(&archix::paths::Paths::system().state)?.recipient
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Secrets(Secrets::RotateMachineKey { compromised }) => {
+            println!(
+                "{}",
+                archix::secrets::tool::rotate(&archix::paths::Paths::system().state, compromised)?
+            );
             return Ok(ExitCode::SUCCESS);
         }
         Command::Cache(Cache::Push { dir }) => {
@@ -805,7 +893,25 @@ fn run() -> Result<ExitCode> {
         host: &hostname,
         config: &evaluation.config,
     };
+    let state = archix::paths::Paths::system().state;
     match command {
+        Command::Secrets(Secrets::Edit { name, machine }) => {
+            archix::secrets::tool::edit(&cli.config, &hostname, &state, &name, machine)?
+        }
+        Command::Secrets(Secrets::Set { name, file }) => {
+            archix::secrets::tool::set(&cli.config, &hostname, &name, file.as_deref())?
+        }
+        Command::Secrets(Secrets::Rekey { names, machine }) => {
+            archix::secrets::tool::rekey(&cli.config, &hostname, &state, &names, machine)?
+        }
+        Command::Secrets(Secrets::Check) => {
+            let rendered = archix::system::render(&evaluation.config, &cli.config)
+                .ok()
+                .and_then(|r| r.state.secrets);
+            if !archix::secrets::tool::check(&cli.config, &hostname, &state, rendered.as_ref())? {
+                return Ok(ExitCode::FAILURE);
+            }
+        }
         Command::Install {
             packages,
             temp: true,
@@ -855,7 +961,13 @@ fn run() -> Result<ExitCode> {
             noconfirm,
             accept_nearest,
             allow_unsafe_downgrade,
-        } => commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?,
+            without_secrets,
+        } => {
+            if without_secrets {
+                commands::without_secrets();
+            }
+            commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?
+        }
         Command::Status { all } => commands::status(&target, all)?,
         Command::Recover { .. }
         | Command::Init { .. }
@@ -885,6 +997,7 @@ fn run() -> Result<ExitCode> {
         | Command::Cache(_)
         | Command::Hooks(_)
         | Command::UsrLocal(_)
+        | Command::Secrets(_)
         | Command::Verify { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")

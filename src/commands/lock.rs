@@ -355,7 +355,16 @@ pub(super) fn pending(
     if let Some(warning) = system::credentials::remote_warning(&rendered.state.users, target.config_dir) {
         eprintln!("{warning}");
     }
-    let passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    let mut rendered = rendered;
+    if let Some(mut manifest) = rendered.state.secrets.clone() {
+        let hmacs = archix::secrets::prepare::hmacs(&paths.state, &manifest, &|sha| rendered.ciphertext(sha));
+        for (name, entry) in manifest.secrets.iter_mut() {
+            entry.hmac = hmacs.get(name).cloned();
+        }
+        rendered.set_secrets(manifest);
+    }
+    let mut passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    system::credentials::resolve_secrets(&mut passwords, rendered.state.secrets.as_ref(), &paths.state);
     for line in system::credentials::override_lines(&passwords) {
         println!("{line}");
     }
@@ -378,12 +387,15 @@ pub(super) fn pending(
             None => system::usr_local::on_disk(&paths.root, path),
         })
     };
-    lines.extend(system::apply::describe(
-        &change,
-        &place,
-        &Accounts::read(&here.join("etc")),
-        &here,
-    )?);
+    lines.extend(
+        system::apply::describe(&change, &place, &Accounts::read(&here.join("etc")), &here)?
+            .into_iter()
+            .filter(|line| !line.contains(archix::secrets::DEPLOY_DIR)),
+    );
+    lines.extend(archix::secrets::prepare::describe(
+        change.from.secrets.as_ref(),
+        change.to.secrets.as_ref(),
+    ));
     let etc = here.join("etc");
     lines.extend(system::credentials::describe(&passwords, &etc));
     for kept in system::credentials::kept_locks(&passwords, &[&etc, &paths.root.join("etc")]) {
@@ -574,6 +586,9 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 println!("{line}");
             }
             for line in fstab_drift(target)? {
+                println!("{line}");
+            }
+            for line in archix::secrets::status_lines(&paths, generation.system.secrets.as_ref()) {
                 println!("{line}");
             }
         }

@@ -15,6 +15,8 @@ pub struct Report {
     pub files: usize,
     pub bytes: u64,
     pub snapshots: usize,
+    /// Retired secrets identities no kept generation needs any more, by recipient.
+    pub retired: Vec<String>,
 }
 
 /// Drops the deployments `deployments.keep` leaves out (never the booted, current or boot-default one) with their boot entries, then generation records outside the generation limits that have no deployment, then cached files no kept generation needs.
@@ -102,6 +104,13 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     let (blob_count, blob_bytes) = crate::system::blobs::collect(paths, &blobs)?;
     report.files += blob_count;
     report.bytes += blob_bytes;
+    let ciphertexts: Vec<Vec<u8>> = kept_generations
+        .iter()
+        .filter_map(|g| g.system.secrets.as_ref())
+        .flat_map(|manifest| manifest.secrets.values())
+        .filter_map(|entry| fs::read(crate::system::blobs::path(paths, &entry.sha256)).ok())
+        .collect();
+    report.retired = crate::secrets::storage::collect_retired(&paths.state, &ciphertexts);
 
     let dates: BTreeSet<String> = kept_generations.iter().map(|g| g.date.to_string()).collect();
     // `archix lock` doesn't take archix's lock, so one resolving right now may be reading a snapshot no generation uses yet.

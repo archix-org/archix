@@ -33,6 +33,8 @@ elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
 elif [ "$suite" = recovery ]; then
   dir=/vm/recovery
+elif [ "$suite" = secrets ]; then
+  dir=/vm/secrets
 fi
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
@@ -42,11 +44,16 @@ truncate -s "$size" "$img"
 # The pcr and rescue suites' LUKS volume, a second virtual disk.
 case $suite in pcr | rescue) truncate -s 64M /work/data.img ;; esac
 # 1 GiB, as the Arch installation guide suggests: keep = 1 holds the booted, current and new deployments' UKIs and protected twins, the fallback copy and the plain UKI.
-sfdisk --quiet "$img" <<SFDISK
+if [ "$suite" = secrets ]; then
+  # A partition after the root, vda3, which the secrets suite makes its swap and greps raw; its type isn't swap, which systemd would turn on before mkswap.
+  printf 'label: gpt\nsize=1G, type=uefi\nsize=6G, type=linux\ntype=linux, name=archix-swap\n' | sfdisk --quiet "$img"
+else
+  sfdisk --quiet "$img" <<SFDISK
 label: gpt
 size=1G, type=uefi
 type=linux
 SFDISK
+fi
 
 part() { sfdisk -J "$img" | python -c "import json,sys; p=json.load(sys.stdin)['partitiontable']['partitions'][$1]; print(p['start']*512, p['size']*512, p['uuid'])"; }
 read -r esp_start esp_size _ < <(part 0)
@@ -164,7 +171,8 @@ sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s
   -e "s|@EXTRA_PACKAGES@|$extra|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 [ ! -f "$dir/vmtest.sh" ] || install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 # The driver's suites (tests/vm/driver) have no vmtest.sh: the guest runs the driver's root shell, which config.lua takes from here.
-[ "$dir" != /vm/boot ] || install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
+case $dir in /vm/boot | /vm/secrets) install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor ;; esac
+[ "$dir" != /vm/secrets ] || install -Dm755 /vm/secrets/archix-leak-sweep /mnt/etc/archix/archix-leak-sweep
 # The test tools go in /opt, which each deployment keeps, as boots of an older deployment and the fallback UKI leave /usr/local out.
 install -Dm755 /vm/deploy/proto/check-deployment /mnt/opt/archix-vmtest/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to

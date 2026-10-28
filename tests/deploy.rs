@@ -885,7 +885,13 @@ fn deploy_helper() {
     if action == "eject" {
         archix::system::deploy_boot::writable_store(&root).unwrap();
         let paths = archix::paths::Paths::under(&root);
-        archix::deploy::eject::eject(&paths, Path::new(env!("CARGO_BIN_EXE_archix")), false).unwrap();
+        archix::deploy::eject::eject(
+            &paths,
+            Path::new(env!("CARGO_BIN_EXE_archix")),
+            false,
+            archix::deploy::eject::SecretsMode::Drop,
+        )
+        .unwrap();
         return;
     }
     let store = Store::open(&root).unwrap();
@@ -1901,6 +1907,7 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
         keep: 2,
         config: &|_| Ok(()),
         credentials: None,
+        scan: None,
     };
     let Err(err) = archix::deploy::build::build(&store, &plan) else {
         panic!("the build can't succeed");
@@ -2134,6 +2141,33 @@ fn signing_keys_are_hidden_from_everything_in_the_view_but_the_boot_builds_signi
         drop((tx, signing));
         staging.discard().unwrap();
     }
+}
+
+#[test]
+#[ignore]
+fn the_secrets_identity_and_decrypted_secrets_are_out_of_the_staging_roots_reach() {
+    let _serial = serial();
+    let (_fs, store) = system("ext4");
+    let root = store.root().to_path_buf();
+    let state = archix::paths::Paths::under(&root).state;
+    let identity = archix::secrets::crypto::identity_path(&state);
+    fs::create_dir_all(identity.parent().unwrap()).unwrap();
+    fs::write(&identity, "AGE-SECRET-KEY-1ARCHIXTESTIDENTITY").unwrap();
+    let run = root.join("run/archix/secrets");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(run.join("wg0"), "DECRYPTED-SECRET-VALUE").unwrap();
+    let staging = Staging::new(&store, 2).unwrap();
+    for tx in [staging.transaction().unwrap(), staging.signing_transaction().unwrap()] {
+        let seen = in_view(
+            &tx,
+            "cat /var/lib/archix/secrets/identity /run/archix/secrets/wg0 2>/dev/null || true; ls -a /var/lib/archix /run 2>/dev/null || true",
+        );
+        assert!(
+            !seen.contains("ARCHIXTESTIDENTITY") && !seen.contains("DECRYPTED-SECRET") && !seen.contains("secrets"),
+            "a scriptlet reached the secrets: {seen}"
+        );
+    }
+    staging.discard().unwrap();
 }
 
 /// Stands in for pacman: with /etc/net-sandbox, CachyOS's, which refuses to run hooks and scriptlets it can't put in a network namespace unless told not to; without, Arch's, which rejects that option. Logs each run's arguments, network namespace, interface count and whether loopback is up.

@@ -114,6 +114,9 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
 /// The statically linked archix the initramfs hook copies; the package installs it.
 pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
 
+/// The unit that decrypts a deployment's secrets at boot; not part of what boot counting judges, as every deployment shares the identity it needs.
+pub const SECRETS_UNIT: &str = "archix-secrets.service";
+
 /// The unit whose failure keeps a counted boot from being blessed; boot-complete.target, and so this unit, is only part of boots systemd-boot counts.
 pub const HEALTH_UNIT: &str = "archix-health-check.service";
 
@@ -159,6 +162,15 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         Paths::system().state.display(),
         archix.display()
     );
+    let secrets = format!(
+        "[Unit]\nDescription=archix: decrypt this deployment's secrets into /run/archix/secrets\nDefaultDependencies=no\n\
+         After=local-fs.target swap.target systemd-sysusers.service archix-boot.service\n\
+         Before=sysinit.target archix-deploy-activate.service systemd-user-sessions.service shutdown.target\n\
+         Conflicts=shutdown.target\nConditionPathExists={}\n\n\
+         [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={} secrets activate\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
+        crate::secrets::MANIFEST,
+        archix.display()
+    );
     let bless = format!("[Service]\nExecStartPre=-{} bless\n", archix.display());
     let root = Path::new("/");
     let mut files = vec![
@@ -172,6 +184,7 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
             etc_merge_boot,
         ),
         (root.join("etc/systemd/system/archix-boot.service"), unit),
+        (root.join(format!("etc/systemd/system/{SECRETS_UNIT}")), secrets),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
         (root.join("etc/systemd/system/archix-flatpak.service"), flatpak),
         (root.join(format!("etc/systemd/system/{HEALTH_UNIT}")), health),
@@ -185,6 +198,7 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
 pub fn boot_wants() -> Vec<(PathBuf, String)> {
     let mut wants: Vec<(PathBuf, String)> = [
         ("sysinit.target.wants", "archix-boot.service"),
+        ("sysinit.target.wants", SECRETS_UNIT),
         ("multi-user.target.wants", "archix-boot-complete.service"),
         ("multi-user.target.wants", "archix-flatpak.service"),
         ("boot-complete.target.requires", HEALTH_UNIT),

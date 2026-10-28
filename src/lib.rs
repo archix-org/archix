@@ -29,6 +29,7 @@ pub mod recipes;
 pub mod repack;
 pub mod repos;
 pub mod resolve;
+pub mod secrets;
 pub mod soname;
 pub mod system;
 pub mod testhooks;

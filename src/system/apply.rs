@@ -1001,10 +1001,20 @@ fn apply_file(
         return Ok(());
     }
     if matches(target, &disk, want, accounts) {
-        if disk != OnDisk::Missing && previous.is_none() {
+        if disk != OnDisk::Missing
+            && previous.is_none()
+            && !want.link.as_deref().is_some_and(crate::secrets::is_secret_link)
+        {
             keep_original(target, &under(&saves.backups, path)).with_context(|| format!("backing up {path}"))?;
         }
         return Ok(());
+    }
+    if want.link.as_deref().is_some_and(crate::secrets::is_secret_link) {
+        // A file at a secret's link may hold its value: the switch checked it, and no copy is kept.
+        if disk != OnDisk::Missing {
+            fs::remove_file(target).with_context(|| format!("replacing {path} with its secret's link"))?;
+        }
+        return write(paths, target, want, accounts, content).with_context(|| format!("writing {path}"));
     }
     if disk != OnDisk::Missing {
         match previous {
@@ -1555,6 +1565,7 @@ mod tests {
             system: false,
             hashed_password: None,
             initial_hashed_password: None,
+            hashed_password_secret: None,
         };
         assert!(!accounts.differs("alice", &alice));
         let more = User {

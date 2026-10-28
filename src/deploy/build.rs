@@ -12,6 +12,9 @@ use crate::system::apply::{Accounts, SystemChange, deployment_tree};
 use crate::system::boot::{self, BootPlan, Entries};
 use crate::system::credentials::{self, Passwords};
 
+/// A last check of a finished tree, at its directory, before its commit.
+pub type Check<'a> = dyn Fn(&Path) -> Result<()> + 'a;
+
 /// Everything one deployment is built from, prepared before anything is staged.
 pub struct Plan<'a> {
     pub paths: &'a Paths,
@@ -30,11 +33,15 @@ pub struct Plan<'a> {
     pub config: &'a dyn Fn(&Path) -> Result<()>,
     /// The passwords a switch sets and whether it may leave nobody a password; a rollback, whose accounts the running system's replace, has none.
     pub credentials: Option<Credentials<'a>>,
+    /// Checks the finished tree, at its directory, just before the commit, as for decrypted secrets that mustn't be in it.
+    pub scan: Option<&'a Check<'a>>,
 }
 
 pub struct Credentials<'a> {
     pub passwords: &'a Passwords,
     pub allow_no_password_login: bool,
+    /// Users whose password a checked crypt_hash secret sets at the deployment's boot.
+    pub logins: &'a std::collections::BTreeSet<String>,
 }
 
 /// What a committed deployment left for after its commit.
@@ -116,7 +123,12 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     crate::system::apply::files(paths, plan.system, &in_etc, &accounts)?;
     check_staged(plan.system, &tx)?;
     if let Some(credentials) = &plan.credentials
-        && let Some(warning) = credentials::lockout(&etc, &paths.root.join("etc"), credentials.allow_no_password_login)?
+        && let Some(warning) = credentials::lockout(
+            &etc,
+            &paths.root.join("etc"),
+            credentials.allow_no_password_login,
+            credentials.logins,
+        )?
     {
         eprintln!("{warning}");
     }
@@ -140,6 +152,9 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     record.package_capabilities = set_capabilities(&dir, plan.system, &base_packages)?;
     if record.package_capabilities != plan.record.package_capabilities {
         crate::generations::write_into(&dir, &record)?;
+    }
+    if let Some(scan) = plan.scan {
+        scan(&dir)?;
     }
     let esp = PathBuf::from(&plan.boot.esp);
     let mut pins = Keep::read(plan.keep, store, &esp)?;

@@ -252,6 +252,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             keep: declared.deployments_keep as usize,
             config: &|staged: &Path| super::switch::carry_config(target.config_dir, &paths, staged),
             credentials: None,
+            scan: None,
         },
     )
     .inspect_err(|_| {

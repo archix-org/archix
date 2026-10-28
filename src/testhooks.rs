@@ -80,6 +80,14 @@ pub fn root() -> std::path::PathBuf {
     std::path::PathBuf::from("/")
 }
 
+/// Where `archix secrets edit` puts the plain text instead of a private ramfs, ARCHIX_TEST_SECRETS_SCRATCH in a debug build, so a test can see it refuse a directory on disk.
+pub fn secrets_scratch() -> Option<std::path::PathBuf> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var_os("ARCHIX_TEST_SECRETS_SCRATCH").map(std::path::PathBuf::from)
+}
+
 /// systemd-boot's LoaderFeatures, or ARCHIX_TEST_LOADER_FEATURES in a debug build.
 pub fn loader_features() -> u64 {
     if cfg!(debug_assertions)

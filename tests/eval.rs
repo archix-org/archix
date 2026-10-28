@@ -792,3 +792,90 @@ fn a_config_that_writes_fstab_or_what_the_mount_options_write_is_refused() {
         assert!(error.contains(says), "{body}: {error}");
     }
 }
+
+#[test]
+fn secrets_render_to_links_templates_and_ciphertexts_and_never_their_values() {
+    let machine = age::x25519::Identity::generate().to_public().to_string();
+    let admin = age::x25519::Identity::generate().to_public().to_string();
+    let encrypted = |value: &str| {
+        let ciphertext = archix::secrets::crypto::encrypt(&[machine.clone(), admin.clone()], value.as_bytes()).unwrap();
+        String::from_utf8(ciphertext).unwrap()
+    };
+    let (wg, nb, pw) = (
+        encrypted("wg-value-0123456789"),
+        encrypted("nb-value-0123456789"),
+        encrypted(HASH),
+    );
+    let body = format!(
+        r#"secrets = {{ machine_key = "{machine}", admins = {{ "{admin}" }}, items = {{
+            wg0 = {{ file = "secrets/wg0.age", mode = "0600" }},
+            nb = {{ file = "secrets/nb.age", path = "/run/NetworkManager/system-connections/x.nmconnection" }},
+            pw = {{ file = "secrets/pw.age", kind = "crypt_hash" }} }} }},
+        files = {{ ["/etc/wireguard/wg0.conf"] = {{ secret = "wg0" }}, ["/etc/netbird/env"] = {{ text = "KEY=" .. archix.secret("nb"), mode = "0644" }} }},
+        users = {{ alice = {{ hashed_password = archix.secret("pw") }} }},
+        units = {{ ["x.service"] = "[Service]\nLoadCredential=k:" .. archix.secret_path("nb") .. "\n" }}"#
+    );
+    let dir = config(&[
+        ("init.lua", &format!("return {{ {body} }}")),
+        ("secrets/wg0.age", &wg),
+        ("secrets/nb.age", &nb),
+        ("secrets/pw.age", &pw),
+    ]);
+    let config = eval_at(dir.path(), "desktop").unwrap().config;
+    let rendered = archix::system::render(&config, dir.path()).unwrap();
+    let files = &rendered.state.files;
+    assert_eq!(
+        files["/etc/wireguard/wg0.conf"].link.as_deref(),
+        Some("/run/archix/secrets/wg0")
+    );
+    let id = archix::secrets::template_id("/etc/netbird/env");
+    assert_eq!(
+        files["/etc/netbird/env"].link.clone(),
+        Some(format!("/run/archix/secrets/files/{id}"))
+    );
+    let template = &rendered.blobs[&files[&format!("/usr/lib/archix/secrets/templates/{id}")].sha256];
+    assert_eq!(String::from_utf8_lossy(template), "KEY={{archix-secret:nb}}\n");
+    let manifest = rendered.state.secrets.as_ref().unwrap();
+    assert_eq!(
+        manifest.templates[&id].mode, 0o640,
+        "a template loses the bits for others"
+    );
+    assert_eq!(manifest.hashes["alice"], "pw");
+    assert_eq!(manifest.secrets["wg0"].consumers, ["/etc/wireguard/wg0.conf"]);
+    assert_eq!(
+        rendered.state.users["alice"].hashed_password_secret.as_deref(),
+        Some("pw")
+    );
+    assert_eq!(rendered.state.users["alice"].hashed_password, None);
+    let unit = &rendered.blobs[&files["/etc/systemd/system/x.service"].sha256];
+    assert!(String::from_utf8_lossy(unit).contains("LoadCredential=k:/run/archix/secrets/nb"));
+    for blob in rendered.blobs.values() {
+        for value in [
+            b"wg-value-0123456789".as_slice(),
+            b"nb-value-0123456789",
+            HASH.as_bytes(),
+        ] {
+            assert!(
+                !archix::secrets::memory::contains(blob, value),
+                "a rendered file holds a value"
+            );
+        }
+    }
+    let record = serde_json::to_string(&rendered.state).unwrap();
+    assert!(
+        !record.contains("wg-value") && !record.contains(HASH),
+        "the record holds no value"
+    );
+    let error = self::rendered(&format!(
+        r#"secrets = {{ machine_key = "{machine}", items = {{ a = {{ file = "a.age" }} }} }}"#
+    ))
+    .err()
+    .unwrap_or_default();
+    assert!(error.contains("secrets.admins is empty"), "{error}");
+    let error = self::rendered(&format!(
+        r#"secrets = {{ machine_key = "{machine}", admins = {{ "{admin}" }}, items = {{ a = {{ file = "a.age" }} }} }}, packages = {{ archix.secret("a") }}"#
+    ))
+    .err()
+    .unwrap_or_default();
+    assert!(error.contains("packages.[1]: a secret can't go here"), "{error}");
+}

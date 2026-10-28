@@ -266,14 +266,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         before_archix: false,
         package_capabilities: BTreeMap::new(),
     };
-    let rendered = system::render(target.config, target.config_dir)?;
+    let mut rendered = system::render(target.config, target.config_dir)?;
     for warning in &rendered.warnings {
         eprintln!("warning: {warning}");
     }
     if let Some(warning) = system::credentials::remote_warning(&rendered.state.users, target.config_dir) {
         eprintln!("{warning}");
     }
-    let passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    let prepared = prepare_secrets(&paths, &mut rendered)?;
+    let mut passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    system::credentials::resolve_secrets(&mut passwords, rendered.state.secrets.as_ref(), &paths.state);
     for line in system::credentials::override_lines(&passwords) {
         println!("{line}");
     }
@@ -286,6 +288,20 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let place = place_in(&paths);
     let accounts = Accounts::read(&here.join("etc"));
     let mut system_lines = system::apply::describe(&system_change, &place, &accounts, &here)?;
+    system_lines.retain(|line| !line.contains(archix::secrets::DEPLOY_DIR));
+    system_lines.extend(archix::secrets::prepare::describe(
+        system_change.from.secrets.as_ref(),
+        system_change.to.secrets.as_ref(),
+    ));
+    if let Some(manifest) = &system_change.to.secrets {
+        system_lines.extend(archix::secrets::prepare::existing(
+            manifest,
+            system_change.from.secrets.as_ref(),
+            &prepared,
+            &place,
+            system::boot::booted_deployment(&paths.root),
+        )?);
+    }
     system_lines.extend(system::credentials::describe(&passwords, &here.join("etc")));
     for kept in system::credentials::kept_locks(&passwords, &[&here.join("etc"), &paths.root.join("etc")]) {
         eprintln!("warning: {kept}");
@@ -652,6 +668,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
         );
     }
+    let scan = |dir: &Path| scan_staged(&prepared, dir);
     eprintln!(":: building deployment {number} from deployment {base}");
     let made = deploy::build::build(
         &deployments,
@@ -672,7 +689,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             credentials: Some(deploy::build::Credentials {
                 passwords: &passwords,
                 allow_no_password_login: system::allows_no_password_login(target.config),
+                logins: &prepared.logins,
             }),
+            scan: if prepared.values.is_empty() { None } else { Some(&scan) },
         },
     )
     .inspect_err(|_| {
@@ -696,6 +715,61 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         made.users,
         soft_failures,
     )
+}
+
+static WITHOUT_SECRETS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `switch --without-secrets`: secrets that don't decrypt here are left out of the deployment instead of refusing it.
+pub fn without_secrets() {
+    WITHOUT_SECRETS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Decrypts and checks the config's secrets as far as this switch can, filling in the manifest, and refuses a managed file that holds a value; returns the values, held until the commit.
+fn prepare_secrets(paths: &Paths, rendered: &mut system::Rendered) -> Result<archix::secrets::prepare::Prepared> {
+    use archix::secrets::{Kind, prepare, scan};
+    let Some(mut manifest) = rendered.state.secrets.clone() else {
+        return Ok(prepare::Prepared::default());
+    };
+    archix::secrets::memory::harden(false).context("keeping this process out of core dumps while it holds secrets")?;
+    let mode = if WITHOUT_SECRETS.load(std::sync::atomic::Ordering::Relaxed) {
+        prepare::Mode::Without
+    } else if system::secureboot::in_chroot() {
+        prepare::Mode::Chroot
+    } else {
+        prepare::Mode::Check
+    };
+    let prepared = {
+        let rendered: &system::Rendered = rendered;
+        prepare::prepare(&paths.state, &mut manifest, &|sha| rendered.ciphertext(sha), mode)?
+    };
+    for warning in &prepared.warnings {
+        eprintln!("warning: {warning}");
+    }
+    rendered.set_secrets(manifest);
+    let needles = prepared.needles(&[Kind::File, Kind::CryptHash]);
+    let ciphertexts = format!("{}/", archix::secrets::DEPLOY_DIR);
+    let mut hits = Vec::new();
+    for (path, file) in &rendered.state.files {
+        let own = path.starts_with(&ciphertexts) && !path.starts_with(&format!("{ciphertexts}templates/"));
+        if let Some(bytes) = rendered.blobs.get(&file.sha256).filter(|_| !own) {
+            hits.extend(scan::blob(bytes, path, &needles, false));
+        }
+    }
+    scan::judge(&hits, true)?;
+    Ok(prepared)
+}
+
+/// The last check before a deployment with secrets commits: no value in its /etc (a short one only warns there) or, opened up, its UKIs and initramfs images.
+fn scan_staged(prepared: &archix::secrets::prepare::Prepared, dir: &Path) -> Result<()> {
+    use archix::secrets::{Kind, scan};
+    let files = prepared.needles(&[Kind::File]);
+    let warnings = scan::judge(&scan::tree(&dir.join("etc"), "/etc", &files, false), false)?;
+    let all = prepared.needles(&[Kind::File, Kind::CryptHash]);
+    scan::judge(&scan::tree(&dir.join("boot"), "/boot", &all, true), true)?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    Ok(())
 }
 
 /// Starts the /etc merge `etcmerge::pause` stopped again once its build is committed or failed, against whichever deployment is pending then.
@@ -1413,6 +1487,9 @@ fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Re
 }
 
 fn print_gc(report: &gc::Report, always: bool) {
+    for recipient in &report.retired {
+        println!("deleted the retired secrets identity {recipient}, which no kept deployment needs");
+    }
     if !report.deployments.is_empty() {
         let numbers: Vec<String> = report.deployments.iter().map(u32::to_string).collect();
         println!("deleted deployments {}", numbers.join(", "));
@@ -1666,6 +1743,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                     carry_config(config_dir, &paths, staged)
                 },
                 credentials: None,
+                scan: None,
             },
         )
         .inspect_err(|_| resume_etc_merge(&paths, paused))?;

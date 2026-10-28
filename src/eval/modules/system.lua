@@ -10,6 +10,11 @@ local text_file = t.submodule {
   url = archix.option { type = t.nullable(t.str), default = archix.null, description = "Download the file from here; needs sha256. archix.fetchurl { url, sha256 } builds both." },
   sha256 = archix.option { type = t.nullable(t.str), default = archix.null, description = "The sha256 the download from url must have; `archix prefetch <url>` prints it." },
   link = archix.option { type = t.nullable(t.str), default = archix.null, description = "Make the file a symlink to this target." },
+  secret = archix.option {
+    type = t.nullable(t.str),
+    default = archix.null,
+    description = "Make the file a link to this secret (secrets.items), which the deployment's boot decrypts into /run/archix/secrets with the secret's owner and mode; the deployment holds only the link.",
+  },
   mode = archix.option { type = t.str, default = "0644" },
   owner = archix.option { type = t.str, default = "root" },
   group = archix.option { type = t.str, default = "root" },

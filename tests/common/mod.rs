@@ -191,7 +191,7 @@ impl Machine {
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
             cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json id-registry.json etc-merge outside-changes.json \
-              pending-hooks notes layout-pruned eject activated accounts"#,
+              pending-hooks notes layout-pruned eject activated accounts secrets"#,
             root = root.display(),
             template = template.display(),
         ));
@@ -861,6 +861,141 @@ pub fn write_aur_dump(path: &Path, entries: &[serde_json::Value]) {
         .unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, gz.finish().unwrap()).unwrap();
+}
+
+/// A fresh random marker of `len` letters and digits, which can't be a leftover of another run.
+pub fn marker(len: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut bytes = vec![0u8; len];
+    assert_eq!(
+        unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), len, 0) },
+        len as isize
+    );
+    bytes
+        .iter()
+        .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
+        .collect()
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+        for i in 0..=chunk.len() {
+            out.push(TABLE[(n >> (18 - 6 * i) & 63) as usize] as char);
+        }
+    }
+    out
+}
+
+/// Where a leak sweep found a value: the place and the marker's name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Hit {
+    pub marker: String,
+    pub place: String,
+}
+
+/// The leak sweep every secrets scenario ends with: each marker, raw and as base64, in every file under the machine's root but the secrets' ramfs, /proc, /sys and /dev (deployments, staging leftovers, /var with archix's state, blobs, generations, backups, the /etc merge's state and the package caches, the ESP with its UKIs' and initramfs images' compressed streams opened), the config but its .age files, `extra` directories (a package_cache_push target), the journal, every core dump and `outputs`, the archix commands' output; returns the hits.
+pub fn leak_sweep(
+    machine: &Machine,
+    config: &Path,
+    extra: &[&Path],
+    markers: &[(String, Vec<u8>)],
+    outputs: &[String],
+) -> Vec<Hit> {
+    use std::collections::BTreeSet;
+    use std::os::unix::fs::MetadataExt;
+    let needles: Vec<(String, Vec<Vec<u8>>)> = markers
+        .iter()
+        .map(|(name, value)| (name.clone(), vec![value.clone(), base64(value).into_bytes()]))
+        .collect();
+    let mut hits = Vec::new();
+    let flat: Vec<&[u8]> = needles
+        .iter()
+        .flat_map(|(_, forms)| forms.iter().map(Vec::as_slice))
+        .collect();
+    let mut look = |bytes: &[u8], place: &str, deep: bool| {
+        let inside = match deep {
+            true => archix::secrets::scan::in_streams(bytes, &flat),
+            false => vec![false; flat.len()],
+        };
+        for (i, (name, forms)) in needles.iter().enumerate() {
+            let found = forms
+                .iter()
+                .enumerate()
+                .any(|(j, form)| archix::secrets::memory::contains(bytes, form) || inside[i * 2 + j]);
+            if found {
+                hits.push(Hit {
+                    marker: name.clone(),
+                    place: place.to_string(),
+                });
+            }
+        }
+    };
+    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut stack: Vec<(PathBuf, bool)> = vec![(machine.root.clone(), false), (config.to_path_buf(), false)];
+    stack.extend(extra.iter().map(|dir| (dir.to_path_buf(), false)));
+    stack.extend(["/var/lib/archix", "/var/cache/archix", "/var/cache/pacman/pkg"].map(|d| (PathBuf::from(d), false)));
+    let skipped: Vec<PathBuf> = ["run/archix/secrets", "proc", "sys", "dev"]
+        .iter()
+        .map(|d| machine.root.join(d))
+        .collect();
+    while let Some((path, deep)) = stack.pop() {
+        if skipped.contains(&path) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !seen.insert((meta.dev(), meta.ino())) {
+            continue;
+        }
+        let name = path.display().to_string();
+        let deep = deep || name.contains("/efi") || name.ends_with("/boot") || name.contains("/boot/");
+        if meta.is_dir() {
+            for entry in fs::read_dir(&path).into_iter().flatten().flatten() {
+                stack.push((entry.path(), deep));
+            }
+        } else if meta.file_type().is_symlink() {
+            if let Ok(target) = fs::read_link(&path) {
+                look(target.as_os_str().as_encoded_bytes(), &name, false);
+            }
+        } else if meta.is_file()
+            && !(path.starts_with(config) && name.ends_with(".age"))
+            && let Ok(bytes) = fs::read(&path)
+        {
+            look(&bytes, &name, deep);
+        }
+    }
+    let journal = Command::new("journalctl")
+        .args(["-o", "export", "--all", "--no-pager"])
+        .output();
+    if let Ok(journal) = journal {
+        look(&journal.stdout, "the journal", false);
+    }
+    for entry in fs::read_dir("/var/lib/systemd/coredump")
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        if let Ok(bytes) = fs::read(entry.path()) {
+            let plain = zstd::decode_all(&bytes[..]).unwrap_or_default();
+            look(&bytes, &entry.path().display().to_string(), false);
+            look(&plain, &entry.path().display().to_string(), false);
+        }
+    }
+    for (i, output) in outputs.iter().enumerate() {
+        look(
+            output.as_bytes(),
+            &format!("the output of archix command {}", i + 1),
+            false,
+        );
+    }
+    hits
 }
 
 /// Writes an executable file.

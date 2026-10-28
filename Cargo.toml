@@ -8,6 +8,7 @@ repository = "https://github.com/archix-org/archix"
 homepage = "https://archix.dev"
 
 [dependencies]
+age = { version = "0.12.1", features = ["armor", "plugin", "ssh"] }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 console = "0.16"

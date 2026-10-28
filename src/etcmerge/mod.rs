@@ -128,10 +128,10 @@ pub fn deployment_etc(root: &Path, number: u32) -> PathBuf {
     root.join("archix/deploy").join(number.to_string()).join("etc")
 }
 
-/// A base taken from the /etc at `etc` as it is now.
-pub fn snapshot(etc: &Path, target: u32, from: u32) -> State {
+/// A base taken from the /etc at `etc` as it is now, leaving out `secrets`, the /etc paths of secrets' links, whose fingerprint would be a value's hash if someone put one there.
+pub fn snapshot(etc: &Path, target: u32, from: u32, secrets: &BTreeSet<String>) -> State {
     let mut all = Vec::new();
-    tree::walk(etc, "", &|rel| never(rel), &mut all);
+    tree::walk(etc, "", &|rel| never(rel) || secrets.contains(rel), &mut all);
     let base = all
         .into_iter()
         .filter(|rel| !FILES.contains(&rel.as_str()))
@@ -165,7 +165,7 @@ pub fn prepare(paths: &Paths, target: u32) -> Result<()> {
     };
     let mut state = match pending(&paths.root).and_then(|(current, _)| load(paths, current)) {
         Some(state) if state.from == booted => state,
-        _ => snapshot(&paths.root.join("etc"), target, booted),
+        _ => snapshot(&paths.root.join("etc"), target, booted, &secret_links(paths, &[booted])),
     };
     ids::record(&paths.state, &state.accounts)?;
     state = State {
@@ -285,18 +285,39 @@ pub fn running(paths: &Paths) -> bool {
         .is_ok_and(|out| matches!(String::from_utf8_lossy(&out.stdout).trim(), "active" | "activating"))
 }
 
-/// Managed /etc files whose content the target's generation changed from the running one's; archix writes those into the target itself.
+/// The /etc paths, relative to it, of the links to secrets in the generations `numbers`: never carried, so a value someone wrote over a link stays where it is.
+pub(crate) fn secret_links(paths: &Paths, numbers: &[u32]) -> BTreeSet<String> {
+    let store = crate::generations::Store::new(paths);
+    numbers
+        .iter()
+        .filter_map(|number| store.get(*number).ok())
+        .flat_map(|generation| {
+            generation
+                .system
+                .secrets
+                .map(|m| m.links())
+                .unwrap_or_default()
+                .into_keys()
+        })
+        .filter_map(|path| path.strip_prefix("/etc/").map(str::to_string))
+        .collect()
+}
+
+/// Managed /etc files whose content the target's generation changed from the running one's, which archix writes into the target itself, and links to secrets in either.
 fn rewritten(paths: &Paths, from: u32, target: u32) -> BTreeSet<String> {
     let store = crate::generations::Store::new(paths);
     let (Ok(old), Ok(new)) = (store.get(from), store.get(target)) else {
         return BTreeSet::new();
     };
     let (old, new) = (old.system.files, new.system.files);
-    old.keys()
+    let mut skipped: BTreeSet<String> = old
+        .keys()
         .chain(new.keys())
         .filter(|path| old.get(*path) != new.get(*path))
         .filter_map(|path| path.strip_prefix("/etc/").map(str::to_string))
-        .collect()
+        .collect();
+    skipped.extend(secret_links(paths, &[from, target]));
+    skipped
 }
 
 /// One pass's outcome.
@@ -979,7 +1000,7 @@ mod tests {
                     make(&b, base, "base");
                     make(&l, live, "live");
                     make(&t, theirs, "theirs");
-                    let mut state = snapshot(&b, 2, 1);
+                    let mut state = snapshot(&b, 2, 1, &BTreeSet::new());
                     let mut merge = merge(&l, &t, &mut state, &[]);
                     merge.pass(Some(&BTreeSet::from(["x".to_string()])), None);
                     let case = format!("base {base:?}, live {live:?}, theirs {theirs:?}");
@@ -1032,7 +1053,7 @@ mod tests {
             fs::create_dir_all(etc).unwrap();
             fs::write(etc.join("x"), text).unwrap();
         }
-        let mut state = snapshot(&b, 2, 1);
+        let mut state = snapshot(&b, 2, 1, &BTreeSet::new());
         let dirty = BTreeSet::from(["x".to_string()]);
         let mut merge = merge(&l, &t, &mut state, &[]);
         merge.pass(Some(&dirty), None);
@@ -1041,6 +1062,62 @@ mod tests {
         assert_eq!(fs::read_to_string(t.join("x")).unwrap(), "live 2");
         assert_eq!(fs::read_to_string(t.join("x.pacnew")).unwrap(), "package");
         assert_eq!(merge.state.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn a_secrets_link_is_never_carried_nor_fingerprinted_even_when_a_value_replaced_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        let store = crate::generations::Store::new(&paths);
+        let record = |number: u32, secrets: Option<crate::secrets::Manifest>| {
+            let mut generation: crate::generations::Generation = serde_json::from_value(serde_json::json!({
+                "format": crate::generations::FORMAT, "number": number, "created": number, "host": "box", "date": "2026-10-10",
+                "packages": {}, "settings": { "remove_undeclared": true, "ignored": [], "keep": 10, "keep_days": 30, "deployments_keep": 2 },
+                "config_commit": null, "config_dirty": false, "system": {}, "flatpak": {}, "before_archix": false
+            }))
+            .unwrap();
+            generation.system.secrets = secrets;
+            store.save(&generation).unwrap();
+        };
+        let entry: crate::secrets::Entry = serde_json::from_value(serde_json::json!({
+            "file": "wg0.age", "sha256": "1", "kind": "file", "owner": "root", "group": "root", "mode": 256,
+            "consumers": ["/etc/wireguard/wg0.conf"]
+        }))
+        .unwrap();
+        let manifest = crate::secrets::Manifest {
+            secrets: [("wg0".to_string(), entry)].into(),
+            ..Default::default()
+        };
+        record(1, Some(manifest));
+        record(2, None);
+        let skipped = rewritten(&paths, 1, 2);
+        assert!(
+            skipped.contains("wireguard/wg0.conf"),
+            "a link the running generation has: {skipped:?}"
+        );
+        let (b, l, t) = (
+            dir.path().join("base"),
+            dir.path().join("live"),
+            dir.path().join("theirs"),
+        );
+        for etc in [&b, &l, &t] {
+            fs::create_dir_all(etc.join("wireguard")).unwrap();
+            std::os::unix::fs::symlink("/run/archix/secrets/wg0", etc.join("wireguard/wg0.conf")).unwrap();
+        }
+        fs::remove_file(l.join("wireguard/wg0.conf")).unwrap();
+        fs::write(l.join("wireguard/wg0.conf"), "PrivateKey = value-someone-saved").unwrap();
+        let secrets = secret_links(&paths, &[1]);
+        let mut state = snapshot(&l, 2, 1, &secrets);
+        assert!(
+            !state.base.contains_key("wireguard/wg0.conf"),
+            "no fingerprint of a value"
+        );
+        let skip: Vec<&str> = skipped.iter().map(String::as_str).collect();
+        merge(&l, &t, &mut state, &skip).pass(None, None);
+        assert!(
+            fs::read_link(t.join("wireguard/wg0.conf")).is_ok(),
+            "the pending deployment keeps its link, never the value"
+        );
     }
 
     #[test]
@@ -1064,7 +1141,7 @@ mod tests {
                 fs::write(etc.join(name), text).unwrap();
             }
         }
-        let mut state = snapshot(&b, 2, 1);
+        let mut state = snapshot(&b, 2, 1, &BTreeSet::new());
         merge(&l, &t, &mut state, &["managed"]).pass(None, None);
         for name in &names[..4] {
             assert_eq!(fs::read_to_string(t.join(name)).unwrap(), "theirs", "{name}");
@@ -1074,7 +1151,7 @@ mod tests {
         fs::write(b.join("machine-id"), "same").unwrap();
         fs::write(l.join("machine-id"), "same").unwrap();
         fs::write(t.join("machine-id"), "theirs").unwrap();
-        let mut state = snapshot(&b, 2, 1);
+        let mut state = snapshot(&b, 2, 1, &BTreeSet::new());
         merge(&l, &t, &mut state, &[]).pass(None, None);
         assert_eq!(
             fs::read_to_string(t.join("machine-id")).unwrap(),
@@ -1094,7 +1171,7 @@ mod tests {
             fs::write(etc.join("passwd"), passwd).unwrap();
             fs::write(etc.join("shadow"), shadow).unwrap();
         }
-        let mut state = snapshot(&l, 2, 1);
+        let mut state = snapshot(&l, 2, 1, &BTreeSet::new());
         fs::write(
             t.join("passwd"),
             format!("{passwd}pkguser:x:960:960::/:/usr/bin/nologin\n"),
@@ -1138,7 +1215,7 @@ mod tests {
             fs::write(etc.join("fstab"), &fstab).unwrap();
             fs::write(etc.join("crypttab"), crypttab).unwrap();
         }
-        let mut state = snapshot(&l, 2, 1);
+        let mut state = snapshot(&l, 2, 1, &BTreeSet::new());
         let new_fstab = format!("{fstab}UUID=new /mnt/new ext4 nofail 0 0\n");
         fs::write(t.join("fstab"), &new_fstab).unwrap();
         fs::write(t.join("crypttab"), format!("{crypttab}new UUID=n none luks,nofail\n")).unwrap();
@@ -1182,7 +1259,7 @@ mod tests {
         let (l, t) = (dir.path().join("live"), dir.path().join("theirs"));
         fs::create_dir_all(&l).unwrap();
         fs::create_dir_all(&t).unwrap();
-        let mut state = snapshot(&l, 2, 1);
+        let mut state = snapshot(&l, 2, 1, &BTreeSet::new());
         fs::write(l.join("late"), "x").unwrap();
         let mut merge = merge(&l, &t, &mut state, &[]);
         let pass = merge.pass(None, Some(Instant::now()));

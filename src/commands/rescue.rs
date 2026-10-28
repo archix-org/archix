@@ -749,11 +749,30 @@ impl Session {
         }
         let paths = Paths::under(&root);
         let records = archix::generations::Store::new(&paths);
-        let declared = store
-            .current()?
-            .and_then(|current| records.get(current).ok())
+        let generation = store.current()?.and_then(|current| records.get(current).ok());
+        let declared = generation
+            .as_ref()
             .and_then(|generation| generation.system.users.get(user)?.hashed_password.clone());
-        if let Some(declared) = declared {
+        let secret = generation.as_ref().and_then(|generation| {
+            let name = generation.system.users.get(user)?.hashed_password_secret.clone()?;
+            let entry = generation.system.secrets.as_ref()?.secrets.get(&name)?.clone();
+            Some((name, entry))
+        });
+        if let Some((name, entry)) = &secret {
+            archix::system::credentials::record_secret_override(
+                &paths.state,
+                user,
+                &archix::system::credentials::secret_mark(entry.hmac.as_deref(), &entry.sha256),
+            )?;
+            let note = format!(
+                "archix: {user}'s password was set in the rescue entry; boots keep it over the crypt_hash secret {name} until a switch changes that secret"
+            );
+            let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+            notes.push_str(&note);
+            notes.push('\n');
+            archix::durable::write(&paths.notes(), notes.as_bytes())?;
+            println!("{note}");
+        } else if let Some(declared) = declared {
             archix::system::credentials::record_override(&paths.state, user, Some(&declared))?;
             let note = format!(
                 "archix: {user}'s password was set in the rescue entry; switches keep it over users.{user}.hashed_password until that hash changes in the config"

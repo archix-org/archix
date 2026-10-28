@@ -32,6 +32,16 @@ pub struct State {
     pub deployment: u32,
     pub phase: Phase,
     pub restore_originals: bool,
+    /// What becomes of the deployment's secrets, which plain Arch has nothing to decrypt.
+    pub secrets: SecretsMode,
+}
+
+/// `eject --secrets`: drop the links to the secrets, or copy each decrypted secret to its path as a real file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum SecretsMode {
+    #[default]
+    Drop,
+    Materialize,
 }
 
 fn state_path(state_dir: &Path) -> PathBuf {
@@ -64,6 +74,10 @@ pub fn read_state(state_dir: &Path) -> Result<Option<State>> {
         deployment,
         phase,
         restore_originals: field("restore-originals") == Some("yes"),
+        secrets: match field("secrets") {
+            Some("materialize") => SecretsMode::Materialize,
+            _ => SecretsMode::Drop,
+        },
     }))
 }
 
@@ -74,9 +88,13 @@ pub fn write_state(state_dir: &Path, state: &State) -> Result<()> {
         Phase::Plain => "plain",
     };
     let text = format!(
-        "deployment {}\nphase {phase}\nrestore-originals {}\n",
+        "deployment {}\nphase {phase}\nrestore-originals {}\nsecrets {}\n",
         state.deployment,
-        if state.restore_originals { "yes" } else { "no" }
+        if state.restore_originals { "yes" } else { "no" },
+        match state.secrets {
+            SecretsMode::Drop => "drop",
+            SecretsMode::Materialize => "materialize",
+        }
     );
     crate::durable::write(&state_path(state_dir), text.as_bytes())
 }
@@ -205,8 +223,81 @@ fn remove_shared_usr_local(root: &Path) -> Result<()> {
     super::stage::remove_any(&crate::system::usr_local::dir(root))
 }
 
-/// Takes archix's integration off the root's own trees and puts back or unlocks the files generation `number` manages, as the eject of a plain system does.
-fn strip(root: &Path, paths: &Paths, number: u32, restore_originals: bool) -> Result<()> {
+/// Drops the links to generation `secrets`' values from the trees under `root`, or with `Materialize` replaces each with a real file holding the value the running system decrypted into its ramfs under `live`, with the secret's owner and mode; says what plain Arch loses.
+pub fn eject_secrets(
+    root: &Path,
+    live: &Path,
+    secrets: &crate::secrets::Manifest,
+    mode: SecretsMode,
+) -> Result<Vec<String>> {
+    use std::os::unix::fs::PermissionsExt;
+    let run = live.join(crate::secrets::RUN_DIR.trim_start_matches('/'));
+    let accounts = crate::system::apply::Accounts::read(&root.join("etc"));
+    let mut said = Vec::new();
+    let materialize = |path: &str, from: &Path, owner: &str, group: &str, mode: u32| -> Result<()> {
+        let target = root.join(path.trim_start_matches('/'));
+        let value = fs::read(from).with_context(|| format!("reading {}, which the boot decrypted", from.display()))?;
+        let uid = if owner == "root" { Some(0) } else { accounts.uid(owner) };
+        let gid = if group == "root" { Some(0) } else { accounts.gid(group) };
+        let _ = fs::remove_file(&target);
+        crate::durable::write_secret(&target, &value)?;
+        std::os::unix::fs::lchown(&target, uid, gid).with_context(|| format!("chown {}", target.display()))?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("chmod {}", target.display()))
+    };
+    for (name, entry) in &secrets.secrets {
+        for path in entry.consumers.iter().filter(|c| c.starts_with('/')) {
+            match mode {
+                SecretsMode::Drop => {
+                    let target = root.join(path.trim_start_matches('/'));
+                    if fs::read_link(&target).is_ok_and(|t| crate::secrets::is_secret_link(&t.to_string_lossy())) {
+                        fs::remove_file(&target).with_context(|| format!("removing {}", target.display()))?;
+                    }
+                }
+                SecretsMode::Materialize => materialize(path, &run.join(name), &entry.owner, &entry.group, entry.mode)
+                    .with_context(|| format!("materializing secret {name} at {path}"))?,
+            }
+        }
+        if let Some(path) = &entry.path {
+            said.push(format!(
+                "secret {name} was written to {path} at each boot; plain Arch doesn't write it there"
+            ));
+        }
+    }
+    for (id, template) in &secrets.templates {
+        match mode {
+            SecretsMode::Drop => {
+                let target = root.join(template.path.trim_start_matches('/'));
+                if fs::read_link(&target).is_ok_and(|t| crate::secrets::is_secret_link(&t.to_string_lossy())) {
+                    fs::remove_file(&target).with_context(|| format!("removing {}", target.display()))?;
+                }
+            }
+            SecretsMode::Materialize => materialize(
+                &template.path,
+                &run.join("files").join(id),
+                &template.owner,
+                &template.group,
+                template.mode,
+            )
+            .with_context(|| format!("materializing {}", template.path))?,
+        }
+    }
+    said.push(match mode {
+        SecretsMode::Drop => format!(
+            "the links to {} secrets are gone; what used them goes without. The identity and ciphertexts stay in /var/lib/archix, so `age -d -i /var/lib/archix/secrets/identity` decrypts one by hand",
+            secrets.secrets.len()
+        ),
+        SecretsMode::Materialize => format!(
+            "{} secrets are real files now, readable by whoever can read the disk, as on any plain Arch install; units reading {} lose theirs",
+            secrets.secrets.len(),
+            crate::secrets::RUN_DIR
+        ),
+    });
+    Ok(said)
+}
+
+/// Takes archix's integration off the root's own trees and puts back or unlocks the files generation `number` manages, as the eject of a plain system does; secrets go as `secrets` says.
+fn strip(root: &Path, paths: &Paths, number: u32, restore_originals: bool, secrets: SecretsMode) -> Result<()> {
     let under = Paths {
         root: root.to_path_buf(),
         ..paths.clone()
@@ -215,7 +306,13 @@ fn strip(root: &Path, paths: &Paths, number: u32, restore_originals: bool) -> Re
     let Ok(generation) = crate::generations::Store::new(paths).get(number) else {
         return Ok(());
     };
+    if let Some(manifest) = &generation.system.secrets {
+        for line in eject_secrets(root, &paths.root, manifest, secrets)? {
+            eprintln!("{line}");
+        }
+    }
     let mut files = generation.system.files.clone();
+    files.retain(|_, file| !file.link.as_deref().is_some_and(crate::secrets::is_secret_link));
     // mkinitcpio reads the kernel command line for UKIs from here.
     files.remove("/etc/kernel/cmdline");
     let inside = |path: &str| root.join(path.trim_start_matches('/'));
@@ -354,7 +451,7 @@ pub fn here(root: &Path, paths: &Paths) -> Result<Vec<String>> {
         // The deployment's binds stay while the copy runs, since cp and its libraries come from them; the root's own /usr may be empty.
         in_plain_view(root, |view| {
             copy_trees(view, &store, state.deployment)?;
-            strip(view, paths, state.deployment, state.restore_originals)
+            strip(view, paths, state.deployment, state.restore_originals, state.secrets)
         })?;
         crate::durable::sync_filesystems_checked(&[root])?;
         state.phase = Phase::Copied;
@@ -533,7 +630,7 @@ pub fn deployment_to_eject(root: &Path) -> Result<u32> {
 }
 
 /// Ejects the system under `paths.root` from its deployments, resuming any eject under way; `archix` is the binary that runs `eject-here`. Returns what the ESP handover wrote.
-pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool) -> Result<Vec<String>> {
+pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool, secrets: SecretsMode) -> Result<Vec<String>> {
     let root = &paths.root;
     let lock = match root.join("archix").exists() {
         true => Some(Store::open(root)?.lock()?),
@@ -550,6 +647,7 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool) -> Result<Ve
             deployment: deployment_to_eject(root)?,
             phase: Phase::Copying,
             restore_originals,
+            secrets,
         },
     };
     write_state(&paths.state, &state)?;
@@ -594,6 +692,7 @@ pub fn offline(paths: &Paths, number: Option<u32>, esp: &Path) -> Result<Vec<Str
                 deployment,
                 phase: Phase::Copying,
                 restore_originals: false,
+                secrets: SecretsMode::Drop,
             }
         }
     };
@@ -601,7 +700,13 @@ pub fn offline(paths: &Paths, number: Option<u32>, esp: &Path) -> Result<Vec<Str
     if state.phase < Phase::Copied {
         in_plain_view(root, |view| {
             copy_trees(view, &store, state.deployment)?;
-            strip(view, paths, state.deployment, state.restore_originals)
+            strip(
+                view,
+                paths,
+                state.deployment,
+                state.restore_originals,
+                SecretsMode::Drop,
+            )
         })?;
         crate::durable::sync_filesystems_checked(&[root])?;
         state.phase = Phase::Copied;
@@ -635,6 +740,7 @@ mod tests {
             deployment: 7,
             phase: Phase::Copied,
             restore_originals: true,
+            secrets: SecretsMode::Materialize,
         };
         write_state(dir.path(), &state).unwrap();
         assert_eq!(read_state(dir.path()).unwrap(), Some(state));

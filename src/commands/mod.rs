@@ -78,7 +78,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
 pub use eject::eject;
 pub use switch::{
     boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record, prune_hidden, rollback,
-    switch,
+    switch, without_secrets,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";

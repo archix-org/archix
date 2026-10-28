@@ -228,6 +228,8 @@ pub struct Passwords {
     pub overridden: BTreeSet<String>,
     /// Users whose rescue password gives way, as their declared hash changed since; a committed switch forgets those overrides.
     pub superseded: BTreeSet<String>,
+    /// Users whose password a crypt_hash secret declares, set at each boot of the deployment, by secret.
+    pub secret: BTreeMap<String, String>,
 }
 
 /// The hashes `users` declare, minus those a password set in the rescue entry overrides; `state` is archix's state directory.
@@ -273,6 +275,47 @@ pub fn record_override(state: &Path, user: &str, declared: Option<&str>) -> Resu
     crate::durable::write_secret(&path, format!("{}\n", digest(declared)).as_bytes())
 }
 
+/// What the rescue entry records for a password a crypt_hash secret declares: the value's HMAC when a switch decrypted it, and its ciphertext's sha256.
+pub fn secret_mark(hmac: Option<&str>, sha256: &str) -> String {
+    format!("secret {} {sha256}", hmac.unwrap_or("-"))
+}
+
+/// Records that the rescue entry set `user`'s password while a crypt_hash secret declared it, as `secret_mark` gives.
+pub fn record_secret_override(state: &Path, user: &str, mark: &str) -> Result<()> {
+    let path = override_path(state, user);
+    let dir = path.parent().expect("a file in a directory");
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::durable::write_secret(&path, format!("{mark}\n").as_bytes())
+}
+
+/// Whether the rescue entry set `user`'s password and no switch has replaced it since; a boot then leaves it.
+pub fn overridden(state: &Path, user: &str) -> bool {
+    override_path(state, user).exists()
+}
+
+/// Sorts the users whose password a crypt_hash secret declares into those whose rescue password holds, as their secret's value (or, undecrypted, its ciphertext) stayed the same, and those whose changed; `secrets` is the new deployment's manifest.
+pub fn resolve_secrets(passwords: &mut Passwords, secrets: Option<&crate::secrets::Manifest>, state: &Path) {
+    let Some(manifest) = secrets else { return };
+    for (user, name) in &manifest.hashes {
+        passwords.secret.insert(user.clone(), name.clone());
+        let Ok(recorded) = fs::read_to_string(override_path(state, user)) else {
+            continue;
+        };
+        let Some(entry) = manifest.secrets.get(name) else {
+            continue;
+        };
+        let words: Vec<&str> = recorded.split_whitespace().collect();
+        let holds = match words[..] {
+            ["secret", hmac, sha] => (hmac != "-" && entry.hmac.as_deref() == Some(hmac)) || sha == entry.sha256,
+            _ => false,
+        };
+        match holds {
+            true => passwords.overridden.insert(user.clone()),
+            false => passwords.superseded.insert(user.clone()),
+        };
+    }
+}
+
 /// Forgets the rescue overrides a committed switch replaced with the declared hashes.
 pub fn forget_overrides(state: &Path, passwords: &Passwords) {
     for name in &passwords.superseded {
@@ -282,11 +325,21 @@ pub fn forget_overrides(state: &Path, passwords: &Passwords) {
 
 /// What a switch says about passwords the rescue entry set: kept over an unchanged declared hash, or replaced by a changed one.
 pub fn override_lines(passwords: &Passwords) -> Vec<String> {
-    let kept = passwords.overridden.iter().map(|name| {
-        format!("keeping {name}'s password set in the rescue entry over users.{name}.hashed_password, until that hash changes")
+    let kept = passwords.overridden.iter().map(|name| match passwords.secret.get(name) {
+        Some(secret) => format!(
+            "keeping {name}'s password set in the rescue entry over the crypt_hash secret {secret}, until that secret changes"
+        ),
+        None => format!(
+            "keeping {name}'s password set in the rescue entry over users.{name}.hashed_password, until that hash changes"
+        ),
     });
-    let replaced = passwords.superseded.iter().map(|name| {
-        format!("users.{name}.hashed_password changed since the rescue entry set {name}'s password, so the declared one replaces it")
+    let replaced = passwords.superseded.iter().map(|name| match passwords.secret.get(name) {
+        Some(secret) => format!(
+            "secret {secret} changed since the rescue entry set {name}'s password, so the new deployment's boot sets the declared one"
+        ),
+        None => format!(
+            "users.{name}.hashed_password changed since the rescue entry set {name}'s password, so the declared one replaces it"
+        ),
     });
     kept.chain(replaced).collect()
 }
@@ -325,7 +378,14 @@ fn kept_lock(name: &str, hash: &str, etcs: &[&Path]) -> Option<String> {
 
 /// One line per password a switch would set, without the hash; the /etc at `etc` holds the accounts as they are.
 pub fn describe(passwords: &Passwords, etc: &Path) -> Vec<String> {
-    let mut lines = Vec::new();
+    let mut lines: Vec<String> = passwords
+        .secret
+        .iter()
+        .filter(|(name, _)| !passwords.overridden.contains(*name))
+        .map(|(name, secret)| {
+            format!("password   {name}'s comes from secret {secret}, set when the new deployment boots")
+        })
+        .collect();
     if passwords.enforced.is_empty() && passwords.initial.is_empty() {
         return lines;
     }
@@ -360,18 +420,25 @@ pub fn kept_locks(passwords: &Passwords, etcs: &[&Path]) -> Vec<String> {
         .collect()
 }
 
+/// Sets `name`'s declared `hash` in the /etc at `etc`, a staging root's at a switch or the booted one's for a crypt_hash secret, unless the account is locked or expired there or in `also`; returns why it was kept.
+pub fn enforce(etc: &Path, also: &[&Path], name: &str, hash: &str) -> Result<Option<String>> {
+    let mut etcs = vec![etc];
+    etcs.extend_from_slice(also);
+    if let Some(why) = kept_lock(name, hash, &etcs) {
+        return Ok(Some(why));
+    }
+    let entries = shadow_entries(etc).unwrap_or_default();
+    if entries.get(name).and_then(|fields| fields.get(1)).map(String::as_str) != Some(hash) {
+        super::password::set(etc, name, hash).with_context(|| format!("setting {name}'s declared password"))?;
+    }
+    Ok(None)
+}
+
 /// Sets the declared hashes in a staging root's /etc: enforced ones unless the account is locked or expired there or in `live`, initial ones for the accounts `existed` says this build created; returns why any was kept.
 pub fn apply(etc: &Path, live: &Path, passwords: &Passwords, existed: &dyn Fn(&str) -> bool) -> Result<Vec<String>> {
     let mut kept = Vec::new();
-    let entries = shadow_entries(etc).unwrap_or_default();
     for (name, hash) in &passwords.enforced {
-        if let Some(why) = kept_lock(name, hash, &[etc, live]) {
-            kept.push(why);
-            continue;
-        }
-        if entries.get(name).and_then(|fields| fields.get(1)) != Some(hash) {
-            super::password::set(etc, name, hash).with_context(|| format!("setting {name}'s declared password"))?;
-        }
+        kept.extend(enforce(etc, &[live], name, hash)?);
     }
     for (name, hash) in &passwords.initial {
         if !existed(name) {
@@ -381,10 +448,32 @@ pub fn apply(etc: &Path, live: &Path, passwords: &Passwords, existed: &dyn Fn(&s
     Ok(kept)
 }
 
-/// Refuses a deployment whose /etc at `etc` leaves no account the rescue entry and a console login can use (root, or a wheel or sudo member with a password) when the running system at `live` has one; with none on either, a warning.
-pub fn lockout(etc: &Path, live: &Path, allowed: bool) -> Result<Option<String>> {
+/// Whether `user` in the /etc at `etc` is root or a wheel or sudo member whose account isn't locked or expired, so a password set there at boot would open the rescue entry.
+fn could_open_rescue(etc: &Path, user: &str) -> bool {
+    let passwd = fs::read_to_string(etc.join("passwd")).unwrap_or_default();
+    let group = fs::read_to_string(etc.join("group")).unwrap_or_default();
+    let Some(fields) = passwd
+        .lines()
+        .map(|line| line.split(':').collect::<Vec<_>>())
+        .find(|fields| fields.first() == Some(&user))
+    else {
+        return false;
+    };
+    let gid = fields.get(3).copied().unwrap_or_default();
+    let member = group.lines().any(|line| {
+        let g: Vec<&str> = line.split(':').collect();
+        g.len() >= 4
+            && super::rescue_auth::GROUPS.contains(&g[0])
+            && (g[2] == gid || g[3].split(',').any(|m| m == user))
+    });
+    let shadow = fs::read_to_string(etc.join("shadow")).unwrap_or_default();
+    (fields.get(2) == Some(&"0") || member) && accounts::may_set_hash(&shadow, user, "$y$")
+}
+
+/// Refuses a deployment whose /etc at `etc` leaves no account the rescue entry and a console login can use (root, or a wheel or sudo member with a password) when the running system at `live` has one; with none on either, a warning. `logins` are users whose crypt_hash secret the switch decrypted and checked, which the deployment's boot sets; no other secret counts.
+pub fn lockout(etc: &Path, live: &Path, allowed: bool, logins: &BTreeSet<String>) -> Result<Option<String>> {
     let usable = |etc: &Path| super::rescue_auth::accounts(etc).is_ok_and(|found| !found.is_empty());
-    if allowed || usable(etc) {
+    if allowed || usable(etc) || logins.iter().any(|user| could_open_rescue(etc, user)) {
         return Ok(None);
     }
     let what = "root is locked and no wheel or sudo member has a yescrypt or SHA-512 password";
@@ -568,6 +657,70 @@ mod tests {
 
     #[test]
     fn an_enforced_hash_resets_a_changed_password_but_never_undoes_a_lock_or_an_expiry() {
+        an_enforced_hash_follows_the_lock_rule(&|etc: &Path, live: &Path, hash: &str| {
+            apply(etc, live, &enforced("alice", hash), &|_| true).unwrap()
+        });
+    }
+
+    #[test]
+    fn a_crypt_hash_secret_set_at_boot_follows_the_same_lock_rule() {
+        an_enforced_hash_follows_the_lock_rule(&|etc: &Path, live: &Path, hash: &str| {
+            enforce(etc, &[live], "alice", hash).unwrap().into_iter().collect()
+        });
+    }
+
+    /// The switch's apply and the boot's enforce for a secret: `set` sets alice's declared `hash` in the first /etc, the second the running one, returning why it was kept.
+    fn an_enforced_hash_follows_the_lock_rule(set: &dyn Fn(&Path, &Path, &str) -> Vec<String>) {
+        let other = SHA512.replace("saltstring", "othersalt");
+        let dir = etc(&format!("root:*:1::::::\nalice:{other}:1:0:99999:7:::\n"));
+        assert!(set(dir.path(), dir.path(), YESCRYPT).is_empty());
+        assert!(
+            fs::read_to_string(dir.path().join("shadow"))
+                .unwrap()
+                .contains(&format!("alice:{YESCRYPT}:"))
+        );
+        for locked in [
+            format!("alice:!{other}:1:0:99999:7:::\n"),
+            format!("alice:{other}:1:0:99999:7::1:\n"),
+        ] {
+            let dir = etc(&format!("root:*:1::::::\n{locked}"));
+            let live = etc("");
+            assert_eq!(set(dir.path(), live.path(), YESCRYPT).len(), 1, "{locked}");
+            assert!(
+                fs::read_to_string(dir.path().join("shadow"))
+                    .unwrap()
+                    .ends_with(&locked),
+                "{locked}"
+            );
+        }
+        let live_locked = etc(&format!("alice:!{other}:1:0:99999:7:::\n"));
+        let staged = etc(&format!("alice:{other}:1:0:99999:7:::\n"));
+        set(staged.path(), live_locked.path(), YESCRYPT);
+        assert!(
+            !fs::read_to_string(staged.path().join("shadow"))
+                .unwrap()
+                .contains(YESCRYPT),
+            "a lock in the other /etc counts too"
+        );
+        let fresh = etc("alice:!:1:0:99999:7:::\n");
+        set(fresh.path(), fresh.path(), YESCRYPT);
+        assert!(
+            fs::read_to_string(fresh.path().join("shadow"))
+                .unwrap()
+                .contains(YESCRYPT),
+            "a never-set password isn't a lock"
+        );
+        let declared_lock = etc(&format!("alice:!{other}:1:0:99999:7:::\n"));
+        set(declared_lock.path(), declared_lock.path(), "!");
+        assert!(
+            fs::read_to_string(declared_lock.path().join("shadow"))
+                .unwrap()
+                .contains("alice:!:")
+        );
+    }
+
+    #[test]
+    fn describing_an_enforced_hash_never_shows_it_and_a_kept_lock_is_no_change() {
         let other = SHA512.replace("saltstring", "othersalt");
         let dir = etc(&format!("root:*:1::::::\nalice:{other}:1:0:99999:7:::\n"));
         let lines = describe(&enforced("alice", YESCRYPT), dir.path());
@@ -662,15 +815,31 @@ mod tests {
     fn a_deployment_nobody_can_log_into_is_refused_only_when_the_running_system_has_a_login() {
         let none = etc("root:*:1::::::\nalice:!:1:0:99999:7:::\n");
         let some = etc(&format!("root:*:1::::::\nalice:{YESCRYPT}:1:0:99999:7:::\n"));
-        let error = lockout(none.path(), some.path(), false).unwrap_err().to_string();
+        let no = BTreeSet::new();
+        let error = lockout(none.path(), some.path(), false, &no).unwrap_err().to_string();
         assert!(error.contains("allow_no_password_login"), "{error}");
-        assert!(lockout(none.path(), some.path(), true).unwrap().is_none());
+        assert!(lockout(none.path(), some.path(), true, &no).unwrap().is_none());
         assert!(
-            lockout(none.path(), none.path(), false)
+            lockout(none.path(), none.path(), false, &no)
                 .unwrap()
                 .is_some_and(|w| w.starts_with("warning"))
         );
-        assert!(lockout(some.path(), none.path(), false).unwrap().is_none());
+        assert!(lockout(some.path(), none.path(), false, &no).unwrap().is_none());
+        let alice: BTreeSet<String> = ["alice".to_string()].into();
+        assert!(
+            lockout(none.path(), some.path(), false, &alice).unwrap().is_none(),
+            "a checked crypt_hash secret for a wheel member counts"
+        );
+        let bob: BTreeSet<String> = ["bob".to_string()].into();
+        assert!(
+            lockout(none.path(), some.path(), false, &bob).is_err(),
+            "one for a user outside wheel doesn't"
+        );
+        let locked = etc(&format!("root:*:1::::::\nalice:!{YESCRYPT}:1:0:99999:7:::\n"));
+        assert!(
+            lockout(locked.path(), some.path(), false, &alice).is_err(),
+            "nor one the boot won't set, as the account is locked"
+        );
     }
 
     #[test]
@@ -686,6 +855,7 @@ mod tests {
             system: false,
             hashed_password: Some(YESCRYPT.into()),
             initial_hashed_password: None,
+            hashed_password_secret: None,
         };
         let users = |user: &User| [("alice".to_string(), user.clone())].into();
         let git = |args: &[&str]| {
@@ -727,6 +897,7 @@ mod tests {
             system: false,
             hashed_password: Some(hash.to_string()),
             initial_hashed_password: None,
+            hashed_password_secret: None,
         };
         let users = |hash: &str| [("alice".to_string(), user(hash))].into();
         assert_eq!(resolve(&users(YESCRYPT), state.path()).enforced["alice"], YESCRYPT);
@@ -744,6 +915,54 @@ mod tests {
         assert!(
             resolve(&users(SHA512), state.path()).superseded.contains("alice"),
             "a hash declared after the rescue replaces it"
+        );
+    }
+
+    #[test]
+    fn a_rescue_password_over_a_secret_hash_holds_until_the_secrets_value_changes() {
+        let state = tempfile::tempdir().unwrap();
+        let entry = |sha: &str, hmac: Option<&str>| -> crate::secrets::Entry {
+            serde_json::from_value(serde_json::json!({
+                "file": "pw.age", "sha256": sha, "kind": "crypt_hash", "owner": "root", "group": "root", "mode": 256, "hmac": hmac
+            }))
+            .unwrap()
+        };
+        let manifest = |e: crate::secrets::Entry| crate::secrets::Manifest {
+            secrets: [("pw".to_string(), e)].into(),
+            hashes: [("alice".to_string(), "pw".to_string())].into(),
+            ..Default::default()
+        };
+        let resolved = |m: &crate::secrets::Manifest| {
+            let mut passwords = Passwords::default();
+            resolve_secrets(&mut passwords, Some(m), state.path());
+            passwords
+        };
+        assert!(!overridden(state.path(), "alice"));
+        assert_eq!(resolved(&manifest(entry("ct1", Some("h1")))).secret["alice"], "pw");
+        record_secret_override(state.path(), "alice", &secret_mark(Some("h1"), "ct1")).unwrap();
+        assert!(
+            overridden(state.path(), "alice"),
+            "a boot sees it and keeps the rescue password"
+        );
+        let reencrypted = resolved(&manifest(entry("ct2", Some("h1"))));
+        assert!(
+            reencrypted.overridden.contains("alice"),
+            "re-encrypting the same value keeps it"
+        );
+        assert!(override_lines(&reencrypted)[0].contains("over the crypt_hash secret pw"));
+        let undecrypted = resolved(&manifest(entry("ct1", None)));
+        assert!(
+            undecrypted.overridden.contains("alice"),
+            "an unchanged ciphertext keeps it without a decrypt"
+        );
+        let changed = resolved(&manifest(entry("ct3", Some("h2"))));
+        assert!(changed.superseded.contains("alice") && override_lines(&changed)[0].contains("secret pw changed"));
+        forget_overrides(state.path(), &changed);
+        assert!(!overridden(state.path(), "alice"));
+        assert!(
+            describe(&changed, state.path())[0].contains("alice's comes from secret pw"),
+            "{:?}",
+            describe(&changed, state.path())
         );
     }
 }

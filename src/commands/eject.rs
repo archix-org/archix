@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::{Result, bail};
 
-use archix::deploy::eject as eject_deployments;
+use archix::deploy::eject::{self as eject_deployments, SecretsMode};
 use archix::generations::Store;
 use archix::integration;
 use archix::paths::Paths;
@@ -14,19 +14,54 @@ use archix::system::{SystemState, boot};
 use super::{check_pacman_free, confirm, require_root};
 
 /// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off; a system on deployments becomes plain Arch first.
-pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()> {
+pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool, secrets: Option<SecretsMode>) -> Result<()> {
     require_root("eject")?;
     let paths = Paths::system();
     check_pacman_free(&paths)?;
     let under_way = eject_deployments::read_state(&paths.state)?;
-    if under_way.is_some() || archix::system::deploy_boot::uses_deployments(&paths.root) {
-        return from_deployments(&paths, under_way, noconfirm, restore_originals, purge);
-    }
     let store = Store::new(&paths);
     let current = match store.current()? {
         Some(number) => Some(store.get(number)?),
         None => None,
     };
+    let declared = current
+        .as_ref()
+        .and_then(|generation| generation.system.secrets.as_ref())
+        .filter(|manifest| !manifest.secrets.is_empty());
+    let secrets = match (declared, secrets, &under_way) {
+        (_, _, Some(state)) => state.secrets,
+        (Some(manifest), None, None) => bail!(
+            "generation {} declares {} secrets, which plain Arch has nothing to decrypt; run eject with --secrets drop (their links go) or --secrets materialize (each becomes a real file at its path, from what this boot decrypted); nothing was changed",
+            current.as_ref().map_or(0, |g| g.number),
+            manifest.secrets.len()
+        ),
+        (_, mode, None) => mode.unwrap_or_default(),
+    };
+    if secrets == SecretsMode::Materialize
+        && under_way.is_none()
+        && declared.is_some()
+        && let Some(report) = archix::secrets::activate::read_report(&paths.root)
+        && !report.missing.is_empty()
+    {
+        bail!(
+            "--secrets materialize copies what this boot decrypted, and {} weren't: {}; nothing was changed",
+            report.missing.len(),
+            report.missing.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if declared.is_some() && under_way.is_none() {
+        println!(
+            "  secrets   {}",
+            match secrets {
+                SecretsMode::Drop => "their links go; the identity and ciphertexts stay in /var/lib/archix/secrets",
+                SecretsMode::Materialize =>
+                    "each becomes a real file at its path, holding what this boot decrypted, readable by whoever reads the disk",
+            }
+        );
+    }
+    if under_way.is_some() || archix::system::deploy_boot::uses_deployments(&paths.root) {
+        return from_deployments(&paths, under_way, noconfirm, restore_originals, purge, secrets);
+    }
     let esp = fs::read_to_string(paths.state.join("boot/esp"))
         .ok()
         .map(|esp| esp.trim().to_string())
@@ -85,7 +120,13 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool) -> Result<()
     integration::remove(&paths)?;
     let _ = Command::new("systemctl").arg("daemon-reload").status();
     if let Some(generation) = &current {
+        if let Some(manifest) = &generation.system.secrets {
+            for line in eject_deployments::eject_secrets(&paths.root, &paths.root, manifest, secrets)? {
+                println!("secrets: {line}");
+            }
+        }
         let mut files = generation.system.files.clone();
+        files.retain(|_, file| !file.link.as_deref().is_some_and(archix::secrets::is_secret_link));
         // mkinitcpio reads the kernel command line for UKIs from here.
         files.remove("/etc/kernel/cmdline");
         if restore_originals {
@@ -135,6 +176,7 @@ fn from_deployments(
     noconfirm: bool,
     restore_originals: bool,
     purge: bool,
+    secrets: SecretsMode,
 ) -> Result<()> {
     let restore_originals = under_way
         .as_ref()
@@ -183,7 +225,7 @@ fn from_deployments(
         }
     }
     if purge {
-        println!("  deletes   /var/lib/archix and /var/cache/archix");
+        println!("  deletes   /var/lib/archix and /var/cache/archix, this machine's secrets identity with them");
     } else {
         println!("  keeps     /var/lib/archix and /var/cache/archix (--purge deletes them)");
     }
@@ -191,7 +233,7 @@ fn from_deployments(
         bail!("aborted; nothing was changed");
     }
     let archix = archix::integration::own_path()?;
-    let written = eject_deployments::eject(paths, &archix, restore_originals).map_err(|e| {
+    let written = eject_deployments::eject(paths, &archix, restore_originals, secrets).map_err(|e| {
         e.context(
             "the eject stopped partway; the machine still boots, and running `sudo archix eject` again finishes it",
         )

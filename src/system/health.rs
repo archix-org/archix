@@ -350,6 +350,7 @@ mod tests {
             system: false,
             hashed_password: None,
             initial_hashed_password: None,
+            hashed_password_secret: None,
         }
     }
 

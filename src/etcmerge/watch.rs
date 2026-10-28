@@ -251,7 +251,12 @@ pub fn run(root: &Path) -> Result<()> {
                 println!(
                     "archix: /etc merge: no base was taken when deployment {target} was staged, so changes from now on are carried"
                 );
-                snapshot(&root.join("etc"), target, booted)
+                snapshot(
+                    &root.join("etc"),
+                    target,
+                    booted,
+                    &super::secret_links(&paths, &[booted, target]),
+                )
             }
         };
         match follow(&paths, state, &signals)? {

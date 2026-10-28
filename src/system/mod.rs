@@ -59,6 +59,9 @@ pub struct SystemState {
     /// The /etc/fstab lines file_systems and swap declare, after archix's own for the root and the ESP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fstab: Vec<fstab::FstabLine>,
+    /// The declared secrets, as the deployment's manifest in /usr/lib/archix/secrets has them; never a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<crate::secrets::Manifest>,
 }
 
 /// A script run after a switch; `user` None means root.
@@ -101,6 +104,9 @@ pub struct User {
     /// Set only when the account is created.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_hashed_password: Option<String>,
+    /// A crypt_hash secret, by name, whose value the deployment's boot sets as the password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashed_password_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -117,6 +123,26 @@ pub struct Rendered {
     pub fetches: BTreeMap<String, String>,
     /// What a switch and diff should warn about the config, such as tmpfiles lines that delete under /home.
     pub warnings: Vec<String>,
+}
+
+impl Rendered {
+    /// Replaces the secrets' manifest, as a switch fills in what it decrypted, in the state and in the file the deployment gets.
+    pub fn set_secrets(&mut self, manifest: crate::secrets::Manifest) {
+        let content = crate::secrets::manifest_bytes(&manifest);
+        let sha256 = sha256_bytes(&content);
+        if let Some(file) = self.state.files.get_mut(crate::secrets::MANIFEST) {
+            file.sha256 = sha256.clone();
+        }
+        self.blobs.insert(sha256, content);
+        self.state.secrets = Some(manifest);
+    }
+
+    /// A secret's ciphertext by its sha256, as render read it from the config.
+    pub fn ciphertext(&self, sha256: &str) -> Option<Vec<u8>> {
+        let path = format!("{}/{sha256}.age", crate::secrets::DEPLOY_DIR);
+        let file = self.state.files.get(&path)?;
+        self.blobs.get(&file.sha256).cloned()
+    }
 }
 
 const FORBIDDEN: &[&str] = &[
@@ -265,6 +291,9 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         blobs: BTreeMap::new(),
         fetches: BTreeMap::new(),
     };
+    crate::secrets::check_placement(config)?;
+    let secrets = crate::secrets::declared(config)?;
+    let mut uses = crate::secrets::Uses::default();
 
     for (path, spec) in map(config, "files").into_iter().flatten() {
         if !path.starts_with('/') || path.ends_with('/') || path.contains("/../") {
@@ -295,11 +324,25 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             str_of(spec, "link").is_some(),
             str_of(spec, "url").is_some(),
             merge.is_some(),
+            str_of(spec, "secret").is_some(),
         ];
         if sources.iter().filter(|set| **set).count() != 1 {
-            bail!("files.{path}: give exactly one of text, source, link, url or merge");
+            bail!("files.{path}: give exactly one of text, source, link, url, merge or secret");
         }
-        if let Some(merge) = merge {
+        let templated = str_of(spec, "text").is_some_and(|text| !crate::secrets::placeholders(text).is_empty());
+        if (templated || str_of(spec, "secret").is_some()) && path.starts_with("/usr/local/") {
+            bail!(
+                "files.{path}: a secret can't go into /usr/local, which every deployment shares; link it from /etc or /srv"
+            );
+        }
+        if let Some(name) = str_of(spec, "secret") {
+            let target = crate::secrets::add_link(&secrets, &mut uses, path, name)?;
+            b.link(path, &target);
+        } else if templated {
+            let text = lines(&Value::Str(str_of(spec, "text").unwrap_or_default().to_string()));
+            let target = crate::secrets::add_template(&secrets, &mut uses, path, &text, owner, group, mode)?;
+            b.link(path, &target);
+        } else if let Some(merge) = merge {
             b.merged(path, merge, owner, group);
         } else if let Some(url) = str_of(spec, "url") {
             let sha256 = str_of(spec, "sha256").with_context(|| format!("files.{path}: url needs sha256"))?;
@@ -467,6 +510,11 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             Some(Value::Int(uid)) => Some(u32::try_from(*uid).context("users: uid out of range")?),
             _ => None,
         };
+        let declared_hash = str_of(spec, "hashed_password");
+        let hashed_password_secret = match declared_hash {
+            Some(value) => crate::secrets::hash_secret(&secrets, &mut uses, name, value)?,
+            None => None,
+        };
         let user = User {
             uid,
             group: str_of(spec, "group").map(str::to_string),
@@ -475,9 +523,15 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             home: str_of(spec, "home").map(str::to_string),
             description: str_of(spec, "description").unwrap_or("").to_string(),
             system: get(spec, "system") == Some(&Value::Bool(true)),
-            hashed_password: str_of(spec, "hashed_password").map(str::to_string),
+            hashed_password: declared_hash
+                .filter(|_| hashed_password_secret.is_none())
+                .map(str::to_string),
             initial_hashed_password: str_of(spec, "initial_hashed_password").map(str::to_string),
+            hashed_password_secret,
         };
+        if user.hashed_password_secret.is_some() && user.initial_hashed_password.is_some() {
+            bail!("users.{name}: give hashed_password or initial_hashed_password, not both");
+        }
         if user.hashed_password.is_some() && user.initial_hashed_password.is_some() {
             bail!("users.{name}: give hashed_password or initial_hashed_password, not both");
         }
@@ -548,6 +602,19 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         b.state.hooks.insert(name.clone(), hook);
     }
     hooks::order(&b.state.hooks)?;
+    if let Some(files) = crate::secrets::files(&secrets, &uses, config_dir)? {
+        for (path, content) in files.contents {
+            b.content(&path, content, 0o600, "root", "root");
+        }
+        b.content(
+            crate::secrets::MANIFEST,
+            crate::secrets::manifest_bytes(&files.manifest),
+            0o600,
+            "root",
+            "root",
+        );
+        b.state.secrets = Some(files.manifest);
+    }
     Ok(Rendered {
         state: b.state,
         blobs: b.blobs,

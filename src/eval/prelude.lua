@@ -105,7 +105,17 @@ local function fetchurl(spec)
   return out
 end
 
+local function secret_name(name, fname)
+  if type(name) ~= "string" or not name:match("^[%w_%-]+$") or name == "files" then
+    error(fname .. ": expected a secret's name from secrets.items (letters, digits, - and _)", 3)
+  end
+  return name
+end
+
 archix = {
+  -- A placeholder the deployment's boot replaces with the value; evaluation never sees it.
+  secret = function(name) return "{{archix-secret:" .. secret_name(name, "archix.secret") .. "}}" end,
+  secret_path = function(name) return "/run/archix/secrets/" .. secret_name(name, "archix.secret_path") end,
   fetchurl = fetchurl,
   types = types,
   option = option,
