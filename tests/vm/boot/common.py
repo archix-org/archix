@@ -9,6 +9,7 @@ STATE = "/var/lib/archix-vmtest"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 HOST = "archix --host archix-vm"
 BACKDOOR = "archix-backdoor.service"
+NIC_STATE = "for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
 SECURE_BOOT_CONFIG = "'s|boot = { loader = \"systemd-boot\" }|boot = { loader = \"systemd-boot\", secure_boot = true, protected_entry = true }|'"
 m = t = None
 
@@ -74,10 +75,9 @@ def secure_boot():
 def network(wait=True):
     if wait and ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1", 150):
         return
-    nic_state = "for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
     t.log("networkctl: " + out("networkctl list --no-pager 2>&1"))
     t.log("networkd: " + out("journalctl -b -u systemd-networkd --no-pager | tail -30"))
-    t.log("nic at the report: " + out(nic_state) + out("for nic in /sys/class/net/en*; do ip -d link show $(basename $nic) 2>&1; done"))
+    t.log("nic at the report: " + out(NIC_STATE) + out("for nic in /sys/class/net/en*; do ip -d link show $(basename $nic) 2>&1; done"))
     t.log("kernel: " + out("journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30"))
     dev = re.search(r"^(\S+).*\[virtio-net\]", m.hmp("info virtio"), re.M)
     t.log("qemu: " + m.hmp("info network") + "".join(m.hmp(f"info virtio-queue-status {dev.group(1)} {q}") for q in (0, 1) if dev))
@@ -85,13 +85,13 @@ def network(wait=True):
     if ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1", 60):
         t.log("nic: a link down/up brought it back")
     else:
-        t.log("nic: still not configured 30 s after a link down/up; the host's set_link off and on")
+        t.log("nic: still not configured 30 s after a link down/up; the host's set_link off and on. nic after the down/up: " + out(NIC_STATE))
         m.hmp("set_link net0 off")
         time.sleep(2)
         m.hmp("set_link net0 on")
         configured = ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=40 > /dev/null 2>&1", 70)
         t.log(f"nic: after the host's set_link off/on {'it is' if configured else 'still not'} configured; qemu: {m.hmp('info network')}")
-    t.log("nic at the end: " + out(nic_state))
+    t.log("nic at the end: " + out(NIC_STATE))
     t.require(False, "networkd didn't configure the NIC's link within 90 s of this stage starting")
 
 
@@ -103,6 +103,14 @@ def boot(match=True):
     booted = found.group(1) if found else ""
     running = out("cat /run/archix/deployment 2>/dev/null").strip()
     t.log(f"booted entry {selected}, mounted deployment {running}, current {current()}, deployments {deployments()}")
+    settled()
+    if match:
+        t.require(booted == running, f"the initramfs mounted deployment {running}, but systemd-boot started {selected}")
+    return selected, booted, running
+
+
+def settled():
+    """multi-user.target reached, no failed unit but the backdoor's own and the NIC configured, as boot() and tests/vm/nic-control judge a boot."""
     t.require(ok("systemctl is-active -q multi-user.target"), f"the boot didn't reach multi-user.target: {out('systemctl list-jobs --no-pager 2>&1 | tail -10')}")
     failed = [unit for unit in out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split() if unit != BACKDOOR]
     if failed:
@@ -115,9 +123,6 @@ def boot(match=True):
             network(wait=False)
         t.require(False, f"units failed at this boot: {' '.join(failed)}")
     network()
-    if match:
-        t.require(booted == running, f"the initramfs mounted deployment {running}, but systemd-boot started {selected}")
-    return selected, booted, running
 
 
 def setup_secure_boot(install=""):

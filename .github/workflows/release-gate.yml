@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Suites to run, comma-separated (boot2, rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, recovery, rescue, secrets, powercut; boot and deploy-boot, which CI runs, only when named); empty runs all but boot and deploy-boot
+        description: Suites to run, comma-separated (boot2, rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, recovery, rescue, secrets, powercut; boot and deploy-boot, which CI runs, and the nic-control experiment only when named); empty runs all but boot and deploy-boot
         default: ""
       fs:
         description: Filesystems, comma-separated (ext4, btrfs); empty runs both
@@ -41,7 +41,7 @@ jobs:
           all=boot2,rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn,recovery,rescue,secrets,powercut
           # $1 as named, else $2, keeping only names in $3.
           pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$3" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
-          echo "suites=$(pick "$SUITES" "$all" "$all,boot,deploy-boot" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
+          echo "suites=$(pick "$SUITES" "$all" "$all,boot,deploy-boot,nic-control" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
           echo "fs=$(pick "$FS" ext4,btrfs ext4,btrfs)" >> "$GITHUB_OUTPUT"
           echo "powercut=$(pick "$SUITES" "$all" "$all" | jq 'index("powercut") != null')" >> "$GITHUB_OUTPUT"
           echo "runs=$(jq -nc --argjson n "${REPEAT:-1}" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
@@ -126,6 +126,9 @@ jobs:
           ARCHIX_VM_CACHE: "0"
           # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
           ARCHIX_OLD: 3a99d0c
+          # nic-control's boots per arm after the first: about 80 min at GitHub's 13 s a boot.
+          NIC_REBOOTS: "300"
+          NIC_RESETS: "60"
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
