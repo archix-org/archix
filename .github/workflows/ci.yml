@@ -209,9 +209,8 @@ jobs:
         fs: [ext4, btrfs]
     env:
       FS: ${{ matrix.fs }}
-      ARCHIX_PREBUILT: ${{ runner.temp }}/build
-      ARCHIX_VM_RESULTS: ${{ runner.temp }}/vm-results
     steps:
+      - run: echo "ARCHIX_PREBUILT=$RUNNER_TEMP/build" >> "$GITHUB_ENV" && echo "ARCHIX_VM_RESULTS=$RUNNER_TEMP/vm-results" >> "$GITHUB_ENV"
       - uses: actions/checkout@v5
       - uses: ./.github/actions/vm-setup
         with:
