@@ -5,7 +5,6 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
 
 use archix::lock::AUR_REPO;
 use common::*;
@@ -198,9 +197,15 @@ fn a_package_signed_by_an_expired_key_is_refused_at_prepare() {
             .output()
             .unwrap()
     };
+    // Making the key and signing two days back, with a day's validity, gives an expired key without a race against a slow run.
+    let past = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 2 * 86_400;
+    fs::write(signer.path().join("gpg.conf"), format!("faked-system-time {past}!\n")).unwrap();
     let packager = "archix expired packager <expired@archix.test>";
-    let made = gpg(&["--quick-gen-key", packager, "ed25519", "sign", "seconds=40"]);
-    let expired = Instant::now() + Duration::from_secs(42);
+    let made = gpg(&["--quick-gen-key", packager, "ed25519", "sign", "1d"]);
     assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
     let listing = String::from_utf8_lossy(&gpg(&["--with-colons", "--list-keys"]).stdout).into_owned();
     let fingerprint = listing
@@ -220,7 +225,6 @@ fn a_package_signed_by_an_expired_key_is_refused_at_prepare() {
         repo.server()
     );
     let setup = Setup::new(&["archix-test-expired"], &body);
-    std::thread::sleep(expired.saturating_duration_since(Instant::now()));
 
     let out = setup.run(&["switch", "--noconfirm"]);
     let _ = Command::new("pacman-key").args(["--delete", &fingerprint]).output();
