@@ -573,6 +573,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let (live, at_boot) = system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
     due.extend(at_boot);
     system::hooks::defer(&paths.state, number, &due, &system_change.to.hooks)?;
+    let paused = archix::etcmerge::pause(&paths)?;
     if let Err(e) = archix::etcmerge::prepare(&paths, number) {
         eprintln!(
             "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
@@ -600,8 +601,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     .inspect_err(|_| {
         let _ = fs::remove_file(system::hooks::pending_path(&paths.state, number));
         archix::etcmerge::discard(&paths, number);
+        resume_etc_merge(&paths, paused);
     })?;
     soft_failures.extend(made.failures);
+    resume_etc_merge(&paths, paused);
     after_commit(
         target,
         &declared,
@@ -615,6 +618,13 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         made.users,
         soft_failures,
     )
+}
+
+/// Starts the /etc merge `etcmerge::pause` stopped again once its build is committed or failed, against whichever deployment is pending then.
+pub(super) fn resume_etc_merge(paths: &Paths, paused: bool) {
+    if paused && let Err(e) = archix::etcmerge::start(paths) {
+        eprintln!("warning: starting the /etc merge again failed: {e:#}");
+    }
 }
 
 /// Writes the managed files outside the deployment trees, then runs the on_change scripts of those that changed; when the write fails, the scripts wait for the deployment's boot instead.
@@ -1534,6 +1544,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
             from: base_generation.system.clone(),
             to: generation.system.clone(),
         };
+        let paused = archix::etcmerge::pause(&paths)?;
         eprintln!(":: rebuilding deployment {number} from deployment {base}");
         let made = deploy::build::build(
             &deployments,
@@ -1554,7 +1565,8 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                     carry_config(config_dir, &paths, staged)
                 },
             },
-        )?;
+        )
+        .inspect_err(|_| resume_etc_merge(&paths, paused))?;
         soft_failures.extend(made.failures);
         users = made.users;
     }

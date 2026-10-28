@@ -223,6 +223,14 @@ pub fn start(paths: &Paths) -> Result<bool> {
         for property in UNIT_ORDER.iter().chain([&STOP_TIMEOUT]) {
             command.arg(format!("--property={property}"));
         }
+        if cfg!(debug_assertions)
+            && test_root
+            && let Some(program) = std::env::var_os("ARCHIX_TEST_MARK")
+        {
+            let mut setenv = std::ffi::OsString::from("--setenv=ARCHIX_TEST_MARK=");
+            setenv.push(program);
+            command.arg(setenv);
+        }
         command.arg("--");
         command.arg(crate::integration::own_path()?);
         command.args(["etc-merge", "--root"]).arg(&paths.root);
@@ -231,6 +239,25 @@ pub fn start(paths: &Paths) -> Result<bool> {
     if !output.status.success() {
         anyhow::bail!(
             "starting {unit} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(true)
+}
+
+/// Stops the watcher before a build stages from the pending deployment it writes into, so the build copies that /etc whole, never between two of the merge's renames such as a new passwd before its shadow, and the watcher can't recover the new deployment's record while the switch saves it; the watcher's last pass runs as it stops, and `start` after the commit, or after a failed build, brings it back against whichever deployment is pending then. True when one was stopped.
+pub fn pause(paths: &Paths) -> Result<bool> {
+    if pending(&paths.root).is_none() || !running(paths) {
+        return Ok(false);
+    }
+    let unit = unit_name(&paths.root);
+    let output = std::process::Command::new("systemctl")
+        .args(["stop", &unit])
+        .output()
+        .context("stopping the /etc merge")?;
+    if !output.status.success() || running(paths) {
+        anyhow::bail!(
+            "stopping {unit} failed, and a build from the deployment it writes into could copy its /etc mid-merge: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
@@ -543,6 +570,7 @@ impl Merge<'_> {
                 self.state.failed.insert(file.to_string(), format!("{e:#}"));
                 return false;
             }
+            crate::testhooks::mark(&format!("etc-merge-wrote-{file}"));
             self.state.carried.insert(file.to_string());
             self.state.failed.remove(*file);
             println!(

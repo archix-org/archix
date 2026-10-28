@@ -230,6 +230,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         from: generation.system.clone(),
         to: generation.system.clone(),
     };
+    let paused = archix::etcmerge::pause(&paths)?;
     if let Err(e) = archix::etcmerge::prepare(&paths, number) {
         eprintln!(
             "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
@@ -251,7 +252,10 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
             config: &|staged: &Path| super::switch::carry_config(target.config_dir, &paths, staged),
         },
     )
-    .inspect_err(|_| archix::etcmerge::discard(&paths, number))?;
+    .inspect_err(|_| {
+        archix::etcmerge::discard(&paths, number);
+        super::switch::resume_etc_merge(&paths, paused);
+    })?;
     archix::system::reboot::refresh_note(&paths.root);
     archix::system::sleep::after_commit(&paths.root);
     let merging = archix::etcmerge::start(&paths).unwrap_or_else(|e| {

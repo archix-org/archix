@@ -184,24 +184,60 @@ impl Store {
         Ok(self.list()?.last().map_or(0, |g| g.number) + 1)
     }
 
-    /// Stores a new generation under its own number, durably and whole.
+    /// Stores a new generation under its own number, durably and whole; another archix storing the same record meanwhile, as any reader of the store does when it recovers a just-committed deployment's record, isn't an error.
     pub fn save(&self, generation: &Generation) -> Result<()> {
         fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
-        if self.path(generation.number).exists() {
-            bail!("generation {} already exists", generation.number);
+        let path = self.path(generation.number);
+        if path.exists() {
+            return self.stored_already(generation);
         }
-        let tmp = self.dir.join(format!(".new-{}", generation.number));
+        self.remove_unfinished(generation.number);
+        let tmp = self
+            .dir
+            .join(format!(".new-{}-{}", generation.number, std::process::id()));
         if tmp.exists() {
             fs::remove_dir_all(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
         }
         fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        crate::testhooks::mark("generation-save");
         crate::durable::write(
             &tmp.join(GENERATION_FILE),
             serde_json::to_string_pretty(generation)?.as_bytes(),
         )?;
-        fs::rename(&tmp, self.path(generation.number))
-            .with_context(|| format!("storing generation {}", generation.number))?;
-        crate::durable::sync_dir(&self.path(generation.number))
+        if let Err(e) = crate::deploy::commit::rename_noreplace(&tmp, &path) {
+            let _ = fs::remove_dir_all(&tmp);
+            if path.exists() {
+                return self.stored_already(generation);
+            }
+            return Err(e).with_context(|| format!("storing generation {}", generation.number));
+        }
+        crate::durable::sync_dir(&path)
+    }
+
+    /// Ok when the store already holds exactly this record, as when another archix saved it first.
+    fn stored_already(&self, generation: &Generation) -> Result<()> {
+        match read(&self.path(generation.number)) {
+            Ok(stored) if stored == *generation => Ok(()),
+            _ => bail!("generation {} already exists", generation.number),
+        }
+    }
+
+    /// Removes the temporary directories saves of generation `number` left when their archix died before the rename.
+    fn remove_unfinished(&self, number: u32) {
+        let prefix = format!(".new-{number}");
+        for entry in fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(rest) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let alive = rest
+                .strip_prefix('-')
+                .and_then(|pid| pid.parse::<i32>().ok())
+                .is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM));
+            if (rest.is_empty() || rest.starts_with('-')) && !alive {
+                let _ = fs::remove_dir_all(entry.path());
+            }
+        }
     }
 
     /// Rewrites a stored generation, such as after its Flatpak apps were locked.
@@ -321,6 +357,11 @@ mod tests {
         store.save(&generation(1, 1)).unwrap();
         store.save(&generation(4, 2)).unwrap();
         assert!(store.save(&generation(4, 3)).is_err(), "a number is taken once");
+        store.save(&generation(4, 2)).unwrap();
+        fs::create_dir_all(dir.path().join("var/lib/archix/generations/.new-5-999999999")).unwrap();
+        store.save(&generation(5, 2)).unwrap();
+        assert!(!dir.path().join("var/lib/archix/generations/.new-5-999999999").exists());
+        store.delete(5).unwrap();
         assert_eq!(store.next_number().unwrap(), 5);
         fs::create_dir_all(dir.path().join("archix")).unwrap();
         symlink("deploy/4", dir.path().join("archix/current")).unwrap();

@@ -902,6 +902,139 @@ fn a_temporary_install_carries_later_etc_edits_and_holds_off_hibernation() {
     sh(&format!("systemctl stop {unit}"));
 }
 
+/// Names in an account file's first field.
+fn account_names(text: &str) -> Vec<String> {
+    let mut names: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.split(':').next())
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    names
+}
+
+fn assert_accounts_whole(etc: &Path, what: &str) {
+    let [passwd, group, shadow, gshadow] = ["passwd", "group", "shadow", "gshadow"].map(|f| read(&etc.join(f)));
+    assert_eq!(
+        account_names(&passwd),
+        account_names(&shadow),
+        "{what}: passwd and shadow"
+    );
+    assert_eq!(
+        account_names(&group),
+        account_names(&gshadow),
+        "{what}: group and gshadow"
+    );
+    let groups = account_names(&group);
+    for line in passwd.lines() {
+        let gid = line.split(':').nth(3).unwrap_or_default();
+        assert!(
+            group.lines().any(|g| g.split(':').nth(2) == Some(gid)),
+            "{what}: {line} has no group {gid} in {groups:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn a_switch_from_a_pending_deployment_builds_from_a_whole_etc_and_saves_its_record_beside_another_reader() {
+    let _system = lock_system();
+    let body = |n: u32| format!(r#"files = {{ ["/etc/archix-test-merge"] = {{ text = "{n}" }} }}"#);
+    let setup = Setup::new(&[], &body(0));
+    setup.lay_out();
+    let machine = &setup.machine;
+    let flags = machine.root.join("pending-build-flags");
+    let edits = machine.root.join("pending-build-edits");
+    fs::create_dir_all(&flags).unwrap();
+    fs::create_dir_all(&edits).unwrap();
+    let script = machine.root.join("pending-build.sh");
+    fs::write(
+        &script,
+        format!(
+            r#"#!/bin/bash
+d={flags}; etc={etc}; e={edits}
+[ -e $d/armed ] || exit 0
+wait_for() {{ for _ in $(seq 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }}
+add() {{ cat $etc/$1 > $e/$1; echo "$2" >> $e/$1; chmod $3 $e/$1; mv $e/$1 $etc/$1; }}
+case "$1" in
+  etc-merge-wrote-passwd) touch $d/watcher-mid; wait_for $d/staged ;;
+  deploy-stage)
+    mkdir $d/edited 2>/dev/null || exit 0
+    add passwd 'carol:x:1050:1050::/home/carol:/bin/bash' 644
+    add group 'carol:x:1050:' 644
+    add shadow 'carol:$c:20000:0:99999:7:::' 600
+    add gshadow 'carol:!::' 600
+    wait_for $d/watcher-mid ;;
+  deploy-transact) touch $d/staged ;;
+  deploy-commit-sync) mkdir -p $d/built; cp {deploy}/.staging-*/etc/{{passwd,group,shadow,gshadow}} $d/built/ ;;
+  generation-save) mkdir $d/saved 2>/dev/null && {archix} generations > $d/generations.out 2>&1 ;;
+esac
+exit 0
+"#,
+            flags = flags.display(),
+            etc = machine.root.join("etc").display(),
+            edits = edits.display(),
+            deploy = machine.root.join("archix/deploy").display(),
+            archix = env!("CARGO_BIN_EXE_archix"),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let env = [
+        ("ARCHIX_TEST_MARK", script.to_str().unwrap()),
+        ("ARCHIX_TEST_ETC_MERGE", "1"),
+    ];
+    setup.set_body(&[], &body(1));
+    setup.ok_env(&env, &["switch", "--noconfirm"]);
+    let pending = machine.current().unwrap();
+    let unit = etcmerge::unit_name(&machine.root);
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let started = Instant::now();
+        while !done() {
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "waited for {what}: {}",
+                sh(&format!("journalctl -u {unit} --no-pager | tail -20"))
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    wait("the watcher's first pass", &|| {
+        etcmerge::load(&Paths::under(&machine.root), pending).is_some_and(|s| s.last_pass > 0)
+    });
+    fs::write(flags.join("armed"), "").unwrap();
+    setup.set_body(&[], &body(2));
+    let out = setup.run_env(&env, &["switch", "--noconfirm"]);
+    let said = text(&out);
+    let next = machine.current().unwrap();
+    assert!(out.status.success() && !said.contains("os error"), "{said}");
+    assert!(
+        flags.join("saved").exists(),
+        "the record was saved while another archix read the store: {said}"
+    );
+    assert_ne!(next, pending, "{said}");
+    assert!(
+        setup
+            .ok(&["generations"])
+            .lines()
+            .any(|l| l.split_whitespace().any(|w| w == next.to_string())),
+        "generation {next}'s record is in the store"
+    );
+    assert_accounts_whole(
+        &flags.join("built"),
+        &format!("the /etc deployment {next} was built with"),
+    );
+    let etc = machine.deployment(next).join("etc");
+    wait("carol in every account file of the new deployment", &|| {
+        ["passwd", "group", "shadow", "gshadow"]
+            .iter()
+            .all(|f| read(&etc.join(f)).contains("carol:"))
+    });
+    sh(&format!("systemctl stop {unit}"));
+    assert_accounts_whole(&etc, &format!("deployment {next}'s /etc once the merge went on"));
+}
+
 #[test]
 #[ignore]
 fn a_switch_without_systemd_running_commits_without_an_etc_merge_or_a_failed_step() {

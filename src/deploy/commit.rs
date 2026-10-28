@@ -170,7 +170,7 @@ impl Staged {
     }
 }
 
-pub(super) fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
     let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).context("path has a NUL byte");
     let (c_from, c_to) = (c(from)?, c(to)?);
     let done = unsafe {

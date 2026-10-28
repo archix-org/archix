@@ -277,6 +277,9 @@ fn sweep(paths: &Paths, keep: Option<u32>) {
 fn follow(paths: &Paths, mut state: State, signals: &Signals) -> Result<Ended> {
     let root = paths.root.clone();
     let target = state.target;
+    // A watcher stopped for a build and started again isn't at shutdown any more.
+    state.final_pass = false;
+    state.partial = 0;
     let live = root.join("etc");
     let theirs: PathBuf = deployment_etc(&root, target);
     let mut inotify = Inotify::new()?;
