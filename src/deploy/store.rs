@@ -213,7 +213,8 @@ impl Store {
         let mut entries: Vec<PathBuf> = fs::read_dir(&hidden)
             .with_context(|| format!("reading {}", hidden.display()))?
             .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<io::Result<_>>()?;
+            .collect::<io::Result<_>>()
+            .with_context(|| format!("reading {}", hidden.display()))?;
         entries.sort();
         for (i, entry) in entries.iter().enumerate() {
             super::stage::remove_any(entry)?;

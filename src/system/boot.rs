@@ -989,7 +989,11 @@ fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
                 "sbctl sign",
             )
         })
-        .and_then(|()| Ok(fs::File::open(&tmp)?.sync_all()?))
+        .and_then(|()| {
+            fs::File::open(&tmp)
+                .and_then(|file| file.sync_all())
+                .with_context(|| format!("writing {}", tmp.display()))
+        })
         .and_then(|()| fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
     if signed.is_err() {
         let _ = fs::remove_file(&tmp);

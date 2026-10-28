@@ -238,7 +238,7 @@ fn run_one(root: &Path, hook: &Hook) -> Result<()> {
         cmd
     };
     cmd.args(&argv[1..]).env_clear().envs(env).current_dir("/");
-    let status = cmd.status()?;
+    let status = cmd.status().with_context(|| format!("running {}", argv[0]))?;
     if !status.success() {
         bail!("exited with {status}");
     }

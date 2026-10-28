@@ -172,7 +172,7 @@ fn copy_trees(root: &Path, store: &Store, number: u32) -> Result<()> {
         let target = root.join(at);
         fs::create_dir_all(&target).with_context(|| format!("creating {}", target.display()))?;
         for entry in fs::read_dir(&target).with_context(|| format!("reading {}", target.display()))? {
-            super::stage::remove_any(&entry?.path())?;
+            super::stage::remove_any(&entry.with_context(|| format!("reading {}", target.display()))?.path())?;
         }
         let how: &[&str] = match (store.backend(), ["usr", "opt", "boot"].contains(tree)) {
             (Backend::Snapshot, _) => &["-a", "--reflink=always"],

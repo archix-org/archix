@@ -36,7 +36,7 @@ pub fn remember_mirrors(state: &Path, mirrors: &[String]) -> Result<()> {
     if configured_mirrors(state) == mirrors {
         return Ok(());
     }
-    fs::create_dir_all(state)?;
+    fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
     crate::durable::write(&state.join("archive-mirrors"), mirrors.join("\n").as_bytes())
 }
 
@@ -56,7 +56,7 @@ pub fn remember_caches(state: &Path, caches: &[String]) -> Result<()> {
     if configured_caches(state) == caches {
         return Ok(());
     }
-    fs::create_dir_all(state)?;
+    fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
     crate::durable::write(&state.join("package-caches"), caches.join("\n").as_bytes())
 }
 
@@ -71,7 +71,7 @@ pub fn remember(state: &Path, url: &str) -> Result<()> {
     if configured(state) == url {
         return Ok(());
     }
-    fs::create_dir_all(state)?;
+    fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
     fs::write(state.join("archive-url"), format!("{url}\n")).with_context(|| format!("writing {}", state.display()))
 }
 

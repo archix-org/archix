@@ -94,8 +94,9 @@ fn save_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .mode(0o600)
         .open(&tmp)
         .with_context(|| format!("creating {}", tmp.display()))?;
-    file.write_all(&serde_json::to_vec(value)?)?;
-    file.sync_all()?;
+    file.write_all(&serde_json::to_vec(value)?)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     crate::durable::sync_dir(path)
 }

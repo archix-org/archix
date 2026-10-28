@@ -24,21 +24,22 @@ pub struct Contents {
 }
 
 pub fn contents(path: &Path) -> Result<Contents> {
-    let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let at = || format!("reading {}", path.display());
+    let file = File::open(path).with_context(at)?;
     let decoder: Box<dyn Read> = if path.to_string_lossy().ends_with(".zst") {
-        Box::new(zstd::Decoder::new(file)?)
+        Box::new(zstd::Decoder::new(file).with_context(at)?)
     } else {
         bail!("{} isn't a .pkg.tar.zst", path.display());
     };
     let mut archive = tar::Archive::new(decoder);
     let (mut name, mut files, mut displaces, mut size, mut backups) = (None, None, Vec::new(), 0, Vec::new());
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let entry_path = entry.path()?.to_string_lossy().into_owned();
+    for entry in archive.entries().with_context(at)? {
+        let mut entry = entry.with_context(at)?;
+        let entry_path = entry.path().with_context(at)?.to_string_lossy().into_owned();
         match entry_path.as_str() {
             ".PKGINFO" => {
                 let mut text = String::new();
-                entry.read_to_string(&mut text)?;
+                entry.read_to_string(&mut text).with_context(at)?;
                 name = text
                     .lines()
                     .find_map(|line| line.strip_prefix("pkgname = "))
@@ -64,7 +65,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
             }
             ".MTREE" => {
                 let mut text = String::new();
-                GzDecoder::new(entry).read_to_string(&mut text)?;
+                GzDecoder::new(entry).read_to_string(&mut text).with_context(at)?;
                 files = Some(mtree_entries(&text));
             }
             _ if !entry_path.starts_with('.') => break,

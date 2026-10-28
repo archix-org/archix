@@ -271,7 +271,8 @@ fn layer_dirs(dir: &Path, tree: &str, lower: &Path) -> Result<()> {
     fs::set_permissions(
         &upper,
         std::os::unix::fs::PermissionsExt::from_mode(meta.mode() & 0o7777),
-    )?;
+    )
+    .with_context(|| format!("chmod {}", upper.display()))?;
     super::flatten::set_times(&upper, &meta)
 }
 
@@ -307,8 +308,8 @@ pub fn private_var(live: &Path, owned: &Owned, out: &Path) -> Result<()> {
             } else if at != *rel {
                 break;
             } else if kind.is_symlink() {
-                std::os::unix::fs::symlink(fs::read_link(&from)?, &to)
-                    .with_context(|| format!("creating {}", to.display()))?;
+                let target = fs::read_link(&from).with_context(|| format!("reading {}", from.display()))?;
+                std::os::unix::fs::symlink(target, &to).with_context(|| format!("creating {}", to.display()))?;
             } else if kind.is_file() {
                 fs::copy(&from, &to).with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
             } else {

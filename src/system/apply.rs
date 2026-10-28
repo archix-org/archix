@@ -187,7 +187,8 @@ fn on_disk(path: &Path) -> Result<OnDisk> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
     if meta.file_type().is_symlink() {
-        return Ok(OnDisk::Link(fs::read_link(path)?.to_string_lossy().into_owned()));
+        let target = fs::read_link(path).with_context(|| format!("reading {}", path.display()))?;
+        return Ok(OnDisk::Link(target.to_string_lossy().into_owned()));
     }
     if !meta.is_file() {
         return Ok(OnDisk::Other);
@@ -458,9 +459,10 @@ pub fn create_homes(created: &[String], accounts: &Accounts, skel: &Path, root: 
         if skel.is_dir() {
             copy_preserving(skel, &home)?;
         } else {
-            fs::create_dir_all(&home)?;
+            fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
         }
-        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", home.display()))?;
         chown_tree(&home, uid, gid)?;
         eprintln!("created user {name}; set a password with `passwd {name}` after the reboot");
     }
@@ -468,10 +470,11 @@ pub fn create_homes(created: &[String], accounts: &Accounts, skel: &Path, root: 
 }
 
 fn chown_tree(path: &Path, uid: u32, gid: u32) -> Result<()> {
-    std::os::unix::fs::lchown(path, Some(uid), Some(gid))?;
-    if fs::symlink_metadata(path)?.is_dir() {
-        for entry in fs::read_dir(path)? {
-            chown_tree(&entry?.path(), uid, gid)?;
+    let at = || format!("chown {}", path.display());
+    std::os::unix::fs::lchown(path, Some(uid), Some(gid)).with_context(at)?;
+    if fs::symlink_metadata(path).with_context(at)?.is_dir() {
+        for entry in fs::read_dir(path).with_context(at)? {
+            chown_tree(&entry.with_context(at)?.path(), uid, gid)?;
         }
     }
     Ok(())
@@ -655,42 +658,44 @@ pub fn check(paths: &Paths, change: &SystemChange, locate: Locate) -> Result<()>
 
 /// Renames, or copies and deletes when `from` and `to` are on different filesystems (a separate /home, a btrfs subvolume).
 fn move_path(from: &Path, to: &Path) -> Result<()> {
+    let at = || format!("moving {} to {}", from.display(), to.display());
     match fs::rename(from, to) {
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             copy_preserving(from, to)?;
-            if fs::symlink_metadata(from)?.is_dir() {
-                fs::remove_dir_all(from)?;
+            if fs::symlink_metadata(from).with_context(at)?.is_dir() {
+                fs::remove_dir_all(from).with_context(at)?;
             } else {
-                fs::remove_file(from)?;
+                fs::remove_file(from).with_context(at)?;
             }
             Ok(())
         }
-        Err(e) if e.raw_os_error() == Some(libc::EBUSY) && !fs::symlink_metadata(from)?.is_dir() => {
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) && !fs::symlink_metadata(from).with_context(at)?.is_dir() => {
             // A bind-mounted file (Docker's /etc/hosts, arch-chroot's resolv.conf) can't be renamed, only copied.
-            fs::copy(from, to)?;
+            fs::copy(from, to).with_context(at)?;
             match fs::remove_file(from) {
                 Err(e) if e.raw_os_error() == Some(libc::EBUSY) => Ok(()),
-                result => Ok(result?),
+                result => result.with_context(at),
             }
         }
-        result => Ok(result?),
+        result => result.with_context(at),
     }
 }
 
 /// A copy of a file, symlink or directory tree that keeps modes and owners.
 fn copy_preserving(from: &Path, to: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(from)?;
+    let at = || format!("copying {} to {}", from.display(), to.display());
+    let meta = fs::symlink_metadata(from).with_context(at)?;
     if meta.file_type().is_symlink() {
-        symlink(fs::read_link(from)?, to)?;
+        symlink(fs::read_link(from).with_context(at)?, to).with_context(at)?;
     } else if meta.is_dir() {
-        fs::create_dir(to)?;
-        for entry in fs::read_dir(from)? {
-            let entry = entry?;
+        fs::create_dir(to).with_context(at)?;
+        for entry in fs::read_dir(from).with_context(at)? {
+            let entry = entry.with_context(at)?;
             copy_preserving(&entry.path(), &to.join(entry.file_name()))?;
         }
-        fs::set_permissions(to, meta.permissions())?;
+        fs::set_permissions(to, meta.permissions()).with_context(at)?;
     } else {
-        fs::copy(from, to)?;
+        fs::copy(from, to).with_context(at)?;
     }
     keep_owner(to, &meta)
 }
@@ -702,7 +707,8 @@ fn is_root() -> bool {
 /// Gives `path` the owner in `meta`; run as a home's user, what archix makes is already theirs.
 fn keep_owner(path: &Path, meta: &fs::Metadata) -> Result<()> {
     if is_root() {
-        std::os::unix::fs::lchown(path, Some(meta.uid()), Some(meta.gid()))?;
+        std::os::unix::fs::lchown(path, Some(meta.uid()), Some(meta.gid()))
+            .with_context(|| format!("chown {}", path.display()))?;
     }
     Ok(())
 }
@@ -751,15 +757,17 @@ fn saves(paths: &Paths, stamp: &str, writer: Option<&Writer>) -> Result<Saves> {
         None => paths.state.clone(),
         Some(writer) => {
             let users = paths.state.join("users");
-            fs::create_dir_all(&users)?;
+            fs::create_dir_all(&users).with_context(|| format!("creating {}", users.display()))?;
             let base = users.join(&writer.name);
             match fs::symlink_metadata(&base) {
                 Ok(meta) if meta.is_dir() => {}
                 Ok(_) => bail!("{} isn't a directory", base.display()),
                 Err(_) => fs::create_dir(&base).with_context(|| format!("creating {}", base.display()))?,
             }
-            std::os::unix::fs::lchown(&base, Some(writer.uid), Some(writer.gid))?;
-            fs::set_permissions(&base, fs::Permissions::from_mode(0o700))?;
+            std::os::unix::fs::lchown(&base, Some(writer.uid), Some(writer.gid))
+                .with_context(|| format!("chown {}", base.display()))?;
+            fs::set_permissions(&base, fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("chmod {}", base.display()))?;
             base
         }
     };
@@ -858,8 +866,10 @@ fn as_owner(
     };
     if fs::symlink_metadata(&writer.home).is_err() {
         fs::create_dir_all(&writer.home).with_context(|| format!("creating {}", writer.home.display()))?;
-        std::os::unix::fs::lchown(&writer.home, Some(writer.uid), Some(writer.gid))?;
-        fs::set_permissions(&writer.home, fs::Permissions::from_mode(0o700))?;
+        std::os::unix::fs::lchown(&writer.home, Some(writer.uid), Some(writer.gid))
+            .with_context(|| format!("chown {}", writer.home.display()))?;
+        fs::set_permissions(&writer.home, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", writer.home.display()))?;
     }
     let content = match file.link.is_none() && file.merge.is_none() && !file.sha256.is_empty() {
         true => {
@@ -958,13 +968,15 @@ fn apply_file(
             None => {
                 let backup = under(&saves.backups, path);
                 if fs::symlink_metadata(&backup).is_err() {
-                    fs::create_dir_all(backup.parent().expect("absolute path"))?;
+                    let dir = backup.parent().expect("absolute path");
+                    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
                     move_path(target, &backup).with_context(|| format!("backing up {path}"))?;
                 }
             }
             Some(previous) if !matches(target, &disk, previous, accounts) => {
                 let copy = under(&saves.edited, path);
-                fs::create_dir_all(copy.parent().expect("absolute path"))?;
+                let dir = copy.parent().expect("absolute path");
+                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
                 fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
                 eprintln!(
                     "warning: {path} was edited outside archix; that version is saved at {}",
@@ -1038,12 +1050,13 @@ fn keep_original(target: &Path, backup: &Path) -> Result<()> {
     if fs::symlink_metadata(backup).is_ok() {
         return Ok(());
     }
-    fs::create_dir_all(backup.parent().expect("absolute path"))?;
-    let meta = fs::symlink_metadata(target)?;
+    let at = || format!("copying {} to {}", target.display(), backup.display());
+    fs::create_dir_all(backup.parent().expect("absolute path")).with_context(at)?;
+    let meta = fs::symlink_metadata(target).with_context(at)?;
     if meta.file_type().is_symlink() {
-        symlink(fs::read_link(target)?, backup)?;
+        symlink(fs::read_link(target).with_context(at)?, backup).with_context(at)?;
     } else {
-        fs::copy(target, backup)?;
+        fs::copy(target, backup).with_context(at)?;
     }
     keep_owner(backup, &meta)
 }
@@ -1099,9 +1112,10 @@ fn finish_temp(
         if let Some((u, g)) = owner
             && is_root()
         {
-            std::os::unix::fs::fchown(&*file, Some(u), Some(g))?;
+            std::os::unix::fs::fchown(&*file, Some(u), Some(g)).with_context(|| format!("chown {}", tmp.display()))?;
         }
-        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        file.set_permissions(fs::Permissions::from_mode(mode))
+            .with_context(|| format!("chmod {}", tmp.display()))?;
         Ok(())
     })();
     if result.is_err() {
@@ -1127,7 +1141,7 @@ fn read_version(path: &Path) -> Result<Option<(String, Version)>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let version = Version::of(&file.metadata()?);
+    let version = Version::of(&file.metadata().with_context(|| format!("reading {}", path.display()))?);
     let mut text = String::new();
     file.read_to_string(&mut text)
         .with_context(|| format!("reading {}", path.display()))?;
@@ -1164,13 +1178,13 @@ fn replace_if_unchanged(
             Ok(()) => Ok(None),
             Err(e) if e.raw_os_error() == Some(libc::EEXIST) => again(),
             Err(e) if e.raw_os_error() == Some(libc::EINVAL) && fs::symlink_metadata(target).is_err() => {
-                fs::rename(tmp, target)?;
+                fs::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
                 Ok(None)
             }
             Err(e) if e.raw_os_error() == Some(libc::EINVAL) => again(),
             Err(e) => {
                 let _ = fs::remove_file(tmp);
-                Err(e.into())
+                Err(e).with_context(|| format!("writing {}", target.display()))
             }
         };
     };
@@ -1190,14 +1204,14 @@ fn replace_if_unchanged(
         }
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => match fs::metadata(target).map(|meta| Version::of(&meta)) {
             Ok(now) if now == *read => {
-                fs::rename(tmp, target)?;
+                fs::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
                 Ok(None)
             }
             _ => again(),
         },
         Err(e) => {
             let _ = fs::remove_file(tmp);
-            Err(e.into())
+            Err(e).with_context(|| format!("writing {}", target.display()))
         }
     }
 }
@@ -1293,7 +1307,7 @@ fn write_merged(target: &Path, want: &ManagedFile, merge: &super::merge::Merge, 
             Some(owner),
             mode,
         )?;
-        let ours = Version::of(&file.metadata()?);
+        let ours = Version::of(&file.metadata().with_context(|| format!("reading {}", tmp.display()))?);
         drop(file);
         match replace_if_unchanged(&tmp, target, read.as_ref(), ours)? {
             None => return Ok(()),
@@ -1314,11 +1328,11 @@ fn create_parents(dir: &Path, want: &ManagedFile, accounts: &Accounts) -> Result
         missing.push(path.to_path_buf());
         current = path.parent();
     }
-    fs::create_dir_all(dir)?;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     if want.owner != "root" {
         let (u, g) = owner(want, accounts)?;
         for path in missing {
-            std::os::unix::fs::chown(&path, Some(u), Some(g))?;
+            std::os::unix::fs::chown(&path, Some(u), Some(g)).with_context(|| format!("chown {}", path.display()))?;
         }
     }
     Ok(())
@@ -1335,14 +1349,15 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts, 
                 match symlink(link, &tmp) {
                     Ok(()) => break tmp,
                     Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
                 }
             };
             if want.owner != "root"
                 && is_root()
                 && let Ok((u, g)) = owner(want, accounts)
             {
-                std::os::unix::fs::lchown(&tmp, Some(u), Some(g))?;
+                std::os::unix::fs::lchown(&tmp, Some(u), Some(g))
+                    .with_context(|| format!("chown {}", tmp.display()))?;
             }
             tmp
         }
@@ -1368,13 +1383,13 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts, 
     match fs::rename(&tmp, target) {
         Err(e) if e.raw_os_error() == Some(libc::EBUSY) && want.link.is_none() => {
             // A bind-mounted file (like /etc/resolv.conf inside arch-chroot) can't be replaced, only rewritten.
-            fs::copy(&tmp, target)?;
-            fs::remove_file(&tmp)?;
+            fs::copy(&tmp, target).with_context(|| format!("writing {}", target.display()))?;
+            fs::remove_file(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
             Ok(())
         }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
-            Err(e.into())
+            Err(e).with_context(|| format!("writing {}", target.display()))
         }
         Ok(()) => Ok(()),
     }

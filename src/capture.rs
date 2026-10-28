@@ -127,7 +127,7 @@ pub struct Installed {
 pub fn read_installed(local_db: &Path) -> Result<BTreeMap<String, Installed>> {
     let mut out = BTreeMap::new();
     for entry in fs::read_dir(local_db).with_context(|| format!("reading {}", local_db.display()))? {
-        let dir = entry?.path();
+        let dir = entry.with_context(|| format!("reading {}", local_db.display()))?.path();
         let Ok(desc) = fs::read_to_string(dir.join("desc")) else {
             continue;
         };

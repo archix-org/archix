@@ -42,7 +42,7 @@ struct Package {
 fn packages(db: &Path) -> Result<Vec<Package>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(db).with_context(|| format!("reading {}", db.display()))? {
-        let dir = entry?.path();
+        let dir = entry.with_context(|| format!("reading {}", db.display()))?.path();
         let Ok(desc) = fs::read_to_string(dir.join("desc")) else {
             continue;
         };

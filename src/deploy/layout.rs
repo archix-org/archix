@@ -162,7 +162,8 @@ pub fn lay_out(root: &Path) -> Result<Store> {
             fs::create_dir(&to).with_context(|| format!("creating {}", to.display()))?;
         }
     }
-    fs::create_dir(staging.join("var-upper"))?;
+    fs::create_dir(staging.join("var-upper"))
+        .with_context(|| format!("creating {}", staging.join("var-upper").display()))?;
     mark("layout-copied");
     crate::durable::sync_filesystems_checked(&[&archix])?;
     rename_noreplace(&staging, &store.path(1))?;
@@ -267,7 +268,7 @@ pub fn prune_hidden_here(root: &Path) -> Result<usize> {
                 _ => continue,
             }
             for entry in fs::read_dir(&hidden).with_context(|| format!("reading {}", hidden.display()))? {
-                super::stage::remove_any(&entry?.path())?;
+                super::stage::remove_any(&entry.with_context(|| format!("reading {}", hidden.display()))?.path())?;
                 removed += 1;
             }
         }

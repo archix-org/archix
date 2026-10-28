@@ -22,7 +22,7 @@ pub fn store(paths: &Paths, blobs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
             continue;
         }
         let tmp = dir.join(format!(".{sha256}.{}", std::process::id()));
-        fs::write(&tmp, content)?;
+        fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
     }
     Ok(())
@@ -48,7 +48,7 @@ pub fn ensure(paths: &Paths, archive: &Archive, rendered: &Rendered) -> Result<(
         }
         if crate::fetch::sha256(Path::new(target))? == file.sha256 {
             let tmp = dir.join(format!(".{}.{}", file.sha256, std::process::id()));
-            fs::copy(target, &tmp)?;
+            fs::copy(target, &tmp).with_context(|| format!("copying {target} to {}", tmp.display()))?;
             fs::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
         }
     }
@@ -79,7 +79,7 @@ pub fn collect(paths: &Paths, keep: &BTreeSet<&str>) -> Result<(usize, u64)> {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !keep.contains(name.as_str()) {
             bytes += entry.metadata().map_or(0, |m| m.len());
-            fs::remove_file(entry.path())?;
+            fs::remove_file(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
             count += 1;
         }
     }

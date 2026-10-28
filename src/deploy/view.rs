@@ -412,9 +412,13 @@ impl Plan {
             if name == "archix" || name == "lost+found" {
                 continue;
             }
-            let meta = entry.path().symlink_metadata()?;
+            let path = entry.path();
+            let meta = path
+                .symlink_metadata()
+                .with_context(|| format!("reading {}", path.display()))?;
             if meta.file_type().is_symlink() {
-                self.symlink(&fs::read_link(entry.path())?, &view.join(&name))?;
+                let target = fs::read_link(&path).with_context(|| format!("reading {}", path.display()))?;
+                self.symlink(&target, &view.join(&name))?;
             } else if meta.is_dir() {
                 self.mkdir(&view.join(&name), meta.mode() & 0o7777, Some((meta.uid(), meta.gid())))?;
             }
@@ -781,9 +785,10 @@ fn prepare_live_var(var: &Path) -> Result<()> {
     fs::create_dir_all(&cache).with_context(|| format!("creating {}", cache.display()))?;
     let log = var.join("log/pacman.log");
     if log.symlink_metadata().is_err() {
-        fs::create_dir_all(var.join("log"))?;
+        fs::create_dir_all(var.join("log")).with_context(|| format!("creating {}", var.join("log").display()))?;
         fs::write(&log, "").with_context(|| format!("creating {}", log.display()))?;
-        fs::set_permissions(&log, fs::Permissions::from_mode(0o644))?;
+        fs::set_permissions(&log, fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("chmod {}", log.display()))?;
     }
     Ok(())
 }

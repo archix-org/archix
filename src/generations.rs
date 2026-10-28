@@ -192,9 +192,9 @@ impl Store {
         }
         let tmp = self.dir.join(format!(".new-{}", generation.number));
         if tmp.exists() {
-            fs::remove_dir_all(&tmp)?;
+            fs::remove_dir_all(&tmp).with_context(|| format!("removing {}", tmp.display()))?;
         }
-        fs::create_dir_all(&tmp)?;
+        fs::create_dir_all(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
         crate::durable::write(
             &tmp.join(GENERATION_FILE),
             serde_json::to_string_pretty(generation)?.as_bytes(),

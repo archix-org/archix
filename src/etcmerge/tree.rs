@@ -246,7 +246,7 @@ fn set_meta(meta: &Metadata, from: &Path, to: &Path) -> Result<()> {
 /// Copies the file `from` to `to` through a 0600 temporary file, fsynced and renamed over, with owner, mode, xattrs and times; returns what was written.
 pub fn copy_file(from: &Path, to: &Path) -> Result<Fp> {
     let src = open_nofollow(from).with_context(|| format!("opening {}", from.display()))?;
-    let meta = src.metadata()?;
+    let meta = src.metadata().with_context(|| format!("reading {}", from.display()))?;
     if !meta.is_file() {
         bail!("{} stopped being a file while it was copied", from.display());
     }

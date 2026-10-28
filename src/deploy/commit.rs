@@ -87,7 +87,10 @@ pub fn clean_esp(esp: &Path) -> Result<()> {
             let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with(prefix) && name.ends_with(".tmp") && entry.file_type()?.is_file() {
+            let kind = entry
+                .file_type()
+                .with_context(|| format!("reading {}", entry.path().display()))?;
+            if name.starts_with(prefix) && name.ends_with(".tmp") && kind.is_file() {
                 fs::remove_file(entry.path()).with_context(|| format!("removing {}", entry.path().display()))?;
             }
         }

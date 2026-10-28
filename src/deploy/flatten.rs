@@ -75,7 +75,7 @@ fn build(
     for (wanted, dir) in [(with_upper, upper), (with_lower, lower)] {
         if wanted {
             for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-                names.insert(entry?.file_name());
+                names.insert(entry.with_context(|| format!("reading {}", dir.display()))?.file_name());
             }
         }
     }
@@ -164,7 +164,7 @@ fn copy_dir_meta(meta: &Path, times: &fs::Metadata, dir: &Path) -> Result<()> {
         if xattr::is_overlay_private(&name) {
             continue;
         }
-        if let Some(value) = xattr::get(meta, &name)? {
+        if let Some(value) = xattr::get(meta, &name).with_context(|| format!("reading {}'s xattrs", meta.display()))? {
             xattr::set(dir, &name, &value).with_context(|| format!("setting {}'s xattrs", dir.display()))?;
         }
     }

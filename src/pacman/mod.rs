@@ -155,7 +155,10 @@ pub const KEYRINGS: &str = "usr/share/pacman/keyrings/";
 pub fn read_local_db(dir: &Path) -> Result<BTreeMap<String, LocalPkg>> {
     let mut packages = BTreeMap::new();
     for entry in fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let desc = entry?.path().join("desc");
+        let desc = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path()
+            .join("desc");
         if !desc.is_file() {
             continue;
         }

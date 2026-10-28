@@ -173,8 +173,9 @@ impl TrialKeyring {
         let gnupg = trial.gnupg();
         let import = trial.0.join("keyrings");
         copy_regular(Path::new("/etc/pacman.d/gnupg"), &gnupg)?;
-        fs::set_permissions(&gnupg, fs::Permissions::from_mode(0o700))?;
-        fs::create_dir_all(&import)?;
+        fs::set_permissions(&gnupg, fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("chmod {}", gnupg.display()))?;
+        fs::create_dir_all(&import).with_context(|| format!("creating {}", import.display()))?;
         let mut names = Vec::new();
         for keyring in keyrings {
             let status = Command::new("bsdtar")
@@ -188,12 +189,17 @@ impl TrialKeyring {
             if !status.success() {
                 bail!("couldn't read the keyring in {}", keyring.display());
             }
-            for file in fs::read_dir(trial.0.join(crate::pacman::KEYRINGS))?.flatten() {
+            let unpacked = trial.0.join(crate::pacman::KEYRINGS);
+            for file in fs::read_dir(&unpacked)
+                .with_context(|| format!("reading {}", unpacked.display()))?
+                .flatten()
+            {
                 let name = file.file_name().to_string_lossy().into_owned();
                 if let Some(stem) = name.strip_suffix(".gpg") {
                     names.push(stem.to_string());
                 }
-                fs::rename(file.path(), import.join(&name))?;
+                fs::rename(file.path(), import.join(&name))
+                    .with_context(|| format!("moving {} to {}", file.path().display(), import.display()))?;
             }
         }
         let output = Command::new("pacman-key")
@@ -362,7 +368,7 @@ fn signer_problem_in(name: &str, status: &str) -> Option<String> {
 /// Hard links to package files without the .sig beside them, for a rollback: each was verified by pacman when first installed and is checked against its pinned sha256, while today's keyring may have revoked its packager since.
 pub fn without_signatures(paths: &Paths, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let dir = paths.cache.join("verified");
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let mut out = Vec::new();
     for file in files {
         let has_sig = file

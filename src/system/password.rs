@@ -186,11 +186,13 @@ pub fn set(etc: &Path, user: &str, hash: &str) -> Result<()> {
     });
     crate::durable::write_secret(&shadow_path, with_password(&shadow, user, hash, today()).as_bytes())?;
     if mode != 0o600 {
-        fs::set_permissions(&shadow_path, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+        fs::set_permissions(&shadow_path, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .with_context(|| format!("chmod {}", shadow_path.display()))?;
     }
     if let Some(text) = pointed {
         crate::durable::write(&passwd_path, text.as_bytes())?;
-        fs::set_permissions(&passwd_path, std::os::unix::fs::PermissionsExt::from_mode(0o644))?;
+        fs::set_permissions(&passwd_path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+            .with_context(|| format!("chmod {}", passwd_path.display()))?;
     }
     Ok(())
 }

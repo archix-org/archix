@@ -229,7 +229,8 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
         }
         let mode = if content.starts_with("#!") { 0o755 } else { 0o644 };
         fs::write(&target, &content).with_context(|| format!("writing {}", target.display()))?;
-        fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(mode))?;
+        fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .with_context(|| format!("chmod {}", target.display()))?;
     }
     for (link, unit) in boot_wants() {
         let target = place(&link)?;
@@ -370,7 +371,7 @@ pub fn sync_pacman_conf(conf: &Path, repos: &[Repo]) -> Result<()> {
     let wanted = with_custom_repos(&current, repos);
     if wanted != current {
         let tmp = conf.with_extension("conf.archix");
-        fs::write(&tmp, &wanted)?;
+        fs::write(&tmp, &wanted).with_context(|| format!("writing {}", tmp.display()))?;
         fs::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
     }
     Ok(())
@@ -386,9 +387,9 @@ pub fn record(paths: &Paths, packages: Vec<String>) -> Result<Option<OutsideChan
     let mut changes = outside_changes(paths)?;
     changes.push(change.clone());
     let path = paths.outside_changes();
-    fs::create_dir_all(&paths.state)?;
+    fs::create_dir_all(&paths.state).with_context(|| format!("creating {}", paths.state.display()))?;
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&changes)?)?;
+    fs::write(&tmp, serde_json::to_string_pretty(&changes)?).with_context(|| format!("writing {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
     Ok(Some(change))
 }
@@ -404,8 +405,11 @@ pub fn outside_changes(paths: &Paths) -> Result<Vec<OutsideChange>> {
 
 /// Forgets recorded outside changes once a switch has reconciled them with the lock.
 pub fn clear_outside_changes(paths: &Paths) -> Result<()> {
-    match fs::remove_file(paths.outside_changes()) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+    let path = paths.outside_changes();
+    match fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", path.display()))
+        }
         _ => Ok(()),
     }
 }

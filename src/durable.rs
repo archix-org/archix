@@ -30,7 +30,8 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     removing_on_error(&tmp, || {
         let mut file = File::create(&tmp).with_context(|| format!("writing {}", tmp.display()))?;
         if let Some(mode) = mode {
-            file.set_permissions(fs::Permissions::from_mode(mode))?;
+            file.set_permissions(fs::Permissions::from_mode(mode))
+                .with_context(|| format!("chmod {}", tmp.display()))?;
         }
         file.write_all(contents)
             .with_context(|| format!("writing {}", tmp.display()))?;
@@ -73,8 +74,8 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
     removing_on_error(&tmp, || {
         fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
         if !crate::testhooks::broken("data-unsynced") {
-            File::open(&tmp)?
-                .sync_all()
+            File::open(&tmp)
+                .and_then(|file| file.sync_all())
                 .with_context(|| format!("writing {}", tmp.display()))?;
         }
         fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
@@ -85,7 +86,9 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
 /// Flushes the directory entry for `path`, which a rename or new symlink only changes in memory.
 pub fn sync_dir(path: &Path) -> Result<()> {
     if let Some(dir) = path.parent() {
-        File::open(dir)?.sync_all()?;
+        File::open(dir)
+            .and_then(|dir| dir.sync_all())
+            .with_context(|| format!("flushing the directory {}", dir.display()))?;
     }
     Ok(())
 }
@@ -173,7 +176,7 @@ pub fn write_config(path: &Path, contents: &[u8]) -> Result<()> {
     let (uid, gid, mode) = match before {
         Some(owner) => owner,
         None => {
-            let dir = fs::metadata(dir)?;
+            let dir = fs::metadata(dir).with_context(|| format!("reading {}", dir.display()))?;
             (dir.uid(), dir.gid(), 0o644)
         }
     };
@@ -220,7 +223,7 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
     let Some(existing) = dir.ancestors().find(|a| a.exists()) else {
         return Ok(());
     };
-    let owner = fs::metadata(existing)?;
+    let owner = fs::metadata(existing).with_context(|| format!("reading {}", existing.display()))?;
     let missing: Vec<&Path> = dir.ancestors().take_while(|a| !a.exists()).collect();
     for created in missing.into_iter().rev() {
         use std::os::unix::fs::OpenOptionsExt;
@@ -290,6 +293,13 @@ mod tests {
         sync_filesystems_checked(&[dir.path()]).unwrap();
         let err = sync_filesystems_checked(&[dir.path(), &dir.path().join("missing")]).unwrap_err();
         assert!(format!("{err:#}").contains("missing"), "{err:#}");
+    }
+
+    #[test]
+    fn a_directory_flush_names_the_directory_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = sync_dir(&dir.path().join("gone/file")).unwrap_err();
+        assert!(format!("{err:#}").contains("gone"), "{err:#}");
     }
 
     #[test]
