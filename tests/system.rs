@@ -900,6 +900,15 @@ fn file_systems_and_swap_are_the_deployments_fstab_after_archixs_own_root_and_es
     )
     .unwrap();
     let checks = Checks::default();
+    let refused = setup.fails(&["switch", "--noconfirm"]);
+    checks.check(
+        refused.contains("  UUID=archix-home /home ext4 rw 0 2    (/home is protected)\n")
+            && refused.contains("[\"/home\"] = { device = \"UUID=archix-home\", fs_type = \"ext4\", options = { \"rw\" }, check = true },")
+            && refused.contains("drop_mounts = { \"/home\" }; nothing was changed"),
+        format!("a switch that would drop a hand-added /home line is refused, naming it:\n{refused}"),
+    );
+    checks.eq(machine.current(), None, "the refused switch changes nothing");
+    setup.set_body(&[], &format!("{MOUNTS},\ndrop_mounts = {{ \"/home\" }}"));
     let out = setup.ok(&["switch", "--noconfirm"]);
     let first = machine.current().unwrap();
     checks.eq(
@@ -908,7 +917,7 @@ fn file_systems_and_swap_are_the_deployments_fstab_after_archixs_own_root_and_es
             "{}\nUUID=archix-root / ext4 rw,relatime 0 1\nUUID=AB12-CD34 {esp} vfat rw,x-systemd.automount,x-systemd.idle-timeout=60,fmask=0077,dmask=0077 0 2\n\
              UUID=archix-test-data /mnt/data ext4 nofail,x-systemd.device-timeout=30s 0 2\n\
              /dev/mapper/archixsecret /mnt/secret ext4 nofail 0 0\n\
-             /var/archix-www /srv/archix-www none bind,nofail 0 0\n\
+             /var/archix-www /srv/archix-www none bind 0 0\n\
              /swap/swapfile none swap nofail 0 0\n",
             archix::system::fstab::HEADER
         ),
@@ -964,6 +973,64 @@ fn file_systems_and_swap_are_the_deployments_fstab_after_archixs_own_root_and_es
         checks.eq(machine.current(), Some(first), "a refused switch changes nothing");
     }
 
+    setup.set_body(&[], MOUNTS);
+    let fstab = system_path("/etc/fstab");
+    let crypttab = system_path("/etc/crypttab");
+    let mut text = read("/etc/fstab");
+    text.push_str("UUID=archix-usb /mnt/archix-usb ext4 rw,nofail 0 0\n/dev/mapper/archixhome /home/archix-crypt ext4 defaults 0 0\n");
+    fs::write(&fstab, text).unwrap();
+    let mut text = read("/etc/crypttab");
+    text.push_str("archixhome UUID=archix-test-home none luks\n");
+    fs::write(&crypttab, text).unwrap();
+    for (command, out) in [("status", setup.ok(&["status"])), ("diff", setup.ok(&["diff"]))] {
+        checks.check(
+            out.contains("/etc/fstab was edited since archix wrote it")
+                && out.contains("  + UUID=archix-usb /mnt/archix-usb ext4 rw,nofail 0 0    (dropped then, unless file_systems declares it)")
+                && out.contains("/etc/crypttab was edited since archix wrote it"),
+            format!("{command} names the hand-added lines the next switch drops:\n{out}"),
+        );
+    }
+    let usb = machine.root.join("mnt/archix-usb");
+    fs::create_dir_all(&usb).unwrap();
+    let mounted = Command::new("mount")
+        .args(["-t", "tmpfs", "tmpfs"])
+        .arg(&usb)
+        .status()
+        .unwrap();
+    assert!(mounted.success());
+    let error = setup.fails(&["switch", "--noconfirm"]);
+    let unmounted = Command::new("umount").arg(&usb).status().unwrap();
+    assert!(unmounted.success());
+    for says in [
+        "  UUID=archix-usb /mnt/archix-usb ext4 rw,nofail 0 0    (/mnt/archix-usb is mounted now)\n",
+        "  /dev/mapper/archixhome /home/archix-crypt ext4 defaults 0 0    (/home/archix-crypt is under /home)\n",
+        "  archixhome UUID=archix-test-home none luks    (it backs /home/archix-crypt)\n",
+        "drop_mounts = { \"/mnt/archix-usb\", \"/home/archix-crypt\", \"/dev/mapper/archixhome\" }; nothing was changed",
+    ] {
+        checks.check(
+            error.contains(says),
+            format!("the refusal should name {says:?}:\n{error}"),
+        );
+    }
+    checks.eq(machine.current(), Some(first), "a refused drop changes nothing");
+    let error = setup.fails(&["switch", "--noconfirm"]);
+    checks.check(
+        !error.contains("/mnt/archix-usb") && error.contains("/home/archix-crypt"),
+        format!("unmounted, a line outside /home, /var and /srv may go:\n{error}"),
+    );
+    setup.set_body(&[], &format!("{MOUNTS},\ndrop_mounts = {{ \"/home/archix-crypt\" }}"));
+    setup.ok(&["switch", "--noconfirm"]);
+    checks.check(
+        !read("/etc/fstab").contains("/home/archix-crypt")
+            && !read("/etc/fstab").contains("/mnt/archix-usb")
+            && !read("/etc/crypttab").contains("archixhome")
+            && read("/etc/crypttab").contains("archixsecret"),
+        format!(
+            "drop_mounts lets the mount and the volume backing it go:\n{}\n{}",
+            read("/etc/fstab"),
+            read("/etc/crypttab")
+        ),
+    );
     setup.set_body(
         &[],
         r#"file_systems = { ["/srv/archix-www"] = { device = "/var/archix-www", options = { "bind" } } }"#,

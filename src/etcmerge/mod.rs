@@ -16,6 +16,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::paths::Paths;
+use crate::system::fstab::{self, TABLES};
 use accounts::{FILES, Texts};
 use tree::{Fp, Kind};
 
@@ -47,6 +48,12 @@ pub struct State {
     /// What the boot of the target carried from the old /etc after an unclean shutdown.
     #[serde(default)]
     pub recovered: BTreeSet<String>,
+    /// The base's text of fstab and crypttab, which are merged line by line.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tables: BTreeMap<String, String>,
+    /// Which of fstab and crypttab, archix's to write, were edited on the running system and carried.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub edited_tables: BTreeSet<String>,
 }
 
 pub fn dir(paths: &Paths) -> PathBuf {
@@ -130,11 +137,16 @@ pub fn snapshot(etc: &Path, target: u32, from: u32) -> State {
         .filter(|rel| !FILES.contains(&rel.as_str()))
         .filter_map(|rel| Some((rel.clone(), tree::fingerprint(&etc.join(&rel)).ok()??)))
         .collect();
+    let tables = TABLES
+        .iter()
+        .filter_map(|rel| Some((rel.to_string(), fs::read_to_string(etc.join(rel)).ok()?)))
+        .collect();
     State {
         target,
         from,
         base,
         accounts: ids::read_texts(etc),
+        tables,
         ..State::default()
     }
 }
@@ -161,6 +173,7 @@ pub fn prepare(paths: &Paths, target: u32) -> Result<()> {
         from: booted,
         base: state.base,
         accounts: state.accounts,
+        tables: state.tables,
         ..State::default()
     };
     save(paths, &state)
@@ -304,15 +317,16 @@ pub struct Merge<'a> {
 }
 
 impl Merge<'_> {
+    /// Managed files the target's generation rewrote stay its own, but for fstab and crypttab, which are merged line by line.
     fn skipped(&self, rel: &str) -> bool {
-        never(rel) || self.skip.contains(rel)
+        never(rel) || (self.skip.contains(rel) && !TABLES.contains(&rel))
     }
 
     /// Merges everything under the paths in `dirty`, or everything when `dirty` is None; stops at `deadline`, listing what's left.
     pub fn pass(&mut self, dirty: Option<&BTreeSet<String>>, deadline: Option<Instant>) -> Pass {
         let mut paths = BTreeSet::new();
         let mut accounts = dirty.is_none();
-        let skip = |rel: &str| never(rel) || self.skip.contains(rel);
+        let skip = |rel: &str| self.skipped(rel);
         match dirty {
             None => {
                 let mut all = Vec::new();
@@ -430,9 +444,19 @@ impl Merge<'_> {
         }
         let to = self.theirs.join(rel);
         let theirs = tree::fingerprint(&to)?;
+        let table = TABLES.contains(&rel).then(|| fs::read_to_string(&to).ok()).flatten();
         if live == theirs {
             self.set_base(rel, live);
+            self.carried_table(rel, table.as_deref());
             return Ok(());
+        }
+        let file = |fp: &Option<Fp>| fp.as_ref().is_some_and(|fp| matches!(fp.kind, Kind::File(_)));
+        if let Some(theirs_text) = &table
+            && file(&live)
+            && file(&theirs)
+            && theirs != base
+        {
+            return self.merge_table(rel, live, theirs_text);
         }
         if live.as_ref().is_some_and(|l| l.kind == Kind::Other) {
             anyhow::bail!("it's a socket, FIFO or device, which the merge doesn't carry");
@@ -486,6 +510,7 @@ impl Merge<'_> {
             }
         };
         self.set_base(rel, written);
+        self.carried_table(rel, table.as_deref());
         let verb = if live.is_some() { "carried" } else { "removed" };
         if conflict {
             self.state.conflicts.insert(rel.to_string());
@@ -494,6 +519,60 @@ impl Merge<'_> {
             println!("archix: /etc merge: {verb} /etc/{rel} into deployment {target}");
         }
         Ok(())
+    }
+
+    /// Merges the running system's edits to fstab or crypttab into the target's line by line, as archix wrote the target's whole.
+    fn merge_table(&mut self, rel: &str, live: Option<Fp>, theirs: &str) -> Result<()> {
+        let target = self.state.target;
+        let (from, to) = (self.live.join(rel), self.theirs.join(rel));
+        let live_text = fs::read_to_string(&from).with_context(|| format!("reading {}", from.display()))?;
+        let base = self.state.tables.get(rel).map_or(theirs, String::as_str);
+        let (text, both) = fstab::merge_lines(rel, base, &live_text, theirs);
+        if both.is_empty() {
+            self.state.carried.insert(rel.to_string());
+            println!(
+                "archix: /etc merge: carried the running system's edits to /etc/{rel} into deployment {target}'s, line by line"
+            );
+        } else {
+            let pacnew = tree::with_suffix(&to, ".pacnew");
+            tree::write_like(&pacnew, theirs.as_bytes(), &to)?;
+            self.state.conflicts.insert(rel.to_string());
+            println!(
+                "archix: /etc merge: /etc/{rel}'s lines for {} changed both on the running system and in deployment {target}; the running system's go in, deployment {target}'s whole file is /etc/{rel}.pacnew",
+                both.join(", ")
+            );
+        }
+        tree::write_like(&to, text.as_bytes(), &from)?;
+        self.set_base(rel, live);
+        self.carried_table(rel, Some(theirs));
+        Ok(())
+    }
+
+    /// After a running system's fstab or crypttab reached the target: keeps its text as the base and warns when archix wrote the target's, as the next switch writes it whole again.
+    fn carried_table(&mut self, rel: &str, theirs: Option<&str>) {
+        if !TABLES.contains(&rel) {
+            return;
+        }
+        let live = fs::read_to_string(self.live.join(rel)).ok();
+        let edited = live.as_deref() != self.state.tables.get(rel).map(String::as_str);
+        match live {
+            Some(text) => self.state.tables.insert(rel.to_string(), text),
+            None => self.state.tables.remove(rel),
+        };
+        if !edited || !theirs.is_some_and(fstab::written_by_archix) {
+            return;
+        }
+        self.state.edited_tables.insert(rel.to_string());
+        let declare = match rel {
+            "crypttab" => "declare the volume as encrypted in its mount's file_systems entry",
+            _ => "declare the mount in file_systems",
+        };
+        let line = format!(
+            "archix: /etc/{rel} was edited on the running system; the edit is carried into deployment {}, but archix writes /etc/{rel} whole at every switch, so the next switch drops this edit (and refuses to while a line it drops is mounted, open, or for /home, /var or /srv): {declare}",
+            self.state.target
+        );
+        println!("{line}");
+        self.note(&line);
     }
 
     fn set_base(&mut self, rel: &str, fp: Option<Fp>) {
@@ -748,6 +827,11 @@ pub fn status_lines(paths: &Paths) -> Vec<String> {
         }
         for (rel, why) in &state.failed {
             lines.push(format!("  /etc/{rel} isn't carried: {why}"));
+        }
+        for rel in &state.edited_tables {
+            lines.push(format!(
+                "  /etc/{rel}: edited on the running system and carried, but the next switch writes it whole again from the config, dropping what file_systems doesn't declare"
+            ));
         }
         if let Some(clash) = &state.clash {
             lines.push(format!("  users and groups aren't carried: {clash}"));
@@ -1039,6 +1123,56 @@ mod tests {
         assert!(
             shadow.contains("alice:$a2:20100:") && shadow.contains("carol:$c:"),
             "{shadow}"
+        );
+    }
+
+    #[test]
+    fn running_system_edits_to_the_fstab_and_crypttab_archix_wrote_are_merged_line_by_line_and_warned_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let (l, t) = (dir.path().join("live"), dir.path().join("theirs"));
+        let header = fstab::HEADER;
+        let fstab = format!("{header}\nUUID=root / ext4 rw 0 1\nUUID=data /mnt/data ext4 nofail 0 2\n");
+        let crypttab = "# Written by archix from file_systems' encrypted devices.\nsecret UUID=s none luks,nofail\n";
+        for etc in [&l, &t] {
+            fs::create_dir_all(etc).unwrap();
+            fs::write(etc.join("fstab"), &fstab).unwrap();
+            fs::write(etc.join("crypttab"), crypttab).unwrap();
+        }
+        let mut state = snapshot(&l, 2, 1);
+        let new_fstab = format!("{fstab}UUID=new /mnt/new ext4 nofail 0 0\n");
+        fs::write(t.join("fstab"), &new_fstab).unwrap();
+        fs::write(t.join("crypttab"), format!("{crypttab}new UUID=n none luks,nofail\n")).unwrap();
+        fs::write(l.join("fstab"), format!("{fstab}UUID=home /home ext4 rw 0 2\n")).unwrap();
+        fs::write(l.join("crypttab"), format!("{crypttab}home UUID=h none luks\n")).unwrap();
+        let mut merge = merge(&l, &t, &mut state, &["crypttab"]);
+        merge.pass(None, None);
+        assert_eq!(
+            fs::read_to_string(t.join("fstab")).unwrap(),
+            format!("{new_fstab}UUID=home /home ext4 rw 0 2\n"),
+            "archix's new line and the running system's both reach the pending deployment"
+        );
+        assert_eq!(
+            fs::read_to_string(t.join("crypttab")).unwrap(),
+            format!("{crypttab}new UUID=n none luks,nofail\nhome UUID=h none luks\n"),
+            "a crypttab the target's generation rewrote is merged too, never skipped"
+        );
+        assert!(!t.join("fstab.pacnew").exists() && merge.state.conflicts.is_empty());
+        assert_eq!(
+            merge.state.edited_tables,
+            BTreeSet::from(["crypttab".to_string(), "fstab".to_string()])
+        );
+        fs::write(
+            l.join("fstab"),
+            format!("{header}\nUUID=root / ext4 rw 0 1\nUUID=home /home ext4 rw 0 2\nUUID=usb /mnt/usb ext4 rw 0 0\n"),
+        )
+        .unwrap();
+        merge.pass(Some(&BTreeSet::from(["fstab".to_string()])), None);
+        assert_eq!(
+            fs::read_to_string(t.join("fstab")).unwrap(),
+            format!(
+                "{header}\nUUID=root / ext4 rw 0 1\nUUID=new /mnt/new ext4 nofail 0 0\nUUID=home /home ext4 rw 0 2\nUUID=usb /mnt/usb ext4 rw 0 0\n"
+            ),
+            "a second edit merges against the first: /mnt/data removed on the running system goes, archix's /mnt/new stays"
         );
     }
 

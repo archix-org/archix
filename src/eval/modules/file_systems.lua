@@ -24,9 +24,9 @@ return {
           description = "fsck the filesystem at boot before mounting it (fs_passno 2).",
         },
         required = archix.option {
-          type = t.bool,
-          default = false,
-          description = "Make the boot wait for it and stop in emergency mode without it. By default a mount is nofail, its device waited for 30 seconds (x-systemd.device-timeout=30s, unless options set one), so an unplugged or dead disk leaves it unmounted instead of stopping every boot.",
+          type = t.nullable(t.bool),
+          default = archix.null,
+          description = "Make the boot wait for it and stop in emergency mode without it. By default mounts at /home, /var and /srv and under them are required, as a boot without one would show an empty directory on the root filesystem that programs fill with fresh files, hidden once the mount is back; elsewhere a mount is nofail, its device waited for 30 seconds (x-systemd.device-timeout=30s, unless options set one), so an unplugged or dead disk leaves it unmounted instead of stopping every boot. false makes a mount under /home, /var or /srv nofail too.",
         },
         encrypted = archix.option {
           type = t.nullable(t.submodule {
@@ -44,6 +44,11 @@ return {
       }),
       default = {},
       description = "Filesystems to mount at boot, keyed by mount point, written into /etc/fstab, which archix writes whole in each deployment: its own lines for the root and the ESP, then these and swap. Like the rest of a deployment they apply at the next boot, and a rollback brings back the fstab of the deployment rolled back to. /, /usr, /opt, /boot, /etc, /var, /var/lib, /var/lib/pacman, /var/lib/dkms, /archix and the ESP can't be declared; /usr/local can.",
+    },
+    drop_mounts = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "Mount points, and /dev/mapper/<name> for /etc/crypttab volumes, whose lines the next deployment may leave out of /etc/fstab and /etc/crypttab although nothing declares them. Without this a switch refuses to drop a line that's mounted or open now, or for /home, /var or /srv and under them, naming each, so a hand-added line can't vanish with its data. Take an entry out once the deployment without it has booted.",
     },
     swap = archix.option {
       type = t.list_of(t.submodule {

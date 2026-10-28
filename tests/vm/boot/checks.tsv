@@ -241,6 +241,9 @@ fs2	f"swapon should show the swap file and zram: {active}; {out('journalctl -b -
 fs2	"on btrfs the swap file's directory should be a subvolume of its own"	added
 fs2	'a switch with the swap file active'	added
 fs2	'the switch with swap active should make a new deployment'	added
+fs2	f"logind should offer hibernation to the swap file with no resume= on the command line: {out('cat /proc/cmdline')}"	added
+fs2	f"the guest should resume the boot it hibernated ({before[:8]}, now {resumed[:8]}), RAM intact: {out('journalctl -b --no-pager | grep -i hibernat | tail -8')}"	added
+fs2	f"the kernel should log the resume: {out('journalctl -b -k --no-pager | grep -i hibernat | tail -5')}"	added
 fs3	'the data disk should be gone'	added
 fs3	"the data disk's mounts should be left out"	added
 fs3	'the mounts on the root and the swap file should still be there'	added
@@ -265,3 +268,9 @@ ee3	bootctl set-oneshot entry	added
 ee4	f'the restored entry should boot deployment {older}, not {running}'	added
 ee4	f"nothing should be refused: {out('cat /run/archix/entry-refused 2>&1')}"	added
 ee4	f"booting deployment {older}'s own entry should make it current, not {current()}"	added
+fs4	'moving /home to its own disk'	added
+fs4	'a switch declaring /home'	added
+fs4	f"/home's line should have no nofail: {fstab}"	added
+fs4	f"/home should be its disk: {out('findmnt /home')}"	added
+fs5	f'the boot should stop before multi-user without /home, not reach the shell: {found!r}'	added
+fs6	f"/home should be its disk again: {out('findmnt /home')}"	added

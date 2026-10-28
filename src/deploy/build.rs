@@ -124,6 +124,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     crate::integration::write_staged(&staging, &crate::integration::own_path()?)?;
     crate::integration::sync_pacman_conf(&etc.join("pacman.conf"), plan.repos)?;
     crate::system::fstab::write_in(&etc, &plan.boot.esp, &plan.system.to.fstab)?;
+    crate::system::fstab::hibernation_in(&etc, &plan.system.to.fstab)?;
     (plan.config)(staging.dir())?;
     let built = boot::build(paths, plan.boot, plan.number, &staging, &tx)?;
     drop(tx);

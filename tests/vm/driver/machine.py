@@ -332,6 +332,57 @@ class Machine:
         time.sleep(1)
         self.key("end", *["up"] * (len(titles) - 1 - row), "ret")
 
+    def hibernate(self, timeout=600):
+        """Hibernates the guest, waits for QEMU to exit as it powers off, starts it again and waits for the resumed guest's shell, the same boot's: a READY from a restarted backdoor or an answer from the old one."""
+        self.wait_for_shell()
+        self.send("systemctl hibernate", 60)
+        self.log("hibernating")
+        try:
+            self.process.wait(timeout)
+        except subprocess.TimeoutExpired:
+            raise self.fault(f"the VM didn't power off to hibernate within {timeout} s; console: {short(self.console_since(self.console_mark), 1500)}")
+        self.stop()
+        self.process = None
+        self.new_boot("resuming from hibernation")
+        self.start()
+        self.console_mark = 0
+        deadline = time.monotonic() + self.boot_timeout
+        tokens, probed = [], 0
+        with self.lock:
+            while True:
+                if self.ready[self.seen:]:
+                    self.boot_id = self.ready[-1]
+                    self.seen = len(self.ready)
+                    break
+                answered = [token for token in tokens if token in self.replies]
+                if answered:
+                    self.boot_id = base64.b64decode(self.replies.pop(answered[0])[1]).decode().strip()
+                    break
+                # The port drops what's sent before the resumed guest reopens it, so the probe goes again until it's answered.
+                if time.monotonic() - probed > 5:
+                    tokens.append(self.send("cat /proc/sys/kernel/random/boot_id", 30))
+                    probed = time.monotonic()
+                if not self.alive():
+                    raise self.gone("waiting for the resumed guest's shell")
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise self.fault(f"the resumed guest's shell didn't answer within {self.boot_timeout} s; console: {short(self.console_since(0), 1500)}")
+                self.lock.wait(min(left, 1))
+        self.connected = True
+        self.log(f"resumed ({time.monotonic() - self.boot_started:.1f} s), boot id {self.boot_id[:8]}")
+        return self.boot_id
+
+    def boot_stopping_at(self, regex, timeout=600):
+        """Starts the VM for a boot expected to stop short of the guest's shell, such as in emergency mode; waits for regex on its console and returns (the match, whether the shell came up anyway), the VM left running."""
+        self.new_boot("starting a boot that should stop")
+        self.start()
+        self.console_mark = 0
+        found = self.wait_for_console_text(regex, timeout)
+        time.sleep(5)
+        with self.lock:
+            shell = bool(self.ready[self.seen:])
+        return found, shell
+
     def shutdown(self, timeout=300):
         self.wait_for_shell()
         self.send("systemctl poweroff", 60)

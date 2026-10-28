@@ -91,6 +91,14 @@ fn under(path: &str, dir: &str) -> bool {
     path == dir || path.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
 }
 
+/// Mount points whose filesystem is required by default and whose fstab lines a switch won't drop unasked: booting without one leaves an empty directory on the root filesystem, where programs write fresh files that the mount hides once it's back.
+pub const PROTECTED: [&str; 3] = ["/home", "/var", "/srv"];
+
+/// Whether `point` is one of `PROTECTED` or under one.
+pub fn protected(point: &str) -> bool {
+    PROTECTED.iter().any(|dir| under(normal(point), dir))
+}
+
 fn normal(point: &str) -> &str {
     match point.trim_end_matches('/') {
         "" => "/",
@@ -271,10 +279,14 @@ pub fn render(config: &Value, esp: &str) -> Result<Declared> {
         if check && (bind || fs_type == "tmpfs") {
             bail!("{what}: check = true needs a filesystem on a device for fsck to check");
         }
-        let required = bool_of(spec, "required");
-        if required && options.iter().any(|option| option == "nofail") {
-            bail!("{what}: required = true and the nofail option contradict each other");
-        }
+        let nofail = options.iter().any(|option| option == "nofail");
+        let required = match get(spec, "required") {
+            Some(Value::Bool(true)) if nofail => {
+                bail!("{what}: required = true and the nofail option contradict each other")
+            }
+            Some(Value::Bool(required)) => *required,
+            _ => protected(point) && !nofail,
+        };
         if !required {
             if !options.iter().any(|option| option == "nofail") {
                 options.push("nofail".into());
@@ -338,6 +350,17 @@ pub fn render(config: &Value, esp: &str) -> Result<Declared> {
             passno: if check { 2 } else { 0 },
             size: None,
         });
+    }
+    for entry in acknowledged(config) {
+        let what = format!("drop_mounts: {entry:?}");
+        match entry.strip_prefix("/dev/mapper/") {
+            Some(name) if name.is_empty() || name.contains('/') => bail!("{what} isn't /dev/mapper/<name>"),
+            Some(_) => {}
+            None => check_path(&entry).map_err(|why| anyhow::anyhow!("{what}: a mount point {why}"))?,
+        }
+        if out.lines.iter().any(|line| !line.is_swap() && line.point == entry) {
+            bail!("{what}: file_systems declares {entry} too; drop_mounts is for lines nothing declares");
+        }
     }
     if !crypttab.is_empty() {
         let mut text = "# Written by archix from file_systems' encrypted devices.\n".to_string();
@@ -535,6 +558,79 @@ pub fn write_in(etc: &Path, esp: &str, declared: &[FstabLine]) -> Result<()> {
     Ok(())
 }
 
+/// The systemd-sleep drop-in under /etc that turns hibernation off in a deployment that swaps on a file its initramfs can't resume from.
+pub const NO_HIBERNATION: &str = "systemd/sleep.conf.d/archix-swap-file.conf";
+
+/// mkinitcpio's HOOKS as the configs under `etc` set them: mkinitcpio.conf, then its conf.d in order.
+fn initramfs_hooks(etc: &Path) -> Vec<String> {
+    let mut configs: Vec<PathBuf> = fs::read_dir(etc.join("mkinitcpio.conf.d"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+        .collect();
+    configs.sort();
+    configs.insert(0, etc.join("mkinitcpio.conf"));
+    let mut hooks = Vec::new();
+    for text in configs.iter().filter_map(|path| fs::read_to_string(path).ok()) {
+        let text: String = text
+            .lines()
+            .map(|line| line.split('#').next().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("HOOKS") {
+            let after = &rest[at + "HOOKS".len()..];
+            let (append, after) = match (after.strip_prefix("+=("), after.strip_prefix("=(")) {
+                (Some(after), _) => (true, after),
+                (None, Some(after)) => (false, after),
+                _ => {
+                    rest = after;
+                    continue;
+                }
+            };
+            let end = after.find(')').unwrap_or(after.len());
+            if !append {
+                hooks.clear();
+            }
+            hooks.extend(after[..end].split_whitespace().map(str::to_string));
+            rest = &after[end..];
+        }
+    }
+    hooks
+}
+
+/// Turns hibernation off in the staged /etc at `etc` when the deployment swaps on a file and nothing in its initramfs could resume from it: the systemd hook does, through the HibernateLocation EFI variable systemd-sleep sets as it hibernates, and so does a resume= the command line sets; archix sets no resume_offset= of its own, as remaking the file at boot at another size would outdate it. True when it's off.
+pub fn hibernation_in(etc: &Path, declared: &[FstabLine]) -> Result<bool> {
+    let file = declared
+        .iter()
+        .find(|line| line.is_swap() && line.device.starts_with('/') && !line.device.starts_with("/dev/"));
+    let cmdline = fs::read_to_string(etc.join("kernel/cmdline")).unwrap_or_default();
+    let path = etc.join(NO_HIBERNATION);
+    let off = file.is_some()
+        && !initramfs_hooks(etc).iter().any(|hook| hook == "systemd")
+        && !cmdline.split_whitespace().any(|param| param.starts_with("resume="));
+    if !off {
+        match fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("removing {}", path.display()));
+            }
+            _ => return Ok(false),
+        }
+    }
+    let text = format!(
+        "# Written by archix: this deployment swaps on {}, but its initramfs has no systemd hook to resume from it through the HibernateLocation EFI variable, and the kernel command line no resume=, so a hibernated system would boot afresh and lose what was in memory.\n[Sleep]\nAllowHibernation=no\nAllowSuspendThenHibernate=no\nAllowHybridSleep=no\n",
+        file.map(|line| line.device.as_str()).unwrap_or_default()
+    );
+    fs::create_dir_all(path.parent().context("the drop-in has a directory")?)?;
+    crate::durable::write(&path, text.as_bytes())?;
+    println!(
+        "swap       hibernation is off in this deployment: mkinitcpio's HOOKS have no systemd hook, which resumes from the swap file through the HibernateLocation EFI variable; add it, or set resume= and resume_offset= in kernel_params yourself"
+    );
+    Ok(true)
+}
+
 /// The lines of an fstab other than the root's and the ESP's, as file_systems and swap would declare them.
 fn others(fstab: &str, esp: &str) -> Vec<FstabLine> {
     fstab
@@ -590,6 +686,335 @@ pub fn describe(current: &str, esp: &str, declared: &[FstabLine]) -> Vec<String>
         }
     }
     lines
+}
+
+/// The files under /etc that archix writes whole at every switch, when it writes them: fstab always, crypttab from file_systems' encrypted devices.
+pub const TABLES: [&str; 2] = ["fstab", "crypttab"];
+
+/// Whether `text` is an fstab or crypttab archix wrote.
+pub fn written_by_archix(text: &str) -> bool {
+    text.starts_with("# Written by archix")
+}
+
+/// What identifies a line of the table `table`: a crypttab line's name, a swap line's device, else the mount point.
+fn table_key(table: &str, fields: &[String]) -> String {
+    match fields {
+        [name, ..] if table == "crypttab" => name.clone(),
+        [device, _, kind, ..] if kind == "swap" => format!("swap {device}"),
+        [_, point, ..] => normal(point).to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Merges the running system's edits to the fstab or crypttab `table` since `base`, now `live`, into `theirs` line by line, keyed by mount point (swap by device, crypttab by name): a line changed on one side takes that side's version, one changed differently on both the running system's. Returns the text and the keys changed on both sides.
+pub fn merge_lines(table: &str, base: &str, live: &str, theirs: &str) -> (String, Vec<String>) {
+    let parse = |text: &str| -> Vec<(String, String, String)> {
+        text.lines()
+            .filter_map(|line| {
+                let fields = fields(line)?;
+                Some((
+                    table_key(table, &fields),
+                    line.split_whitespace().collect::<Vec<_>>().join(" "),
+                    line.to_string(),
+                ))
+            })
+            .collect()
+    };
+    let (base, live_lines, theirs_lines) = (parse(base), parse(live), parse(theirs));
+    let find = |lines: &[(String, String, String)], key: &str| {
+        lines
+            .iter()
+            .find(|line| line.0 == key)
+            .map(|line| (line.1.clone(), line.2.clone()))
+    };
+    let mut both = Vec::new();
+    let mut pick = |key: &str| -> Option<String> {
+        let (b, l, t) = (find(&base, key), find(&live_lines, key), find(&theirs_lines, key));
+        let same = |x: &Option<(String, String)>, y: &Option<(String, String)>| {
+            x.as_ref().map(|x| &x.0) == y.as_ref().map(|y| &y.0)
+        };
+        if same(&l, &b) {
+            return t.map(|t| t.1);
+        }
+        if !same(&t, &b) && !same(&t, &l) {
+            both.push(key.to_string());
+        }
+        l.map(|l| l.1)
+    };
+    let mut out = String::new();
+    let mut done: Vec<String> = Vec::new();
+    for line in theirs.lines() {
+        let Some(fields) = fields(line) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let key = table_key(table, &fields);
+        if done.contains(&key) {
+            continue;
+        }
+        if let Some(line) = pick(&key) {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        done.push(key);
+    }
+    for (key, _, _) in &live_lines {
+        if !done.contains(key) {
+            if let Some(line) = pick(key) {
+                out.push_str(&line);
+                out.push('\n');
+            }
+            done.push(key.clone());
+        }
+    }
+    (out, both)
+}
+
+/// Lines for `archix status` and `diff` when the running /etc at `etc` has an fstab other than archix wrote from `declared`, or a crypttab whose sha256 isn't `crypttab`, the one archix wrote.
+pub fn drift(etc: &Path, esp: &str, declared: &[FstabLine], crypttab: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(live) = fs::read_to_string(etc.join("fstab")) {
+        let uuid = super::boot::disk_link_of(Path::new(esp), "by-uuid");
+        let (wrote, _) = compose(&live, esp, uuid.as_deref(), declared);
+        let norm = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| fields(line).is_some())
+                .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                .collect()
+        };
+        let (live, wrote) = (norm(&live), norm(&wrote));
+        let added: Vec<&String> = live.iter().filter(|line| !wrote.contains(line)).collect();
+        let missing: Vec<&String> = wrote.iter().filter(|line| !live.contains(line)).collect();
+        if !added.is_empty() || !missing.is_empty() {
+            out.push("warning: /etc/fstab was edited since archix wrote it; the next switch writes it whole again from the config:".to_string());
+            out.extend(
+                added
+                    .iter()
+                    .map(|line| format!("  + {line}    (dropped then, unless file_systems declares it)")),
+            );
+            out.extend(missing.iter().map(|line| format!("  - {line}    (written back then)")));
+        }
+    }
+    if let Some(sha) = crypttab
+        && let Ok(live) = fs::read(etc.join("crypttab"))
+        && crate::fetch::sha256_bytes(&live) != sha
+    {
+        out.push("warning: /etc/crypttab was edited since archix wrote it from file_systems' encrypted devices; the next switch writes it again, keeping your version beside it: declare the change in file_systems".to_string());
+    }
+    out
+}
+
+/// drop_mounts of an evaluated config: mount points, and /dev/mapper/<name> for crypttab volumes, whose lines a switch may drop though they're mounted, open or protected.
+pub fn acknowledged(config: &Value) -> Vec<String> {
+    strings(get(config, "drop_mounts"))
+}
+
+/// Whether something is mounted at `point` under `root` now.
+pub fn mounted(root: &Path, point: &str) -> bool {
+    let want = root.join(point.trim_start_matches('/'));
+    fs::read_to_string("/proc/self/mountinfo")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split(' ').nth(4))
+        .any(|at| Path::new(&unescape(at)) == want)
+}
+
+/// Whether the device-mapper device `name` is active now, as an open crypttab volume is.
+pub fn open_volume(name: &str) -> bool {
+    fs::read_dir("/sys/class/block")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| fs::read_to_string(entry.path().join("dm/name")).is_ok_and(|found| found.trim() == name))
+}
+
+/// One fstab or crypttab line a switch would drop that it won't drop unasked, with why.
+#[derive(Debug, PartialEq)]
+pub struct Guarded {
+    pub line: String,
+    pub what: String,
+    pub why: Vec<String>,
+}
+
+/// The fstab lines of `current` that the declared lines leave out and that are mounted now (`mounted`) or protected, unless `acknowledged` lists their mount point.
+pub fn guarded_drops(
+    current: &str,
+    esp: &str,
+    declared: &[FstabLine],
+    acknowledged: &[String],
+    mounted: &dyn Fn(&str) -> bool,
+) -> Vec<Guarded> {
+    let mut out = Vec::new();
+    for line in current.lines() {
+        let Some(fields) = fields(line).filter(|f| f.len() >= 3 && !kept(f, esp) && f[2] != "swap") else {
+            continue;
+        };
+        let point = normal(&fields[1]);
+        if declared.iter().any(|d| !d.is_swap() && normal(&d.point) == point)
+            || acknowledged.iter().any(|a| normal(a) == point)
+        {
+            continue;
+        }
+        let mut why = Vec::new();
+        if mounted(point) {
+            why.push(format!("{point} is mounted now"));
+        }
+        if let Some(dir) = PROTECTED.iter().find(|dir| under(point, dir)) {
+            why.push(if point == *dir {
+                format!("{point} is protected")
+            } else {
+                format!("{point} is under {dir}")
+            });
+        }
+        if !why.is_empty() {
+            out.push(Guarded {
+                line: line.trim().to_string(),
+                what: point.to_string(),
+                why,
+            });
+        }
+    }
+    out
+}
+
+/// The crypttab lines of `current` that `new` leaves out and whose volume is open now (`open`) or backs a protected mount point in the fstab `current_fstab`, unless `acknowledged` lists /dev/mapper/<name> or that mount point.
+pub fn guarded_crypt_drops(
+    current: &str,
+    new: &str,
+    current_fstab: &str,
+    acknowledged: &[String],
+    open: &dyn Fn(&str) -> bool,
+) -> Vec<Guarded> {
+    let kept_names: Vec<String> = new.lines().filter_map(fields).map(|f| f[0].clone()).collect();
+    let mut out = Vec::new();
+    for line in current.lines() {
+        let Some(name) = fields(line).map(|f| f[0].clone()) else {
+            continue;
+        };
+        let mapper = format!("/dev/mapper/{name}");
+        let backs: Vec<String> = current_fstab
+            .lines()
+            .filter_map(fields)
+            .filter(|f| f.len() >= 2 && f[0] == mapper)
+            .map(|f| normal(&f[1]).to_string())
+            .collect();
+        if kept_names.contains(&name)
+            || acknowledged.contains(&mapper)
+            || acknowledged
+                .iter()
+                .any(|a| backs.iter().any(|point| normal(a) == point))
+        {
+            continue;
+        }
+        let mut why = Vec::new();
+        if open(&name) {
+            why.push(format!("{mapper} is open now"));
+        }
+        why.extend(
+            backs
+                .iter()
+                .filter(|point| protected(point))
+                .map(|point| format!("it backs {point}")),
+        );
+        if !why.is_empty() {
+            out.push(Guarded {
+                line: line.trim().to_string(),
+                what: mapper,
+                why,
+            });
+        }
+    }
+    out
+}
+
+/// Refuses a switch whose deployment would leave out guarded fstab or crypttab lines of the running /etc at `etc`, naming each and how to keep or drop it; returns warnings for drop_mounts entries neither file has.
+pub fn check_drops(
+    root: &Path,
+    etc: &Path,
+    esp: &str,
+    declared: &[FstabLine],
+    new_crypttab: &str,
+    acknowledged: &[String],
+) -> Result<Vec<String>> {
+    let fstab = fs::read_to_string(etc.join("fstab")).unwrap_or_default();
+    let crypttab = fs::read_to_string(etc.join("crypttab")).unwrap_or_default();
+    let mounts = guarded_drops(&fstab, esp, declared, acknowledged, &|point| mounted(root, point));
+    let volumes = guarded_crypt_drops(&crypttab, new_crypttab, &fstab, acknowledged, &open_volume);
+    let warnings = acknowledged
+        .iter()
+        .filter(|entry| {
+            let in_fstab = fstab
+                .lines()
+                .filter_map(fields)
+                .any(|f| f.len() >= 2 && normal(&f[1]) == normal(entry));
+            let in_crypttab = entry
+                .strip_prefix("/dev/mapper/")
+                .is_some_and(|name| crypttab.lines().filter_map(fields).any(|f| f[0] == name));
+            !in_fstab && !in_crypttab
+        })
+        .map(|entry| {
+            format!(
+                "warning: drop_mounts lists {entry}, which neither /etc/fstab nor /etc/crypttab has now; take it out, or a line for it added later is dropped without asking"
+            )
+        })
+        .collect();
+    if mounts.is_empty() && volumes.is_empty() {
+        return Ok(warnings);
+    }
+    let mut text = String::from("the next deployment would leave out lines that nothing in the config declares:\n");
+    for guarded in mounts.iter().chain(&volumes) {
+        text.push_str(&format!("  {}    ({})\n", guarded.line, guarded.why.join("; ")));
+    }
+    if !mounts.is_empty() {
+        text.push_str(
+            "Booting without a mount leaves its directory empty on the root filesystem, where programs write fresh files that the mount hides once it's back. Declare each in file_systems, as `archix init` would:\n",
+        );
+        for guarded in &mounts {
+            let captured = capture(&guarded.line, Some(&crypttab), None, esp);
+            match captured.file_systems.first() {
+                Some((point, table)) => text.push_str(&format!(
+                    "  [{}] = {},\n",
+                    crate::luagen::string(point),
+                    table.render(1)
+                )),
+                None => text.push_str(&format!(
+                    "  ({} can't be declared: {})\n",
+                    guarded.what,
+                    captured.notes.join("; ")
+                )),
+            }
+        }
+    }
+    if !volumes.is_empty() {
+        text.push_str(
+            "A volume's crypttab line comes from its mount's file_systems entry, as encrypted = { device = \"UUID=…\" }.\n",
+        );
+    }
+    let names: Vec<String> = mounts
+        .iter()
+        .chain(&volumes)
+        .map(|guarded| crate::luagen::string(&guarded.what))
+        .collect();
+    bail!(
+        "{text}To drop them instead, set drop_mounts = {{ {} }}; nothing was changed",
+        names.join(", ")
+    )
+}
+
+/// Warnings for the fstab lines of the running system's `current` that a deployment with the fstab `target` leaves out and that are mounted now or protected, as a rollback can't refuse.
+pub fn rollback_warnings(root: &Path, current: &str, target: &str, esp: &str) -> Vec<String> {
+    guarded_drops(current, esp, &others(target, esp), &[], &|point| mounted(root, point))
+        .into_iter()
+        .map(|guarded| {
+            format!(
+                "warning: the deployment rolled back to has no fstab line for {} ({}; {}), so it boots without it; declare it in file_systems and switch after the reboot",
+                guarded.what,
+                guarded.line,
+                guarded.why.join("; ")
+            )
+        })
+        .collect()
 }
 
 /// boot.esp of an evaluated config.
@@ -937,8 +1362,8 @@ pub fn capture(fstab: &str, crypttab: Option<&str>, zram: Option<&str>, esp: &st
         if fields.get(5).and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| n > 0) && !bind && fs_type != "tmpfs" {
             table.push(("check".into(), Lua::Bool(true)));
         }
-        if !nofail {
-            table.push(("required".into(), Lua::Bool(true)));
+        if nofail == protected(point) {
+            table.push(("required".into(), Lua::Bool(!nofail)));
         }
         if let Some(name) = device.strip_prefix("/dev/mapper/")
             && let Some(line) = crypt.iter().find(|line| line[0] == name)
@@ -1082,7 +1507,7 @@ mod tests {
                     "/mnt/data": { "device": "UUID=1234", "fs_type": "ext4", "options": ["noatime"], "check": true },
                     "/mnt/data/sub": { "device": "LABEL=sub", "fs_type": "btrfs", "options": ["subvol=@sub", "x-systemd.device-timeout=5s"] },
                     "/home": { "device": "/dev/vdb1", "fs_type": "ext4", "required": true, "check": true },
-                    "/srv/www": { "device": "/var/www", "options": ["bind"] },
+                    "/mnt/www": { "device": "/var/www", "options": ["bind"] },
                     "/mnt/my disk": { "device": "tmpfs", "fs_type": "tmpfs", "options": ["size=16M", "mode=1777"] },
                     "/mnt/nas": { "device": "nas:/export", "fs_type": "nfs" },
                 }
@@ -1098,10 +1523,49 @@ mod tests {
                 "LABEL=sub /mnt/data/sub btrfs subvol=@sub,x-systemd.device-timeout=5s,nofail 0 0",
                 "tmpfs /mnt/my\\040disk tmpfs size=16M,mode=1777,nofail 0 0",
                 "nas:/export /mnt/nas nfs nofail 0 0",
-                "/var/www /srv/www none bind,nofail 0 0",
+                "/var/www /mnt/www none bind,nofail 0 0",
             ]
         );
         assert!(declared.files.is_empty());
+    }
+
+    #[test]
+    fn mounts_at_home_var_and_srv_are_required_unless_said_otherwise() {
+        let declared = render(
+            &config(serde_json::json!({
+                "file_systems": {
+                    "/home": { "device": "UUID=home", "fs_type": "ext4", "required": null, "check": true },
+                    "/var/log": { "device": "UUID=log", "fs_type": "btrfs", "options": ["subvol=@log"] },
+                    "/srv/www": { "device": "/var/www", "options": ["bind"] },
+                    "/home/alice/nas": { "device": "nas:/alice", "fs_type": "nfs", "required": false },
+                    "/var/cache": { "device": "UUID=cache", "options": ["nofail"] },
+                    "/home2": { "device": "UUID=h2" },
+                    "/srv/secret": { "device": "/dev/mapper/srv", "encrypted": { "device": "UUID=luks" } },
+                }
+            })),
+            "/efi",
+        )
+        .unwrap();
+        assert_eq!(
+            lines(&declared),
+            [
+                "UUID=home /home ext4 defaults 0 2",
+                "nas:/alice /home/alice/nas nfs nofail 0 0",
+                "UUID=h2 /home2 auto nofail,x-systemd.device-timeout=30s 0 0",
+                "/dev/mapper/srv /srv/secret auto defaults 0 0",
+                "/var/www /srv/www none bind 0 0",
+                "UUID=cache /var/cache auto nofail,x-systemd.device-timeout=30s 0 0",
+                "UUID=log /var/log btrfs subvol=@log 0 0",
+            ]
+        );
+        assert_eq!(
+            declared.files[0].1, "# Written by archix from file_systems' encrypted devices.\nsrv UUID=luks none luks\n",
+            "a required mount's volume isn't nofail either"
+        );
+        assert!(
+            error(serde_json::json!({ "file_systems": { "/home": { "device": "UUID=h", "required": true, "options": ["nofail"] } } }))
+                .contains("contradict")
+        );
     }
 
     #[test]
@@ -1397,6 +1861,8 @@ mod tests {
                      LABEL=media /mnt/media\\040disk auto nofail,x-systemd.device-timeout=30s 0 0\n\
                      /dev/mapper/secret /mnt/secret ext4 defaults,nofail 0 0\n\
                      /srv/a /srv/b none bind 0 0\n\
+                     /mnt/a /mnt/b none bind 0 0\n\
+                     UUID=c /var/cache btrfs subvol=@cache,nofail 0 0\n\
                      UUID=var /var ext4 defaults 0 2\n\
                      /swapfile none swap defaults,pri=5 0 0\n\
                      UUID=sw none swap defaults,nofail 0 0\n";
@@ -1414,10 +1880,12 @@ mod tests {
         assert_eq!(
             rendered,
             [
-                "/home { device = \"UUID=home\", fs_type = \"ext4\", options = { \"rw\", \"relatime\" }, check = true, required = true }",
+                "/home { device = \"UUID=home\", fs_type = \"ext4\", options = { \"rw\", \"relatime\" }, check = true }",
                 "/mnt/media disk { device = \"LABEL=media\" }",
                 "/mnt/secret { device = \"/dev/mapper/secret\", fs_type = \"ext4\", encrypted = { device = \"UUID=luks\", key_file = \"/etc/keys/s.key\", options = { \"discard\" } } }",
-                "/srv/b { device = \"/srv/a\", options = { \"bind\" }, required = true }",
+                "/srv/b { device = \"/srv/a\", options = { \"bind\" } }",
+                "/mnt/b { device = \"/mnt/a\", options = { \"bind\" }, required = true }",
+                "/var/cache { device = \"UUID=c\", fs_type = \"btrfs\", options = { \"subvol=@cache\" }, required = false }",
             ]
         );
         assert!(captured.crypttab_taken && captured.zram_taken);
@@ -1458,7 +1926,7 @@ mod tests {
 
     #[test]
     fn captured_lines_render_back_to_the_same_mounts() {
-        let fstab = "UUID=root / ext4 rw 0 1\nUUID=home /home ext4 rw,relatime 0 2\nLABEL=m /mnt/m auto nofail,x-systemd.device-timeout=30s 0 0\n/srv/a /srv/b none bind 0 0\n/swapfile none swap pri=5 0 0\n";
+        let fstab = "UUID=root / ext4 rw 0 1\nUUID=home /home ext4 rw,relatime 0 2\nLABEL=m /mnt/m auto nofail,x-systemd.device-timeout=30s 0 0\n/srv/a /srv/b none bind 0 0\nUUID=c /var/cache btrfs subvol=@cache,nofail,x-systemd.device-timeout=30s 0 0\n/swapfile none swap pri=5 0 0\n";
         let captured = capture(fstab, None, None, "/efi");
         fn json(lua: &Lua) -> serde_json::Value {
             match lua {
@@ -1488,8 +1956,279 @@ mod tests {
         assert_eq!(
             text,
             format!(
-                "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=home /home ext4 rw,relatime 0 2\nLABEL=m /mnt/m auto nofail,x-systemd.device-timeout=30s 0 0\n/srv/a /srv/b none bind 0 0\n/swapfile none swap pri=5 0 0\n"
+                "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=home /home ext4 rw,relatime 0 2\nLABEL=m /mnt/m auto nofail,x-systemd.device-timeout=30s 0 0\n/srv/a /srv/b none bind 0 0\nUUID=c /var/cache btrfs subvol=@cache,nofail,x-systemd.device-timeout=30s 0 0\n/swapfile none swap pri=5 0 0\n"
             )
         );
+    }
+
+    #[test]
+    fn hibernation_is_off_where_the_initramfs_cant_resume_from_the_swap_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let etc = dir.path();
+        fs::create_dir_all(etc.join("mkinitcpio.conf.d")).unwrap();
+        fs::create_dir_all(etc.join("kernel")).unwrap();
+        let file = FstabLine {
+            device: "/swap/swapfile".into(),
+            point: "none".into(),
+            fs_type: "swap".into(),
+            options: "nofail".into(),
+            passno: 0,
+            size: Some(1 << 30),
+        };
+        let partition = FstabLine {
+            device: "UUID=sw".into(),
+            size: None,
+            ..file.clone()
+        };
+        let udev = "# HOOKS=(base systemd)\nHOOKS=(base udev autodetect\n  block filesystems fsck)\n";
+        let off = |mkinitcpio: &str, cmdline: &str, lines: &[FstabLine]| {
+            fs::write(etc.join("mkinitcpio.conf"), mkinitcpio).unwrap();
+            fs::write(etc.join("kernel/cmdline"), cmdline).unwrap();
+            let off = hibernation_in(etc, lines).unwrap();
+            assert_eq!(off, etc.join(NO_HIBERNATION).exists());
+            off
+        };
+        assert!(off(udev, "root=UUID=r rw", std::slice::from_ref(&file)));
+        assert!(
+            fs::read_to_string(etc.join(NO_HIBERNATION))
+                .unwrap()
+                .contains("AllowHibernation=no\n")
+        );
+        assert!(
+            !off(udev, "root=UUID=r rw", &[partition]),
+            "a partition is resume='s, the user's"
+        );
+        assert!(!off(
+            udev,
+            "root=UUID=r resume=UUID=r resume_offset=1",
+            std::slice::from_ref(&file)
+        ));
+        assert!(!off(
+            "HOOKS=(base systemd autodetect block filesystems)\n",
+            "",
+            std::slice::from_ref(&file)
+        ));
+        fs::write(
+            etc.join("mkinitcpio.conf.d/zz.conf"),
+            "HOOKS=(base udev block filesystems)\n",
+        )
+        .unwrap();
+        assert!(
+            off("HOOKS=(base systemd)\n", "", std::slice::from_ref(&file)),
+            "conf.d overrides mkinitcpio.conf"
+        );
+        fs::write(etc.join("mkinitcpio.conf.d/zz.conf"), "HOOKS+=(systemd)\n").unwrap();
+        assert!(!off(udev, "", &[file]), "and appends to it");
+    }
+
+    fn mount(device: &str, point: &str) -> FstabLine {
+        FstabLine {
+            device: device.into(),
+            point: point.into(),
+            fs_type: "auto".into(),
+            options: "nofail".into(),
+            passno: 0,
+            size: None,
+        }
+    }
+
+    const RUNNING: &str = "UUID=root / ext4 rw 0 1\n\
+                           UUID=ESP /efi vfat rw 0 2\n\
+                           UUID=home /home ext4 rw 0 2\n\
+                           UUID=usb /mnt/usb ext4 rw,nofail 0 0\n\
+                           UUID=old /mnt/old ext4 rw,nofail 0 0\n\
+                           UUID=log /var/log/ btrfs subvol=@log 0 0\n\
+                           /dev/mapper/srv /srv/data ext4 defaults 0 0\n\
+                           UUID=data /mnt/data ext4 rw 0 2\n\
+                           /swapfile none swap defaults 0 0\n";
+
+    #[test]
+    fn lines_a_switch_drops_are_guarded_when_mounted_now_or_under_home_var_or_srv() {
+        let mounted = |point: &str| point == "/mnt/usb" || point == "/";
+        let guarded = |acknowledged: &[&str]| -> Vec<(String, Vec<String>)> {
+            let acknowledged: Vec<String> = acknowledged.iter().map(|a| a.to_string()).collect();
+            guarded_drops(
+                RUNNING,
+                "/efi",
+                &[mount("UUID=new", "/mnt/data")],
+                &acknowledged,
+                &mounted,
+            )
+            .into_iter()
+            .map(|g| (g.what, g.why))
+            .collect()
+        };
+        assert_eq!(
+            guarded(&[]),
+            [
+                ("/home".to_string(), vec!["/home is protected".to_string()]),
+                ("/mnt/usb".to_string(), vec!["/mnt/usb is mounted now".to_string()]),
+                ("/var/log".to_string(), vec!["/var/log is under /var".to_string()]),
+                ("/srv/data".to_string(), vec!["/srv/data is under /srv".to_string()]),
+            ],
+            "/mnt/old isn't mounted nor protected, /mnt/data is declared, the root's, the ESP's and swap lines aren't file_systems'"
+        );
+        assert_eq!(
+            guarded(&["/home", "/var/log/", "/mnt/usb", "/srv/data"]),
+            [],
+            "drop_mounts acknowledges each"
+        );
+        let both = guarded_drops("UUID=h /home ext4 rw 0 2\n", "/efi", &[], &[], &|_| true);
+        assert_eq!(both[0].why, ["/home is mounted now", "/home is protected"]);
+        assert_eq!(both[0].line, "UUID=h /home ext4 rw 0 2");
+    }
+
+    #[test]
+    fn crypttab_lines_are_guarded_when_their_volume_is_open_or_backs_a_protected_mount() {
+        let crypttab = "srv UUID=luks-srv none luks\nusb UUID=luks-usb none luks,nofail\nold UUID=luks-old none luks\n";
+        let open = |name: &str| name == "usb";
+        let guarded = |new: &str, acknowledged: &[&str]| -> Vec<String> {
+            let acknowledged: Vec<String> = acknowledged.iter().map(|a| a.to_string()).collect();
+            guarded_crypt_drops(crypttab, new, RUNNING, &acknowledged, &open)
+                .into_iter()
+                .map(|g| format!("{}: {}", g.what, g.why.join("; ")))
+                .collect()
+        };
+        assert_eq!(
+            guarded("", &[]),
+            [
+                "/dev/mapper/srv: it backs /srv/data",
+                "/dev/mapper/usb: /dev/mapper/usb is open now"
+            ]
+        );
+        assert_eq!(
+            guarded("srv UUID=other none\n", &[]),
+            ["/dev/mapper/usb: /dev/mapper/usb is open now"]
+        );
+        assert_eq!(guarded("", &["/srv/data", "/dev/mapper/usb"]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_refused_drop_names_each_line_and_how_to_declare_or_drop_it() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("fstab"), RUNNING).unwrap();
+        fs::write(dir.path().join("crypttab"), "srv UUID=luks-srv none luks\n").unwrap();
+        let root = dir.path().join("nothing-mounted-here");
+        let error = check_drops(&root, dir.path(), "/efi", &[mount("UUID=data", "/mnt/data")], "", &[])
+            .unwrap_err()
+            .to_string();
+        for says in [
+            "  UUID=home /home ext4 rw 0 2    (/home is protected)\n",
+            "  UUID=log /var/log/ btrfs subvol=@log 0 0    (/var/log is under /var)\n",
+            "  srv UUID=luks-srv none luks    (it backs /srv/data)\n",
+            "  [\"/home\"] = { device = \"UUID=home\", fs_type = \"ext4\", options = { \"rw\" }, check = true },\n",
+            "drop_mounts = { \"/home\", \"/var/log\", \"/srv/data\", \"/dev/mapper/srv\" }; nothing was changed",
+        ] {
+            assert!(error.contains(says), "{says:?} in:\n{error}");
+        }
+        assert!(!error.contains("/mnt/old"), "{error}");
+        let acknowledged: Vec<String> = ["/home", "/var/log", "/srv/data", "/mnt/gone"]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        let warnings = check_drops(&root, dir.path(), "/efi", &[], "", &acknowledged).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].contains("drop_mounts lists /mnt/gone, which neither"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn drop_mounts_takes_mount_points_and_mapper_names_nothing_declares() {
+        assert!(
+            render(
+                &config(serde_json::json!({ "drop_mounts": ["/home", "/dev/mapper/home"] })),
+                "/efi"
+            )
+            .is_ok()
+        );
+        for (body, says) in [
+            (
+                serde_json::json!({ "drop_mounts": ["home"] }),
+                "must be an absolute path",
+            ),
+            (
+                serde_json::json!({ "drop_mounts": ["/dev/mapper/"] }),
+                "isn't /dev/mapper/<name>",
+            ),
+            (
+                serde_json::json!({ "drop_mounts": ["/home"], "file_systems": { "/home": { "device": "UUID=h" } } }),
+                "file_systems declares /home too",
+            ),
+        ] {
+            assert!(error(body.clone()).contains(says), "{body}: {}", error(body.clone()));
+        }
+    }
+
+    #[test]
+    fn running_system_edits_merge_into_the_fstab_archix_wrote_line_by_line() {
+        let base = format!(
+            "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=data /mnt/data ext4 nofail 0 2\nUUID=old /mnt/old ext4 nofail 0 0\n"
+        );
+        let theirs = format!(
+            "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=data /mnt/data ext4 noatime,nofail 0 2\nUUID=new /mnt/new ext4 nofail 0 0\nUUID=old /mnt/old ext4 nofail 0 0\n"
+        );
+        let live =
+            "# my edits\nUUID=root / ext4 rw 0 1\nUUID=data   /mnt/data ext4 nofail 0 2\nUUID=home /home ext4 rw 0 2\n";
+        let (text, both) = merge_lines("fstab", &base, live, &theirs);
+        assert_eq!(
+            text,
+            format!(
+                "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=data /mnt/data ext4 noatime,nofail 0 2\nUUID=new /mnt/new ext4 nofail 0 0\nUUID=home /home ext4 rw 0 2\n"
+            ),
+            "archix's change and new line stay, the running system's new line and removal go in"
+        );
+        assert!(both.is_empty());
+        let live = live.replace(
+            "UUID=data   /mnt/data ext4 nofail",
+            "UUID=data /mnt/data ext4 ro,nofail",
+        );
+        let (text, both) = merge_lines("fstab", &base, &live, &theirs);
+        assert_eq!(both, ["/mnt/data"]);
+        assert!(text.contains("UUID=data /mnt/data ext4 ro,nofail 0 2\n"), "{text}");
+        let (text, both) = merge_lines(
+            "crypttab",
+            "a UUID=1 none luks\n",
+            "a UUID=1 none luks\nb UUID=2 /key luks\n",
+            "# Written by archix from file_systems' encrypted devices.\na UUID=1 none luks,nofail\n",
+        );
+        assert_eq!(
+            text,
+            "# Written by archix from file_systems' encrypted devices.\na UUID=1 none luks,nofail\nb UUID=2 /key luks\n"
+        );
+        assert!(both.is_empty());
+        let (text, _) = merge_lines("fstab", "", "/a none swap sw 0 0\n", "/b none swap sw 0 0\n");
+        assert_eq!(
+            text, "/b none swap sw 0 0\n/a none swap sw 0 0\n",
+            "swap lines are told apart by device"
+        );
+    }
+
+    #[test]
+    fn an_fstab_or_crypttab_edited_since_archix_wrote_it_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let declared = [mount("UUID=data", "/mnt/data")];
+        let (wrote, _) = compose("UUID=root / ext4 rw 0 1\n", "/efi", Some("AB12-CD34"), &declared);
+        fs::write(dir.path().join("fstab"), &wrote).unwrap();
+        let crypttab = "a UUID=1 none luks\n";
+        fs::write(dir.path().join("crypttab"), crypttab).unwrap();
+        let sha = crate::fetch::sha256_bytes(crypttab.as_bytes());
+        assert_eq!(drift(dir.path(), "/efi", &declared, Some(&sha)), Vec::<String>::new());
+        fs::write(
+            dir.path().join("fstab"),
+            wrote.replace("UUID=data /mnt/data auto nofail 0 0\n", "UUID=home /home ext4 rw 0 2\n"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("crypttab"), "a UUID=1 none luks,discard\n").unwrap();
+        let lines = drift(dir.path(), "/efi", &declared, Some(&sha));
+        assert_eq!(
+            lines[1..3],
+            [
+                "  + UUID=home /home ext4 rw 0 2    (dropped then, unless file_systems declares it)",
+                "  - UUID=data /mnt/data auto nofail 0 0    (written back then)",
+            ]
+        );
+        assert!(lines[0].contains("/etc/fstab was edited") && lines[3].contains("/etc/crypttab was edited"));
     }
 }

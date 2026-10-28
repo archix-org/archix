@@ -49,6 +49,33 @@ pub(super) fn current_root(paths: &Paths) -> PathBuf {
     }
 }
 
+/// The /etc/crypttab the next deployment gets: the one the config renders, the original archix kept when it stops managing one, or else the running system's.
+pub(super) fn next_crypttab(
+    paths: &Paths,
+    here: &Path,
+    change: &SystemChange,
+    blobs: &BTreeMap<String, Vec<u8>>,
+) -> String {
+    const PATH: &str = "/etc/crypttab";
+    let live = fs::read_to_string(here.join("etc/crypttab")).ok();
+    if let Some(file) = change.to.files.get(PATH) {
+        return blobs
+            .get(&file.sha256)
+            .map(|blob| String::from_utf8_lossy(blob).into_owned())
+            .unwrap_or_default();
+    }
+    let Some(previous) = change.from.files.get(PATH) else {
+        return live.unwrap_or_default();
+    };
+    if let Ok(original) = fs::read_to_string(paths.state.join("backups/etc/crypttab")) {
+        return original;
+    }
+    match live {
+        Some(text) if archix::fetch::sha256_bytes(text.as_bytes()) != previous.sha256 => text,
+        _ => String::new(),
+    }
+}
+
 /// The pacman database of the current deployment, which the next one is staged from.
 pub(super) fn installed_db(paths: &Paths) -> PathBuf {
     let here = current_root(paths);
@@ -279,6 +306,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     );
     let cmdline = new_text("/etc/kernel/cmdline").unwrap_or_default();
     for warning in system::fstab::check(&paths.root, &rendered.state.fstab, &crypttab, &cmdline)? {
+        eprintln!("{warning}");
+    }
+    let new_crypttab = next_crypttab(&paths, &here, &system_change, &rendered.blobs);
+    for warning in system::fstab::check_drops(
+        &paths.root,
+        &here.join("etc"),
+        system::fstab::esp_of(target.config),
+        &rendered.state.fstab,
+        &new_crypttab,
+        &system::fstab::acknowledged(target.config),
+    )? {
         eprintln!("{warning}");
     }
     if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
@@ -1537,6 +1575,18 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         println!("{line}");
     }
     print_hooks(&current_change);
+    let target_fstab = match kept {
+        true => fs::read_to_string(deployments.path(number).join("etc/fstab")).unwrap_or_default(),
+        false => generation.system.fstab.iter().map(|line| line.line() + "\n").collect(),
+    };
+    for warning in system::fstab::rollback_warnings(
+        &paths.root,
+        &fs::read_to_string(current_root(&paths).join("etc/fstab")).unwrap_or_default(),
+        &target_fstab,
+        &boot.esp,
+    ) {
+        eprintln!("{warning}");
+    }
     if !kept {
         let esp = PathBuf::from(&boot.esp);
         let pins = Keep::read(generation.settings.deployments_keep as usize, &deployments, &esp)?;

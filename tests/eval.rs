@@ -734,7 +734,7 @@ fn file_systems_swap_and_zram_evaluate_and_render_into_fstab_lines() {
     let out = serde_json::to_value(&evaluation.config).unwrap();
     assert_eq!(
         out["file_systems"]["/mnt/data"],
-        json!({ "device": "UUID=1234", "fs_type": "ext4", "options": [], "check": true, "required": false, "encrypted": null })
+        json!({ "device": "UUID=1234", "fs_type": "ext4", "options": [], "check": true, "required": null, "encrypted": null })
     );
     assert_eq!(out["packages"], json!(["zram-generator"]), "zram brings zram-generator");
     let rendered = archix::system::render(&evaluation.config, dir.path()).unwrap();
@@ -743,7 +743,7 @@ fn file_systems_swap_and_zram_evaluate_and_render_into_fstab_lines() {
         lines,
         [
             "UUID=1234 /mnt/data ext4 nofail,x-systemd.device-timeout=30s 0 2",
-            "/var/www /srv/www none bind,nofail 0 0",
+            "/var/www /srv/www none bind 0 0",
             "/swap/swapfile none swap nofail 0 0",
         ]
     );

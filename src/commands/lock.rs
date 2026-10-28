@@ -390,6 +390,18 @@ pub(super) fn pending(
         eprintln!("warning: {kept}");
     }
     lines.extend(system::fstab::describe_at(&here, target.config, &change.to.fstab));
+    let new_crypttab = super::switch::next_crypttab(&paths, &here, &change, &rendered.blobs);
+    match system::fstab::check_drops(
+        &paths.root,
+        &etc,
+        system::fstab::esp_of(target.config),
+        &change.to.fstab,
+        &new_crypttab,
+        &system::fstab::acknowledged(target.config),
+    ) {
+        Ok(warnings) => warnings.iter().for_each(|warning| eprintln!("{warning}")),
+        Err(refusal) => eprintln!("warning: `archix switch` refuses this: {refusal:#}"),
+    }
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
@@ -399,6 +411,28 @@ pub(super) fn pending(
         println!("flatpak apps archix doesn't manage: {}", unmanaged.join(" "));
     }
     Ok((lines, warned, kept))
+}
+
+/// Warnings for an fstab or crypttab in the current deployment's /etc that differs from what archix wrote there.
+fn fstab_drift(target: &Target) -> Result<Vec<String>> {
+    let paths = Paths::system();
+    let store = Store::new(&paths);
+    let Some(generation) = store.current()?.map(|n| store.get(n)).transpose()? else {
+        return Ok(Vec::new());
+    };
+    if generation.before_archix {
+        return Ok(Vec::new());
+    }
+    Ok(system::fstab::drift(
+        &super::switch::current_root(&paths).join("etc"),
+        system::fstab::esp_of(target.config),
+        &generation.system.fstab,
+        generation
+            .system
+            .files
+            .get("/etc/crypttab")
+            .map(|file| file.sha256.as_str()),
+    ))
 }
 
 /// What this machine carries into every deployment that the config doesn't declare, as `archix {command}` reports it.
@@ -470,6 +504,9 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
     for line in &kept {
         println!("{line}");
     }
+    for line in fstab_drift(target)? {
+        println!("{line}");
+    }
     for line in carried(target, &declared.ignored, all, "diff")? {
         println!("{line}");
     }
@@ -534,6 +571,9 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 );
             }
             for line in archix::etcmerge::status_lines(&paths) {
+                println!("{line}");
+            }
+            for line in fstab_drift(target)? {
                 println!("{line}");
             }
         }
