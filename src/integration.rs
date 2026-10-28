@@ -121,7 +121,7 @@ pub const HEALTH_UNIT: &str = "archix-health-check.service";
 pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     let unit = format!(
         "[Unit]\nDescription=archix: match the booted generation\nDefaultDependencies=no\nAfter=local-fs.target\n\
-         Before=sysinit.target\n\n\
+         Before=sysinit.target archix-deploy-activate.service\n\n\
          [Service]\nType=oneshot\nExecStart={} boot-check\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
         archix.display()
     );
