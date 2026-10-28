@@ -485,6 +485,58 @@ fn a_package_cache_shares_builds_and_package_files_between_machines() {
 
 #[test]
 #[ignore]
+fn a_dependency_pinned_to_an_older_version_relocks_from_its_locked_commit_not_the_aur_newest() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new("archix-test-pin-utils", "1.0"));
+    aur.publish(TestPkg {
+        depends: &["archix-test-pin-utils=1.0"],
+        ..TestPkg::new("archix-test-pin-dkms", "1.0")
+    });
+    aur.publish(TestPkg::new("archix-test-pin-lib", "1.0"));
+    aur.publish(TestPkg {
+        depends: &["archix-test-pin-lib=1.0"],
+        ..TestPkg::new("archix-test-pin-app", "1.0")
+    });
+    let setup = Setup::new(
+        &["archix-test-pin-dkms", "archix-test-pin-utils", "archix-test-pin-app"],
+        &format!("aur = {{ url = {:?} }}", aur.url()),
+    );
+    aur.publish(TestPkg::new("archix-test-pin-utils", "2.0"));
+    aur.publish(TestPkg::new("archix-test-pin-lib", "2.0"));
+    let _ = fs::remove_file(archix::aur::index::dump_path(
+        std::path::Path::new("/var/cache/archix"),
+        &aur.url(),
+    ));
+    let init = setup.read("init.lua").unwrap();
+    setup.write(
+        "init.lua",
+        &init.replacen("packages = { ", "packages = { \"tree\", ", 1),
+    );
+    let output = setup.run(&["lock", "--noconfirm"]);
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    setup.write("init.lua", &init);
+    assert!(
+        output.status.success(),
+        "a declared dependency and an undeclared one, both locked at 1.0 while the AUR moved on to 2.0:\n{text}"
+    );
+    let lock = setup.lock();
+    for name in [
+        "archix-test-pin-dkms",
+        "archix-test-pin-utils",
+        "archix-test-pin-app",
+        "archix-test-pin-lib",
+    ] {
+        assert_eq!(lock.packages[name].version, "1.0-1", "{name}");
+    }
+}
+
+#[test]
+#[ignore]
 fn an_aur_package_standing_in_for_a_repo_package_is_used_only_when_declared() {
     let _system = lock_system();
     let mut aur = LocalAur::new();

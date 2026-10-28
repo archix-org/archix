@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::archive::Archive;
 use crate::aur::git::AurGit;
-use crate::aur::index::Index;
+use crate::aur::index::{Index, constraint, meets};
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
 use crate::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, LOCAL_REPO, Locked};
@@ -436,22 +436,35 @@ fn aur_closure(
                     .iter()
                     .filter_map(|target| index.get(target))
                     .find(|entry| Index::satisfies(entry, &dep));
-                let Some(entry) = declared.or_else(|| index.satisfier(&dep)) else {
-                    bail!("`{dep}` is in none of the configured repos, pkgbuilds/ or the AUR");
+                let pinned = match declared {
+                    Some(_) => None,
+                    None => match locked_satisfier(&bases, &dep, index.satisfier(&dep).is_some()) {
+                        Some(found) => Some(found),
+                        None => at_locked_commit(aur, &mut bases, index, &dep)?,
+                    },
                 };
-                let wanted = srcinfo::dep_name(&dep);
-                if entry.name != wanted && in_repos.contains(wanted) && !targets.contains(&entry.name) {
-                    let what = match needed_by.get(&dep) {
-                        Some(by) => format!("{by} needs `{dep}`, which the configured repos' {wanted} can't satisfy;"),
-                        None => format!("`{dep}`:"),
+                if let Some(found) = pinned {
+                    found
+                } else {
+                    let Some(entry) = declared.or_else(|| index.satisfier(&dep)) else {
+                        bail!("`{dep}` is in none of the configured repos, pkgbuilds/ or the AUR");
                     };
-                    bail!(
-                        "{what} only {}, an AUR package standing in for {wanted}, would, and archix doesn't swap a repo package for an AUR one unasked; nothing was changed. Declare {} in packages if that's what you want",
-                        entry.name,
-                        entry.name
-                    );
+                    let wanted = srcinfo::dep_name(&dep);
+                    if entry.name != wanted && in_repos.contains(wanted) && !targets.contains(&entry.name) {
+                        let what = match needed_by.get(&dep) {
+                            Some(by) => {
+                                format!("{by} needs `{dep}`, which the configured repos' {wanted} can't satisfy;")
+                            }
+                            None => format!("`{dep}`:"),
+                        };
+                        bail!(
+                            "{what} only {}, an AUR package standing in for {wanted}, would, and archix doesn't swap a repo package for an AUR one unasked; nothing was changed. Declare {} in packages if that's what you want",
+                            entry.name,
+                            entry.name
+                        );
+                    }
+                    (entry.name.clone(), entry.package_base.clone())
                 }
-                (entry.name.clone(), entry.package_base.clone())
             }
         };
         let fresh = if needed_at_runtime {
@@ -571,6 +584,62 @@ fn locked_commit(aur: &Aur, base: &str) -> Result<String> {
     }
 }
 
+/// A package of a base already locked that satisfies `dep`, version included: one with its name, or, when the AUR has nothing for it, one providing it; a split package's siblings depend on each other at the locked version, not the AUR's newest.
+fn locked_satisfier(bases: &HashMap<String, (String, SrcInfo)>, dep: &str, aur_has: bool) -> Option<(String, String)> {
+    let name = srcinfo::dep_name(dep);
+    let wanted = constraint(dep);
+    let mut sorted: Vec<(&String, &SrcInfo)> = bases.iter().map(|(base, (_, info))| (base, info)).collect();
+    sorted.sort_by_key(|(base, _)| *base);
+    let named = sorted
+        .iter()
+        .find(|(_, info)| info.package(name).is_some_and(|_| meets(Some(&info.version), wanted)));
+    let provided = || {
+        sorted.iter().find_map(|(base, info)| {
+            info.packages
+                .iter()
+                .find(|pkg| {
+                    pkg.provides.iter().filter(|p| srcinfo::dep_name(p) == name).any(|p| {
+                        let version = p.split_once('=').map_or(info.version.as_str(), |(_, v)| v);
+                        meets(Some(version), wanted)
+                    })
+                })
+                .map(|pkg| (pkg.name.clone(), (*base).clone()))
+        })
+    };
+    match named {
+        Some((base, _)) => Some((name.to_string(), (*base).clone())),
+        None if !aur_has => provided(),
+        None => None,
+    }
+}
+
+/// The AUR package named in `dep` at the commit its base is locked at, when the AUR's newest version doesn't meet `dep` but that one does.
+fn at_locked_commit(
+    aur: &Aur,
+    bases: &mut HashMap<String, (String, SrcInfo)>,
+    index: &Index,
+    dep: &str,
+) -> Result<Option<(String, String)>> {
+    let name = srcinfo::dep_name(dep);
+    let Some(entry) = index.get(name) else { return Ok(None) };
+    let base = entry.package_base.clone();
+    let pinned = aur.commits.borrow().contains_key(&base)
+        || aur.previous.is_some_and(|lock| {
+            lock.packages
+                .values()
+                .any(|pkg| pkg.base.as_deref() == Some(base.as_str()))
+        });
+    if bases.contains_key(&base) || !pinned {
+        return Ok(None);
+    }
+    let commit = locked_commit(aur, &base)?;
+    let info = srcinfo::parse(&aur.git.show(&base, &commit, ".SRCINFO")?)
+        .with_context(|| format!("reading {base}'s .SRCINFO at {commit}"))?;
+    let meets_dep = info.package(name).is_some() && meets(Some(&info.version), constraint(dep));
+    bases.insert(base.clone(), (commit, info));
+    Ok(meets_dep.then(|| (name.to_string(), base)))
+}
+
 /// The dependency strings no package in the snapshot's repos satisfies, per pacman itself.
 fn unsatisfied(conf: &Path, db: &Path, deps: &[String]) -> Result<BTreeSet<String>> {
     if deps.is_empty() {
@@ -663,6 +732,35 @@ fn valid_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_split_package_needs_its_sibling_at_the_locked_version() {
+        let info = srcinfo::parse(
+            "pkgbase = gpu-utils\n\tpkgver = 580.1\n\tpkgrel = 1\n\tarch = x86_64\n\n\
+             pkgname = gpu-utils\n\tprovides = gpu-libgl\n\npkgname = gpu-dkms\n\tdepends = gpu-utils=580.1\n",
+        )
+        .unwrap();
+        let bases = HashMap::from([("gpu-utils".to_string(), ("c0ffee".to_string(), info))]);
+        let found = |dep: &str, aur_has: bool| locked_satisfier(&bases, dep, aur_has);
+        assert_eq!(
+            found("gpu-utils=580.1", true),
+            Some(("gpu-utils".to_string(), "gpu-utils".to_string()))
+        );
+        assert_eq!(found("gpu-utils=581", true), None, "the version is checked");
+        assert_eq!(
+            found("gpu-utils>=500", false).map(|f| f.0),
+            Some("gpu-utils".to_string())
+        );
+        assert_eq!(
+            found("gpu-libgl", false),
+            Some(("gpu-utils".to_string(), "gpu-utils".to_string()))
+        );
+        assert_eq!(
+            found("gpu-libgl", true),
+            None,
+            "a provider only when the AUR has nothing"
+        );
+    }
 
     #[test]
     fn package_names() {
