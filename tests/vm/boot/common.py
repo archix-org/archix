@@ -71,8 +71,8 @@ def secure_boot():
     return ok("bootctl status 2> /dev/null | grep -q 'Secure Boot: enabled (user)'")
 
 
-def network():
-    if ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1", 150):
+def network(wait=True):
+    if wait and ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1", 150):
         return
     nic_state = "for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
     t.log("networkctl: " + out("networkctl list --no-pager 2>&1"))
@@ -109,6 +109,10 @@ def boot(match=True):
         for unit in failed:
             t.log(f"{unit}: " + out(f"journalctl -b -u {unit} --no-pager | tail -20"))
         t.log("networkctl: " + out("networkctl list --no-pager 2>&1"))
+        if "systemd-networkd-wait-online.service" in failed:
+            t.log(f"units failed at this boot: {' '.join(failed)}")
+            # The NIC report, QEMU's view included, while the guest is still in the state that failed it.
+            network(wait=False)
         t.require(False, f"units failed at this boot: {' '.join(failed)}")
     network()
     if match:
