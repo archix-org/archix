@@ -178,8 +178,28 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
     );
     no_hash_in(&c, &rolled, "the rollback");
 
-    setup.set_body(&[], &users("!", ""));
     let before = machine.deployments();
+    setup.set_body(
+        &[],
+        &format!(r#"users = {{ alice = {{ groups = {{}}, hashed_password = "{ALICE2}" }}, bob = {{ initial_hashed_password = "{BOB}" }} }}"#),
+    );
+    let refused = setup.fails(&["switch", "--noconfirm"]);
+    c.check(
+        refused.contains("leaves no account that can log in with a password"),
+        format!("taking the last password holder out of wheel, with root locked, is refused:\n{refused}"),
+    );
+    c.eq(
+        machine.current(),
+        Some(second),
+        "nothing changed after the wheel removal: current",
+    );
+    c.eq(
+        machine.deployments(),
+        before.clone(),
+        "nothing changed after the wheel removal: deployments",
+    );
+
+    setup.set_body(&[], &users("!", ""));
     let refused = setup.fails(&["switch", "--noconfirm"]);
     c.check(
         refused.contains("leaves no account that can log in with a password")
@@ -195,6 +215,17 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
         hash(machine, machine.current().unwrap(), "alice"),
         "!".to_string(),
         "acknowledged, the lock is declared",
+    );
+    let quiet = setup.ok(&["status"]);
+    c.check(
+        !quiet.contains("no account can log in to the rescue entry"),
+        format!("acknowledged, status doesn't warn:\n{quiet}"),
+    );
+    setup.set_body(&[], &users("!", ""));
+    let warned = setup.ok(&["status"]);
+    c.check(
+        warned.contains("no account can log in to the rescue entry") && warned.contains("live USB"),
+        format!("with no account the rescue entry can use, status keeps warning:\n{warned}"),
     );
     c.finish();
 }

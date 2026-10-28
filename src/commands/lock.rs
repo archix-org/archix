@@ -492,6 +492,18 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
             if let Some(warning) = archix::system::usr_local::boot_files_warning(&paths.root) {
                 println!("{warning}");
             }
+            if !archix::system::allows_no_password_login(target.config)
+                && archix::system::rescue_auth::accounts(
+                    &archix::deploy::store::Store::open(&paths.root)?
+                        .path(number)
+                        .join("etc"),
+                )
+                .is_ok_and(|found| found.is_empty())
+            {
+                println!(
+                    "warning: no account can log in to the rescue entry (root is locked and no wheel or sudo member has a yescrypt or SHA-512 password), so recovering needs a live USB; give root or a wheel user a password with passwd or users.<name>.hashed_password, or set allow_no_password_login = true to silence this"
+                );
+            }
             if let Some(line) = archix::system::usr_local::hold_status(&paths) {
                 println!("{line}");
             }
