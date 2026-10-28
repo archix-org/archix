@@ -301,7 +301,7 @@ case $stage in
     mkdir -p /etc/vmtest-dir/sub && echo "made after the switch" > /etc/vmtest-dir/sub/file
     echo /bin/vmtest-shell >> /etc/shells
     for _ in $(seq 50); do grep -qx /bin/vmtest-shell "/archix/deploy/$pending/etc/shells" && break; sleep 0.2; done
-    status=$(archix --host archix-vm status 2>&1)
+    for _ in $(seq 50); do status=$(archix --host archix-vm status 2>&1); grep -q "/etc changes carried into the pending deployment $pending" <<< "$status" && grep -q '/etc/shells: changed on the running system' <<< "$status" && break; sleep 0.2; done
     if ! { echo "$status" | grep -q "/etc changes carried into the pending deployment $pending" && echo "$status" | grep -q "/etc/shells: changed on the running system"; }; then
       echo "$status" | while IFS= read -r line; do say "status: $line"; done
       journalctl -b -u archix-etc-merge.service --no-pager | tail -30 | while IFS= read -r line; do say "journal: $line"; done
