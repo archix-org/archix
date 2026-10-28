@@ -38,7 +38,9 @@ fn ints(value: Option<&Value>) -> Result<Vec<i64>> {
     Ok(out)
 }
 
-fn ranges(value: Option<&Value>) -> Result<Vec<String>> {
+type Span = (i64, i64);
+
+fn ranges(value: Option<&Value>) -> Result<Vec<Span>> {
     let mut out = Vec::new();
     for item in match value {
         Some(Value::List(items)) => items.as_slice(),
@@ -46,9 +48,64 @@ fn ranges(value: Option<&Value>) -> Result<Vec<String>> {
     } {
         match (get(item, "from"), get(item, "to")) {
             (Some(Value::Int(from)), Some(Value::Int(to))) if 1 <= *from && from <= to && *to <= 65535 => {
-                out.push(format!("{from}-{to}"))
+                out.push((*from, *to))
             }
             _ => bail!("firewall port ranges need from <= to, both 1-65535"),
+        }
+    }
+    Ok(out)
+}
+
+/// Sorted spans with overlaps merged, as one nftables set can't hold overlapping intervals.
+fn merged(mut spans: Vec<Span>, adjacent: bool) -> Vec<Span> {
+    spans.sort_unstable();
+    let mut out: Vec<Span> = Vec::new();
+    for (from, to) in spans {
+        match out.last_mut() {
+            Some(last) if from <= last.1 + i64::from(adjacent) => last.1 = last.1.max(to),
+            _ => out.push((from, to)),
+        }
+    }
+    out
+}
+
+fn set(spans: &[Span]) -> String {
+    let items: Vec<String> = spans
+        .iter()
+        .map(|&(from, to)| {
+            if from == to {
+                from.to_string()
+            } else {
+                format!("{from}-{to}")
+            }
+        })
+        .collect();
+    items.join(", ")
+}
+
+/// The services `allowed_services` names, sorted and once each, with their entries in `service_ports`.
+fn services(firewall: &Value) -> Result<Vec<(&str, &Value)>> {
+    let mut names = std::collections::BTreeSet::new();
+    if let Some(Value::List(items)) = get(firewall, "allowed_services") {
+        for item in items {
+            if let Value::Str(name) = item {
+                names.insert(name.as_str());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for name in names {
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        {
+            bail!("firewall service names are 1-64 letters, digits, '-', '_' or '.', not {name:?}");
+        }
+        match get(firewall, "service_ports").and_then(|ports| get(ports, name)) {
+            Some(ports) => out.push((name, ports)),
+            None => bail!("firewall.allowed_services names {name:?}, which firewall.service_ports doesn't define"),
         }
     }
     Ok(out)
@@ -123,14 +180,36 @@ pub fn ruleset(firewall: &Value) -> Result<Option<String>> {
     if get(firewall, "allow_ping") != Some(&Value::Bool(false)) {
         out.push_str("    icmp type echo-request accept\n");
     }
+    let services = services(firewall)?;
     for (proto, ports, spans) in [
         ("tcp", "allowed_tcp_ports", "allowed_tcp_port_ranges"),
         ("udp", "allowed_udp_ports", "allowed_udp_port_ranges"),
     ] {
-        let mut open: Vec<String> = ints(get(firewall, ports))?.iter().map(i64::to_string).collect();
-        open.extend(ranges(get(firewall, spans))?);
-        if !open.is_empty() {
-            let _ = writeln!(out, "    {proto} dport {{ {} }} accept", open.join(", "));
+        let mut rules: Vec<(Option<&str>, Vec<Span>)> = Vec::new();
+        let mut explicit: Vec<Span> = ints(get(firewall, ports))?.into_iter().map(|p| (p, p)).collect();
+        explicit.extend(ranges(get(firewall, spans))?);
+        rules.push((None, explicit));
+        for &(name, entry) in &services {
+            let mut open: Vec<Span> = ints(get(entry, proto))?.into_iter().map(|p| (p, p)).collect();
+            open.extend(ranges(get(entry, &format!("{proto}_ranges")))?);
+            rules.push((Some(name), open));
+        }
+        let mut opened: Vec<Span> = Vec::new();
+        for (name, spans) in rules {
+            let mut spans = merged(spans, false);
+            spans.retain(|&(from, to)| !opened.iter().any(|&(a, b)| a <= from && to <= b));
+            if spans.is_empty() {
+                continue;
+            }
+            let _ = write!(out, "    {proto} dport {{ {} }} accept", set(&spans));
+            match name {
+                Some(name) => {
+                    let _ = writeln!(out, " comment \"{name}\"");
+                }
+                None => out.push('\n'),
+            }
+            opened.extend(spans);
+            opened = merged(opened, true);
         }
     }
     for line in text(get(firewall, "extra_input_rules"))
@@ -185,6 +264,49 @@ mod tests {
             "{rules}"
         );
         assert!(!rules.contains("flush ruleset"), "other tables are left alone");
+    }
+
+    #[test]
+    fn services_get_a_commented_rule_each_without_ports_opened_before() {
+        let rules = ruleset(&value(serde_json::json!({
+            "enable": true,
+            "allowed_tcp_ports": [8080, 22, 22],
+            "allowed_services": ["syncthing", "ssh", "kdeconnect", "syncthing", "gsconnect"],
+            "service_ports": {
+                "ssh": { "tcp": [22] },
+                "syncthing": { "tcp": [22000], "udp": [22000, 21027] },
+                "kdeconnect": { "tcp_ranges": [{ "from": 1714, "to": 1764 }], "udp_ranges": [{ "from": 1714, "to": 1764 }], "tcp": [1720] },
+                "gsconnect": { "tcp_ranges": [{ "from": 1714, "to": 1764 }] },
+                "unused": { "tcp": [9] },
+            },
+        })))
+        .unwrap()
+        .unwrap();
+        let input: Vec<&str> = rules
+            .lines()
+            .filter(|l| l.starts_with("    tcp dport") || l.starts_with("    udp dport"))
+            .collect();
+        assert_eq!(
+            input,
+            [
+                "    tcp dport { 22, 8080 } accept",
+                "    tcp dport { 1714-1764 } accept comment \"gsconnect\"",
+                "    tcp dport { 22000 } accept comment \"syncthing\"",
+                "    udp dport { 1714-1764 } accept comment \"kdeconnect\"",
+                "    udp dport { 21027, 22000 } accept comment \"syncthing\"",
+            ],
+            "{rules}"
+        );
+        let unknown = ruleset(&value(
+            serde_json::json!({ "enable": true, "allowed_services": ["nope"] }),
+        ));
+        assert!(unknown.unwrap_err().to_string().contains("\"nope\""));
+        let quote = ruleset(&value(serde_json::json!({
+            "enable": true,
+            "allowed_services": ["a\"b"],
+            "service_ports": { "a\"b": { "tcp": [1] } },
+        })));
+        assert!(quote.is_err(), "a name can't break out of the comment");
     }
 
     #[test]

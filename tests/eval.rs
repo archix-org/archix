@@ -485,3 +485,78 @@ fn null_and_nullable() {
     assert_eq!(out["editor"], json!(null));
     assert_eq!(out["uses_null"], json!(true));
 }
+
+#[test]
+fn firewall_services_have_built_in_ports_that_modules_override_or_add_to() {
+    let out = eval_ok(&[(
+        "init.lua",
+        r#"return { firewall = { enable = true, allowed_services = { "ssh", "syncthing" } } }"#,
+    )]);
+    let ports = &out["firewall"]["service_ports"];
+    assert_eq!(
+        ports["syncthing"],
+        json!({ "tcp": [22000], "udp": [21027, 22000], "tcp_ranges": [], "udp_ranges": [] })
+    );
+    assert_eq!(ports["kdeconnect"]["udp_ranges"], json!([{ "from": 1714, "to": 1764 }]));
+    assert_eq!(out["firewall"]["allowed_services"], json!(["ssh", "syncthing"]));
+    assert_eq!(out["packages"], json!(["nftables"]));
+
+    let out = eval_ok(&[
+        (
+            "init.lua",
+            r#"return { imports = { "a", "b" }, config = { firewall = { service_ports = { ssh = { tcp = { 2222 } } } } } }"#,
+        ),
+        (
+            "lua/a.lua",
+            r#"return { firewall = { allowed_services = { "ssh", "valheim" }, service_ports = { valheim = { udp_ranges = { { from = 2456, to = 2458 } } } } } }"#,
+        ),
+        (
+            "lua/b.lua",
+            r#"return { config = function() return { firewall = { allowed_services = { "ssh" }, service_ports = { mdns = archix.force { udp = { 5353, 5354 } } } } } end }"#,
+        ),
+    ]);
+    let ports = &out["firewall"]["service_ports"];
+    assert_eq!(
+        ports["ssh"]["tcp"],
+        json!([2222]),
+        "a plain definition replaces the built-in one"
+    );
+    assert_eq!(ports["mdns"]["udp"], json!([5353, 5354]));
+    assert_eq!(ports["valheim"]["udp_ranges"], json!([{ "from": 2456, "to": 2458 }]));
+    assert_eq!(ports["https"]["tcp"], json!([443]), "the other built-ins stay");
+    let mut services: Vec<&str> = out["firewall"]["allowed_services"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    services.sort_unstable();
+    assert_eq!(
+        services,
+        ["ssh", "ssh", "valheim"],
+        "lists concatenate; the ruleset opens each service once"
+    );
+}
+
+#[test]
+fn naming_an_unknown_firewall_service_lists_the_known_ones() {
+    let err = eval_err(&[
+        (
+            "init.lua",
+            r#"return { imports = { "game" }, config = { firewall = { allowed_services = { "ssh", "stean", "valheim" } } } }"#,
+        ),
+        (
+            "lua/game.lua",
+            r#"return { config = function() return { firewall = { service_ports = { valheim = { udp = { 2456 } } } } } end }"#,
+        ),
+    ]);
+    assert!(
+        err.contains(r#"names "stean", which firewall.service_ports doesn't define"#),
+        "{err}"
+    );
+    assert!(err.contains("known services: alvr, "), "{err}");
+    assert!(
+        err.contains(", steam, steam-dedicated-server, ") && err.contains(", valheim, "),
+        "{err}"
+    );
+}

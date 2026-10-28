@@ -359,7 +359,7 @@ fn the_firewall_and_environment_come_from_the_config() {
     let _system = lock_system();
     let body = |port: u32| {
         format!(
-            r#"firewall = {{ enable = true, allowed_tcp_ports = {{ {port} }}, trusted_interfaces = {{ "wg0" }} }},
+            r#"firewall = {{ enable = true, allowed_tcp_ports = {{ {port}, 22 }}, trusted_interfaces = {{ "wg0" }}, allowed_services = {{ "ssh", "kdeconnect", "steam", "game" }}, service_ports = {{ game = {{ udp = {{ 2456 }} }} }} }},
             environment = {{ variables = {{ EDITOR = "nvim", PATHS = {{ "/a", "/b" }} }}, shell_aliases = {{ ll = "ls -l" }} }}"#
         )
     };
@@ -368,9 +368,24 @@ fn the_firewall_and_environment_come_from_the_config() {
     assert_eq!(enabled("archix-firewall.service"), "enabled");
     let rules = read(archix::system::firewall::RULES);
     assert!(
-        rules.contains("tcp dport { 2222 } accept") && rules.contains("\"wg0\""),
+        rules.contains("tcp dport { 22, 2222 } accept\n") && rules.contains("\"wg0\""),
         "{rules}"
     );
+    for rule in [
+        "tcp dport { 1714-1764 } accept comment \"kdeconnect\"",
+        "udp dport { 1714-1764 } accept comment \"kdeconnect\"",
+        "udp dport { 10400, 10401, 27031-27035, 27036 } accept comment \"steam\"",
+        "udp dport { 2456 } accept comment \"game\"",
+    ] {
+        assert!(rules.contains(rule), "{rule} in {rules}");
+    }
+    assert!(!rules.contains("comment \"ssh\""), "22 is open already: {rules}");
+    let check = Command::new("nft")
+        .args(["-c", "-f"])
+        .arg(system_path(archix::system::firewall::RULES))
+        .output()
+        .unwrap();
+    assert!(check.status.success(), "{}", String::from_utf8_lossy(&check.stderr));
     assert_eq!(
         read("/etc/profile.d/archix-environment.sh"),
         "export EDITOR=\"nvim\"\nexport PATHS=\"/a:/b\"\n"
@@ -382,7 +397,7 @@ fn the_firewall_and_environment_come_from_the_config() {
     setup.ok(&["switch", "--noconfirm"]);
     let rules = read(archix::system::firewall::RULES);
     assert!(
-        rules.contains("tcp dport { 2223 } accept") && !rules.contains("2222"),
+        rules.contains("tcp dport { 22, 2223 } accept") && !rules.contains("2222"),
         "{rules}"
     );
 
