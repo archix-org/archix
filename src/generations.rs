@@ -261,7 +261,8 @@ impl Store {
     }
 }
 
-fn read(dir: &Path) -> Result<Generation> {
+/// The record in `dir`: a store entry or a deployment's own copy.
+pub fn read(dir: &Path) -> Result<Generation> {
     let path = dir.join(GENERATION_FILE);
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))

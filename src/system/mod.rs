@@ -4,6 +4,7 @@ pub mod authenticode;
 pub mod blobs;
 pub mod boot;
 pub mod btrfs;
+pub mod capabilities;
 pub mod credentials;
 pub mod deploy_boot;
 pub mod firewall;
@@ -50,6 +51,9 @@ pub struct SystemState {
     /// Extra versions per package that a downgrade mustn't cross without asking.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unsafe_downgrades: BTreeMap<String, Vec<String>>,
+    /// File capabilities in libcap's text form, keyed by a file's path in the deployment's /usr or /opt.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, String>,
 }
 
 /// A script run after a switch; `user` None means root.
@@ -393,6 +397,12 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
     }
     render_environment(&mut b, root("environment"));
     render_appimages(&mut b, root("appimages"));
+    for (path, text) in map(config, "capabilities").into_iter().flatten() {
+        if let Value::Str(text) = text {
+            b.state.capabilities.insert(path.clone(), text.clone());
+        }
+    }
+    capabilities::validate(&b.state.capabilities)?;
     if let Some(boot) = root("boot") {
         let esp = str_of(boot, "esp").unwrap_or("/boot").trim_end_matches('/').to_string();
         for (name, text) in map(boot, "extra_entries").into_iter().flatten() {

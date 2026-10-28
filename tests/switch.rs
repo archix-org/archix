@@ -1295,6 +1295,91 @@ fn manual_upgrades_are_recorded_and_adopted_as_pins() {
     );
 }
 
+/// A snapshot after the image's, in which lemon is 3.54.0-1 and curl-rustls needs librustls's next soname.
+const MOVED_SNAPSHOT: &str = "2026-10-20";
+
+#[test]
+#[ignore]
+fn a_hold_keeps_a_package_at_its_version_from_the_archive_while_updates_move_the_rest() {
+    let _system = lock_system();
+    let setup = Setup::new(&["lemon"], r#"holds = { lemon = "3.53.3" }"#);
+    let lock = setup.lock();
+    assert_eq!(
+        lock.packages["lemon"].version, "3.53.3-1",
+        "the newest pkgrel of 3.53.3"
+    );
+    assert_eq!(lock.packages["lemon"].repo, "archive");
+    assert_eq!(lock.held["lemon"].hold, "3.53.3");
+    assert_eq!(lock.held["lemon"].newest, "3.53.4-1");
+    assert!(lock.pinned.is_empty());
+    setup.lay_out();
+    assert_eq!(installed("lemon").as_deref(), Some("3.53.3-1"));
+    let status = setup.ok(&["status"]);
+    assert!(
+        status.contains("hold: lemon held at 3.53.3-1, behind the snapshot's 3.53.4-1"),
+        "{status}"
+    );
+    assert!(setup.ok(&["diff"]).contains("hold: lemon held at 3.53.3-1"));
+
+    let before = setup.lock();
+    let out = setup.ok(&["update", "--to", MOVED_SNAPSHOT, "--noconfirm"]);
+    let after = setup.lock();
+    assert_eq!(after.date.to_string(), MOVED_SNAPSHOT, "{out}");
+    assert_eq!(after.packages["lemon"], before.packages["lemon"], "{out}");
+    assert_eq!(after.held["lemon"].newest, "3.54.0-1");
+    assert!(
+        after
+            .packages
+            .iter()
+            .any(|(name, pkg)| before.packages.get(name).is_some_and(|old| old.version != pkg.version)),
+        "the rest of the lock moved with the snapshot"
+    );
+    assert!(
+        setup
+            .ok(&["status"])
+            .contains("hold: lemon held at 3.53.3-1, behind the snapshot's 3.54.0-1")
+    );
+
+    let lockfile = setup.read("archix.lock").unwrap();
+    let init = setup.read("init.lua").unwrap();
+    setup.write(
+        "init.lua",
+        &init.replace(r#"lemon = "3.53.3""#, r#"lemon = "3.53.3", tree = "2.2.1-1""#),
+    );
+    let err = setup.fails(&["update", "--to", MOVED_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        err.contains("holds.tree: tree isn't among this config's packages or their dependencies"),
+        "{err}"
+    );
+    setup.write(
+        "init.lua",
+        &init.replace(r#"lemon = "3.53.3""#, r#"lemon = "3.40.9-7""#),
+    );
+    let err = setup.fails(&["update", "--to", MOVED_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        err.contains("holds.lemon: the Arch Linux Archive has no lemon 3.40.9-7; newest there: ")
+            && err.contains("3.54.0-1"),
+        "{err}"
+    );
+    assert_eq!(setup.read("archix.lock").unwrap(), lockfile, "nothing was changed");
+}
+
+#[test]
+#[ignore]
+fn a_held_library_the_moved_snapshot_needs_a_newer_soname_of_is_refused_naming_both() {
+    let _system = lock_system();
+    let setup = Setup::new(&["curl-rustls"], r#"holds = { librustls = "0.15.4-1" }"#);
+    let lockfile = setup.read("archix.lock").unwrap();
+    let err = setup.fails(&["update", "--to", MOVED_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        err.contains(
+            "curl-rustls 8.23.0-1 needs `librustls.so=0.15.5-64`, but holds keep librustls at 0.15.4-1 (the snapshot has 0.15.5-1)"
+        ) && err.contains("nothing was changed"),
+        "{err}"
+    );
+    assert_eq!(setup.read("archix.lock").unwrap(), lockfile);
+}
+
 #[test]
 #[ignore]
 fn declining_adoption_reverts_to_the_lock() {

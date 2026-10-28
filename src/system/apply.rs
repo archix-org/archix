@@ -366,6 +366,24 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
             lines.push(format!("disable    {unit}"));
         }
     }
+    let caps_at = |path: &str| {
+        super::capabilities::read(&root.join(path.trim_start_matches('/')))
+            .ok()
+            .flatten()
+    };
+    for (path, text) in &change.to.capabilities {
+        let want = super::capabilities::parse(text)?;
+        if caps_at(path) != Some(want) {
+            lines.push(format!("setcap     {path} {}", super::capabilities::to_text(&want)));
+        }
+    }
+    for (path, text) in &change.from.capabilities {
+        if !change.to.capabilities.contains_key(path)
+            && super::capabilities::parse(text).is_ok_and(|had| caps_at(path) == Some(had))
+        {
+            lines.push(format!("setcap     {path} (capabilities removed)"));
+        }
+    }
     Ok(lines)
 }
 

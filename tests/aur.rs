@@ -291,6 +291,73 @@ fn the_lock_and_status_say_which_aur_packages_float() {
 
 #[test]
 #[ignore]
+fn an_aur_hold_keeps_the_recipe_commit_of_its_version_or_the_commit_it_names() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    let name = "archix-test-held";
+    for version in ["1.0", "1.1", "1.2"] {
+        aur.publish(TestPkg::new(name, version));
+    }
+    let aur_body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&[name], &format!(r#"{aur_body}, holds = {{ ["{name}"] = "1.1" }}"#));
+    let lock = setup.lock();
+    assert_eq!(lock.packages[name].version, "1.1-1");
+    assert_eq!(
+        lock.packages[name].commit.as_deref(),
+        Some(aur.commit(name, 1).as_str())
+    );
+    assert_eq!(lock.held[name].newest, "1.2-1");
+    assert!(setup.ok(&["status"]).contains(&format!(
+        "hold: {name} held at 1.1-1, behind the AUR's newest recipe's 1.2-1"
+    )));
+
+    aur.publish(TestPkg::new(name, "1.3"));
+    setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    assert_eq!(setup.lock().packages[name].version, "1.1-1", "an update keeps it");
+    assert_eq!(setup.lock().held[name].newest, "1.3-1");
+
+    let first = aur.commit(name, 3);
+    setup.set_body(
+        &[name],
+        &format!(
+            r#"{aur_body}, holds = {{ ["{name}"] = {{ commit = "{}" }} }}"#,
+            &first[..10]
+        ),
+    );
+    let lock = setup.lock();
+    assert_eq!(lock.packages[name].version, "1.0-1");
+    assert_eq!(
+        lock.packages[name].commit.as_deref(),
+        Some(first.as_str()),
+        "the full hash"
+    );
+
+    let lockfile = setup.read("archix.lock").unwrap();
+    let init = setup.read("init.lua").unwrap();
+    setup.write("init.lua", &init.replace(&first[..10], "0123456789abcdef"));
+    let err = setup.fails(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        err.contains(&format!(
+            "holds.{name}: {name}'s AUR history has no commit 0123456789abcdef"
+        )),
+        "{err}"
+    );
+    setup.write(
+        "init.lua",
+        &init.replace(&format!(r#"{{ commit = "{}" }}"#, &first[..10]), r#""0.9""#),
+    );
+    let err = setup.fails(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
+    assert!(
+        err.contains(&format!(
+            "holds.{name}: no commit in {name}'s AUR history builds {name} 0.9"
+        )),
+        "{err}"
+    );
+    assert_eq!(setup.read("archix.lock").unwrap(), lockfile);
+}
+
+#[test]
+#[ignore]
 fn a_new_aur_maintainer_is_named_when_the_lock_moves() {
     let _system = lock_system();
     let mut aur = LocalAur::new();

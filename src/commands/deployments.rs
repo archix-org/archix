@@ -77,6 +77,25 @@ pub fn verify_in(paths: &Paths, repair: bool, only: &[u32], repair_hint: &str) -
             (problems, missing) = deploy::verify::changed(deploy::verify::check(&deployment)?);
         }
         deploy::verify::save(&paths, number, &problems);
+        let system = archix::generations::read(&deployment)
+            .map(|g| g.system)
+            .unwrap_or_default();
+        let mut caps = system::capabilities::check(&deployment, &system.capabilities);
+        if !caps.is_empty() && repair {
+            let _lock = store.lock()?;
+            let change = system::apply::SystemChange {
+                from: Default::default(),
+                to: system.clone(),
+            };
+            deploy::build::set_capabilities(&deployment, &change)
+                .with_context(|| format!("setting deployment {number}'s capabilities"))?;
+            println!("deployment {number}: set {} declared capabilities again", caps.len());
+            caps = system::capabilities::check(&deployment, &system.capabilities);
+        }
+        if !caps.is_empty() {
+            println!("deployment {number}: {}", caps.join("; "));
+            changed.push(number);
+        }
         if missing > 0 {
             println!(
                 "deployment {number}: {missing} packaged files are missing, as pacman.conf's NoExtract or a deletion left them"
@@ -90,7 +109,9 @@ pub fn verify_in(paths: &Paths, repair: bool, only: &[u32], repair_hint: &str) -
                 problems.len(),
                 deploy::verify::describe(&problems, 20)
             );
-            changed.push(number);
+            if !changed.contains(&number) {
+                changed.push(number);
+            }
         }
     }
     if !changed.is_empty() {

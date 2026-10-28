@@ -124,6 +124,7 @@ struct Declared {
     flatpak_remotes: BTreeMap<String, flatpak::Remote>,
     /// Official packages to rebuild with these patch files, relative to the config directory.
     patches: BTreeMap<String, Vec<String>>,
+    holds: archix::holds::Holds,
 }
 
 /// The boot.* settings, present when archix manages booting.
@@ -177,6 +178,10 @@ impl Declared {
                 "archix boots every generation as its own deployment from a systemd-boot entry, so it needs boot.loader = \"systemd-boot\" (with boot.esp and kernel_params); nothing was changed"
             ),
         }
+    }
+
+    fn hold_specs(&self) -> BTreeMap<String, String> {
+        archix::holds::specs(&self.holds)
     }
 
     fn repo_names(&self) -> Vec<String> {
@@ -451,6 +456,7 @@ fn declared(config: &Value) -> Result<Declared> {
                 .collect(),
             _ => BTreeMap::new(),
         },
+        holds: archix::holds::from_config(map.get("holds"))?,
     };
     if let Some(Value::Map(fp)) = map.get("flatpak") {
         let default_remote = match fp.get("remote") {

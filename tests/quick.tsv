@@ -28,6 +28,7 @@ src/system/credentials.rs	test:credentials test:system
 src/deploy/build.rs	test:deploy test:switch test:boot test:deploy_boot test:credentials
 src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
 src/system/	test:system test:switch
+src/system/capabilities.rs	test:system test:switch test:deploy
 src/flatpak.rs	test:flatpak
 src/fetch.rs	test:fetch test:archlinux
 src/archive.rs	test:archlinux test:fetch test:switch
@@ -36,6 +37,7 @@ src/recipes.rs	test:recipes test:helper
 src/repack.rs	test:repos test:recipes
 src/pacman/	test:switch test:archlinux test:repos
 src/lock.rs	test:switch test:archlinux
+src/holds.rs	test:switch test:aur
 src/resolve.rs	test:switch test:archlinux test:helper
 src/plan.rs	test:switch
 src/packages.rs	test:switch test:archlinux

@@ -300,16 +300,17 @@ fn put_back(from: &Path, to: &Path, entry: &crate::repack::Entry) -> Result<()> 
         Kind::Link(target) => std::os::unix::fs::symlink(target, &tmp)?,
         _ => {
             fs::copy(from, &tmp)?;
-            for name in super::xattr::list(from).unwrap_or_default() {
-                if let Ok(Some(value)) = super::xattr::get(from, &name) {
-                    super::xattr::set(&tmp, &name, &value)?;
-                }
-            }
         }
     }
     owner(&tmp)?;
     if !matches!(entry.kind, Kind::Link(_)) {
         fs::set_permissions(&tmp, fs::Permissions::from_mode(entry.mode & 0o7777))?;
+        // After the chown, which would clear security.capability.
+        for name in super::xattr::list(from).unwrap_or_default() {
+            if let Ok(Some(value)) = super::xattr::get(from, &name) {
+                super::xattr::set(&tmp, &name, &value)?;
+            }
+        }
         fs::File::open(&tmp)?.sync_all()?;
     }
     if fs::symlink_metadata(to).is_ok_and(|meta| meta.is_dir()) {

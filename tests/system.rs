@@ -721,3 +721,103 @@ fn usr_local_is_shared_writable_written_at_once_and_never_rolled_back() {
     let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
     assert!(!notes.contains("/usr/local"), "{notes}");
 }
+
+/// What `getcap` prints for `path`, empty when it has no capabilities.
+fn getcap(path: &std::path::Path) -> String {
+    let output = Command::new("getcap").arg(path).output().unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn ino(path: &std::path::Path) -> u64 {
+    std::os::unix::fs::MetadataExt::ino(&fs::metadata(path).unwrap())
+}
+
+#[test]
+#[ignore]
+fn capabilities_go_on_a_copy_in_the_new_deployment_and_follow_switches_and_rollbacks() {
+    let _system = lock_system();
+    let keep = "deployments = { keep = 6 }";
+    let with_caps = format!(r#"{keep}, capabilities = {{ ["/usr/bin/tree"] = "cap_sys_nice+ep" }}"#);
+    let setup = Setup::new(&["tree"], keep);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let tree = |number: u32| machine.deployment(number).join("usr/bin/tree");
+    let plain = machine.current().unwrap();
+    assert_eq!(getcap(&tree(plain)), "");
+
+    setup.set_body(&["tree"], &with_caps);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("setcap     /usr/bin/tree cap_sys_nice=ep"), "{out}");
+    let capped = machine.current().unwrap();
+    assert!(
+        getcap(&tree(capped)).ends_with("cap_sys_nice=ep"),
+        "{}",
+        getcap(&tree(capped))
+    );
+    assert_eq!(
+        getcap(&tree(plain)),
+        "",
+        "the deployment it was staged from, which shared the file's inode, is unchanged"
+    );
+    assert_ne!(ino(&tree(plain)), ino(&tree(capped)));
+    assert!(setup.ok(&["switch", "--noconfirm"]).contains("nothing to do"));
+
+    setup.set_body(
+        &["tree"],
+        &format!(r#"{with_caps}, files = {{ ["/etc/archix-caps"] = {{ text = "x" }} }}"#),
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let again = machine.current().unwrap();
+    assert!(getcap(&tree(again)).ends_with("cap_sys_nice=ep"), "a switch keeps them");
+    assert_eq!(
+        ino(&tree(again)),
+        ino(&tree(capped)),
+        "an unchanged file is shared again"
+    );
+
+    setup.set_body(&["tree"], keep);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    assert!(out.contains("setcap     /usr/bin/tree (capabilities removed)"), "{out}");
+    let removed = machine.current().unwrap();
+    assert_eq!(getcap(&tree(removed)), "");
+    assert!(
+        getcap(&tree(again)).ends_with("cap_sys_nice=ep"),
+        "dropping them in a new deployment leaves the older ones theirs"
+    );
+    setup.ok(&["verify"]);
+
+    setup.ok(&["rollback", &again.to_string(), "--noconfirm"]);
+    assert_eq!(machine.current(), Some(again));
+    assert!(getcap(&system_path("/usr/bin/tree")).ends_with("cap_sys_nice=ep"));
+
+    machine.store_writable(true);
+    archix::deploy::xattr::remove(&tree(again), c"security.capability").unwrap();
+    machine.store_writable(false);
+    let output = setup.run(&["verify"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success()
+            && text.contains(&format!(
+                "deployment {again}: /usr/bin/tree lacks its capabilities cap_sys_nice=ep"
+            )),
+        "{text}"
+    );
+    setup.ok(&["verify", "--repair"]);
+    assert!(getcap(&tree(again)).ends_with("cap_sys_nice=ep"));
+
+    let deployments = machine.deployments();
+    setup.set_body(
+        &["tree"],
+        r#"capabilities = { ["/usr/bin/archix-no-such-file"] = "cap_sys_nice+ep", ["/usr/bin/tree"] = "cap_sys_nice+ep" }"#,
+    );
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(
+        err.contains("capabilities: /usr/bin/archix-no-such-file isn't in the new deployment; nothing was changed"),
+        "{err}"
+    );
+    assert_eq!(machine.deployments(), deployments);
+    assert_eq!(machine.current(), Some(again));
+    setup.set_body(&["tree"], r#"capabilities = { ["/usr/bin/tree"] = "cap_sys_nice+e" }"#);
+    let err = setup.fails(&["switch", "--noconfirm"]);
+    assert!(err.contains("leaves the file without capabilities"), "{err}");
+}

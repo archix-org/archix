@@ -22,6 +22,11 @@ return {
       default = {},
       description = "Patch files for official packages, keyed by package name and relative to the config directory. archix rebuilds Arch's own recipe for the locked version with them, applied with patch -p1 before the recipe's prepare(), and adds a sub-release to the pkgrel. Recipes in pkgbuilds/<dir>/ need no option: declaring a package they build is enough.",
     },
+    holds = archix.option {
+      type = t.attrs_of(t.any),
+      default = {},
+      description = "Packages kept back while the rest of the lock moves with the snapshot, keyed by package name: an exact version (\"1.1.2-1\", or \"1.1.2\" for its newest pkgrel), which an official package is fetched at from the Arch Linux Archive and an AUR package is built at from the recipe commit that builds it; a floor (\">= 0.15.4\"), which never pins but refuses a lock below it; or { commit = \"...\" }, an AUR package's recipe commit. `archix lock` and `archix update` keep them, and refuse, naming both packages, a hold that a dependency (a soname included) of the new snapshot rules out. A hold on a package the lock doesn't have is an error.",
+    },
     repos = archix.option {
       type = t.list_of(t.enum { "core", "extra", "multilib", "core-testing", "extra-testing", "multilib-testing" }),
       default = { "core", "extra" },

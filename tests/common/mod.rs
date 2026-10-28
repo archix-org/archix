@@ -690,6 +690,18 @@ impl LocalAur {
         format!("file://{}", self.dir.path().display())
     }
 
+    /// The commit `back` commits before the newest of `name`'s recipe.
+    pub fn commit(&self, name: &str, back: usize) -> String {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(self.dir.path().join(format!("{name}.git")))
+            .args(["rev-parse", &format!("HEAD~{back}")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
     fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(["-c", "user.name=test", "-c", "user.email=test@example.com", "-C"])

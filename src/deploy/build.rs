@@ -132,6 +132,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let dir = staged.dir.clone();
     let in_trees = |path: &str| matches!(deployment_tree(path), Some("usr" | "opt")).then(|| dir.join(&path[1..]));
     crate::system::apply::files(paths, plan.system, &in_trees, &accounts)?;
+    set_capabilities(&dir, plan.system)?;
     let esp = PathBuf::from(&plan.boot.esp);
     let mut pins = Keep::read(plan.keep, store, &esp)?;
     pins.current = Some(plan.number);
@@ -186,6 +187,28 @@ fn check_staged(system: &SystemChange, tx: &crate::deploy::view::Transaction) ->
         }
     }
     Ok(())
+}
+
+/// Sets the config's file capabilities in `tree`, a finished deployment not yet committed, after everything that writes or chowns its files.
+pub fn set_capabilities(tree: &Path, system: &SystemChange) -> Result<()> {
+    if system.to.capabilities.is_empty() && system.from.capabilities.is_empty() {
+        return Ok(());
+    }
+    let owned = crate::conflicts::owned_files(&tree.join("pacman"));
+    let declared = system
+        .to
+        .files
+        .keys()
+        .filter(|path| matches!(deployment_tree(path), Some("usr" | "opt")))
+        .cloned()
+        .collect();
+    crate::system::capabilities::apply(
+        tree,
+        &system.from.capabilities,
+        &system.to.capabilities,
+        &owned,
+        &declared,
+    )
 }
 
 /// Refuses a deployment in which a file archix writes into /usr, an AppImage's command or menu entry, is one a package in pacman database `local_db` ships, which it would replace.

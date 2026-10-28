@@ -133,6 +133,7 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
         names,
         &declared.prefer,
         Some(&aur),
+        &Default::default(),
     )?;
     review(&git, Some(&lock), &temp, declared.aur_review && !noconfirm, &confirm)?;
 
@@ -446,6 +447,7 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
             &declared.packages,
             &declared.prefer,
             Some(&aur),
+            &declared.holds,
         )?;
         fresh.keep_pins(&lock);
         if fresh != lock {

@@ -57,6 +57,7 @@ pub(super) fn current_lock(
             &declared.prefer,
             &declared.repo_names(),
             &recipes.fingerprints(&old.local_recipes())?,
+            &declared.hold_specs(),
         )
         // Only `archix lock` re-resolves a lock made for a newer CPU; switch refuses it instead of rewriting the lock it applies.
         && (!for_this_cpu
@@ -86,6 +87,7 @@ pub(super) fn current_lock(
             &declared.packages,
             prefer,
             Some(&aur),
+            &declared.holds,
         )
     };
     let mut new = resolve_with(&declared.prefer)?;
@@ -439,6 +441,9 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
         lock.date,
         count(lock.packages.len(), "package", "packages")
     );
+    for line in archix::holds::status_lines(&lock) {
+        println!("{line}");
+    }
     let newer = newer_than_lock(&lock, &installed).len();
     if newer > 0 {
         println!(
@@ -596,12 +601,16 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
             floating.join(", ")
         ),
     }
+    for line in archix::holds::status_lines(lock) {
+        println!("{line}");
+    }
     let fingerprints = recipes(target, &declared)?.fingerprints(&lock.local_recipes())?;
     if !lock.matches(
         &declared.packages,
         &declared.prefer,
         &declared.repo_names(),
         &fingerprints,
+        &declared.hold_specs(),
     ) {
         println!("the config changed since the lock was written; `archix lock` or `archix switch` will re-resolve");
     }
@@ -639,6 +648,8 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
     for (name, pkg) in &new.packages {
         let note = if floats(name, pkg) {
             " (builds from a VCS source; its first build records the commit)"
+        } else if new.held.get(name).is_some_and(|held| held.newest != pkg.version) {
+            " (held)"
         } else {
             ""
         };

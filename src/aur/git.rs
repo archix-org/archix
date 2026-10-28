@@ -70,6 +70,17 @@ impl AurGit {
         Ok(self.git(base, &["rev-parse", "HEAD"])?.trim().to_string())
     }
 
+    /// The full hash of `commit`, which may be abbreviated; an error when the base's history doesn't have it.
+    pub fn full_commit(&self, base: &str, commit: &str) -> Result<String> {
+        Ok(self
+            .git(
+                base,
+                &["rev-parse", "--verify", "--quiet", &format!("{commit}^{{commit}}")],
+            )?
+            .trim()
+            .to_string())
+    }
+
     pub fn has_commit(&self, base: &str, commit: &str) -> bool {
         self.git(base, &["cat-file", "-e", &format!("{commit}^{{commit}}")])
             .is_ok()

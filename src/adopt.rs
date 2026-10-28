@@ -16,16 +16,22 @@ use crate::paths::Paths;
 use crate::repos::Repo;
 use crate::resolve::{Aur, resolve};
 
-/// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves.
+/// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves; a held one isn't adopted but goes back to its hold.
 pub fn newer_than_lock<'a>(lock: &HostLock, installed: &'a BTreeMap<String, LocalPkg>) -> Vec<&'a LocalPkg> {
     lock.packages
         .iter()
+        .filter(|(name, _)| !holding(lock, name))
         .filter_map(|(name, locked)| {
             installed
                 .get(name)
                 .filter(|pkg| vercmp(&pkg.version, &locked.version) == Ordering::Greater)
         })
         .collect()
+}
+
+/// Whether the lock keeps `name` at a version or commit by the config's `holds`, rather than only above a floor.
+fn holding(lock: &HostLock, name: &str) -> bool {
+    lock.held.get(name).is_some_and(|held| !held.hold.starts_with(">="))
 }
 
 /// Which installed versions [`fit`] pins when they differ from the snapshot's.
@@ -161,9 +167,10 @@ pub fn fit(
     aur: Option<&Aur>,
     mode: Fit,
 ) -> Result<HostLock> {
+    let holds = previous.map(crate::holds::from_lock).transpose()?.unwrap_or_default();
     let mut best: Option<(usize, HostLock)> = None;
     for date in &candidates.dates {
-        let mut resolved = match resolve(archive, cache, *date, repos, declared, prefer, aur) {
+        let mut resolved = match resolve(archive, cache, *date, repos, declared, prefer, aur, &holds) {
             Ok(resolved) => resolved,
             Err(e) => {
                 eprintln!("skipping snapshot {date}: {e:#}");
@@ -196,6 +203,7 @@ pub fn fit(
         for (name, locked) in &adopted.packages {
             if let (Some(pkg), Some(base)) = (installed.get(name), &locked.base)
                 && locked.repo == AUR_REPO
+                && !holding(&adopted, name)
                 && differs(&pkg.version, &locked.version)
             {
                 aur_bases.insert(base.clone(), pkg.version.clone());
@@ -215,7 +223,7 @@ pub fn fit(
         }
     }
     if moved {
-        adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur)?;
+        adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur, &holds)?;
         if let Some(previous) = previous {
             adopted.keep_pins(previous);
         }
@@ -226,7 +234,7 @@ pub fn fit(
             let (Some(base), Some(commit)) = (locked.base.clone(), locked.commit.clone()) else {
                 continue;
             };
-            if locked.repo != AUR_REPO || !differs(&pkg.version, &locked.version) {
+            if locked.repo != AUR_REPO || !differs(&pkg.version, &locked.version) || adopted.held.contains_key(name) {
                 continue;
             }
             let Some(upstream) = vcs_commit(&pkg.version) else {
@@ -256,7 +264,7 @@ pub fn fit(
     let mut pins = Vec::new();
     for (name, locked) in &adopted.packages {
         let Some(pkg) = installed.get(name) else { continue };
-        if !locked.is_built() && differs(&pkg.version, &locked.version) {
+        if !locked.is_built() && differs(&pkg.version, &locked.version) && !holding(&adopted, name) {
             pins.push((name.clone(), pkg.clone(), locked.clone()));
         }
     }
@@ -332,6 +340,11 @@ pub fn vcs_sources(info: &SrcInfo, commit: &str) -> Option<BTreeMap<String, Stri
 
 /// The newest commit whose .SRCINFO says `version`, skipping one whose PKGBUILD had moved on before its .SRCINFO caught up.
 pub fn commit_for_version(git: &AurGit, base: &str, version: &str) -> Result<Option<(String, SrcInfo)>> {
+    commit_where(git, base, |found| found == version)
+}
+
+/// The newest commit whose .SRCINFO's version `wanted` accepts, as [`commit_for_version`] picks it.
+pub fn commit_where(git: &AurGit, base: &str, wanted: impl Fn(&str) -> bool) -> Result<Option<(String, SrcInfo)>> {
     git.sync(base)?;
     let mut newer: Option<(String, String)> = None;
     for commit in git.history(base)?.into_iter().take(500) {
@@ -346,8 +359,8 @@ pub fn commit_for_version(git: &AurGit, base: &str, version: &str) -> Result<Opt
         let pkgbuild = git.show(base, &commit, "PKGBUILD").unwrap_or_default();
         let stale = newer
             .as_ref()
-            .is_some_and(|(next_version, next_pkgbuild)| next_version != version && *next_pkgbuild == pkgbuild);
-        if info.version == version && !stale {
+            .is_some_and(|(next_version, next_pkgbuild)| !wanted(next_version) && *next_pkgbuild == pkgbuild);
+        if wanted(&info.version) && !stale {
             return Ok(Some((commit, info)));
         }
         newer = Some((info.version.clone(), pkgbuild));

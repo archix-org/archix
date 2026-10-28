@@ -33,6 +33,9 @@ pub struct HostLock {
     /// Packages held at a version other than the snapshot's, e.g. after adopting a manual upgrade.
     #[serde(default)]
     pub pinned: Vec<String>,
+    /// The config's `holds` this lock was resolved with, by package.
+    #[serde(default, rename = "holds")]
+    pub held: BTreeMap<String, Held>,
     #[serde(default)]
     pub packages: BTreeMap<String, Locked>,
     /// Flatpak apps by id, each at an exact commit.
@@ -41,6 +44,15 @@ pub struct HostLock {
     /// Hashes of the config's local recipes and patches the lock was resolved with.
     #[serde(default)]
     pub recipes: BTreeMap<String, String>,
+}
+
+/// One package's hold as a lock was resolved with it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Held {
+    /// The hold: a version, `>=` a version, or `commit:` an AUR commit.
+    pub hold: String,
+    /// What the snapshot, or for AUR packages the AUR's newest recipe, has instead.
+    pub newest: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -95,15 +107,21 @@ impl Locked {
 }
 
 impl HostLock {
-    /// Whether this lock was resolved for the same declared packages, preferred providers, repos and recipes.
+    /// Whether this lock was resolved for the same declared packages, preferred providers, repos, recipes and holds (as specs).
     pub fn matches(
         &self,
         declared: &[String],
         prefer: &[String],
         repos: &[String],
         recipes: &BTreeMap<String, String>,
+        holds: &BTreeMap<String, String>,
     ) -> bool {
-        self.declared == declared && self.prefer == prefer && self.repos == repos && self.recipes == *recipes
+        let held: BTreeMap<&String, &String> = self.held.iter().map(|(name, held)| (name, &held.hold)).collect();
+        self.declared == declared
+            && self.prefer == prefer
+            && self.repos == repos
+            && self.recipes == *recipes
+            && held == holds.iter().collect::<BTreeMap<_, _>>()
     }
 
     pub fn pin(&mut self, name: &str, locked: Locked) {
@@ -133,6 +151,9 @@ impl HostLock {
             }
         }
         for name in &old.pinned {
+            if self.held.contains_key(name) {
+                continue;
+            }
             if let (Some(pinned), Some(fresh)) = (old.packages.get(name), self.packages.get(name)) {
                 let locked = Locked {
                     explicit: fresh.explicit,
@@ -186,6 +207,21 @@ impl Lockfile {
             }
             if !lock.pinned.is_empty() {
                 let _ = writeln!(out, "pinned = {}", array(&lock.pinned));
+            }
+            if !lock.held.is_empty() {
+                let held: Vec<String> = lock
+                    .held
+                    .iter()
+                    .map(|(name, held)| {
+                        format!(
+                            "{} = {{ hold = {}, newest = {} }}",
+                            string(name),
+                            string(&held.hold),
+                            string(&held.newest)
+                        )
+                    })
+                    .collect();
+                let _ = writeln!(out, "holds = {{ {} }}", held.join(", "));
             }
             let _ = writeln!(out, "\n[hosts.{host}.packages]");
             for (name, pkg) in &lock.packages {
@@ -315,6 +351,13 @@ mod tests {
             declared: vec!["gtk+".into()],
             prefer: vec!["noto-fonts".into()],
             pinned: vec!["zlib".into()],
+            held: BTreeMap::from([(
+                "gtk+".to_string(),
+                Held {
+                    hold: "1:2.24".into(),
+                    newest: "1:2.25-1".into(),
+                },
+            )]),
             packages,
             flatpak: BTreeMap::from([(
                 "org.mozilla.firefox".to_string(),
@@ -341,6 +384,10 @@ mod tests {
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[hosts.\"my.laptop\".packages]"), "{text}");
         assert!(text.contains("\"gtk+\" = { version = \"1:2.24-1\""), "{text}");
+        assert!(
+            text.contains("holds = { \"gtk+\" = { hold = \"1:2.24\", newest = \"1:2.25-1\" } }"),
+            "{text}"
+        );
         assert!(
             text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", sources = { \"yay::git+https://example.org/yay.git\" = \"c0ffee\" }, explicit = false, build_only = true }"),
             "{text}"
