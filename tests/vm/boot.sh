@@ -6,7 +6,8 @@ qmp=/work/qmp.sock
 rm -f "$qmp" /work/serial.log
 monitor=(-qmp "unix:$qmp,server=on,wait=off")
 watchers=()
-trap 'kill "${watchers[@]}" 2> /dev/null' EXIT
+# With no watcher a bare kill fails, and an EXIT trap's status becomes the script's.
+trap 'status=$?; [ ${#watchers[@]} = 0 ] || kill "${watchers[@]}" 2> /dev/null; exit $status' EXIT
 if [ "${SUITE:-boot}" = health ]; then
   sock=/work/monitor.sock
   rm -f "$sock"
