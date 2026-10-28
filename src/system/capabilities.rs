@@ -267,14 +267,42 @@ fn own_inode(path: &Path) -> Result<()> {
     copied.with_context(|| format!("copying {} to give it its own inode", path.display()))
 }
 
-/// Sets `to`'s capabilities in `tree`, a deployment not yet committed (or being repaired), and takes `from`'s, the base deployment's, off files `to` no longer lists when they still carry them; each file changed gets its own inode first. `owned` are the files packages ship (without the leading /) and `declared` those the config writes; a capability on anything else is refused before any changes.
+/// The capabilities a record's text gives, None for the empty text of none.
+pub fn recorded(text: &str) -> Option<Caps> {
+    parse(text).ok()
+}
+
+fn text_of(caps: Option<Caps>) -> String {
+    caps.map(|caps| to_text(&caps)).unwrap_or_default()
+}
+
+/// Gives `file` the capabilities `caps`, or none, on an inode of its own unless it has them already.
+fn put(file: &Path, caps: Option<Caps>) -> Result<()> {
+    if read(file)? == caps {
+        return Ok(());
+    }
+    own_inode(file)?;
+    match caps {
+        Some(caps) => xattr::set(file, XATTR, &encode(&caps)),
+        None => xattr::remove(file, XATTR),
+    }
+    .with_context(|| format!("setting {}'s capabilities", file.display()))
+}
+
+/// The base deployment's side of `apply`: the capabilities its config declared, and those its record says packages gave its files.
+pub struct Base<'a> {
+    pub declared: &'a BTreeMap<String, String>,
+    pub packages: &'a BTreeMap<String, String>,
+}
+
+/// Sets `to`'s capabilities in `tree`, a deployment not yet committed, and gives a file the base declared and `to` no longer does back the capabilities its package left it, when it still has the base's; each file changed gets its own inode first. `owned` are the files packages ship (without the leading /) and `declared` those the config writes; a capability on anything else is refused before any changes. Returns the new deployment's record of what packages left each file it declares or gave back.
 pub fn apply(
     tree: &Path,
-    from: &BTreeMap<String, String>,
+    base: &Base,
     to: &BTreeMap<String, String>,
     owned: &HashSet<String>,
     declared: &BTreeSet<String>,
-) -> Result<()> {
+) -> Result<BTreeMap<String, String>> {
     let mut refused = Vec::new();
     let mut wanted = Vec::new();
     for (path, text) in to {
@@ -290,46 +318,98 @@ pub fn apply(
             Ok(_) if !owned.contains(path.trim_start_matches('/')) && !declared.contains(path) => refused.push(format!(
                 "{path} isn't a package's or a file the config declares, so nothing would put it back the same in another deployment"
             )),
-            Ok(_) => wanted.push((file, caps)),
+            Ok(_) => wanted.push((path, file, caps)),
         }
     }
     if !refused.is_empty() {
         bail!("capabilities: {}; nothing was changed", refused.join("; "));
     }
-    for (file, caps) in wanted {
-        if read(&file)? == Some(caps) {
-            continue;
-        }
-        own_inode(&file)?;
-        xattr::set(&file, XATTR, &encode(&caps))
-            .with_context(|| format!("setting {}'s capabilities", file.display()))?;
+    // A file still carrying the base's declared capabilities is the base's file, whose package state the base recorded; any other is as its package left it now.
+    let left_by_package =
+        |path: &str, now: Option<Caps>| match base.declared.get(path).and_then(|text| parse(text).ok()) {
+            Some(had) if now == Some(had) => base.packages.get(path).and_then(|text| recorded(text)),
+            _ => now,
+        };
+    let mut packages = BTreeMap::new();
+    for (path, file, caps) in wanted {
+        let now = read(&file)?;
+        packages.insert(path.clone(), text_of(left_by_package(path, now)));
+        put(&file, Some(caps))?;
     }
-    for (path, text) in from.iter().filter(|(path, _)| !to.contains_key(*path)) {
+    for path in base.declared.keys().filter(|path| !to.contains_key(*path)) {
         let file = tree.join(path.trim_start_matches('/'));
-        let Ok(had) = parse(text) else { continue };
-        if !fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file()) || read(&file)? != Some(had) {
+        if !fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file()) {
             continue;
         }
-        own_inode(&file)?;
-        xattr::remove(&file, XATTR).with_context(|| format!("removing {}'s capabilities", file.display()))?;
+        let left = left_by_package(path, read(&file)?);
+        packages.insert(path.clone(), text_of(left));
+        put(&file, left)?;
     }
-    Ok(())
+    Ok(packages)
 }
 
-/// The declared capabilities that a deployment's files lack or have otherwise, one line each.
-pub fn check(deployment: &Path, declared: &BTreeMap<String, String>) -> Vec<String> {
-    let mut problems = Vec::new();
+/// What each file in a deployment's record should have: its declared capabilities, or those its package left it when no longer declared.
+fn expected(
+    declared: &BTreeMap<String, String>,
+    packages: &BTreeMap<String, String>,
+) -> BTreeMap<String, Option<Caps>> {
+    let mut want: BTreeMap<String, Option<Caps>> = packages
+        .iter()
+        .map(|(path, text)| (path.clone(), recorded(text)))
+        .collect();
     for (path, text) in declared {
-        let Ok(want) = parse(text) else { continue };
-        let file = deployment.join(path.trim_start_matches('/'));
-        match read(&file) {
-            Ok(Some(have)) if have == want => {}
-            Ok(Some(have)) => problems.push(format!("{path} has {}, not {}", to_text(&have), to_text(&want))),
-            Ok(None) => problems.push(format!("{path} lacks its capabilities {}", to_text(&want))),
-            Err(e) => problems.push(format!("{path}: {e:#}")),
+        if let Ok(caps) = parse(text) {
+            want.insert(path.clone(), Some(caps));
+        }
+    }
+    want
+}
+
+/// The capabilities a deployment's files lack or have otherwise, one line each: the declared ones, and for a file no longer declared those its package left it, from `packages`, the deployment's record of them.
+pub fn check(
+    deployment: &Path,
+    declared: &BTreeMap<String, String>,
+    packages: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (path, want) in expected(declared, packages) {
+        let theirs = if declared.contains_key(&path) {
+            ""
+        } else {
+            " as its package left it"
+        };
+        match (read(&deployment.join(path.trim_start_matches('/'))), want) {
+            (Ok(have), want) if have == want => {}
+            (Ok(Some(have)), Some(want)) => {
+                problems.push(format!("{path} has {}, not {}{theirs}", to_text(&have), to_text(&want)))
+            }
+            (Ok(None), Some(want)) => {
+                problems.push(format!("{path} lacks its capabilities {}{theirs}", to_text(&want)))
+            }
+            (Ok(Some(have)), None) => problems.push(format!(
+                "{path} has {}, which its package didn't give it",
+                to_text(&have)
+            )),
+            (Ok(None), None) => {}
+            (Err(e), _) => problems.push(format!("{path}: {e:#}")),
         }
     }
     problems
+}
+
+/// Puts back what `check` finds amiss in a deployment's tree, each changed file on an inode of its own; a file that's gone stays gone.
+pub fn repair(
+    deployment: &Path,
+    declared: &BTreeMap<String, String>,
+    packages: &BTreeMap<String, String>,
+) -> Result<()> {
+    for (path, want) in expected(declared, packages) {
+        let file = deployment.join(path.trim_start_matches('/'));
+        if fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file()) {
+            put(&file, want)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

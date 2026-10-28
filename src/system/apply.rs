@@ -377,11 +377,24 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
             lines.push(format!("setcap     {path} {}", super::capabilities::to_text(&want)));
         }
     }
+    let left_by_packages = crate::generations::read(root)
+        .map(|current| current.package_capabilities)
+        .unwrap_or_default();
     for (path, text) in &change.from.capabilities {
         if !change.to.capabilities.contains_key(path)
             && super::capabilities::parse(text).is_ok_and(|had| caps_at(path) == Some(had))
         {
-            lines.push(format!("setcap     {path} (capabilities removed)"));
+            match left_by_packages
+                .get(path)
+                .and_then(|text| super::capabilities::recorded(text))
+            {
+                Some(left) if Some(left) == caps_at(path) => {}
+                Some(left) => lines.push(format!(
+                    "setcap     {path} {} (as its package left it)",
+                    super::capabilities::to_text(&left)
+                )),
+                None => lines.push(format!("setcap     {path} (capabilities removed)")),
+            }
         }
     }
     Ok(lines)

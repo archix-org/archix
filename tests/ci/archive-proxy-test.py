@@ -47,13 +47,17 @@ def main():
         f"/{DIR}/{corrupt}": bytes([files[corrupt][0] ^ 1]) + files[corrupt][1:],
         f"/packages/l/loose/{loose}": files[loose],
         f"/packages/l/loose/cut-{loose}": files[loose][:-1000],
+        "/packages/l/loose/": f'<a href="../">../</a>\n<a href="{loose}">{loose}</a> 21-Oct-2026 10:00 300K\n'.encode(),
+        "/packages/e/empty/": b'<a href="../">../</a>\n',
     }
+    requested = []
 
     class Upstream(http.server.BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            requested.append(self.path)
             body = served.get(self.path)
             if body is None:
                 self.send_response(404)
@@ -104,6 +108,17 @@ def main():
             check((cache / "packages/l/loose" / loose).is_file(), "a package in no db is cached once its zstd stream is whole")
             check(not isinstance(get(f"/packages/l/loose/cut-{loose}"), bytes), "a package in no db with a cut zstd stream reaches the client as an error")
             check(not (cache / f"packages/l/loose/cut-{loose}").exists(), "a package in no db with a cut zstd stream isn't cached")
+            listing = served["/packages/l/loose/"]
+            check(get("/packages/l/loose/") == listing, "a package's listing passes through")
+            index = cache / "packages/l/loose/index.html"
+            check(index.is_file() and index.read_bytes() == listing, "a package's listing is cached")
+            served["/packages/l/loose/"] = listing + b'<a href="loose-2-1-x86_64.pkg.tar.zst">x</a>\n'
+            check(get("/packages/l/loose/") == listing, "a cached listing stays as first fetched, pinned like the files")
+            before = len(requested)
+            missing = get("/packages/l/loose/loose-0-1-x86_64.pkg.tar.zst")
+            check(getattr(missing, "code", None) == 404 and len(requested) == before, "a file the pinned listing lacks is 404 without asking upstream")
+            get("/packages/e/empty/")
+            check(not (cache / "packages/e/empty/index.html").exists(), "a listing without the package's files isn't cached")
         finally:
             proxy.terminate()
             proxy.wait()

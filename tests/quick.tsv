@@ -29,7 +29,7 @@ src/deploy/build.rs	test:deploy test:switch test:boot test:deploy_boot test:cred
 src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
 src/system/fstab.rs	test:system test:init test:switch
 src/system/	test:system test:switch
-src/system/capabilities.rs	test:system test:switch test:deploy
+src/system/capabilities.rs	test:system test:switch test:deploy test:repos
 src/flatpak.rs	test:flatpak
 src/fetch.rs	test:fetch test:archlinux
 src/archive.rs	test:archlinux test:fetch test:switch
@@ -48,7 +48,7 @@ src/unsafe_downgrades.json	test:switch
 src/conflicts.rs	test:switch test:aur
 src/installed.rs	test:switch test:system
 src/gc.rs	test:switch
-src/generations.rs	test:switch
+src/generations.rs	test:switch test:system test:repos
 src/durable.rs	test:switch test:deploy
 src/date.rs	test:switch test:archlinux
 src/elf.rs	test:deploy_boot test:switch

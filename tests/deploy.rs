@@ -572,6 +572,114 @@ fn in_place_writes_and_setcap_in_staging_leave_the_previous_deployment_untouched
     }
 }
 
+/// What `getcap` prints for `path` after the name, empty for none.
+fn getcap(path: &Path) -> String {
+    archix::system::capabilities::read(path)
+        .unwrap()
+        .map(|caps| archix::system::capabilities::to_text(&caps))
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore]
+fn declared_capabilities_go_on_a_copy_and_give_back_what_the_package_set_on_ext4_and_btrfs() {
+    use archix::system::capabilities::{Base, apply, check, repair};
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        let (_fs, store) = system(fs_type);
+        archix::testhooks::allow_plain_esp();
+        let esp = store.root().join("efi");
+        let boot = SystemdBoot {
+            esp: esp.clone(),
+            uki: PathBuf::from("boot/archix.efi"),
+        };
+        let tool = |number: u32| store.path(number).join("usr/bin/tool");
+        let owned = std::collections::HashSet::from(["usr/bin/tool".to_string()]);
+        let none = BTreeMap::new();
+        let nice = BTreeMap::from([("/usr/bin/tool".to_string(), "cap_sys_nice+ep".to_string())]);
+        // Each deployment staged from the one before, `caps` applied to the finished tree before its commit.
+        let build = |number: u32, script: &str, caps: &dyn Fn(&Path) -> BTreeMap<String, String>| {
+            let staging = Staging::new(&store, number).unwrap();
+            in_view(&staging.transaction().unwrap(), script);
+            let staged = staging.finish().unwrap();
+            let left = caps(&staged.dir);
+            staged.commit(&store, &esp, &boot).unwrap();
+            left
+        };
+
+        build(2, "setcap cap_ipc_lock+ep /usr/bin/tool", &|_| BTreeMap::new());
+        assert_eq!(
+            getcap(&tool(2)),
+            "cap_ipc_lock=ep",
+            "{fs_type}: as the package's scriptlet left it"
+        );
+        let left = build(3, "true", &|tree| {
+            if fs_type == "ext4" {
+                assert_eq!(
+                    ino(&tree.join("usr/bin/tool")),
+                    ino(&tool(2)),
+                    "flattening hardlinks it to deployment 2's"
+                );
+            }
+            let base = Base {
+                declared: &none,
+                packages: &none,
+            };
+            apply(tree, &base, &nice, &owned, &Default::default()).unwrap()
+        });
+        assert_eq!(
+            left,
+            BTreeMap::from([("/usr/bin/tool".to_string(), "cap_ipc_lock=ep".to_string())]),
+            "{fs_type}: the record keeps what the package left"
+        );
+        assert_eq!(getcap(&tool(3)), "cap_sys_nice=ep", "{fs_type}");
+        assert_eq!(
+            getcap(&tool(2)),
+            "cap_ipc_lock=ep",
+            "{fs_type}: the deployment it was staged from is unchanged"
+        );
+        if fs_type == "ext4" {
+            assert_ne!(ino(&tool(3)), ino(&tool(2)), "a copy of its own");
+        }
+
+        let back = build(4, "true", &|tree| {
+            let base = Base {
+                declared: &nice,
+                packages: &left,
+            };
+            apply(tree, &base, &none, &owned, &Default::default()).unwrap()
+        });
+        assert_eq!(back, left, "{fs_type}: the record keeps what it gave back");
+        assert_eq!(
+            getcap(&tool(4)),
+            "cap_ipc_lock=ep",
+            "{fs_type}: dropping the declaration gives back the package's, not none"
+        );
+        assert_eq!(
+            getcap(&tool(3)),
+            "cap_sys_nice=ep",
+            "{fs_type}: the deployment it was staged from is unchanged"
+        );
+        assert_eq!(getcap(&tool(2)), "cap_ipc_lock=ep", "{fs_type}");
+        assert!(check(&store.path(4), &none, &back).is_empty());
+        assert!(check(&store.path(3), &nice, &left).is_empty());
+
+        xattr::remove(&tool(4), c"security.capability").unwrap();
+        assert_eq!(
+            check(&store.path(4), &none, &back),
+            ["/usr/bin/tool lacks its capabilities cap_ipc_lock=ep as its package left it"],
+            "{fs_type}"
+        );
+        repair(&store.path(4), &none, &back).unwrap();
+        assert_eq!(
+            getcap(&tool(4)),
+            "cap_ipc_lock=ep",
+            "{fs_type}: repaired to the package's"
+        );
+        assert_eq!(getcap(&tool(3)), "cap_sys_nice=ep", "{fs_type}");
+    }
+}
+
 /// The classic chroot escape: chroot into a subdirectory, climb out with `..`, chroot there and list /; it only stays in the view if the view was pivoted into, not chrooted.
 const ESCAPE: &str = r#"
 #include <dirent.h>

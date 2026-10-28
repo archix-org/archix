@@ -305,6 +305,97 @@ fn a_rollback_that_rebuilds_never_takes_a_keyring_back() {
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
 }
 
+/// A file's capabilities as getcap prints them after its name, empty for none.
+fn getcap(path: &Path) -> String {
+    archix::system::capabilities::read(path)
+        .unwrap()
+        .map(|caps| archix::system::capabilities::to_text(&caps))
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore]
+fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script_set() {
+    let _system = lock_system();
+    let repo = LocalRepo::new("archix-third");
+    let name = "archix-test-capped";
+    let path = "/usr/bin/archix-test-capped";
+    // As gnome-keyring's post_install gives gnome-keyring-daemon cap_ipc_lock.
+    repo.publish_full(
+        name,
+        "1.0",
+        &format!("install -Dm755 /usr/bin/true \"$pkgdir{path}\""),
+        &format!("post_install() {{\n  setcap cap_ipc_lock+ep {path}\n}}\n"),
+        None,
+    );
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}, deployments = {{ keep = 6 }}",
+        repo.server()
+    );
+    let setup = Setup::new(&[name], &body);
+    setup.lay_out();
+    let machine = &setup.machine;
+    let file = |number: u32| machine.deployment(number).join(&path[1..]);
+    let packaged = machine.current().unwrap();
+    assert_eq!(
+        getcap(&file(packaged)),
+        "cap_ipc_lock=ep",
+        "as its install script left it"
+    );
+
+    setup.set_body(
+        &[name],
+        &format!(r#"{body}, capabilities = {{ ["{path}"] = "cap_sys_nice+ep" }}"#),
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let declared = machine.current().unwrap();
+    assert_eq!(getcap(&file(declared)), "cap_sys_nice=ep");
+    assert_eq!(getcap(&file(packaged)), "cap_ipc_lock=ep");
+
+    setup.set_body(&[name], &body);
+    let diff = setup.ok(&["diff"]);
+    assert!(
+        diff.contains(&format!("setcap     {path} cap_ipc_lock=ep (as its package left it)")),
+        "{diff}"
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let restored = machine.current().unwrap();
+    assert_eq!(
+        getcap(&file(restored)),
+        "cap_ipc_lock=ep",
+        "dropping the declaration gives back what the package set, rather than stripping it"
+    );
+    assert_eq!(
+        getcap(&file(declared)),
+        "cap_sys_nice=ep",
+        "older deployments keep theirs"
+    );
+    assert_eq!(getcap(&file(packaged)), "cap_ipc_lock=ep");
+    setup.ok(&["verify"]);
+
+    machine.store_writable(true);
+    archix::deploy::xattr::remove(&file(restored), c"security.capability").unwrap();
+    machine.store_writable(false);
+    let output = setup.run(&["verify"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !output.status.success()
+            && text.contains(&format!(
+                "deployment {restored}: {path} lacks its capabilities cap_ipc_lock=ep as its package left it"
+            )),
+        "{text}"
+    );
+    setup.ok(&["verify", "--repair"]);
+    assert_eq!(
+        getcap(&file(restored)),
+        "cap_ipc_lock=ep",
+        "repaired to what the package set"
+    );
+    assert_eq!(getcap(&file(declared)), "cap_sys_nice=ep");
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}
+
 #[test]
 #[ignore]
 fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it() {

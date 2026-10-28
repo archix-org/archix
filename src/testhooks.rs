@@ -62,7 +62,7 @@ pub fn archive_proxy() -> Option<String> {
     std::env::var("ARCHIX_TEST_ARCHIVE").ok().filter(|url| !url.is_empty())
 }
 
-/// The day the newest archive snapshot is searched back from, ARCHIX_TEST_TODAY in a debug build, so a test sees the same newest snapshot every day.
+/// The day the newest archive snapshot is searched back from and after which /packages/ listings are cut, ARCHIX_TEST_TODAY in a debug build, so a test sees the same archive every day.
 pub fn archive_today() -> Option<crate::date::Date> {
     if !cfg!(debug_assertions) {
         return None;

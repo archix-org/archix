@@ -237,6 +237,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         system: SystemState::default(),
         flatpak: lock.flatpak.clone(),
         before_archix: false,
+        package_capabilities: BTreeMap::new(),
     };
     let rendered = system::render(target.config, target.config_dir)?;
     for warning in &rendered.warnings {
@@ -801,6 +802,7 @@ fn before_archix(target: &Generation, installed: &BTreeMap<String, archix::pacma
         config_commit: None,
         config_dirty: false,
         before_archix: true,
+        package_capabilities: BTreeMap::new(),
         ..target.clone()
     }
 }

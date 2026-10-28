@@ -274,14 +274,36 @@ fn archive_files(archive: &Archive, cache: &Path, name: &str) -> Result<Vec<(Str
     if !found {
         bail!("the Arch Linux Archive has no {name} at all ({url})");
     }
-    Ok(listed_versions(&text, name))
+    Ok(listed_versions(&text, name, crate::testhooks::archive_today()))
 }
 
-/// (file, version) for each `<name>-<version>-<arch>.pkg.tar.zst` an archive directory listing links to.
-pub fn listed_versions(html: &str, name: &str) -> Vec<(String, String)> {
+/// The day an autoindex row says its file was made, from its DD-Mon-YYYY column.
+fn row_date(row: &str) -> Option<crate::date::Date> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    row.split_whitespace().find_map(|word| {
+        let mut parts = word.split('-');
+        let (Some(day), Some(month), Some(year), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let month = MONTHS.iter().position(|m| *m == month)? + 1;
+        format!("{year}-{month:02}-{day}").parse().ok()
+    })
+}
+
+/// (file, version) for each `<name>-<version>-<arch>.pkg.tar.zst` an archive directory listing links to, leaving out files its rows date after `until`.
+pub fn listed_versions(html: &str, name: &str, until: Option<crate::date::Date>) -> Vec<(String, String)> {
     let mut found: Vec<(String, String)> = html
         .split("href=\"")
         .skip(1)
+        .filter(
+            |row| match (until, row_date(row.split("<a ").next().unwrap_or_default())) {
+                (Some(until), Some(made)) => made <= until,
+                _ => true,
+            },
+        )
         .filter_map(|rest| rest.split('"').next())
         .map(|href| href.replace("%3A", ":").replace("%2B", "+"))
         .filter_map(|file| {
@@ -614,10 +636,28 @@ mod tests {
 <a href="scx-scheds-git-1.0-1-x86_64.pkg.tar.zst">x</a>
 <a href="scx-scheds-1.1.10-1-x86_64.pkg.tar.xz">x</a>
 <a href="scx-scheds-1%3A2.0-1-any.pkg.tar.zst">x</a>"#;
-        let found = listed_versions(html, "scx-scheds");
+        let found = listed_versions(html, "scx-scheds", None);
         let versions: Vec<&str> = found.iter().map(|(_, v)| v.as_str()).collect();
         assert_eq!(versions, ["1.0.9-2", "1.1.2-1", "1:2.0-1"]);
         assert_eq!(found[2].0, "scx-scheds-1:2.0-1-any.pkg.tar.zst");
+    }
+
+    #[test]
+    fn files_the_listing_dates_after_the_day_given_are_left_out() {
+        let html = r#"<a href="../">../</a>
+<a href="lemon-3.53.3-1-x86_64.pkg.tar.zst">lemon-3.53.3-1-x86_64.pkg.tar.zst</a>                  27-Jun-2026 08:19     49K
+<a href="lemon-3.54.0-1-x86_64.pkg.tar.zst">lemon-3.54.0-1-x86_64.pkg.tar.zst</a>                  20-Oct-2026 21:08     49K
+<a href="lemon-3.54.1-1-x86_64.pkg.tar.zst">lemon-3.54.1-1-x86_64.pkg.tar.zst</a>                  21-Oct-2026 00:01     49K
+"#;
+        let versions = |until: Option<&str>| -> Vec<String> {
+            listed_versions(html, "lemon", until.map(|day| day.parse().unwrap()))
+                .into_iter()
+                .map(|(_, version)| version)
+                .collect()
+        };
+        assert_eq!(versions(Some("2026-10-20")), ["3.53.3-1", "3.54.0-1"]);
+        assert_eq!(versions(None), ["3.53.3-1", "3.54.0-1", "3.54.1-1"]);
+        assert_eq!(versions(Some("2026-01-01")), Vec::<String>::new());
     }
 
     #[test]

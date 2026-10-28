@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Caching proxy for archive.archlinux.org's immutable /repos/<date>/ and /packages/ files; it keeps only files it has verified."""
+"""Caching proxy for archive.archlinux.org's immutable /repos/<date>/ and /packages/ files, and /packages/ listings pinned at their first fetch; it keeps only files it has verified."""
 
 import argparse
 import base64
@@ -23,6 +23,9 @@ import urllib.request
 from pathlib import Path
 
 CACHEABLE = re.compile(r"^/(repos/\d{4}/\d{2}/\d{2}/[^/]+/os/[^/]+|packages/[^/]/[^/]+)/[^/]+$")
+LISTING = re.compile(r"^/packages/[^/]/[^/]+/$")
+INDEX = "index.html"
+PACKAGE_FILE = re.compile(r"^packages/[^/]/([^/]+)/([^/]+)$")
 REPO_FILE = re.compile(r"^(repos/\d{4}/\d{2}/\d{2}/([^/]+)/os/[^/]+)/[^/]+$")
 DB = re.compile(r"\.(db|files)(\.tar\.(gz|xz|zst))?$")
 ZSTD = b"\x28\xb5\x2f\xfd"
@@ -32,6 +35,11 @@ CHUNK = 1 << 20
 def cacheable(path):
     parts = path[1:].split("/")
     return bool(CACHEABLE.match(path)) and not any(part in ("", "..") or part.startswith(".") for part in parts)
+
+
+def listed(text, name):
+    hrefs = {urllib.parse.unquote(href) for href in re.findall(r'href="([^"]+)"', text)}
+    return {href for href in hrefs if href.startswith(f"{name}-") and ".pkg.tar" in href}
 
 
 def magic(path):
@@ -144,9 +152,19 @@ class Store:
                 pass
         return self.dbs.get(db_rel)
 
+    # A package file its package's pinned listing doesn't name, which the proxy answers 404 for without asking upstream.
+    def unlisted(self, rel):
+        match = PACKAGE_FILE.match(rel)
+        if not match or match.group(2) == INDEX or not (index := self.find(f"{rel.rsplit('/', 1)[0]}/{INDEX}")):
+            return False
+        return urllib.parse.unquote(match.group(2)).removesuffix(".sig") not in listed(index.read_text(errors="replace"), match.group(1))
+
     # Returns (ok, how it was checked), or None for a file it can't check, which then isn't cached.
     def verify(self, rel, path):
         name = rel.rsplit("/", 1)[1]
+        if name == INDEX and (match := PACKAGE_FILE.match(rel)):
+            files = listed(path.read_text(errors="replace"), match.group(1))
+            return bool(files), f"a listing of {len(files)} {match.group(1)} files" if files else f"no {match.group(1)} files in it"
         if DB.search(name):
             try:
                 self.learn_db(rel, path)
@@ -193,18 +211,22 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         url = urllib.parse.urlsplit(self.path)
         if url.path == "/archix-proxy":
             return self.reply(200, b"ok\n", head)
-        if url.query or not cacheable(url.path):
+        listing = bool(LISTING.match(url.path)) and cacheable(url.path + INDEX)
+        if url.query or not (listing or cacheable(url.path)):
             return self.passthrough(head)
-        rel = url.path[1:]
+        rel = url.path[1:] + (INDEX if listing else "")
         if cached := self.store.find(rel):
             self.note("HIT")
-            return self.send_file(cached, head)
+            return self.send_file(cached, head, "text/html" if listing else "application/octet-stream")
+        if self.store.unlisted(rel):
+            self.note("UNLISTED", "404: the pinned listing has no such file")
+            return self.reply(404, b"", head)
         if head or "Range" in self.headers:
             return self.passthrough(head)
         db_rel = repo_db_rel(rel)
         if db_rel and db_rel != rel and ".pkg.tar" in rel and self.store.repo_db(rel) is None:
             self.fetch(db_rel, None)
-        self.fetch(rel, self)
+        self.fetch(rel, self, url.path if listing else None)
 
     def reply(self, status, body, head, headers=()):
         self.send_response(status)
@@ -215,7 +237,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
-    def send_file(self, path, head):
+    def send_file(self, path, head, kind):
         size = path.stat().st_size
         start, end = 0, size - 1
         if match := re.fullmatch(r"bytes=(\d+)-(\d*)", self.headers.get("Range", "")):
@@ -228,7 +250,7 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             self.send_response(200)
         self.send_header("Content-Length", str(end - start + 1))
         self.send_header("Last-Modified", email.utils.formatdate(path.stat().st_mtime, usegmt=True))
-        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Type", kind)
         self.end_headers()
         if head:
             return
@@ -277,9 +299,9 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             if not head:
                 shutil.copyfileobj(response, self.wfile, CHUNK)
 
-    def fetch(self, rel, client):
+    def fetch(self, rel, client, upstream_path=None):
         try:
-            response = self.open_upstream("/" + rel)
+            response = self.open_upstream(upstream_path or "/" + rel)
         except (urllib.error.HTTPError, OSError) as e:
             status = e.code if isinstance(e, urllib.error.HTTPError) else 502
             self.note("MISS", f"{rel}: {e}")

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
@@ -131,7 +132,14 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     let dir = staged.dir.clone();
     let in_trees = |path: &str| matches!(deployment_tree(path), Some("usr" | "opt")).then(|| dir.join(&path[1..]));
     crate::system::apply::files(paths, plan.system, &in_trees, &accounts)?;
-    set_capabilities(&dir, plan.system)?;
+    let base_packages = crate::generations::read(&store.path(plan.base))
+        .map(|base| base.package_capabilities)
+        .unwrap_or_default();
+    let mut record = plan.record.clone();
+    record.package_capabilities = set_capabilities(&dir, plan.system, &base_packages)?;
+    if record.package_capabilities != plan.record.package_capabilities {
+        crate::generations::write_into(&dir, &record)?;
+    }
     let esp = PathBuf::from(&plan.boot.esp);
     let mut pins = Keep::read(plan.keep, store, &esp)?;
     pins.current = Some(plan.number);
@@ -153,7 +161,7 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
     }
     let records = crate::generations::Store::new(paths);
     if !records.has(plan.number) {
-        records.save(plan.record)?;
+        records.save(&record)?;
     }
     Ok(Built { users, failures })
 }
@@ -188,10 +196,14 @@ fn check_staged(system: &SystemChange, tx: &crate::deploy::view::Transaction) ->
     Ok(())
 }
 
-/// Sets the config's file capabilities in `tree`, a finished deployment not yet committed, after everything that writes or chowns its files.
-pub fn set_capabilities(tree: &Path, system: &SystemChange) -> Result<()> {
+/// Sets the config's file capabilities in `tree`, a finished deployment not yet committed, after everything that writes or chowns its files, given what `base_packages`, the base deployment's record, says packages left its files; returns the new deployment's.
+fn set_capabilities(
+    tree: &Path,
+    system: &SystemChange,
+    base_packages: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>> {
     if system.to.capabilities.is_empty() && system.from.capabilities.is_empty() {
-        return Ok(());
+        return Ok(BTreeMap::new());
     }
     let owned = crate::conflicts::owned_files(&tree.join("pacman"));
     let declared = system
@@ -203,7 +215,10 @@ pub fn set_capabilities(tree: &Path, system: &SystemChange) -> Result<()> {
         .collect();
     crate::system::capabilities::apply(
         tree,
-        &system.from.capabilities,
+        &crate::system::capabilities::Base {
+            declared: &system.from.capabilities,
+            packages: base_packages,
+        },
         &system.to.capabilities,
         &owned,
         &declared,

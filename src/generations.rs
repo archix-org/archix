@@ -38,6 +38,9 @@ pub struct Generation {
     /// The system as the first switch found it, laid out as deployment 1; its packages have no locked files, so it can't be rebuilt once dropped.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub before_archix: bool,
+    /// The capabilities each file whose capabilities this deployment declares or gave back had as its package left it, as getcap prints them, empty for none; written by the build, so not part of the system it describes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub package_capabilities: BTreeMap<String, String>,
 }
 
 /// The config settings a generation was applied with, kept so rollback and gc work without evaluating the config.
@@ -327,6 +330,7 @@ mod tests {
             system: SystemState::default(),
             flatpak: BTreeMap::new(),
             before_archix: false,
+            package_capabilities: BTreeMap::new(),
         }
     }
 
