@@ -96,10 +96,12 @@ if [ -z "$driver" ]; then
     l2=$(docker run -d --rm --network none --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=0 \
       --sysctl net.ipv6.conf.default.disable_ipv6=0 -v "$work":/work -v "$root/tests/vm":/vm:ro archix-arch-test \
       sh -c 'exec python -u /vm/firewall/l2.py /work/l2.sock /work/reach.sock > /work/l2.log 2>&1')
-    trap 'docker rm -f "$l2" > /dev/null 2>&1 || true' EXIT
   fi
-  docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh
-  exit
+  # No EXIT trap of its own: work-dir.sh's frees the heavy slot and the work dir.
+  status=0
+  docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh || status=$?
+  [ -z "${l2:-}" ] || docker rm -f "$l2" > /dev/null 2>&1 || true
+  exit "$status"
 fi
 tty=() args=()
 [ -z "$interactive" ] || tty=(-it) args=(--interactive)
