@@ -234,6 +234,29 @@ pub fn merge_held(base: &Texts, live: &Texts, theirs: &Texts) -> Texts {
     out
 }
 
+/// Days since 1970, shadow's unit.
+fn today() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| (since.as_secs() / 86_400) as i64)
+}
+
+/// Whether a shadow entry is locked as `passwd -l` or `usermod -L` leaves it (a hash behind "!"), or expired; a bare "!" is an account that never had a password, and "!*" a package's.
+pub fn held(fields: &[String]) -> bool {
+    let hash = fields.get(1).map_or("", String::as_str);
+    let locked = hash.starts_with('!') && hash.len() > 1 && hash != "!*";
+    let expired = fields
+        .get(7)
+        .and_then(|days| days.parse::<i64>().ok())
+        .is_some_and(|days| days <= today());
+    locked || expired
+}
+
+/// The rule every declared hash follows, at a switch or a boot: it may replace `user`'s password in `shadow` unless the account is locked or expired there, which only a declared lock ("!" or "*") may go over.
+pub fn may_set_hash(shadow: &str, user: &str, hash: &str) -> bool {
+    hash.starts_with(['!', '*']) || !entries(shadow).get(user).is_some_and(|fields| held(fields))
+}
+
 /// Whether an ID belongs to a person rather than a package: root and the regular range, not nobody.
 fn regular(id: Option<&String>) -> bool {
     id.and_then(|id| id.parse::<u32>().ok())
@@ -375,6 +398,30 @@ mod tests {
             merge3("shadow", base, live, theirs),
             "root:$new:20000::::::\nalice:$a2:20100:0:99999:7:::\ncups:!*:20050::::::\n"
         );
+    }
+
+    #[test]
+    fn a_lock_made_after_the_switch_reaches_the_pending_deployment_over_its_declared_hash() {
+        let base = "root:*:20000::::::\nalice:$old:20000:0:99999:7:::\n";
+        let live = "root:*:20000::::::\nalice:!$old:20100:0:99999:7:::\n";
+        let theirs = "root:*:20000::::::\nalice:$declared:20100:0:99999:7:::\n";
+        let merged = merge3("shadow", base, live, theirs);
+        assert!(merged.contains("alice:!$old:"), "{merged}");
+        assert!(
+            !may_set_hash(&merged, "alice", "$declared"),
+            "nothing enforced later undoes it"
+        );
+        assert!(
+            may_set_hash(&merged, "alice", "!"),
+            "a declared lock may go over a lock"
+        );
+        let expired = "alice:$old:20000:0:99999:7::1:\n";
+        assert!(!may_set_hash(expired, "alice", "$declared"));
+        assert!(
+            may_set_hash("alice:!:20000:0:99999:7:::\n", "alice", "$declared"),
+            "never had a password"
+        );
+        assert!(may_set_hash(base, "alice", "$declared") && may_set_hash(base, "bob", "$declared"));
     }
 
     #[test]

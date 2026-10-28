@@ -81,9 +81,34 @@ return {
         home = archix.option { type = t.nullable(t.path), default = archix.null },
         description = archix.option { type = t.str, default = "" },
         system = archix.option { type = t.bool, default = false, description = "A system user: low uid, no home directory." },
+        hashed_password = archix.option {
+          type = t.nullable(t.str),
+          default = archix.null,
+          description = "The password as a crypt(3) hash (`mkpasswd` prints a yescrypt one), or \"!\" to lock the account; set in the next deployment at every switch, so a password changed with passwd goes back to it, and archix diff says so. A locked or expired account stays so, and a password set in the rescue entry holds until this hash changes. Anyone who can read the config can try to crack it offline.",
+        },
+        initial_hashed_password = archix.option {
+          type = t.nullable(t.str),
+          default = archix.null,
+          description = "A crypt(3) hash set only when archix creates the account; passwd changes it for good after that.",
+        },
+        ssh_authorized_keys = archix.option {
+          type = t.list_of(t.str),
+          default = {},
+          description = "SSH public keys that may log in as the user, one .pub line each, written to /etc/ssh/authorized_keys.d/<user> in the next deployment; ~/.ssh/authorized_keys keeps working beside them. Declaring any installs openssh; enable sshd.service in services.",
+        },
       }),
       default = {},
-      description = "Users archix creates and keeps in step; ones it created are removed (home kept) when they leave the config. Passwords are never managed: set them with passwd.",
+      description = "Users archix creates and keeps in step; ones it created are removed (home kept) when they leave the config. Passwords come from hashed_password or initial_hashed_password, else set them with passwd.",
+    },
+    allow_no_password_login = archix.option {
+      type = t.bool,
+      default = false,
+      description = "Let a switch build a deployment in which neither root nor a wheel or sudo member has a password, which a switch otherwise refuses when the running system has one, as the rescue boot entry needs one to open.",
+    },
+    tmpfiles = archix.option {
+      type = t.list_of(t.str),
+      default = {},
+      description = "tmpfiles.d lines, such as \"d /var/lib/foo 0750 foo foo -\", written to /etc/tmpfiles.d/archix.conf in the next deployment and applied when it boots. Lines touching archix's own paths are refused.",
     },
     groups = archix.option {
       type = t.attrs_of(t.submodule {
@@ -94,4 +119,10 @@ return {
       description = "Groups archix creates and keeps in step.",
     },
   },
+  config = function(cfg)
+    for _, user in pairs(cfg.users) do
+      if #user.ssh_authorized_keys > 0 then return { packages = { "openssh" } } end
+    end
+    return {}
+  end,
 }

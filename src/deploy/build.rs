@@ -9,6 +9,7 @@ use crate::paths::Paths;
 use crate::repos::Repo;
 use crate::system::apply::{Accounts, SystemChange, deployment_tree};
 use crate::system::boot::{self, BootPlan, Entries};
+use crate::system::credentials::{self, Passwords};
 
 /// Everything one deployment is built from, prepared before anything is staged.
 pub struct Plan<'a> {
@@ -26,6 +27,13 @@ pub struct Plan<'a> {
     pub keep: usize,
     /// Puts the config as this switch leaves it into the staging tree at the given directory, before the commit.
     pub config: &'a dyn Fn(&Path) -> Result<()>,
+    /// The passwords a switch sets and whether it may leave nobody a password; a rollback, whose accounts the running system's replace, has none.
+    pub credentials: Option<Credentials<'a>>,
+}
+
+pub struct Credentials<'a> {
+    pub passwords: &'a Passwords,
+    pub allow_no_password_login: bool,
 }
 
 /// What a committed deployment left for after its commit.
@@ -92,12 +100,25 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         Ok(())
     };
     let etc = staging.tree("etc");
+    let before = Accounts::read(&etc);
     let users = crate::system::apply::users(plan.system, &etc, &run, &paths.state)?;
     crate::etcmerge::ids::release(&paths.state, &etc)?;
+    if let Some(credentials) = &plan.credentials {
+        let existed = |name: &str| before.uid(name).is_some();
+        for kept in credentials::apply(&etc, &paths.root.join("etc"), credentials.passwords, &existed)? {
+            eprintln!("warning: {kept}");
+        }
+    }
     let accounts = Accounts::read(&etc);
     let mut failures = crate::system::apply::disable_services(plan.system, &run);
     let in_etc = |path: &str| (deployment_tree(path) == Some("etc")).then(|| etc.join(&path["/etc/".len()..]));
     crate::system::apply::files(paths, plan.system, &in_etc, &accounts)?;
+    check_staged(plan.system, &tx)?;
+    if let Some(credentials) = &plan.credentials
+        && let Some(warning) = credentials::lockout(&etc, &paths.root.join("etc"), credentials.allow_no_password_login)?
+    {
+        eprintln!("{warning}");
+    }
     failures.extend(crate::system::apply::enable_services(plan.system, &run));
     crate::integration::write_staged(&staging, &crate::integration::own_path()?)?;
     crate::integration::sync_pacman_conf(&etc.join("pacman.conf"), plan.repos)?;
@@ -135,6 +156,36 @@ fn build_staged(store: &Store, plan: &Plan) -> Result<Built> {
         records.save(plan.record)?;
     }
     Ok(Built { users, failures })
+}
+
+/// Refuses a deployment whose sudoers drop-in visudo rejects or whose tmpfiles lines systemd-tmpfiles can't parse, checked in the staging root where the new accounts and packages are.
+fn check_staged(system: &SystemChange, tx: &crate::deploy::view::Transaction) -> Result<()> {
+    if system.to.files.contains_key(credentials::SUDOERS) {
+        let output = tx.output(&["visudo", "-c", "-f", credentials::SUDOERS])?;
+        if !output.status.success() {
+            let said = String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            bail!("visudo refuses the sudoers lines from sudo ({said}); nothing was changed");
+        }
+    }
+    if system.to.files.contains_key(credentials::TMPFILES) {
+        let output = tx.output(&["systemd-tmpfiles", "--dry-run", "--create", credentials::TMPFILES])?;
+        let errors = String::from_utf8_lossy(&output.stderr);
+        let unparsed: Vec<&str> = errors
+            .lines()
+            .filter(|line| line.contains(credentials::TMPFILES))
+            .collect();
+        if !unparsed.is_empty() {
+            bail!(
+                "systemd-tmpfiles refuses tmpfiles lines: {}; nothing was changed",
+                unparsed.join("; ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a deployment in which a file archix writes into /usr, an AppImage's command or menu entry, is one a package in pacman database `local_db` ships, which it would replace.

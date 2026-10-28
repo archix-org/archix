@@ -2,7 +2,7 @@ always	lib:archix bin:archix test:no_global_sync test:eval test:formats test:hm
 src/aur/	test:aur test:helper test:recipes
 src/commands/helper.rs	test:helper test:aur
 src/commands/init/	test:init
-src/commands/switch.rs	test:switch test:system test:boot
+src/commands/switch.rs	test:switch test:system test:boot test:credentials
 src/commands/deployments.rs	test:switch test:deploy
 src/commands/eject.rs	test:deploy test:switch
 src/commands/lock.rs	test:switch test:archlinux
@@ -23,7 +23,9 @@ src/system/revoke.rs	test:boot
 src/system/deploy_boot.rs	test:deploy_boot test:deploy
 src/system/rescue	test:rescue test:boot
 src/system/password.rs	test:rescue
-src/commands/rescue.rs	test:rescue
+src/commands/rescue.rs	test:rescue test:credentials
+src/system/credentials.rs	test:credentials test:system
+src/deploy/build.rs	test:deploy test:switch test:boot test:deploy_boot test:credentials
 src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
 src/system/	test:system test:switch
 src/flatpak.rs	test:flatpak

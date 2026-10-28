@@ -610,3 +610,105 @@ fn naming_an_unknown_firewall_service_lists_the_known_ones() {
         "{err}"
     );
 }
+
+/// The evaluated and rendered system of an init.lua returning `body`, or the error either gives.
+fn rendered(body: &str) -> Result<archix::system::Rendered, String> {
+    let dir = config(&[("init.lua", &format!("return {{ {body} }}"))]);
+    let evaluation = eval_at(dir.path(), "desktop").map_err(|e| e.to_string())?;
+    archix::system::render(&evaluation.config, dir.path()).map_err(|e| format!("{e:#}"))
+}
+
+fn rendered_ok(body: &str) -> archix::system::Rendered {
+    rendered(body).unwrap_or_else(|e| panic!("{body}: {e}"))
+}
+
+const HASH: &str = "$y$j9T$u2f4nll1JxfH3hjxKg.8P1$iQmwHBe.iDFgnhAJVdpekC.aTQ8uIWtwoFNGILtAHV9";
+const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@laptop";
+
+#[test]
+fn credentials_render_into_their_files_and_bring_their_packages() {
+    let body = format!(
+        r#"users = {{ alice = {{ groups = {{ "wheel" }}, hashed_password = "{HASH}", ssh_authorized_keys = {{ "{KEY}" }} }} }},
+        sudo = {{ enable = true, extra_rules = {{ "alice ALL=(ALL) NOPASSWD: /usr/bin/systemctl" }} }},
+        tmpfiles = {{ "d /var/lib/foo 0750 alice alice -" }}"#
+    );
+    let dir = config(&[("init.lua", &format!("return {{ {body} }}"))]);
+    let config = eval_at(dir.path(), "desktop").unwrap().config;
+    let packages = serde_json::to_value(&config).unwrap()["packages"].clone();
+    let has = |name: &str| packages.as_array().unwrap().iter().any(|p| p == name);
+    assert!(has("sudo") && has("openssh"), "{packages}");
+    let rendered = archix::system::render(&config, dir.path()).unwrap();
+    let files = &rendered.state.files;
+    let text = |path: &str| String::from_utf8(rendered.blobs[&files[path].sha256].clone()).unwrap();
+    assert_eq!(text("/etc/ssh/authorized_keys.d/alice"), format!("{KEY}\n"));
+    assert_eq!(files["/etc/ssh/authorized_keys.d/alice"].mode, 0o644);
+    assert!(
+        text("/etc/ssh/sshd_config.d/10-archix-authorized-keys.conf")
+            .contains("AuthorizedKeysFile .ssh/authorized_keys /etc/ssh/authorized_keys.d/%u\n")
+    );
+    assert_eq!(files["/etc/sudoers.d/archix"].mode, 0o440);
+    assert!(
+        text("/etc/sudoers.d/archix")
+            .contains("%wheel ALL=(ALL:ALL) ALL\nalice ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n")
+    );
+    assert_eq!(
+        text("/etc/tmpfiles.d/archix.conf"),
+        "d /var/lib/foo 0750 alice alice -\n"
+    );
+    assert_eq!(rendered.state.users["alice"].hashed_password.as_deref(), Some(HASH));
+    let none = rendered_ok("users = { bob = {} }");
+    assert!(
+        !none
+            .state
+            .files
+            .keys()
+            .any(|path| path.contains("ssh") || path.contains("sudoers"))
+    );
+}
+
+#[test]
+fn credentials_that_arent_what_they_should_be_are_refused_without_printing_the_hash() {
+    for (body, says) in [
+        (
+            r#"users = { alice = { hashed_password = "hunter2" } }"#.to_string(),
+            "looks like a plaintext password",
+        ),
+        (
+            r#"users = { alice = { initial_hashed_password = "$1$x$abcdefghijklmnopqrstuv" } }"#.to_string(),
+            "old hash type",
+        ),
+        (
+            format!(r#"users = {{ alice = {{ hashed_password = "{}" }} }}"#, &HASH[..30]),
+            "isn't a whole one",
+        ),
+        (
+            format!(r#"users = {{ alice = {{ hashed_password = "{HASH}", initial_hashed_password = "{HASH}" }} }}"#),
+            "not both",
+        ),
+        (
+            r#"users = { alice = { ssh_authorized_keys = { "AAAAC3Nza me@laptop" } } }"#.to_string(),
+            "ssh_authorized_keys[1] names no key type",
+        ),
+        (
+            r#"users = { alice = { ssh_authorized_keys = { "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" } } }"#.to_string(),
+            "isn't a ssh-rsa key",
+        ),
+        (r#"tmpfiles = { "R /var/lib" }"#.to_string(), "would reach into /var/lib/archix"),
+        (r#"tmpfiles = { "d /archix/x 0755 root root -" }"#.to_string(), "touches /archix"),
+        (
+            r#"boot = { esp = "/boot/efi" }, tmpfiles = { "r /boot/efi/x" }"#.to_string(),
+            "touches /boot/efi",
+        ),
+        (r#"tmpfiles = { "y /x" }"#.to_string(), "isn't a tmpfiles.d type"),
+        (
+            r#"sudo = { enable = true, extra_rules = { "a\nb" } }"#.to_string(),
+            "one sudoers line",
+        ),
+    ] {
+        let error = rendered(&body).err().unwrap_or_else(|| panic!("{body} was accepted"));
+        assert!(error.contains(says), "{body}: {error}");
+        assert!(!error.contains(&HASH[10..]), "{error}");
+    }
+    let warned = rendered_ok(r#"tmpfiles = { "R /home/*/.cache/thumbnails" }"#).warnings;
+    assert!(warned.iter().any(|w| w.contains("under /home")), "{warned:?}");
+}

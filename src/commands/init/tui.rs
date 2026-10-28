@@ -1355,6 +1355,7 @@ pub(super) mod tests {
                     secrets: 1,
                 },
             )]),
+            authorized_keys: BTreeMap::new(),
         }
     }
 

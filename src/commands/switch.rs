@@ -239,6 +239,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         before_archix: false,
     };
     let rendered = system::render(target.config, target.config_dir)?;
+    for warning in &rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if let Some(warning) = system::credentials::remote_warning(&rendered.state.users, target.config_dir) {
+        eprintln!("{warning}");
+    }
+    let passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    for line in system::credentials::override_lines(&passwords) {
+        println!("{line}");
+    }
     generation.system = rendered.state.clone();
     let system_change = SystemChange {
         from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
@@ -247,7 +257,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let here = current_root(&paths);
     let place = place_in(&paths);
     let accounts = Accounts::read(&here.join("etc"));
-    let system_lines = system::apply::describe(&system_change, &place, &accounts, &here)?;
+    let mut system_lines = system::apply::describe(&system_change, &place, &accounts, &here)?;
+    system_lines.extend(system::credentials::describe(&passwords, &here.join("etc")));
+    for kept in system::credentials::kept_locks(&passwords, &[&here.join("etc"), &paths.root.join("etc")]) {
+        eprintln!("warning: {kept}");
+    }
     system::apply::check(&paths, &system_change, &place)?;
     if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
         system::firewall::validate(&String::from_utf8_lossy(&rendered.blobs[&rules.sha256]))?;
@@ -599,6 +613,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
                 carry_config(target.config_dir, &paths, staged)?;
                 super::lock::stage_deferred(&paths, &staged.join("etc"))
             },
+            credentials: Some(deploy::build::Credentials {
+                passwords: &passwords,
+                allow_no_password_login: system::allows_no_password_login(target.config),
+            }),
         },
     )
     .inspect_err(|_| {
@@ -608,6 +626,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     })?;
     soft_failures.extend(made.failures);
     resume_etc_merge(&paths, paused);
+    system::credentials::forget_overrides(&paths.state, &passwords);
     after_commit(
         target,
         &declared,
@@ -673,7 +692,14 @@ fn after_commit(
     super::lock::write_deferred()?;
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
-    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
+    let with_password = system::credentials::with_password(&system_change.to.users);
+    if let Err(e) = system::apply::create_homes(
+        &users,
+        &accounts,
+        &deployment.join("etc/skel"),
+        &paths.root,
+        &with_password,
+    ) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
     write_live_files(
@@ -1567,6 +1593,7 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
                     skipped.iter().for_each(|line| eprintln!("warning: {line}"));
                     carry_config(config_dir, &paths, staged)
                 },
+                credentials: None,
             },
         )
         .inspect_err(|_| resume_etc_merge(&paths, paused))?;
@@ -1583,7 +1610,14 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
         soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
     }
     let accounts = Accounts::read(&deployment.join("etc"));
-    if let Err(e) = system::apply::create_homes(&users, &accounts, &deployment.join("etc/skel"), &paths.root) {
+    let with_password = BTreeSet::new();
+    if let Err(e) = system::apply::create_homes(
+        &users,
+        &accounts,
+        &deployment.join("etc/skel"),
+        &paths.root,
+        &with_password,
+    ) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
     write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);

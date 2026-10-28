@@ -1792,6 +1792,7 @@ fn a_build_that_fails_on_a_full_btrfs_leaves_no_staging_tree() {
         record: &record,
         keep: 2,
         config: &|_| Ok(()),
+        credentials: None,
     };
     let Err(err) = archix::deploy::build::build(&store, &plan) else {
         panic!("the build can't succeed");

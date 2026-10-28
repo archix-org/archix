@@ -25,6 +25,7 @@ pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("hooks", include_str!("modules/hooks.lua")),
     ("environment", include_str!("modules/environment.lua")),
     ("firewall", include_str!("modules/firewall.lua")),
+    ("sudo", include_str!("modules/sudo.lua")),
     ("boot", include_str!("modules/boot.lua")),
     ("appimages", include_str!("modules/appimages.lua")),
     ("flatpak", include_str!("modules/flatpak.lua")),

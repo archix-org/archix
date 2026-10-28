@@ -369,7 +369,7 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
     Ok(lines)
 }
 
-/// Creates and updates the users and groups archix manages in a staging root through `run`, which runs a command in it, reading its accounts from `etc`; never touches passwords. Returns the regular users it created, whose homes `create_homes` makes once the deployment is committed.
+/// Creates and updates the users and groups archix manages in a staging root through `run`, which runs a command in it, reading its accounts from `etc`; passwords are credentials::apply's. Returns the regular users it created, whose homes `create_homes` makes once the deployment is committed.
 pub fn users(
     change: &SystemChange,
     etc: &Path,
@@ -445,8 +445,14 @@ pub fn users(
     Ok(created)
 }
 
-/// Makes the homes of users a committed deployment created, from its /etc/skel, owned by them.
-pub fn create_homes(created: &[String], accounts: &Accounts, skel: &Path, root: &Path) -> Result<()> {
+/// Makes the homes of users a committed deployment created, from its /etc/skel, owned by them; `with_password` are those whose password the config sets.
+pub fn create_homes(
+    created: &[String],
+    accounts: &Accounts,
+    skel: &Path,
+    root: &Path,
+    with_password: &BTreeSet<String>,
+) -> Result<()> {
     for name in created {
         let Some((home, gid)) = accounts.home(name) else {
             continue;
@@ -467,7 +473,10 @@ pub fn create_homes(created: &[String], accounts: &Accounts, skel: &Path, root: 
         fs::set_permissions(&home, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod {}", home.display()))?;
         chown_tree(&home, uid, gid)?;
-        eprintln!("created user {name}; set a password with `passwd {name}` after the reboot");
+        match with_password.contains(name) {
+            true => eprintln!("created user {name}, with the password the config sets"),
+            false => eprintln!("created user {name}; set a password with `passwd {name}` after the reboot"),
+        }
     }
     Ok(())
 }
@@ -1513,6 +1522,8 @@ mod tests {
             home: None,
             description: "Alice".into(),
             system: false,
+            hashed_password: None,
+            initial_hashed_password: None,
         };
         assert!(!accounts.differs("alice", &alice));
         let more = User {

@@ -347,6 +347,16 @@ pub(super) fn pending(
     let store = Store::new(&paths);
     let current = store.current()?.map(|n| store.get(n)).transpose()?;
     let rendered = system::render(target.config, target.config_dir)?;
+    for warning in &rendered.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if let Some(warning) = system::credentials::remote_warning(&rendered.state.users, target.config_dir) {
+        eprintln!("{warning}");
+    }
+    let passwords = system::credentials::resolve(&rendered.state.users, &paths.state);
+    for line in system::credentials::override_lines(&passwords) {
+        println!("{line}");
+    }
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let change = SystemChange {
         from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
@@ -372,6 +382,11 @@ pub(super) fn pending(
         &Accounts::read(&here.join("etc")),
         &here,
     )?);
+    let etc = here.join("etc");
+    lines.extend(system::credentials::describe(&passwords, &etc));
+    for kept in system::credentials::kept_locks(&passwords, &[&etc, &paths.root.join("etc")]) {
+        eprintln!("warning: {kept}");
+    }
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);

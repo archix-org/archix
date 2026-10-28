@@ -348,6 +348,8 @@ mod tests {
             home: None,
             description: String::new(),
             system: false,
+            hashed_password: None,
+            initial_hashed_password: None,
         }
     }
 

@@ -132,6 +132,8 @@ struct Facts {
     flatpak_remotes: BTreeMap<String, Remote>,
     flatpak_gone: Vec<String>,
     dotfiles: BTreeMap<String, Home>,
+    /// Keys from /etc/ssh/authorized_keys.d, by user, which go into the users init declares instead of their files.
+    authorized_keys: BTreeMap<String, Vec<String>>,
 }
 
 /// One user's home and the dotfiles init can offer from it.
@@ -581,6 +583,16 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .filter(|file| !Path::new(&file.path).starts_with(default_dir))
         .collect();
     files.sort_by(|a, b| a.path.cmp(&b.path));
+    let (tmpfiles, taken) = capture::tmpfiles(root, &files);
+    files.retain(|file| !taken.contains(&file.path));
+    if !tmpfiles.is_empty() {
+        settings_summary.push(format!(
+            "{} from /etc/tmpfiles.d",
+            count(tmpfiles.len(), "tmpfiles line", "tmpfiles lines")
+        ));
+        settings.push(("tmpfiles".to_string(), Lua::strings(&tmpfiles)));
+    }
+    let authorized_keys = capture::authorized_keys(root, &files);
     let mut secret_paths = found.secrets;
     secret_paths.extend(units.secrets);
     let mut secret_paths = capture::group_secrets(&secret_paths);
@@ -719,6 +731,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         flatpak_remotes,
         flatpak_gone,
         dotfiles,
+        authorized_keys,
     })
 }
 
@@ -961,6 +974,9 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
                 if !user.description.is_empty() {
                     fields.push(("description".into(), Lua::str(&user.description)));
                 }
+                if let Some(keys) = facts.authorized_keys.get(name) {
+                    fields.push(("ssh_authorized_keys".into(), Lua::strings(keys)));
+                }
                 (name.clone(), Lua::Table(fields))
             })
             .collect();
@@ -998,6 +1014,9 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     let mut table = Vec::new();
     for i in &answers.files {
         let file = &facts.files[*i];
+        if keys_declared(facts, answers, &file.path) {
+            continue;
+        }
         if let Some(target) = &file.link {
             table.push((file.path.clone(), Lua::Table(vec![("link".into(), Lua::str(target))])));
             continue;
@@ -1087,6 +1106,12 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         config.home_dir = Some(home.clone());
     }
     config
+}
+
+/// Whether `path` is an /etc/ssh/authorized_keys.d file whose keys go into a user init declares, rather than into files.
+fn keys_declared(facts: &Facts, answers: &Answers, path: &str) -> bool {
+    path.strip_prefix(&format!("{}/", archix::system::credentials::KEYS_DIR))
+        .is_some_and(|user| facts.authorized_keys.contains_key(user) && answers.users.contains(user))
 }
 
 /// Whether `unit` is a unit file init would copy out of /usr/lib that `answers` leaves out, so enabling it would fail.
@@ -1179,6 +1204,23 @@ fn report(facts: &Facts, answers: &Answers) {
             count(system.len(), "system user", "system users"),
             some_of(&system, 6)
         ));
+    }
+    let keyed: Vec<String> = facts
+        .authorized_keys
+        .keys()
+        .filter(|user| answers.users.contains(*user))
+        .cloned()
+        .collect();
+    if !keyed.is_empty() {
+        done(format!(
+            "SSH keys from /etc/ssh/authorized_keys.d as ssh_authorized_keys: {}",
+            some_of(&keyed, 6)
+        ));
+    }
+    if !users.is_empty() {
+        note(
+            "passwords aren't captured: their hashes are secrets, which a config never holds. Each user keeps the password it has; a fresh machine gets them from users.<name>.hashed_password or passwd",
+        );
     }
     let copied: Vec<String> = facts
         .files
@@ -1836,6 +1878,39 @@ mod tests {
         assert!(
             !host.contains("handmade.timer"),
             "without its unit file, its enablement goes too:\n{host}"
+        );
+    }
+
+    #[test]
+    fn authorized_keys_of_a_declared_user_go_into_it_instead_of_files() {
+        let mut facts = super::tui::tests::facts();
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl me@laptop";
+        let me = facts.accounts.users.keys().next().cloned().unwrap();
+        facts.authorized_keys.insert(me.clone(), vec![key.to_string()]);
+        facts.files = vec![FoundFile {
+            path: format!("/etc/ssh/authorized_keys.d/{me}"),
+            mode: 0o644,
+            owner: "root".into(),
+            group: "root".into(),
+            recommended: true,
+            edited: false,
+            source: None,
+            link: None,
+        }];
+        let mut answers = Answers::recommended(&facts);
+        answers.files.insert(0);
+        answers.users.insert(me.clone());
+        let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            host.contains("ssh_authorized_keys = {") && host.contains(&format!("\"{key}\"")),
+            "{host}"
+        );
+        assert!(!host.contains("authorized_keys.d"), "{host}");
+        answers.users.remove(&me);
+        let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            host.contains("authorized_keys.d"),
+            "an undeclared user's keys stay a file:\n{host}"
         );
     }
 

@@ -398,6 +398,73 @@ pub fn unowned_units(root: &Path, installed: &BTreeMap<String, Installed>) -> Fo
     out
 }
 
+/// The lines of hand-made /etc/tmpfiles.d files among `files`, for the tmpfiles option, with the paths they come from; a file masking a packaged one of its name, a link, or one with a line archix refuses stays a file.
+pub fn tmpfiles(root: &Path, files: &[FoundFile]) -> (Vec<String>, Vec<String>) {
+    let (mut lines, mut taken) = (Vec::new(), Vec::new());
+    for file in files {
+        let Some(name) = file.path.strip_prefix("/etc/tmpfiles.d/") else {
+            continue;
+        };
+        if !name.ends_with(".conf") || name.contains('/') || file.link.is_some() || file.source.is_some() {
+            continue;
+        }
+        if on_disk(root, &format!("/usr/lib/tmpfiles.d/{name}"))
+            .symlink_metadata()
+            .is_ok()
+        {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(on_disk(root, &file.path)) else {
+            continue;
+        };
+        let own: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        let protected = ["/archix", "/var/lib/archix", "/var/usrlocal", "/efi", "/boot"].map(str::to_string);
+        if crate::system::credentials::check_tmpfiles(&own, &protected).is_ok() {
+            lines.extend(own);
+            taken.push(file.path.clone());
+        }
+    }
+    (lines, taken)
+}
+
+/// The keys in /etc/ssh/authorized_keys.d/<user> files among `files`, by user, for users.<name>.ssh_authorized_keys; a file with a line archix refuses stays a file.
+pub fn authorized_keys(root: &Path, files: &[FoundFile]) -> BTreeMap<String, Vec<String>> {
+    let mut keys = BTreeMap::new();
+    for file in files {
+        let Some(user) = file
+            .path
+            .strip_prefix(&format!("{}/", crate::system::credentials::KEYS_DIR))
+        else {
+            continue;
+        };
+        if user.contains('/') || file.link.is_some() {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(on_disk(root, &file.path)) else {
+            continue;
+        };
+        let lines: Vec<String> = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect();
+        if !lines.is_empty()
+            && lines
+                .iter()
+                .all(|line| crate::system::credentials::check_key("", line).is_ok())
+        {
+            keys.insert(user.to_string(), lines);
+        }
+    }
+    keys
+}
+
 /// Secret paths as a reader wants them: everything under one of the secret directories as that directory with a count.
 pub fn group_secrets(paths: &[String]) -> Vec<String> {
     let mut dirs: BTreeMap<&str, usize> = BTreeMap::new();
@@ -886,6 +953,32 @@ mod tests {
         assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
         assert!(!listed(&LISTS.recommended, "/etc/shells"));
         assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));
+    }
+
+    #[test]
+    fn hand_made_tmpfiles_become_lines_unless_they_mask_a_packaged_file_or_touch_archixs_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let etc = root.path().join("etc/tmpfiles.d");
+        fs::create_dir_all(&etc).unwrap();
+        fs::create_dir_all(root.path().join("usr/lib/tmpfiles.d")).unwrap();
+        fs::write(etc.join("foo.conf"), "# mine\nd /var/lib/foo 0750 root root -\n\n").unwrap();
+        fs::write(etc.join("systemd.conf"), "").unwrap();
+        fs::write(root.path().join("usr/lib/tmpfiles.d/systemd.conf"), "d /run 0755\n").unwrap();
+        fs::write(etc.join("bad.conf"), "R /var/lib\n").unwrap();
+        let file = |path: &str| FoundFile {
+            path: path.into(),
+            mode: 0o644,
+            owner: "root".into(),
+            group: "root".into(),
+            recommended: true,
+            edited: false,
+            source: None,
+            link: None,
+        };
+        let files = ["foo", "systemd", "bad"].map(|name| file(&format!("/etc/tmpfiles.d/{name}.conf")));
+        let (lines, taken) = tmpfiles(root.path(), &files);
+        assert_eq!(lines, ["d /var/lib/foo 0750 root root -"]);
+        assert_eq!(taken, ["/etc/tmpfiles.d/foo.conf"]);
     }
 
     #[test]

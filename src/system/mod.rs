@@ -4,6 +4,7 @@ pub mod authenticode;
 pub mod blobs;
 pub mod boot;
 pub mod btrfs;
+pub mod credentials;
 pub mod deploy_boot;
 pub mod firewall;
 pub mod health;
@@ -85,6 +86,12 @@ pub struct User {
     pub home: Option<String>,
     pub description: String,
     pub system: bool,
+    /// Set at every switch; it's in the config, so in every generation record too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hashed_password: Option<String>,
+    /// Set only when the account is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_hashed_password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +106,8 @@ pub struct Rendered {
     pub blobs: BTreeMap<String, Vec<u8>>,
     /// Contents that come from a download instead: sha256 to url, fetched into the blob store at switch.
     pub fetches: BTreeMap<String, String>,
+    /// What a switch and diff should warn about the config, such as tmpfiles lines that delete under /home.
+    pub warnings: Vec<String>,
 }
 
 const FORBIDDEN: &[&str] = &[
@@ -438,8 +447,58 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             home: str_of(spec, "home").map(str::to_string),
             description: str_of(spec, "description").unwrap_or("").to_string(),
             system: get(spec, "system") == Some(&Value::Bool(true)),
+            hashed_password: str_of(spec, "hashed_password").map(str::to_string),
+            initial_hashed_password: str_of(spec, "initial_hashed_password").map(str::to_string),
         };
+        if user.hashed_password.is_some() && user.initial_hashed_password.is_some() {
+            bail!("users.{name}: give hashed_password or initial_hashed_password, not both");
+        }
+        for (key, hash) in [
+            ("hashed_password", &user.hashed_password),
+            ("initial_hashed_password", &user.initial_hashed_password),
+        ] {
+            if let Some(hash) = hash {
+                credentials::check_hash(&format!("users.{name}.{key}"), hash)?;
+            }
+        }
+        let keys = strings(get(spec, "ssh_authorized_keys"));
+        for (i, key) in keys.iter().enumerate() {
+            credentials::check_key(&format!("users.{name}.ssh_authorized_keys[{}]", i + 1), key)?;
+        }
+        if !keys.is_empty() {
+            b.text(
+                &format!("{}/{}", credentials::KEYS_DIR, unit_name(name)?),
+                &format!("{}\n", keys.join("\n")),
+            );
+        }
         b.state.users.insert(name.clone(), user);
+    }
+    if b.state.files.keys().any(|path| path.starts_with(credentials::KEYS_DIR)) {
+        b.text(
+            credentials::SSHD_DROP_IN,
+            &format!(
+                "# Written by archix: users' keys from the config, besides their own ~/.ssh/authorized_keys.\nAuthorizedKeysFile .ssh/authorized_keys {}/%u\n",
+                credentials::KEYS_DIR
+            ),
+        );
+    }
+    if let Some(sudo) = root("sudo")
+        && get(sudo, "enable") == Some(&Value::Bool(true))
+    {
+        let text = credentials::sudoers(
+            get(sudo, "wheel") != Some(&Value::Bool(false)),
+            get(sudo, "wheel_needs_password") != Some(&Value::Bool(false)),
+            &strings(get(sudo, "extra_rules")),
+        )?;
+        b.content(credentials::SUDOERS, text.into_bytes(), 0o440, "root", "root");
+    }
+    let tmpfiles = strings(root("tmpfiles"));
+    let mut warnings = Vec::new();
+    if !tmpfiles.is_empty() {
+        let esp = root("boot").and_then(|boot| str_of(boot, "esp")).unwrap_or("/efi");
+        let own = ["/archix", "/var/lib/archix", "/var/usrlocal", esp].map(str::to_string);
+        warnings.extend(credentials::check_tmpfiles(&tmpfiles, &own)?);
+        b.text(credentials::TMPFILES, &format!("{}\n", tmpfiles.join("\n")));
     }
     for (key, target) in [
         ("services", &mut b.state.services),
@@ -465,6 +524,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         state: b.state,
         blobs: b.blobs,
         fetches: b.fetches,
+        warnings,
     })
 }
 
@@ -659,6 +719,11 @@ fn merge_of(spec: &Value, immutable: bool, what: &str) -> Result<Option<merge::M
     };
     merge.apply("").with_context(|| format!("{what}.merge"))?;
     Ok(Some(merge))
+}
+
+/// Whether the config lets a switch leave nobody a password, as `allow_no_password_login`.
+pub fn allows_no_password_login(config: &Value) -> bool {
+    config_get(config, "allow_no_password_login") == Some(&Value::Bool(true))
 }
 
 fn config_get<'a>(config: &'a Value, key: &str) -> Option<&'a Value> {

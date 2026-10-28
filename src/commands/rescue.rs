@@ -742,10 +742,27 @@ impl Session {
             bail!("the passwords differ; nothing was changed");
         }
         let hash = password::sha512_crypt(first.as_bytes(), &password::salt()?);
-        for number in targets {
-            password::set(&store.path(number).join("etc"), user, &hash)
+        for number in &targets {
+            password::set(&store.path(*number).join("etc"), user, &hash)
                 .with_context(|| format!("setting {user}'s password in deployment {number}"))?;
             println!("set {user}'s password in deployment {number}");
+        }
+        let paths = Paths::under(&root);
+        let records = archix::generations::Store::new(&paths);
+        let declared = store
+            .current()?
+            .and_then(|current| records.get(current).ok())
+            .and_then(|generation| generation.system.users.get(user)?.hashed_password.clone());
+        if let Some(declared) = declared {
+            archix::system::credentials::record_override(&paths.state, user, Some(&declared))?;
+            let note = format!(
+                "archix: {user}'s password was set in the rescue entry; switches keep it over users.{user}.hashed_password until that hash changes in the config"
+            );
+            let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
+            notes.push_str(&note);
+            notes.push('\n');
+            archix::durable::write(&paths.notes(), notes.as_bytes())?;
+            println!("{note}");
         }
         Ok(())
     }
