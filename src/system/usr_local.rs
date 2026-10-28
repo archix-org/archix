@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::paths::Paths;
 
@@ -48,6 +48,215 @@ pub fn on_disk(root: &Path, path: &str) -> PathBuf {
     }
 }
 
+/// Where quarantined boot-time files go, relative to the root, each run in a directory named by its time.
+pub const QUARANTINE: &str = "var/usrlocal.quarantine";
+
+/// How to bring up systemd-boot's menu, whose timeout may be 0, to start the fallback UKI or an older deployment.
+pub const MENU_HINT: &str = "to start the fallback UKI or an older deployment, bring up systemd-boot's menu by holding Space (or pressing it repeatedly) as the machine starts, or from a running system with `systemctl reboot --boot-loader-menu=60`; `sudo bootctl set-timeout 5` shows it at every boot";
+
+/// The state of the hold that keeps /usr/local out of every boot once a boot left it out while it held boot-time files.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Hold {
+    /// Out until its boot-time files are gone or `archix usr-local release`.
+    Held,
+    /// Out until `archix usr-local release`, as the last boot that bound it again didn't finish.
+    Failed,
+    /// `archix usr-local release` asked the next boot to bind it once.
+    Trial,
+    /// A boot bound it under the hold, which archix-boot-complete.service lifts once that boot reaches multi-user.target.
+    Trying,
+}
+
+impl Hold {
+    fn word(self) -> &'static str {
+        match self {
+            Hold::Held => "held",
+            Hold::Failed => "failed",
+            Hold::Trial => "trial",
+            Hold::Trying => "trying",
+        }
+    }
+}
+
+/// The hold's file, under the state directory `state`, on the root so the initramfs reads it.
+pub fn hold_path(state: &Path) -> PathBuf {
+    state.join("boot").join("usr-local-hold")
+}
+
+/// The hold and the reason it was first set, if there is one.
+pub fn read_hold(state: &Path) -> Option<(Hold, String)> {
+    let text = fs::read_to_string(hold_path(state)).ok()?;
+    let (word, why) = text.trim().split_once(' ').unwrap_or((text.trim(), ""));
+    let hold = match word {
+        "held" => Hold::Held,
+        "failed" => Hold::Failed,
+        "trial" => Hold::Trial,
+        "trying" => Hold::Trying,
+        _ => Hold::Held,
+    };
+    Some((hold, why.to_string()))
+}
+
+/// Writes the hold, durably, keeping the reason it was first set.
+pub fn write_hold(state: &Path, hold: Hold, why: &str) -> Result<()> {
+    let path = hold_path(state);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    crate::durable::write(&path, format!("{} {why}\n", hold.word()).as_bytes())
+}
+
+/// In the initramfs, for a boot that would bind /usr/local: why the hold keeps it out, or None to bind it, after recording that this boot tries it again when the hold lets it.
+pub fn held(root: &Path, write: &dyn Fn(Hold, &str) -> Result<()>) -> Option<String> {
+    let (hold, why) = read_hold(&crate::paths::Paths::under(root).state)?;
+    let release = match hold {
+        Hold::Trying => {
+            return Some(
+                "the last boot that bound it again didn't reach multi-user.target, so it stays out until `sudo archix usr-local release`"
+                    .to_string(),
+            );
+        }
+        Hold::Failed => {
+            return Some(format!(
+                "it is held out since {why}, and the last boot that bound it again didn't reach multi-user.target; `sudo archix usr-local release` lets the next boot try it"
+            ));
+        }
+        Hold::Held if !boot_files(root).is_empty() => {
+            return Some(format!("it is held out since {why}"));
+        }
+        Hold::Held => "its boot-time files are gone",
+        Hold::Trial => "`archix usr-local release` asked for it",
+    };
+    match write(Hold::Trying, &why) {
+        Ok(()) => {
+            println!(
+                "archix: binding /usr/local again, held out since {why}, as {release}; if this boot doesn't reach multi-user.target, the next one leaves it out"
+            );
+            None
+        }
+        Err(e) => Some(format!(
+            "it is held out since {why}, and recording this boot's try failed ({e:#})"
+        )),
+    }
+}
+
+/// At boot, from archix-boot.service, before the booted deployment is made current: holds /usr/local out of every later boot when this one left it out (the fallback UKI, an older deployment) while it held boot-time files, so a file there that broke the current deployment's boot can't do it again once its fallback is current; marks a try that didn't finish; then updates the login note.
+pub fn at_boot(paths: &Paths) -> Result<()> {
+    let record = fs::read_to_string(paths.root.join(RECORD.trim_start_matches('/'))).unwrap_or_default();
+    let record = record.trim();
+    let hold = read_hold(&paths.state);
+    if let Some(why) = record.strip_prefix("skipped ")
+        && hold.is_none()
+    {
+        let files = boot_files(&paths.root);
+        if !files.is_empty() {
+            let why = format!("a boot left it out ({why}) while it held {}", shown(&files));
+            write_hold(&paths.state, Hold::Held, &why)?;
+            println!("archix: /usr/local stays out of every boot from now on: {why}");
+        }
+    }
+    if record.starts_with("held ")
+        && let Some((Hold::Trying, why)) = &hold
+    {
+        write_hold(&paths.state, Hold::Failed, why)?;
+    }
+    sync_note(paths)
+}
+
+/// From archix-boot-complete.service at multi-user.target: a boot that bound /usr/local under the hold made it, so the hold goes.
+pub fn confirm(paths: &Paths) -> Result<()> {
+    let record = fs::read_to_string(paths.root.join(RECORD.trim_start_matches('/'))).unwrap_or_default();
+    if record.trim() != "mounted" || !matches!(read_hold(&paths.state), Some((Hold::Trying, _))) {
+        return Ok(());
+    }
+    fs::remove_file(hold_path(&paths.state)).context("removing the /usr/local hold")?;
+    println!("archix: this boot bound /usr/local again and reached multi-user.target, so it is no longer held out");
+    Ok(())
+}
+
+/// `archix usr-local release`: lets the next boot bind /usr/local again, once; if that boot doesn't reach multi-user.target, the one after leaves it out.
+pub fn release(paths: &Paths) -> Result<String> {
+    let Some((hold, why)) = read_hold(&paths.state) else {
+        return Ok("/usr/local isn't held out; every boot of the current deployment binds it".to_string());
+    };
+    if hold == Hold::Trying {
+        return Ok(
+            "this boot bound /usr/local under the hold already; it is lifted once this boot reaches multi-user.target"
+                .to_string(),
+        );
+    }
+    write_hold(&paths.state, Hold::Trial, &why)?;
+    Ok(format!(
+        "the next boot binds /usr/local again (held out since {why}); if it doesn't reach multi-user.target, the boot after leaves /usr/local out again"
+    ))
+}
+
+/// `archix usr-local quarantine`: moves the files under /var/usrlocal that systemd, udev or the module loader read at boot into /var/usrlocal.quarantine/<time>, keeping their paths, and lets the next boot bind /usr/local again.
+pub fn quarantine(paths: &Paths) -> Result<String> {
+    let root = &paths.root;
+    if !crate::system::deploy_boot::uses_deployments(root) {
+        bail!(
+            "this machine has no deployments, so /usr/local is the root's own and every boot uses it; move the files yourself"
+        );
+    }
+    let files = boot_files(root);
+    let mut lines = Vec::new();
+    if !files.is_empty() {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let into = root.join(QUARANTINE).join(secs.to_string());
+        for file in &files {
+            let rel = file.trim_start_matches("/usr/local/");
+            let (from, to) = (dir(root).join(rel), into.join(rel));
+            fs::create_dir_all(to.parent().expect("a file under a directory"))
+                .with_context(|| format!("creating {}", to.display()))?;
+            fs::rename(&from, &to).with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        }
+        crate::durable::sync_filesystems_checked(&[dir(root)])?;
+        lines.push(format!(
+            "moved {} into {}, under the same paths; move one back to /usr/local to use it again",
+            shown(&files),
+            into.display()
+        ));
+    } else {
+        lines.push("/var/usrlocal holds no files that systemd, udev or the module loader read at boot".to_string());
+    }
+    if let Some((_, why)) = read_hold(&paths.state) {
+        write_hold(&paths.state, Hold::Trial, &why)?;
+        lines.push("the next boot binds /usr/local again".to_string());
+    }
+    Ok(lines.join("\n"))
+}
+
+/// `archix status`'s line about the hold, if there is one.
+pub fn hold_status(paths: &Paths) -> Option<String> {
+    let (hold, why) = read_hold(&paths.state)?;
+    Some(match hold {
+        Hold::Trial => format!("/usr/local: held out since {why}; the next boot binds it again, once"),
+        Hold::Trying => format!(
+            "/usr/local: held out since {why}; this boot bound it again, and the hold goes once it reaches multi-user.target"
+        ),
+        Hold::Held | Hold::Failed => format!(
+            "/usr/local: every boot leaves it out, held since {why}{}; `sudo archix usr-local quarantine` moves its boot-time files to /{QUARANTINE}, or once you've fixed them `sudo archix usr-local release` lets the next boot bind it again",
+            if hold == Hold::Failed {
+                ", and the last boot that bound it again didn't finish"
+            } else {
+                ""
+            }
+        ),
+    })
+}
+
+/// Up to ten of `files` and how many more.
+fn shown(files: &[String]) -> String {
+    let listed: Vec<&str> = files.iter().take(10).map(String::as_str).collect();
+    match files.len() - listed.len() {
+        0 => listed.join(", "),
+        n => format!("{} and {n} more", listed.join(", ")),
+    }
+}
+
 /// Why a boot of deployment `generation`, started from `selected`, leaves /usr/local out: the fallback UKI, or a deployment older than current, as systemd-boot's fallback after a newer one's failed tries boots; None binds it.
 pub fn skip_reason(selected: Option<&str>, generation: u32, current: Option<u32>) -> Option<String> {
     if let Some(entry) = selected.filter(|entry| crate::system::boot::parse_fallback(entry).is_some()) {
@@ -61,11 +270,25 @@ pub fn skip_reason(selected: Option<&str>, generation: u32, current: Option<u32>
     }
 }
 
-/// The login note a boot that left /usr/local out says why in.
-fn skipped_note(why: &str) -> String {
-    format!(
-        "archix: this boot left /usr/local unmounted, as {why}; it shows the deployment's own empty, read-only /usr/local. The shared one, which every deployment uses and no rollback undoes, is /var/usrlocal: if a unit, udev rule or module setting there broke the boot, fix or remove it there, then reboot into the current deployment"
-    )
+/// The login note a boot that left /usr/local out says why in, with how to clear the hold, if there is one, of the boot-time `files`.
+fn skipped_note(why: &str, hold: Option<Hold>, files: &[String]) -> String {
+    let mut note = format!(
+        "archix: this boot left /usr/local unmounted, as {why}; it shows the deployment's own empty, read-only /usr/local. The shared one, which every deployment uses and no rollback undoes, is /var/usrlocal"
+    );
+    match (hold, files.is_empty()) {
+        (Some(Hold::Held | Hold::Failed | Hold::Trying), false) => note.push_str(&format!(
+            ". It holds files that systemd, udev or the module loader read at boot ({}), so every boot leaves it out until you clear them: `sudo archix usr-local quarantine` moves them to /{QUARANTINE}, or fix them and `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
+            shown(files)
+        )),
+        (Some(Hold::Held | Hold::Failed | Hold::Trying), true) => note.push_str(
+            ". Every boot leaves it out until `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
+        ),
+        _ => note.push_str(
+            ": if a unit, udev rule or module setting there broke the boot, fix or remove it there, then reboot into the current deployment",
+        ),
+    }
+    note.push_str(&format!("; {MENU_HINT}"));
+    note
 }
 
 fn note_record(paths: &Paths) -> PathBuf {
@@ -78,7 +301,13 @@ pub fn sync_note(paths: &Paths) -> Result<()> {
     let old = fs::read_to_string(note_record(paths))
         .ok()
         .filter(|note| !note.is_empty());
-    let new = record.trim().strip_prefix("skipped ").map(skipped_note);
+    let record = record.trim();
+    let hold = read_hold(&paths.state).map(|(hold, _)| hold);
+    let new = record
+        .strip_prefix("skipped ")
+        .or_else(|| record.strip_prefix("held "))
+        .or_else(|| record.strip_prefix("unbound "))
+        .map(|why| skipped_note(why, hold, &boot_files(&paths.root)));
     let before = fs::read_to_string(paths.notes()).unwrap_or_default();
     let mut notes = before.clone();
     if let Some(old) = &old {
@@ -156,7 +385,7 @@ pub fn boot_files_warning(root: &Path) -> Option<String> {
         n => format!(" and {n} more"),
     };
     Some(format!(
-        "warning: /usr/local holds files that systemd, udev or the module loader read at boot: {}{more}. They apply to every deployment and no rollback undoes them; a boot of an older deployment than current and the fallback UKI leave /usr/local out, to get past a bad one",
+        "warning: /usr/local holds files that systemd, udev or the module loader read at boot: {}{more}. They apply to every deployment and no rollback undoes them; a boot of an older deployment than current and the fallback UKI leave /usr/local out, to get past a bad one, and then every boot leaves it out until `sudo archix usr-local quarantine` or `release`; {MENU_HINT}",
         shown.join(", ")
     ))
 }
@@ -273,6 +502,163 @@ mod tests {
         sync_note(&paths).unwrap();
         assert_eq!(fs::read_to_string(paths.notes()).unwrap(), "archix: an earlier note\n");
         assert!(!note_record(&paths).exists());
+    }
+
+    fn boot_record(paths: &Paths, record: &str) {
+        let path = paths.root.join(RECORD.trim_start_matches('/'));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, format!("{record}\n")).unwrap();
+    }
+
+    fn deploy_mount(paths: &Paths) -> Option<String> {
+        held(&paths.root, &|hold, why| write_hold(&paths.state, hold, why))
+    }
+
+    fn hold_of(paths: &Paths) -> Option<Hold> {
+        read_hold(&paths.state).map(|(hold, _)| hold)
+    }
+
+    #[test]
+    fn a_boot_that_left_boot_time_files_out_holds_them_out_until_they_are_gone_or_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        fs::create_dir_all(paths.root.join("archix/deploy")).unwrap();
+        let unit = dir_of(&paths).join("lib/systemd/system/broken.service");
+        fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        fs::write(&unit, "").unwrap();
+        fs::create_dir_all(dir_of(&paths).join("bin")).unwrap();
+        fs::write(dir_of(&paths).join("bin/tool"), "").unwrap();
+
+        boot_record(&paths, "mounted");
+        at_boot(&paths).unwrap();
+        assert_eq!(hold_of(&paths), None, "a boot that bound it holds nothing");
+        assert_eq!(deploy_mount(&paths), None);
+
+        boot_record(
+            &paths,
+            "skipped systemd-boot started deployment 2, older than the current 3",
+        );
+        at_boot(&paths).unwrap();
+        assert_eq!(hold_of(&paths), Some(Hold::Held));
+        let notes = fs::read_to_string(paths.notes()).unwrap();
+        assert!(
+            notes.contains("/usr/local/lib/systemd/system/broken.service")
+                && notes.contains("sudo archix usr-local quarantine")
+                && notes.contains("--boot-loader-menu"),
+            "{notes}"
+        );
+        for _ in 0..2 {
+            let why = deploy_mount(&paths).expect("every later boot leaves it out");
+            assert!(why.contains("older than the current 3"), "{why}");
+            assert_eq!(hold_of(&paths), Some(Hold::Held));
+            boot_record(&paths, &format!("held {why}"));
+            at_boot(&paths).unwrap();
+            assert_eq!(hold_of(&paths), Some(Hold::Held));
+        }
+        assert!(fs::read_to_string(paths.notes()).unwrap().contains("broken.service"));
+        assert!(hold_status(&paths).unwrap().contains("every boot leaves it out"));
+
+        assert!(
+            release(&paths)
+                .unwrap()
+                .contains("the next boot binds /usr/local again")
+        );
+        assert_eq!(deploy_mount(&paths), None, "the released boot binds it");
+        assert_eq!(hold_of(&paths), Some(Hold::Trying));
+        let why = deploy_mount(&paths).expect("a try that didn't reach multi-user.target");
+        assert!(why.contains("didn't reach multi-user.target"), "{why}");
+        boot_record(&paths, &format!("held {why}"));
+        at_boot(&paths).unwrap();
+        assert_eq!(hold_of(&paths), Some(Hold::Failed));
+        fs::remove_file(&unit).unwrap();
+        assert!(
+            deploy_mount(&paths).is_some(),
+            "after a failed try only a release lets it in, though its boot-time files are gone"
+        );
+
+        fs::write(&unit, "").unwrap();
+        let said = quarantine(&paths).unwrap();
+        assert!(
+            said.contains("broken.service") && said.contains("next boot binds"),
+            "{said}"
+        );
+        assert!(!unit.exists() && dir_of(&paths).join("bin/tool").exists());
+        let moved: Vec<PathBuf> = fs::read_dir(paths.root.join(QUARANTINE))
+            .unwrap()
+            .flatten()
+            .map(|run| run.path().join("lib/systemd/system/broken.service"))
+            .collect();
+        assert!(moved.len() == 1 && moved[0].is_file(), "{moved:?}");
+        assert_eq!(deploy_mount(&paths), None);
+        boot_record(&paths, "mounted");
+        at_boot(&paths).unwrap();
+        assert_eq!(hold_of(&paths), Some(Hold::Trying), "lifted only at multi-user.target");
+        assert!(
+            !fs::read_to_string(paths.notes())
+                .unwrap_or_default()
+                .contains("/usr/local")
+        );
+        confirm(&paths).unwrap();
+        assert_eq!(hold_of(&paths), None);
+        assert_eq!(hold_status(&paths), None);
+    }
+
+    #[test]
+    fn a_held_usr_local_comes_back_by_itself_once_its_boot_time_files_are_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        fs::create_dir_all(paths.root.join("archix/deploy")).unwrap();
+        write_hold(&paths.state, Hold::Held, "a boot left it out").unwrap();
+        let rule = dir_of(&paths).join("lib/udev/rules.d/1.rules");
+        fs::create_dir_all(rule.parent().unwrap()).unwrap();
+        fs::write(&rule, "").unwrap();
+        assert!(deploy_mount(&paths).is_some());
+        fs::remove_file(&rule).unwrap();
+        assert_eq!(deploy_mount(&paths), None);
+        assert_eq!(hold_of(&paths), Some(Hold::Trying));
+        boot_record(
+            &paths,
+            "skipped systemd-boot started the fallback UKI archix-fallback-3.efi",
+        );
+        confirm(&paths).unwrap();
+        assert_eq!(
+            hold_of(&paths),
+            Some(Hold::Trying),
+            "only a boot that bound it lifts the hold"
+        );
+        assert!(
+            release(&paths)
+                .unwrap()
+                .contains("bound /usr/local under the hold already"),
+            "a release mid-try changes nothing"
+        );
+        let unwritable = held(&paths.root, &|_, _| anyhow::bail!("read-only"));
+        assert!(unwritable.is_some(), "a try that can't be recorded isn't made");
+    }
+
+    #[test]
+    fn a_boot_that_left_usr_local_out_without_boot_time_files_holds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        fs::create_dir_all(paths.root.join("archix/deploy")).unwrap();
+        fs::create_dir_all(dir_of(&paths).join("bin")).unwrap();
+        fs::write(dir_of(&paths).join("bin/tool"), "").unwrap();
+        boot_record(
+            &paths,
+            "skipped systemd-boot started the fallback UKI archix-fallback-3.efi",
+        );
+        at_boot(&paths).unwrap();
+        assert_eq!(hold_of(&paths), None);
+        let notes = fs::read_to_string(paths.notes()).unwrap();
+        assert!(
+            notes.contains("left /usr/local unmounted") && !notes.contains("quarantine"),
+            "{notes}"
+        );
+        assert!(release(&paths).unwrap().contains("isn't held out"));
+    }
+
+    fn dir_of(paths: &Paths) -> PathBuf {
+        dir(&paths.root)
     }
 
     #[test]

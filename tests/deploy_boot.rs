@@ -245,6 +245,41 @@ fn the_initramfs_binds_var_usrlocal_over_usr_local_but_not_for_the_fallback_uki_
 
 #[test]
 #[ignore]
+fn the_initramfs_keeps_a_held_usr_local_out_and_records_a_released_try_on_a_read_only_root() {
+    let hold = |root: &Path| root.join("var/lib/archix/boot/usr-local-hold");
+    let unit = "var/usrlocal/lib/systemd/system/broken.service";
+    for (state, has_unit, bound, after) in [
+        ("held", true, false, "held"),
+        ("held", false, true, "trying"),
+        ("trial", true, true, "trying"),
+        ("trying", false, false, "trying"),
+        ("failed", false, false, "failed"),
+    ] {
+        let sysroot = Sysroot::new();
+        let root = sysroot.root();
+        sh("mount", &["-o", "remount,rw", root.to_str().unwrap()]);
+        fs::write(hold(&root), format!("{state} a boot left it out\n")).unwrap();
+        fs::create_dir_all(root.join("var/usrlocal")).unwrap();
+        if has_unit {
+            fs::create_dir_all(root.join(unit).parent().unwrap()).unwrap();
+            fs::write(root.join(unit), "x").unwrap();
+        }
+        sh("mount", &["-o", "remount,ro", root.to_str().unwrap()]);
+        let out = sysroot.mount(&sysroot.efivar("archix-1.conf"));
+        assert!(out.status.success(), "{state}: {}", text(&out));
+        let record = fs::read_to_string(sysroot.dir.path().join("run/usr-local")).unwrap();
+        assert_eq!(record == "mounted\n", bound, "{state}, unit {has_unit}: {record}");
+        assert!(bound || record.starts_with("held "), "{state}: {record}");
+        let now = fs::read_to_string(hold(&root)).unwrap();
+        assert!(
+            now.starts_with(&format!("{after} ")) && now.contains("a boot left it out"),
+            "{state}, unit {has_unit}: the hold is {now}"
+        );
+    }
+}
+
+#[test]
+#[ignore]
 fn the_initramfs_never_mounts_a_staging_tree_and_falls_back_to_current() {
     for entry in [Some("archix-3.conf"), Some("archix-9.conf"), None] {
         let sysroot = Sysroot::new();

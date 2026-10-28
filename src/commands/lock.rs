@@ -477,6 +477,9 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
             if let Some(warning) = archix::system::usr_local::boot_files_warning(&paths.root) {
                 println!("{warning}");
             }
+            if let Some(line) = archix::system::usr_local::hold_status(&paths) {
+                println!("{line}");
+            }
             for line in archix::system::activate::boot_failures(&paths.root) {
                 println!("{line}");
             }

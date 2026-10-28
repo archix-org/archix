@@ -256,6 +256,9 @@ enum Command {
     /// Run again, or drop, the hooks of a deployment that failed at too many boots
     #[command(subcommand)]
     Hooks(Hooks),
+    /// Let boots bind the shared /usr/local again once a boot that left it out held it out
+    #[command(subcommand)]
+    UsrLocal(UsrLocal),
     /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
     Verify {
         /// Restore what differs from the package cache
@@ -279,6 +282,14 @@ enum Hooks {
         /// The deployment whose hooks to drop; the running one by default
         deployment: Option<u32>,
     },
+}
+
+#[derive(Subcommand)]
+enum UsrLocal {
+    /// Let the next boot bind /usr/local again, once; if it doesn't reach multi-user.target, the boot after leaves it out again
+    Release,
+    /// Move the files under /var/usrlocal that systemd, udev or the module loader read at boot to /var/usrlocal.quarantine, then release /usr/local
+    Quarantine,
 }
 
 #[derive(Subcommand)]
@@ -423,6 +434,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Rollback { .. } => Some("rollback"),
         Command::Gc => Some("gc"),
         Command::Hooks(_) => Some("hooks"),
+        Command::UsrLocal(_) => Some("usr-local"),
         Command::Verify { .. } => Some("verify"),
         Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
@@ -641,6 +653,15 @@ fn run() -> Result<ExitCode> {
             commands::hooks(false, deployment)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::UsrLocal(action) => {
+            let paths = archix::paths::Paths::system();
+            let said = match action {
+                UsrLocal::Release => archix::system::usr_local::release(&paths)?,
+                UsrLocal::Quarantine => archix::system::usr_local::quarantine(&paths)?,
+            };
+            println!("{said}");
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Verify { repair } => {
             commands::verify(repair)?;
             return Ok(ExitCode::SUCCESS);
@@ -654,6 +675,9 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::BootComplete => {
+            if let Err(e) = archix::system::usr_local::confirm(&archix::paths::Paths::system()) {
+                println!("archix: {e:#}");
+            }
             archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
             return Ok(ExitCode::SUCCESS);
         }
@@ -838,6 +862,7 @@ fn run() -> Result<ExitCode> {
         | Command::SecureBoot(_)
         | Command::Cache(_)
         | Command::Hooks(_)
+        | Command::UsrLocal(_)
         | Command::Verify { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")

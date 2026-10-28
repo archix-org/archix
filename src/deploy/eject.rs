@@ -201,6 +201,7 @@ fn copy_trees(root: &Path, store: &Store, number: u32) -> Result<()> {
 
 /// Deletes the shared /var/usrlocal once the root's own /usr/local holds its files and nothing boots deployments any more.
 fn remove_shared_usr_local(root: &Path) -> Result<()> {
+    super::stage::remove_any(&crate::system::usr_local::hold_path(&Paths::under(root).state))?;
     super::stage::remove_any(&crate::system::usr_local::dir(root))
 }
 

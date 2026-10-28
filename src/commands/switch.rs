@@ -1862,8 +1862,8 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
             Err(e) => println!("archix: {e:#}"),
         }
     }
-    if laid_out && let Err(e) = system::usr_local::sync_note(&paths) {
-        println!("archix: updating the login note about /usr/local: {e:#}");
+    if laid_out && let Err(e) = system::usr_local::at_boot(&paths) {
+        println!("archix: updating the /usr/local hold and its login note: {e:#}");
     }
     let booted = match cmdline {
         Some(cmdline) => system::boot::booted_generation(&cmdline),

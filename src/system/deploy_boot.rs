@@ -318,6 +318,22 @@ pub fn bind_usr_local(root: &Path) -> Result<()> {
     bind(&shared, &target, false).with_context(|| format!("binding {} on {}", shared.display(), target.display()))
 }
 
+/// Writes the /usr/local hold on the root at `root` from the initramfs, remounting a read-only root read-write first if it has to.
+fn write_hold(root: &Path, hold: crate::system::usr_local::Hold, why: &str) -> Result<()> {
+    let state = Paths::under(root).state;
+    match crate::system::usr_local::write_hold(&state, hold, why) {
+        Err(e)
+            if e.chain().any(|cause| {
+                cause.downcast_ref::<io::Error>().and_then(io::Error::raw_os_error) == Some(libc::EROFS)
+            }) =>
+        {
+            sys_mount(None, root, libc::MS_REMOUNT)?;
+            crate::system::usr_local::write_hold(&state, hold, why)
+        }
+        other => other,
+    }
+}
+
 /// In the initramfs: binds the chosen deployment's trees over `root` and records its generation in `run_dir`/deployment.
 pub fn mount(root: &Path, efivar: &Path, run_dir: &Path) -> Result<u32> {
     mount_for(root, efivar, run_dir, &crate::testhooks::kernel_cmdline())
@@ -360,12 +376,15 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
         crate::system::usr_local::skip_reason(selected.as_deref(), chosen.generation, current(&archix).ok().flatten());
     let usr_local = match &skipped {
         Some(why) => format!("skipped {why}\n"),
-        None => match bind_usr_local(root) {
-            Ok(()) => "mounted\n".to_string(),
-            Err(e) => format!("skipped binding /var/usrlocal failed ({e:#})\n"),
+        None => match crate::system::usr_local::held(root, &|hold, why| write_hold(root, hold, why)) {
+            Some(why) => format!("held {why}\n"),
+            None => match bind_usr_local(root) {
+                Ok(()) => "mounted\n".to_string(),
+                Err(e) => format!("unbound binding /var/usrlocal failed ({e:#})\n"),
+            },
         },
     };
-    if let Some(why) = usr_local.strip_prefix("skipped ") {
+    if let Some((_, why)) = usr_local.split_once(' ') {
         println!("archix: leaving /usr/local unmounted: {}", why.trim());
     }
     protect_store(root)?;

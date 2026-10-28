@@ -311,6 +311,27 @@ class Machine:
         """Makes systemd-boot start entry name at the next boot only."""
         self.succeed(f"bootctl set-oneshot {shlex.quote(name)}", what=f"bootctl set-oneshot {name}")
 
+    def key(self, *names):
+        """Presses each key, a QEMU qcode such as spc, down or ret, on the VM's keyboard."""
+        for name in names:
+            self.qmp("send-key", keys=[{"type": "qcode", "data": name}])
+            time.sleep(0.2)
+
+    def pick_from_menu(self, titles, entry, since, timeout=180):
+        """Starts entry from systemd-boot's menu as a user does with the timeout at 0: Space pressed over and over from console offset since, through the firmware, until every title is on the console, then End and Up to entry's row in titles (the menu's order), so the arrows move even to the first, and Enter."""
+        row = titles.index(entry)
+        deadline = time.monotonic() + timeout
+        while not all(title in self.console_since(since) for title in titles):
+            if not self.alive():
+                raise self.gone("waiting for systemd-boot's menu")
+            if time.monotonic() > deadline:
+                raise self.fault(f"systemd-boot's menu didn't come up within {timeout} s of pressing Space; console: {short(self.console_since(since), 1500)}")
+            self.qmp("send-key", keys=[{"type": "qcode", "data": "spc"}])
+            time.sleep(0.05)
+        self.log(f"systemd-boot's menu is up; picking {entry!r}, row {row + 1} of {len(titles)}")
+        time.sleep(1)
+        self.key("end", *["up"] * (len(titles) - 1 - row), "ret")
+
     def shutdown(self, timeout=300):
         self.wait_for_shell()
         self.send("systemctl poweroff", 60)

@@ -675,4 +675,49 @@ fn usr_local_is_shared_writable_written_at_once_and_never_rolled_back() {
             "{command}: {out}"
         );
     }
+
+    // A boot that left /usr/local out with a boot-time file in it holds it out of the boots after, though they boot what is current then.
+    setup.set_body(&[], &usr_local_body("four"));
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_ne!(machine.current(), Some(first));
+    machine.reboot(Some(&format!("archix-{first}.conf")));
+    setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    assert_eq!(
+        machine.current(),
+        Some(first),
+        "booting the older entry made it current"
+    );
+    let held = archix::system::usr_local::hold_path(&setup.paths.state);
+    assert!(fs::read_to_string(&held).unwrap().starts_with("held "));
+    for _ in 0..2 {
+        let out = machine.reboot(Some(&format!("archix-{first}.conf")));
+        assert!(
+            out.contains("leaving /usr/local unmounted: it is held out since"),
+            "{out}"
+        );
+        assert!(!unit.exists() && !root.join("usr/local/bin/handmade").exists());
+        setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+        let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+        assert!(
+            notes.contains("archix-local.service") && notes.contains("sudo archix usr-local quarantine"),
+            "{notes}"
+        );
+    }
+    assert!(setup.ok(&["status"]).contains("/usr/local: every boot leaves it out"));
+    let said = setup.ok(&["usr-local", "quarantine"]);
+    assert!(said.contains("archix-local.service"), "{said}");
+    let out = machine.reboot(Some(&format!("archix-{first}.conf")));
+    assert!(out.contains("binding /usr/local again"), "{out}");
+    setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    assert_eq!(
+        live("bin/handmade"),
+        "curl | sh\n",
+        "the boot after the quarantine binds it"
+    );
+    assert!(!unit.exists());
+    assert!(fs::read_to_string(&held).unwrap().starts_with("trying "));
+    setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-complete"]);
+    assert!(!held.exists(), "reaching multi-user.target lifts the hold");
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(!notes.contains("/usr/local"), "{notes}");
 }

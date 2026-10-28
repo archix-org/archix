@@ -145,6 +145,13 @@ fn from_deployments(
             state.deployment
         ),
         None => {
+            let held = archix::system::usr_local::boot_files(&paths.root);
+            if archix::system::usr_local::read_hold(&paths.state).is_some() && !held.is_empty() {
+                bail!(
+                    "/usr/local is held out of every boot, and eject would make /var/usrlocal, with the files systemd, udev or the module loader read at boot ({}), the root's own /usr/local, which every boot then reads; `sudo archix usr-local quarantine` moves them away, or fix them, `sudo archix usr-local release` and boot with them first; nothing was changed",
+                    held.join(", ")
+                );
+            }
             let deployment = eject_deployments::deployment_to_eject(&paths.root)?;
             println!("archix eject: archix stops managing this machine, which becomes plain Arch");
             println!(

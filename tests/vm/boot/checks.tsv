@@ -184,13 +184,37 @@ ul2	f'the unit in /usr/local should have failed each counted try: {broken_boots(
 ul2	'the fallback boot should leave /usr/local out'	added
 ul2	f"deploy-mount should say why: {out('cat /run/archix/usr-local')}"	added
 ul2	f'the login notes should say /usr/local is out and where it is: {notes}'	added
+ul2	f'the login note should name the unit, the command that clears it and how to bring up the menu: {notes}'	added
 ul2	f'archix should make deployment {good} current after {bad} failed to boot'	added
-ul2	bootctl set-oneshot f'archix-{good}.conf'	added
-ul3	f"after the failed boot of deployment {good}'s entry, systemd-boot should start its fallback UKI, not {selected}"	added
-ul3	f'the boot of the current deployment {good} with /usr/local should have failed once: {broken_boots()} boots, {failures} before'	added
-ul3	'the fallback UKI should leave /usr/local out'	added
-ul4	f"deployment {good}'s own entry should boot, not {selected}"	added
-ul4	f'/usr/local should be the shared /var/usrlocal again: {source}'	added
-ul4	'no boot should fail once the unit is gone'	added
-ul4	f"the boot with /usr/local should take its note away: {out('cat /var/lib/archix/notes')}"	added
-ul4	'archix status should have nothing to warn about in /usr/local'	added
+ul2	f"the fallback boot should hold /usr/local out of the boots after: {out(f'cat {HOLD}')}"	added
+ul3	f"a plain reboot should start deployment {good}'s own entry, not {selected}"	added
+ul3	f'no plain reboot should run the unit in /usr/local: {broken_boots()} boots, {failures} before'	added
+ul3	f"deploy-mount should leave /usr/local out as held: {out('cat /run/archix/usr-local')}"	added
+ul3	f'archix status should say /usr/local is held out: {status}'	added
+ul3	'archix usr-local release'	added
+ul3	f"a release should let the next boot try /usr/local: {out(f'cat {HOLD}')}"	added
+ul4	f"the boot after the failed try should start deployment {good}'s entry, not {selected}"	added
+ul4	f'the released boot should have bound /usr/local and failed once: {broken_boots()} boots, {failures} before'	added
+ul4	f"the boot after a failed try should leave /usr/local out: {out('cat /run/archix/usr-local')}"	added
+ul4	f"the hold should say the try failed: {out(f'cat {HOLD}')}"	added
+ul4	'archix usr-local quarantine'	added
+ul4	f'the quarantine should move the unit out of /var/usrlocal: {said}'	added
+ul4	'the quarantined unit should be gone from /var/usrlocal'	added
+ul5	f"deployment {good}'s own entry should boot, not {selected}"	added
+ul5	f'/usr/local should be the shared /var/usrlocal again: {source}'	added
+ul5	'no boot should fail once the unit is gone'	added
+ul5	'the boot that reached multi-user.target should lift the hold'	added
+ul5	f"the boot with /usr/local should take its note away: {out('cat /var/lib/archix/notes')}"	added
+ul5	f'archix status should have nothing to say about /usr/local: {status}'	added
+ul5	f"bootctl should list deployment {good}'s fallback UKI: {titles}"	added
+ul5	'the unit should be back in /var/usrlocal'	added
+ul6	f"the menu should have started deployment {good}'s fallback UKI, not {selected}"	added
+ul6	f'the boot of the current deployment with the unit back should have failed once: {broken_boots()} boots, {failures + 1} before'	added
+ul6	f"the fallback UKI should leave /usr/local out: {out('cat /run/archix/usr-local')}"	added
+ul6	f"the fallback UKI's boot should hold /usr/local out of the boots after: {out(f'cat {HOLD}')}"	added
+ul7	f"a plain reboot should start deployment {good}'s own entry, not {selected}"	added
+ul7	"the plain reboot after the menu's fallback should not run the unit"	added
+ul7	f"deploy-mount should leave /usr/local out as held after the fallback UKI: {out('cat /run/archix/usr-local')}"	added
+ul7	'the second archix usr-local quarantine'	added
+ul7	f"the boot after the second quarantine should bind /usr/local: {out('cat /run/archix/usr-local')}"	added
+ul7	'the boot after the second quarantine should lift the hold'	added
