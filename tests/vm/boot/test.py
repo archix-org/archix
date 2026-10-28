@@ -83,7 +83,8 @@ def run(m, t):
         booted = found.group(1) if found else ""
         running = out("cat /run/archix/deployment 2>/dev/null").strip()
         t.log(f"booted entry {selected}, mounted deployment {running}, current {current()}, deployments {deployments()}")
-        failed = out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split()
+        t.require(ok("systemctl is-active -q multi-user.target"), f"the boot didn't reach multi-user.target: {out('systemctl list-jobs --no-pager 2>&1 | tail -10')}")
+        failed = [unit for unit in out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split() if unit != "archix-backdoor.service"]
         if failed:
             for unit in failed:
                 t.log(f"{unit}: " + out(f"journalctl -b -u {unit} --no-pager | tail -20"))

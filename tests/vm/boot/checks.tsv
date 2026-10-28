@@ -1,0 +1,160 @@
+every boot	"networkd didn't configure the NIC's link within 90 s of this stage starting"
+every boot	f"units failed at this boot: {' '.join(failed)}"
+every boot	f'the initramfs mounted deployment {running}, but systemd-boot started {selected}'
+every boot	f"the boot didn't reach multi-user.target: {out('systemctl list-jobs --no-pager 2>&1 | tail -10')}"	added
+plain	'the image should boot as a plain install, not laid out yet'
+plain	'the ProtectSystem=strict service should run before the first switch'
+plain	'the first switch on the booted system'
+plain	f'the first switch should lay out deployment 1 and build 2: {deployments()}'
+plain	f"the ProtectSystem=strict service lost its /usr during the first layout: {out('journalctl -u archix-protected.service -b --no-pager | tail -5')}"
+plain	'the first switch pruned the live /usr, which running services may still use'
+plain	f'the running system should be bound to deployment 1: {usr}'
+plain	'/boot should be read-only once laid out'
+1	'the first switch should make deployment 2 current'
+1	f'the first switch should lay out deployment 1 and build 2: {deployments()}'
+1	f"/usr should be deployment 2's: {usr}"
+1	'/usr should be read-only'
+1	'/boot should be read-only'
+1	f'/archix should be a read-only mount: {options}'
+1	f"the first switch should leave the rescue entry and its UKI: {out('ls /efi/loader/entries')}"
+1	f"the rescue entry must never be loader.conf's default: {loader()}"
+1	f'{attempt} got through /archix'
+1	f'deployment 1 changed through /archix: {changed}'
+1	'archix verify should find deployments 1 and 2 as their packages installed them'
+1	"the first boot after the layout should have emptied the root's own /usr, which deployments hide"
+1	'the ProtectSystem=strict service should run on deployment 2'
+1	f"LoaderEntrySelected should be volatile, but its attributes are {attrs or 'missing'}"
+1	'deployment 2 should start the marker'
+1	'archix install tree'
+1	'installing tree should make deployment 3 current'
+1	'deployment 3 should have tree'
+1	'the switch changed deployment 2'
+1	f'keep = 2 should keep only the booted deployment 2 and the new 3: {deployments()}'
+1	'tree should arrive with the next boot, not now'
+1	f'status should name tree as waiting for a reboot: {status}'
+1	'the login notes should say updates wait for a reboot'
+1	'the running system should keep the marker until the next boot'
+1	f'loader.conf should prefer deployment 3 and fall back to 2: {text}'
+1	f"the rescue UKI's initramfs must not hold the test driver's backdoor: {backdoor}"	added
+2	'the restart should boot deployment 3'
+2	'deployment 3 should have tree'
+2	'deployment 3 drops the marker'
+2	'the boot of deployment 3 should take the waiting-updates note away'
+2	bootctl set-oneshot 'archix-2.conf'
+3	"should have booted deployment 2's entry"
+3	"booting deployment 2's entry should make it current"
+3	f'deployment 2 should be the default now: {text}'
+3	'deployment 2 has no tree'
+3	'deployment 2 should start the marker'
+3	'archix rollback 3'
+3	'rolling back to deployment 3 should make it current'
+3	f'rolling back to deployment 3 should make it the default: {loader()}'
+3	f'a rollback to a kept deployment builds nothing: {deployments()}'
+4	'the rollback should boot deployment 3'
+4	'deployment 3 should have tree'
+4	f'loader.conf should name deployment 2: {loader()}'
+4	'current should still be 3'
+4b	f"after a crash between the rollback's two writes, deployment 2's entry should boot, not {booted}"
+4b	'booting deployment 2 should have made it current after the crash'
+4b	f'deployment 2 should stay the default: {loader()}'
+4b	f"deployment 2's files changed: {diff(baseline, now)}"
+4b	'deployment 2 should start the marker'
+4b	'archix secure-boot setup'
+4b	'switch with Secure Boot'
+5	'Secure Boot should be enforcing'
+5	f"archix-boot-complete.service failed: {out('journalctl -u archix-boot-complete.service -b --no-pager | tail -5')}"
+5	f'once deployment {c} booted fine, it should be the default and nothing preferred: {text}'
+5	f'archix bless should have failed to rename the counted entry on the read-only ESP: {tail}'
+5	f'systemd-bless-boot should succeed after archix bless failed: {tail}'
+5	f"systemd-bless-boot should have blessed deployment {booted}'s entry: {entries}"
+5	f'no entry should keep or gain boot counters: {entries}'
+5	f'deployment {booted} should stay current after archix bless failed, not {current()}'
+5	f"the login notes shouldn't say the boot wasn't counted: {out('cat /var/lib/archix/notes')}"
+5	'secure-boot check should pass'
+5	"the anti-cheat check can't pass with a self-signed kernel"
+5	'protected_entry should write a protected entry'
+5	'an unsigned switch must be refused under Secure Boot'
+5	'the refused switch changed the current deployment'
+5	f'the refused switch left a deployment behind: {deployments()}'
+5	f'the refused switch left its staging tree: {listing()}'
+5	'the switch never started staging'
+6	f'after a power cut mid-switch, deployment {before} should still boot and be current'	renamed	f'after a reset mid-switch, deployment {before} should still boot and be current'
+6	f'the cut switch committed a deployment: {listing()}; deployments before {kept}, now {deployments()}'	renamed	f'the reset switch committed a deployment: {listing()}; deployments before {kept}, now {deployments()}'
+6	'the switch after the power cut'	renamed	'the switch after the reset'
+6	'installing jq should make a newer deployment'
+6	f"the next switch should clear the cut switch's staging tree: {listing()}"	renamed	f"the next switch should clear the reset switch's staging tree: {listing()}"
+6	"switch to a deployment that can't boot"
+6	f"the new entry should count three boot tries: {out('ls /efi/loader/entries')}"
+6	f'loader.conf should prefer deployment {bad} and fall back to {good}: {text}'
+7	f'after three failed boots of deployment {bad}, systemd-boot should start {good}, not {booted}'
+7	f'archix should make deployment {good} current after {bad} failed to boot'
+7	f"deployment {bad}'s entry should be marked bad: {out('ls /efi/loader/entries')}"
+7	f"the login note should say {bad} didn't boot: {out('cat /var/lib/archix/notes')}"
+7	f'falling back to {good} should drop preferred: {loader()}'
+7	'switch to a deployment with a UKI of its own'
+7	f'copying {revoked}'
+7	'hashing the stand-in'
+7	'signing the stand-in'
+7	'appending the stand-in to dbx'
+7	'hashing the copy'
+7	'switch with deployments.keep = 1'
+7	f'keep = 1 should leave only the booted and the current deployment: {deployments()}'
+7	f"deployment {dropped}'s generation should stay as a record: {generations}"
+7	f'dropping deployment {dropped} should take {revoked} off the ESP'
+7	f"the entry archix didn't write should still be in dbx: {dbx}"
+7	f'dbx should list the dropped UKI {target}: {dbx}'
+7	'revoke should find nothing left'
+7	bootctl set-oneshot 'revoketest.conf'
+7	'Secure Boot should be enforcing once set up'	added
+8	'the firmware should refuse the revoked UKI'
+8	"the refused boot shouldn't change the current deployment"
+8	'Secure Boot should be enforcing'
+etc-merge	'archix install zsh'
+etc-merge	'installing zsh should leave a deployment pending'
+etc-merge	"zsh's scriptlet should add it to the staged /etc/shells"
+etc-merge	f"the commit should start archix-etc-merge.service: {out('systemctl status archix-etc-merge.service --no-pager | tail -5')}"
+etc-merge	'chpasswd'
+etc-merge	'status should count the carried changes and the conflict'
+etc-merge-2	f'the restart should boot deployment {pending}'
+etc-merge-2	f"the password changed after the switch didn't reach deployment {pending}"
+etc-merge-2	f'the connection should arrive whole and 0600: {mode}'
+etc-merge-2	f"the new directory didn't reach deployment {pending}"
+etc-merge-2	'the live edit to /etc/shells should win'
+etc-merge-2	f"deployment {pending}'s /etc/shells should be /etc/shells.pacnew: {out('ls /etc/shells* 2>&1')}"
+etc-merge-2	f'status should report the merge after the boot: {status}'
+etc-merge-2	"a clean reboot shouldn't leave the power-cut note"
+etc-merge-2	'archix install bc'
+etc-merge-3	f'after the power cut deployment {pending} should boot'	renamed	f'after the reset deployment {pending} should boot'
+etc-merge-3	'the boot should carry what the old /etc held on disk'
+etc-merge-3	f"the login note should name the window: {out('cat /var/lib/archix/notes')}"
+etc-merge-3	'status should name the window'
+fallback	f"only deployment {c}'s fallback UKI should be on the ESP: {uki}"
+fallback	f'the fallback UKI should be signed: {verify}'
+fallback	'Secure Boot should be enforcing once set up'	added
+9	f'without loader/entries systemd-boot should start the fallback UKI of deployment {c}, not {selected}'
+9	f'the fallback UKI should boot deployment {c}, not {running}'
+9	f'deployment {c} should have tree'
+9	bootctl set-oneshot 'archix-fallback-999.efi'
+10	f'systemd-boot should have started archix-fallback-999.efi, not {selected}'
+10	f"the fallback of a deployment that's gone should boot current, {c}, not {running}"
+10	'deploy-mount should say it booted current instead'
+10	f"the eject never finished copying the trees: {out('cat /var/lib/archix/eject 2>&1')}"
+10	"the killed eject shouldn't have got as far as deleting /archix"
+11	'running eject again should finish it'
+11	f"eject should delete /archix: {out('ls -A /archix 2>&1')}"
+11	f"/usr should be the root's own now: {out('findmnt -no SOURCE /usr')}"
+11	f'eject should make the plain UKI the default: {loader()}'
+11	"eject left archix's boot entries"
+11	'the finished eject left its state'
+11	'the running system lost tree'
+12	f'plain Arch should boot through arch-linux.efi, not {selected}'
+12	'a plain boot mounts no deployment'
+12	"/usr should be the root's own"
+12	'Secure Boot should still be enforcing'
+12	f'plain Arch has other packages than the deployment had: {diff(packages, now)}'
+12	f"pacman -Qkk differs from the deployment's: {diff(qkk, now)}"
+12	'the ProtectSystem=strict service should run on plain Arch'
+12	f'eject should remove {unit}.service'
+12	'plain pacman -Syu after the eject'
+12	'plain pacman -S after the eject'
+12	'pacman -S cowsay should install it'

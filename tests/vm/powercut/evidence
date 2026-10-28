@@ -11,7 +11,7 @@ raw=$(mktemp -d)
 trap 'rm -rf "$raw"' EXIT
 mkdir -p "$raw/out"
 started=$(date -u +%FT%TZ) t0=$SECONDS
-FS=$fs SUMMARY=$raw/summary.json OUT=$raw/out SERIAL=$raw "$root/tests/vm/run.sh" powercut 2>&1 | tee "$raw/run.log"
+ARCHIX_VM_CACHE=0 FS=$fs SUMMARY=$raw/summary.json OUT=$raw/out SERIAL=$raw "$root/tests/vm/run.sh" powercut 2>&1 | tee "$raw/run.log"
 status=${PIPESTATUS[0]}
 mkdir -p "$dir"
 cp "$raw/run.log" "$dir/"

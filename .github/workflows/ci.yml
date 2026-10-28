@@ -30,6 +30,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: tests/ci/archive-proxy-test.py
+      - run: tests/vm/boot/checks.py
 
   image:
     runs-on: ubuntu-latest
@@ -166,7 +167,8 @@ jobs:
           path: ${{ runner.temp }}/archive/base
           key: archive-base-${{ github.run_id }}-${{ github.run_attempt }}-container
 
-  boot:
+  # The old shell boot suite, beside the split tests until they have been compared on the same commit.
+  boot-sh:
     needs: [image, build]
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -184,7 +186,7 @@ jobs:
         with:
           name: archix-build
           path: ${{ runner.temp }}/build
-      - run: tests/vm/run.sh boot
+      - run: tests/vm/run.sh boot-sh
         env:
           FS: ${{ matrix.fs }}
           ARCHIX_PREBUILT: ${{ runner.temp }}/build
@@ -192,17 +194,18 @@ jobs:
         uses: ./.github/actions/vm-finish
         with:
           group: boot
-          name: boot-${{ matrix.fs }}
+          name: boot-sh-${{ matrix.fs }}
           status: ${{ job.status }}
 
-  # The boot suite on the Python driver (docs/vm-testing.md), beside boot until it's proven; a pass is kept in the Actions cache by its inputs' hash and skips the job's VM next time.
-  boot2:
+  # The split boot tests (docs/vm-testing.md), one job each; a pass is kept in the Actions cache with its logs by its inputs' hash, the test image's QEMU, OVMF and swtpm and the runner's kernel among them, so the test is skipped next time.
+  boot:
     needs: [image, build]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
+        test: [fallback, layout, revoke, secureboot, etc-merge, counting, reset-mid-switch]
         fs: [ext4, btrfs]
     env:
       FS: ${{ matrix.fs }}
@@ -210,33 +213,32 @@ jobs:
       ARCHIX_VM_RESULTS: ${{ runner.temp }}/vm-results
     steps:
       - uses: actions/checkout@v5
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: boot
+          need-gb: "20"
       - uses: actions/download-artifact@v4
         with:
           name: archix-build
           path: ${{ runner.temp }}/build
       - id: key
-        run: echo "key=vm-result-boot2-${{ matrix.fs }}-$(python3 tests/vm/driver/cache.py key boot2)" >> "$GITHUB_OUTPUT"
+        run: echo "key=vm-result-boot-${{ matrix.test }}-${{ matrix.fs }}-$(python3 tests/vm/driver/cache.py key boot-${{ matrix.test }})" >> "$GITHUB_OUTPUT"
       - id: result
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vm-results
           key: ${{ steps.key.outputs.key }}
-      - if: steps.result.outputs.cache-hit != 'true'
-        uses: ./.github/actions/vm-setup
-        with:
-          group: boot
-          need-gb: "25"
-      - run: tests/vm/run.sh boot2
+      - run: tests/vm/run.sh boot ${{ matrix.test }}
       - if: steps.result.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/vm-results
           key: ${{ steps.key.outputs.key }}
-      - if: always() && steps.result.outputs.cache-hit != 'true'
+      - if: always()
         uses: ./.github/actions/vm-finish
         with:
           group: boot
-          name: boot2-${{ matrix.fs }}
+          name: boot-${{ matrix.test }}-${{ matrix.fs }}
           status: ${{ job.status }}
 
   deploy-boot:

@@ -31,7 +31,7 @@ elif [ "$suite" = rescue ]; then
   dir=/vm/rescue packages=(base linux mkinitcpio systemd-ukify e2fsprogs openssl jq sbctl tpm2-tss)
 elif [ "$suite" = churn ]; then
   dir=/vm/churn size=12G packages=(base linux mkinitcpio systemd-ukify sbctl efitools)
-elif [ "$suite" = boot2 ]; then
+elif [ "$suite" = boot ] || [ "$suite" = boot2 ]; then
   dir=/vm/boot
 elif [ "$suite" = recovery ]; then
   dir=/vm/recovery
@@ -166,14 +166,14 @@ sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s
   -e "s|@EXTRA_PACKAGES@|$extra|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 [ ! -f "$dir/vmtest.sh" ] || install -Dm755 "$dir/vmtest.sh" /mnt/etc/archix/vmtest.sh
 # The driver's suites (tests/vm/driver) have no vmtest.sh: the guest runs the driver's root shell, which config.lua takes from here.
-[ "$suite" != boot2 ] || install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
+[ "$dir" != /vm/boot ] || install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
 install -Dm755 /vm/deploy/proto/check-deployment /mnt/usr/local/bin/archix-check-deployment
 [ -n "${TO_DATE:-}" ] && echo "$TO_DATE" > /mnt/etc/archix-vmtest-to
 [ -d "$dir/pkgbuilds" ] && cp -r "$dir/pkgbuilds" /mnt/etc/archix/
 arch-chroot /mnt archix --host archix-vm update --to "$date" --noconfirm
-if [ "$suite" = boot ] || [ "$suite" = boot2 ]; then
+if [ "$suite" = boot-sh ] || [ "$dir" = /vm/boot ]; then
   # The boot suite lays the system out on its first boot, with services running, so the image boots like a plain Arch install: a UKI on the ESP, which systemd-boot lists by itself.
-  if [ "$suite" = boot ]; then
+  if [ "$suite" = boot-sh ]; then
     test_unit=archix-vmtest.service
     install -Dm755 "$dir/vmtest.sh" /mnt/usr/local/bin/archix-vmtest
     printf '[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/archix-vmtest\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n' > /mnt/etc/systemd/system/archix-vmtest.service

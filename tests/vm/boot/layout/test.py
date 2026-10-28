@@ -1,0 +1,93 @@
+# The layout and deployments: deployment 2 boots read-only, a switch builds 3 beside it, booting an older entry makes it current, a rollback, and a reset between a rollback's two writes.
+import re
+
+from boot.common import EFIVAR, HOST, LOADER, bind, boot, current, deployments, diff, edit_config, findings, has_line, hidden_usr, loader, ok, out
+
+RESCUE_INITRD = "import pefile, sys; pe = pefile.PE(sys.argv[1]); s = next(s for s in pe.sections if s.Name.rstrip(b'\\0') == b'.initrd'); open(sys.argv[2], 'wb').write(s.get_data()[:s.Misc_VirtualSize])"
+
+
+def run(m, t):
+    bind(m, t)
+    with t.step("1: the layout boots deployment 2 read-only; a switch builds deployment 3 beside it"):
+        boot()
+        t.check(current() == "2", "the first switch should make deployment 2 current")
+        t.check(deployments() == "1 2 ", f"the first switch should lay out deployment 1 and build 2: {deployments()}")
+        usr = out("findmnt -no SOURCE /usr")
+        t.check("archix/deploy/2/usr" in usr, f"/usr should be deployment 2's: {usr}")
+        t.check(not ok("touch /usr/archix-vmtest"), "/usr should be read-only")
+        t.check(not ok("touch /boot/archix-vmtest"), "/boot should be read-only")
+        options = out("findmnt -no OPTIONS /archix")
+        t.check("ro" in options.strip().split(","), f"/archix should be a read-only mount: {options}")
+        rescue = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2> /dev/null").strip()
+        t.check(rescue != "" and ok(f"[ -f {rescue} ]"), f"the first switch should leave the rescue entry and its UKI: {out('ls /efi/loader/entries')}")
+        backdoor = out(f"rm -rf /run/rescue-initrd && mkdir /run/rescue-initrd && cd /run/rescue-initrd && python3 -c \"{RESCUE_INITRD}\" {rescue} ../rescue-initrd.img && lsinitcpio -x ../rescue-initrd.img && echo extracted; grep -rlsa -e archix-backdoor -e archix.shell . ; cd / && rm -rf /run/rescue-initrd /run/rescue-initrd.img")
+        t.check(backdoor.strip() == "extracted", f"the rescue UKI's initramfs must not hold the test driver's backdoor: {backdoor}")
+        t.check("archix-rescue" not in loader(), f"the rescue entry must never be loader.conf's default: {loader()}")
+        for attempt in ("chmod -R 700 /archix/deploy/1/usr/bin", "chown -R nobody /archix/deploy/1/usr/bin",
+                        "setfacl -R -m u:nobody:rwx /archix/deploy/1/usr/bin", "setcap cap_net_raw+ep /archix/deploy/1/usr/bin/pacman"):
+            t.check(not ok(attempt), f"{attempt} got through /archix")
+        changed = findings(1)
+        t.check(changed == "", f"deployment 1 changed through /archix: {changed}")
+        t.check(ok("archix verify"), "archix verify should find deployments 1 and 2 as their packages installed them")
+        t.check(hidden_usr() == 0, "the first boot after the layout should have emptied the root's own /usr, which deployments hide")
+        t.check(ok("systemctl is-active -q archix-protected.service"), "the ProtectSystem=strict service should run on deployment 2")
+        attrs = out(f"od -An -tu4 -N4 {EFIVAR} 2>/dev/null | tr -d ' '").strip()
+        t.check(attrs.isdigit() and int(attrs) & 1 == 0, f"LoaderEntrySelected should be volatile, but its attributes are {attrs or 'missing'}")
+        t.check(ok("systemctl is-active -q archix-marker.service"), "deployment 2 should start the marker")
+        edit_config("'/-- marker/d'")
+        m.succeed(f"{HOST} install tree --noconfirm", what="archix install tree")
+        t.check(current() == "3", "installing tree should make deployment 3 current")
+        t.check(ok("[ -x /archix/deploy/3/usr/bin/tree ]"), "deployment 3 should have tree")
+        t.check(not ok("[ -e /archix/deploy/2/usr/bin/tree ]"), "the switch changed deployment 2")
+        t.check(deployments() == "2 3 ", f"keep = 2 should keep only the booted deployment 2 and the new 3: {deployments()}")
+        t.check(not ok("command -v tree"), "tree should arrive with the next boot, not now")
+        status = out(f"{HOST} status")
+        t.check("waiting for a reboot (deployment 3): tree " in status, f"status should name tree as waiting for a reboot: {status}")
+        t.check(ok("grep -q 'waiting for a reboot (deployment 3)' /var/lib/archix/notes"), "the login notes should say updates wait for a reboot")
+        t.check(ok("systemctl is-active -q archix-marker.service"), "the running system should keep the marker until the next boot")
+        text = loader()
+        t.check(has_line(text, "preferred archix-3.conf") and has_line(text, "default archix-2.conf"), f"loader.conf should prefer deployment 3 and fall back to 2: {text}")
+        m.reboot()
+
+    with t.step("2: deployment 3 boots with tree and without the marker"):
+        _, booted, _ = boot()
+        t.check(booted == "3" and current() == "3", "the restart should boot deployment 3")
+        t.check(ok("command -v tree"), "deployment 3 should have tree")
+        t.check(not ok("systemctl is-enabled -q archix-marker.service"), "deployment 3 drops the marker")
+        t.check(not ok("grep -qs 'waiting for a reboot' /var/lib/archix/notes"), "the boot of deployment 3 should take the waiting-updates note away")
+        m.select_entry("archix-2.conf")
+        m.reboot()
+
+    with t.step("3: booting an older entry makes it current; a rollback repoints to 3"):
+        _, booted, _ = boot()
+        t.check(booted == "2", "should have booted deployment 2's entry")
+        t.check(current() == "2", "booting deployment 2's entry should make it current")
+        text = loader()
+        t.check(has_line(text, "default archix-2.conf") and not re.search(r"^preferred", text, re.M), f"deployment 2 should be the default now: {text}")
+        t.check(not ok("command -v tree"), "deployment 2 has no tree")
+        t.check(ok("systemctl is-active -q archix-marker.service"), "deployment 2 should start the marker")
+        m.succeed("archix rollback 3 --noconfirm", what="archix rollback 3")
+        t.check(current() == "3", "rolling back to deployment 3 should make it current")
+        t.check(has_line(loader(), "default archix-3.conf"), f"rolling back to deployment 3 should make it the default: {loader()}")
+        t.check(deployments() == "2 3 ", f"a rollback to a kept deployment builds nothing: {deployments()}")
+        m.reboot()
+
+    with t.step("4: the rollback boots 3; a reset between a rollback's boot default and its current"):
+        _, booted, _ = boot()
+        t.check(booted == "3", "the rollback should boot deployment 3")
+        t.check(ok("command -v tree"), "deployment 3 should have tree")
+        baseline = findings(2)
+        m.succeed(f"sed -i -e '/^preferred /d' -e 's/^default .*/default archix-2.conf/' {LOADER}")
+        t.require(has_line(loader(), "default archix-2.conf"), f"loader.conf should name deployment 2: {loader()}")
+        t.require(current() == "3", "current should still be 3")
+        m.succeed("sync -f /efi")
+        m.crash()
+
+    with t.step("4b: after the reset deployment 2 boots whole and current"):
+        _, booted, _ = boot()
+        t.check(booted == "2", f"after a crash between the rollback's two writes, deployment 2's entry should boot, not {booted}")
+        t.check(current() == "2", "booting deployment 2 should have made it current after the crash")
+        t.check(has_line(loader(), "default archix-2.conf"), f"deployment 2 should stay the default: {loader()}")
+        now = findings(2)
+        t.check(now == baseline, f"deployment 2's files changed: {diff(baseline, now)}")
+        t.check(ok("systemctl is-active -q archix-marker.service"), "deployment 2 should start the marker")

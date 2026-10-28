@@ -52,7 +52,8 @@ class Machine:
     def __init__(self, timeline, work="/work", disks=None, mem=None, cpus=None, tpm=False, boot_timeout=900, global_timeout=None):
         self.timeline = timeline
         self.work = Path(work)
-        self.disks = disks if disks is not None else [f"file={self.work}/disk.img,format=raw,if=virtio"]
+        overlay = self.work / "disk.qcow2"
+        self.disks = disks if disks is not None else [f"file={overlay},format=qcow2,if=virtio" if overlay.exists() else f"file={self.work}/disk.img,format=raw,if=virtio"]
         self.mem = mem or os.environ.get("VM_MEM", "3072")
         self.cpus = cpus or os.environ.get("VM_CPUS", "2")
         self.tpm = tpm
@@ -302,9 +303,9 @@ class Machine:
         self.new_boot("rebooting")
 
     def crash(self):
-        """A power cut: QEMU's system_reset, with whatever the guest hadn't written lost."""
+        """A reset, QEMU's system_reset: what the guest hadn't written is lost, but it is no power cut, which tests/vm/powercut replays from a write log."""
         self.qmp("system_reset")
-        self.new_boot("power cut (system_reset)")
+        self.new_boot("reset (system_reset)")
 
     def select_entry(self, name):
         """Makes systemd-boot start entry name at the next boot only."""

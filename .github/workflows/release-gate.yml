@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Suites to run, comma-separated (rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, recovery, rescue, powercut; boot and deploy-boot, which CI runs, only when named); empty runs all but boot and deploy-boot
+        description: Suites to run, comma-separated (boot2, rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, recovery, rescue, powercut; boot and deploy-boot, which CI runs, only when named); empty runs all but boot and deploy-boot
         default: ""
       fs:
         description: Filesystems, comma-separated (ext4, btrfs); empty runs both
@@ -38,7 +38,7 @@ jobs:
           FS: ${{ inputs.fs }}
           REPEAT: ${{ inputs.repeat }}
         run: |
-          all=rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn,recovery,rescue,powercut
+          all=boot2,rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn,recovery,rescue,powercut
           # $1 as named, else $2, keeping only names in $3.
           pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$3" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
           echo "suites=$(pick "$SUITES" "$all" "$all,boot,deploy-boot" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
@@ -122,6 +122,8 @@ jobs:
           FS: ${{ matrix.fs }}
           VM_TIMEOUT: "14400"
           ARCHIX_PREBUILT: ${{ runner.temp }}/build
+          # A gate proves this commit, never a pass recorded for the same inputs earlier.
+          ARCHIX_VM_CACHE: "0"
           # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
           ARCHIX_OLD: 3a99d0c
       - if: always()
