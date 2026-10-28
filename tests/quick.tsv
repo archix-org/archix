@@ -27,6 +27,7 @@ src/commands/rescue.rs	test:rescue test:credentials
 src/system/credentials.rs	test:credentials test:system
 src/deploy/build.rs	test:deploy test:switch test:boot test:deploy_boot test:credentials
 src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
+src/system/fstab.rs	test:system test:init test:switch
 src/system/	test:system test:switch
 src/system/capabilities.rs	test:system test:switch test:deploy
 src/flatpak.rs	test:flatpak

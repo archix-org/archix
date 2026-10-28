@@ -496,7 +496,7 @@ fn write_and_lock(
         host,
         &config,
         answers.git,
-        first_step(facts, host).filter(|_| answers.boot),
+        first_step(facts).filter(|_| answers.boot),
     );
     Ok(())
 }
@@ -571,8 +571,16 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
     let Settings {
         fields: mut settings,
         summary: mut settings_summary,
-        notes: settings_notes,
+        notes: mut settings_notes,
     } = host_settings(&mut skip);
+    let systemd_boot_esp = capture::systemd_boot_esp();
+    mount_settings(
+        systemd_boot_esp.as_deref().unwrap_or("/efi"),
+        &mut skip,
+        &mut settings,
+        &mut settings_summary,
+        &mut settings_notes,
+    );
     let root = Path::new("/");
     let found = capture::config_files(root, &machine.details, &skip)?;
     let units = capture::unowned_units(root, &machine.details);
@@ -614,7 +622,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         })
         .collect();
 
-    let boot = match capture::systemd_boot_esp() {
+    let boot = match systemd_boot_esp {
         None => BootFacts::NoLoader,
         Some(esp) => {
             let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
@@ -1325,7 +1333,7 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
             lines
         }
     };
-    if first_step(facts, "").is_none() {
+    if first_step(facts).is_none() {
         let staging = if facts.btrfs {
             "a btrfs snapshot"
         } else {
@@ -1340,7 +1348,7 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
 }
 
 /// What has to change on this machine before `archix switch` can lay it out as deployments, if anything.
-fn first_step(facts: &Facts, host: &str) -> Option<String> {
+fn first_step(facts: &Facts) -> Option<String> {
     match &facts.boot {
         BootFacts::NoLoader => Some("install systemd-boot (`bootctl install`)".to_string()),
         BootFacts::NoRoot => Some("add the root= kernel parameter to kernel_params".to_string()),
@@ -1348,9 +1356,10 @@ fn first_step(facts: &Facts, host: &str) -> Option<String> {
             blocker: Some(_),
             esp_in_boot: true,
             ..
-        } => Some(format!(
-            "mount the ESP at /efi instead of /boot: change its line in /etc/fstab and in the config's copy, files/{host}/etc/fstab, then mount it there"
-        )),
+        } => Some(
+            "mount the ESP at /efi instead of /boot: change its line in /etc/fstab, then mount it there; archix keeps that line in each deployment's fstab"
+                .to_string(),
+        ),
         BootFacts::Ready { blocker: Some(why), .. } => Some(why.clone()),
         BootFacts::Ready { blocker: None, .. } => None,
     }
@@ -1554,6 +1563,41 @@ fn host_settings(skip: &mut BTreeSet<String>) -> Settings {
         }
     }
     out
+}
+
+/// file_systems, swap and zram from this machine's fstab, crypttab and zram-generator.conf, with the ESP at `esp`; /etc/fstab is archix's to write, so it's never offered as a file, nor crypttab and zram-generator.conf once the options say what they do.
+fn mount_settings(
+    esp: &str,
+    skip: &mut BTreeSet<String>,
+    fields: &mut Vec<(String, Lua)>,
+    summary: &mut Vec<String>,
+    notes: &mut Vec<String>,
+) {
+    let read = |path: &str| fs::read_to_string(path).ok();
+    let captured = archix::system::fstab::capture(
+        &read("/etc/fstab").unwrap_or_default(),
+        read("/etc/crypttab").as_deref(),
+        read(archix::system::fstab::ZRAM_CONF).as_deref(),
+        esp,
+    );
+    skip.insert("/etc/fstab".into());
+    if captured.crypttab_taken {
+        skip.insert("/etc/crypttab".into());
+    }
+    if captured.zram_taken {
+        skip.insert(archix::system::fstab::ZRAM_CONF.into());
+    }
+    if !captured.file_systems.is_empty() {
+        fields.push(("file_systems".into(), Lua::Table(captured.file_systems)));
+    }
+    if !captured.swap.is_empty() {
+        fields.push(("swap".into(), Lua::List(captured.swap)));
+    }
+    if let Some(zram) = captured.zram {
+        fields.push(("zram".into(), zram));
+    }
+    summary.extend(captured.summary);
+    notes.extend(captured.notes);
 }
 
 /// Whether mkinitcpio's HOOKS, as these configs set them in order, has the microcode hook, which puts microcode in the initramfs itself.
@@ -1789,8 +1833,8 @@ mod tests {
             lines.iter().any(|(good, line)| !good && line.contains("in /boot")),
             "{lines:?}"
         );
-        let step = first_step(&facts, "box").unwrap();
-        assert!(step.contains("/efi") && step.contains("files/box/etc/fstab"), "{step}");
+        let step = first_step(&facts).unwrap();
+        assert!(step.contains("/efi") && step.contains("/etc/fstab"), "{step}");
         let answers = Answers::recommended(&facts);
         let config = build(&facts, &answers, Path::new("/cfg"), "box");
         let boot = Lua::Table(config.fields.clone()).render(0);
@@ -1800,7 +1844,7 @@ mod tests {
         );
 
         let ready = super::tui::tests::facts();
-        assert_eq!(first_step(&ready, "box"), None);
+        assert_eq!(first_step(&ready), None);
         assert!(
             boot_lines(&ready)
                 .iter()

@@ -554,6 +554,64 @@ fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
     );
 }
 
+#[test]
+#[ignore]
+fn a_swap_file_on_btrfs_gets_a_subvolume_of_its_own_and_never_shares_one() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (image, root) = (dir.path().join("btrfs.img"), dir.path().join("root"));
+    fs::create_dir_all(&root).unwrap();
+    let sh = |command: &str| {
+        let ok = Command::new("sh").arg("-c").arg(command).status().unwrap().success();
+        assert!(ok, "{command}");
+    };
+    sh(&format!(
+        "truncate -s 512M {0} && mkfs.btrfs -q {0} && mount -o loop {0} {1}",
+        image.display(),
+        root.display()
+    ));
+    fs::create_dir_all(root.join("data")).unwrap();
+    let line = |file: &str| archix::system::fstab::FstabLine {
+        device: file.into(),
+        point: "none".into(),
+        fs_type: "swap".into(),
+        options: "nofail".into(),
+        passno: 0,
+        size: Some(64 << 20),
+    };
+    let checks = Checks::default();
+    let shared = archix::system::fstab::check(&root, &[line("/data/swapfile")], "", "");
+    checks.check(
+        shared
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("isn't a subvolume of its own")),
+        format!("a swap file archix would make in a plain btrfs directory is refused: {shared:?}"),
+    );
+    checks.check(
+        archix::system::fstab::check(&root, &[line("/swap/swapfile")], "", "").is_ok(),
+        "a missing directory is fine: archix creates it as a subvolume",
+    );
+    let made = archix::system::fstab::make_swapfile(&root.join("swap/swapfile"), 64 << 20);
+    checks.check(made.is_ok(), format!("making the swap file: {made:?}"));
+    let subvolume = Command::new("btrfs")
+        .args(["subvolume", "show"])
+        .arg(root.join("swap"))
+        .output()
+        .unwrap();
+    checks.check(subvolume.status.success(), "its directory is a subvolume of its own");
+    let attrs = Command::new("lsattr").arg(root.join("swap/swapfile")).output().unwrap();
+    let attrs = String::from_utf8_lossy(&attrs.stdout).into_owned();
+    checks.check(
+        attrs.split_whitespace().next().is_some_and(|flags| flags.contains('C')),
+        format!("btrfs filesystem mkswapfile makes it NOCOW: {attrs}"),
+    );
+    checks.check(
+        archix::system::fstab::check(&root, &[line("/swap/swapfile")], "", "").is_ok(),
+        "the next switch accepts it",
+    );
+    sh(&format!("umount {}", root.display()));
+    checks.finish();
+}
+
 fn usr_local_body(text: &str) -> String {
     format!(
         r#"files = {{ ["/usr/local/bin/archix-declared"] = {{ text = {text:?}, mode = "0755", on_change = "echo ran >> /var/tmp/archix-usr-local-on-change" }} }}"#
@@ -820,4 +878,141 @@ fn capabilities_go_on_a_copy_in_the_new_deployment_and_follow_switches_and_rollb
     setup.set_body(&["tree"], r#"capabilities = { ["/usr/bin/tree"] = "cap_sys_nice+e" }"#);
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("leaves the file without capabilities"), "{err}");
+}
+
+const MOUNTS: &str = r#"file_systems = {
+  ["/mnt/data"] = { device = "UUID=archix-test-data", fs_type = "ext4", check = true },
+  ["/srv/archix-www"] = { device = "/var/archix-www", options = { "bind" } },
+  ["/mnt/secret"] = { device = "/dev/mapper/archixsecret", fs_type = "ext4", encrypted = { device = "UUID=archix-test-luks", key_file = "/etc/archix-secret.key" } },
+},
+swap = { { file = "/swap/swapfile", size = "64M" } }"#;
+
+#[test]
+#[ignore]
+fn file_systems_and_swap_are_the_deployments_fstab_after_archixs_own_root_and_esp_lines() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], MOUNTS);
+    let machine = &setup.machine;
+    let esp = machine.esp().display().to_string();
+    fs::write(
+        machine.root.join("etc/fstab"),
+        format!("# from genfstab\nUUID=archix-root / ext4 rw,relatime 0 1\nUUID=AB12-CD34 {esp} vfat rw 0 0\nUUID=archix-home /home ext4 rw 0 2\n"),
+    )
+    .unwrap();
+    let checks = Checks::default();
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    let first = machine.current().unwrap();
+    checks.eq(
+        read("/etc/fstab"),
+        format!(
+            "{}\nUUID=archix-root / ext4 rw,relatime 0 1\nUUID=AB12-CD34 {esp} vfat rw,x-systemd.automount,x-systemd.idle-timeout=60,fmask=0077,dmask=0077 0 2\n\
+             UUID=archix-test-data /mnt/data ext4 nofail,x-systemd.device-timeout=30s 0 2\n\
+             /dev/mapper/archixsecret /mnt/secret ext4 nofail 0 0\n\
+             /var/archix-www /srv/archix-www none bind,nofail 0 0\n\
+             /swap/swapfile none swap nofail 0 0\n",
+            archix::system::fstab::HEADER
+        ),
+        "the deployment's fstab is the root's line, the ESP's with its protections, then the declared lines",
+    );
+    for line in [
+        "fstab      mount /mnt/data (UUID=archix-test-data) at the next boot",
+        "fstab      swap on /swap/swapfile at the next boot",
+        "fstab      drop /home (UUID=archix-home) at the next boot",
+        "fstab      the ESP at",
+        "UUID=archix-test-data for /mnt/data isn't attached now",
+    ] {
+        checks.check(out.contains(line), format!("the switch should say {line:?}:\n{out}"));
+    }
+    checks.eq(
+        read("/etc/crypttab"),
+        "# Written by archix from file_systems' encrypted devices.\narchixsecret UUID=archix-test-luks /etc/archix-secret.key luks,nofail\n".to_string(),
+        "an encrypted mount gets its crypttab line",
+    );
+    checks.check(
+        read("/etc/systemd/system/archix-swapfile-swap-swapfile.service")
+            .contains("ExecStart=/usr/bin/archix swapfile /swap/swapfile 67108864\n")
+            && read("/etc/systemd/system/swap-swapfile.swap.d/archix-swapfile.conf")
+                .contains("Requires=archix-swapfile-swap-swapfile.service"),
+        "a swap file with a size is made by a unit before its swap unit",
+    );
+    let diff = setup.ok(&["diff"]);
+    checks.check(
+        diff.contains("matches the lock and the config"),
+        format!("nothing is left to change:\n{diff}"),
+    );
+    let status = setup.ok(&["status"]);
+    checks.check(
+        !status.contains("/etc/fstab"),
+        format!("the fstab archix writes isn't carried by hand:\n{status}"),
+    );
+
+    let refused = [
+        (
+            r#"file_systems = { ["/mnt/x"] = { device = "/dev/mapper/archixnothing" } }"#,
+            "no /etc/crypttab line opens",
+        ),
+        (
+            r#"files = { ["/etc/fstab"] = { text = "UUID=1 / ext4 rw 0 1" } }"#,
+            "declare mounts in file_systems and swap",
+        ),
+        (r#"file_systems = { ["/usr"] = { device = "UUID=1" } }"#, "own /usr"),
+    ];
+    for (body, says) in refused {
+        setup.set_body(&[], body);
+        let error = setup.fails(&["switch", "--noconfirm"]);
+        checks.check(error.contains(says), format!("{body}: {error}"));
+        checks.eq(machine.current(), Some(first), "a refused switch changes nothing");
+    }
+
+    setup.set_body(
+        &[],
+        r#"file_systems = { ["/srv/archix-www"] = { device = "/var/archix-www", options = { "bind" } } }"#,
+    );
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    checks.check(
+        !read("/etc/fstab").contains("/mnt/data") && out.contains("fstab      drop /mnt/data (UUID=archix-test-data)"),
+        format!("a mount left out of the config leaves the next deployment's fstab:\n{out}"),
+    );
+    checks.check(
+        !system_path("/etc/crypttab").exists() || !read("/etc/crypttab").contains("archixsecret"),
+        "and its crypttab line goes with it",
+    );
+    setup.ok(&["rollback", "--noconfirm"]);
+    checks.check(
+        read("/etc/fstab").contains("UUID=archix-test-data /mnt/data"),
+        "a rollback brings back the fstab of the deployment it rolls back to",
+    );
+    checks.finish();
+}
+
+#[test]
+#[ignore]
+fn a_swap_file_is_made_once_and_again_only_at_another_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("swap/swapfile");
+    let make = |bytes: u64| {
+        let output = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .arg("swapfile")
+            .arg(&file)
+            .arg(bytes.to_string())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let signature = |file: &std::path::Path| fs::read(file).unwrap()[4086..4096].to_vec();
+    use std::os::unix::fs::MetadataExt;
+    assert!(make(16 << 20).contains("made the swap file"));
+    let meta = fs::metadata(&file).unwrap();
+    assert_eq!((meta.len(), meta.mode() & 0o777), (16 << 20, 0o600));
+    assert_eq!(signature(&file), b"SWAPSPACE2");
+    assert_eq!(make(16 << 20), "", "a swap file of the right size is left alone");
+    assert_eq!(fs::metadata(&file).unwrap().ino(), meta.ino());
+    assert!(make(8 << 20).contains("again"));
+    assert_eq!(fs::metadata(&file).unwrap().len(), 8 << 20);
+    assert_eq!(signature(&file), b"SWAPSPACE2");
+    assert!(
+        fs::read_dir(file.parent().unwrap()).unwrap().count() == 1,
+        "no temporary file is left"
+    );
 }

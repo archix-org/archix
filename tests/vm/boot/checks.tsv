@@ -218,3 +218,22 @@ ul7	f"deploy-mount should leave /usr/local out as held after the fallback UKI: {
 ul7	'the second archix usr-local quarantine'	added
 ul7	f"the boot after the second quarantine should bind /usr/local: {out('cat /run/archix/usr-local')}"	added
 ul7	'the boot after the second quarantine should lift the hold'	added
+fs1	'partitioning and formatting the data disk'	added
+fs1	'making the LUKS volume'	added
+fs1	'switch with file_systems, swap and zram'	added
+fs1	f"the next deployment's fstab should hold the declared lines: {fstab}"	added
+fs1	f"the ESP's line should keep archix's protections: {fstab}"	added
+fs1	f'the switch should say the mounts wait for the next boot: {said}'	added
+fs1	'the mounts and the swap should wait for the next boot'	added
+fs2	f"the data disk should be mounted at /mnt/data: {out('findmnt /mnt/data')}"	added
+fs2	f"the bind mount should show its source: {out('findmnt /mnt/bound')}"	added
+fs2	f"the LUKS volume should be opened with its key file and mounted: {out('journalctl -b -u systemd-cryptsetup@vmsecret --no-pager | tail -5')}"	added
+fs2	'the tmpfs should be mounted at /mnt/scratch'	added
+fs2	f"swapon should show the swap file and zram: {active}; {out('journalctl -b -u archix-swapfile-swap-swapfile --no-pager | tail -5')}"	added
+fs2	"on btrfs the swap file's directory should be a subvolume of its own"	added
+fs2	'a switch with the swap file active'	added
+fs2	'the switch with swap active should make a new deployment'	added
+fs3	'the data disk should be gone'	added
+fs3	"the data disk's mounts should be left out"	added
+fs3	'the mounts on the root and the swap file should still be there'	added
+fs3	'the deployment switched to with swap active should boot'	added

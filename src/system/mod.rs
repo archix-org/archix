@@ -8,6 +8,7 @@ pub mod capabilities;
 pub mod credentials;
 pub mod deploy_boot;
 pub mod firewall;
+pub mod fstab;
 pub mod health;
 pub mod hooks;
 pub mod merge;
@@ -54,6 +55,9 @@ pub struct SystemState {
     /// File capabilities in libcap's text form, keyed by a file's path in the deployment's /usr or /opt.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub capabilities: BTreeMap<String, String>,
+    /// The /etc/fstab lines file_systems and swap declare, after archix's own for the root and the ESP.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fstab: Vec<fstab::FstabLine>,
 }
 
 /// A script run after a switch; `user` None means root.
@@ -265,6 +269,11 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         if !path.starts_with('/') || path.ends_with('/') || path.contains("/../") {
             bail!("files: {path:?} must be an absolute file path");
         }
+        if path == "/etc/fstab" {
+            bail!(
+                "files: /etc/fstab is archix's to write, with its own lines for the root and the ESP; declare mounts in file_systems and swap instead"
+            );
+        }
         if FORBIDDEN.iter().any(|prefix| path.starts_with(prefix)) && !path.starts_with("/usr/local/") {
             bail!(
                 "files: {path} is in a directory archix doesn't write to; home files go in home.files, and boot entries in boot.extra_entries"
@@ -423,6 +432,14 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
             );
         }
     }
+    let mounts = fstab::render(config, fstab::esp_of(config))?;
+    for (path, text, from) in mounts.files {
+        if b.state.files.contains_key(&path) {
+            bail!("files: {path} is written by archix from {from}; leave it out of files");
+        }
+        b.text(&path, &text);
+    }
+    b.state.fstab = mounts.lines;
     if let Some(rules) = firewall::ruleset(root("firewall").unwrap_or(&Value::Null))? {
         b.text(firewall::RULES, &rules);
         b.text(&format!("/etc/systemd/system/{}", firewall::UNIT), &firewall::unit());

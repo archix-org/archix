@@ -364,6 +364,7 @@ pub(super) fn pending(
         from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
         to: rendered.state,
     };
+    let here = super::switch::current_root(&paths);
     let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
     let built_from = current.as_ref().map(|g| &g.packages);
     lines.extend(
@@ -371,7 +372,6 @@ pub(super) fn pending(
             .iter()
             .map(ToString::to_string),
     );
-    let here = super::switch::current_root(&paths);
     let place = |path: &str| {
         Some(match system::apply::deployment_tree(path) {
             Some(_) => here.join(path.trim_start_matches('/')),
@@ -389,6 +389,7 @@ pub(super) fn pending(
     for kept in system::credentials::kept_locks(&passwords, &[&etc, &paths.root.join("etc")]) {
         eprintln!("warning: {kept}");
     }
+    lines.extend(system::fstab::describe_at(&here, target.config, &change.to.fstab));
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
@@ -417,6 +418,7 @@ fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str
             .chain(integration::boot_wants())
             .map(|(path, _)| path.to_string_lossy().into_owned()),
     );
+    declared.insert("/etc/fstab".to_string());
     let config_dir = std::fs::canonicalize(target.config_dir)
         .ok()
         .and_then(|dir| Some(format!("/{}", dir.strip_prefix(&paths.root).ok()?.display())));

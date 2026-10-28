@@ -263,6 +263,23 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         eprintln!("warning: {kept}");
     }
     system::apply::check(&paths, &system_change, &place)?;
+    system_lines.extend(system::fstab::describe_at(&here, target.config, &rendered.state.fstab));
+    let new_text = |path: &str| match rendered.state.files.get(path) {
+        Some(file) => rendered
+            .blobs
+            .get(&file.sha256)
+            .map(|blob| String::from_utf8_lossy(blob).into_owned()),
+        None => fs::read_to_string(here.join(path.trim_start_matches('/'))).ok(),
+    };
+    let crypttab = format!(
+        "{}{}",
+        new_text("/etc/crypttab").unwrap_or_default(),
+        new_text("/etc/crypttab.initramfs").unwrap_or_default()
+    );
+    let cmdline = new_text("/etc/kernel/cmdline").unwrap_or_default();
+    for warning in system::fstab::check(&paths.root, &rendered.state.fstab, &crypttab, &cmdline)? {
+        eprintln!("{warning}");
+    }
     if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
         system::firewall::validate(&String::from_utf8_lossy(&rendered.blobs[&rules.sha256]))?;
         system::firewall::check_others(&rendered.state.services, |unit| {

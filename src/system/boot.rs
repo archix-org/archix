@@ -411,7 +411,7 @@ fn partuuid_of(path: &Path) -> Option<String> {
 }
 
 /// The name in /dev/disk/`kind` of the device the filesystem at `path` is on.
-fn disk_link_of(path: &Path, kind: &str) -> Option<String> {
+pub fn disk_link_of(path: &Path, kind: &str) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
     let dev = fs::metadata(path).ok()?.dev();
     fs::read_dir(Path::new("/dev/disk").join(kind))
@@ -489,39 +489,8 @@ pub fn esp_fstab(fstab: &str, esp: &str, uuid: Option<&str>) -> Option<(String, 
     (changed != EspFstab::default()).then_some((text, changed))
 }
 
-/// Makes a staged deployment's fstab mount the ESP at `esp`, on access, and fsck it at boot, unless the config manages /etc/fstab, which only gets a warning.
-pub fn esp_fstab_in(etc: &Path, esp: &str, managed: bool) -> Result<()> {
-    let path = etc.join("fstab");
-    let text = fs::read_to_string(&path).unwrap_or_default();
-    let uuid = disk_link_of(Path::new(esp), "by-uuid");
-    let Some((text, changed)) = esp_fstab(&text, esp, uuid.as_deref()) else {
-        return Ok(());
-    };
-    if managed {
-        if changed.added {
-            eprintln!(
-                "warning: the config's /etc/fstab has no line for the ESP at {esp}, so after a reboot systemd-gpt-auto-generator tries to mount it at /boot, where each deployment's own /boot is bound, and it isn't mounted at all: boot entries can't be updated or counted as good there, and it's never fscked; add `UUID={} {esp} vfat {ESP_OPTIONS} 0 2`",
-                uuid.as_deref().unwrap_or_default()
-            );
-        }
-        if changed.automount {
-            eprintln!(
-                "warning: the config's /etc/fstab keeps the ESP at {esp} mounted all the time, where a forced reboot can corrupt it; add x-systemd.automount,x-systemd.idle-timeout=60 to its options"
-            );
-        }
-        if changed.fsck {
-            eprintln!(
-                "warning: the config's /etc/fstab gives the ESP at {esp} no fs_passno, so systemd never runs fsck on it, and a FAT a power cut left damaged is mounted unrepaired and turns read-only at its first broken chain, where boot entries can't be written; set its sixth field to 2"
-            );
-        }
-        if changed.private {
-            eprintln!(
-                "warning: the config's /etc/fstab mounts the ESP at {esp} readable by everyone, so bootctl won't trust its random seed and any user can read its boot entries; add fmask=0077,dmask=0077 to its options"
-            );
-        }
-        return Ok(());
-    }
-    crate::durable::write(&path, text.as_bytes())?;
+/// Says what `esp_fstab` changed on the ESP's line of a staged deployment's fstab.
+pub fn report_esp_fstab(esp: &str, changed: &EspFstab) {
     if changed.added {
         println!(
             "fstab      the ESP at {esp} had no line, so systemd-gpt-auto-generator would have mounted it at /boot, where each deployment's /boot is bound; it has its own line now, mounted on access and fscked at boot"
@@ -542,7 +511,6 @@ pub fn esp_fstab_in(etc: &Path, esp: &str, managed: bool) -> Result<()> {
             "fstab      the ESP at {esp} is readable by root only (fmask=0077,dmask=0077), as bootctl wants for its random seed"
         );
     }
-    Ok(())
 }
 
 /// After deploy-mount or activation failed on a boot systemd-boot is counting, reboots after a pause so the next try or the fallback happens with nobody at the machine; on other boots it returns, leaving the halt or emergency shell for whoever is there, since a reboot would only start the same entry again.
@@ -2295,16 +2263,6 @@ mod tests {
             None,
             "no line for that ESP, nor its UUID"
         );
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("fstab"), fstab).unwrap();
-        esp_fstab_in(dir.path(), "/efi", true).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("fstab")).unwrap(),
-            fstab,
-            "a managed fstab is left alone"
-        );
-        esp_fstab_in(dir.path(), "/efi", false).unwrap();
-        assert_eq!(fs::read_to_string(dir.path().join("fstab")).unwrap(), once);
     }
 
     #[test]
@@ -2366,21 +2324,6 @@ mod tests {
             esp_fstab("", "/efi", Some("AB12-CD34")).unwrap().0,
             "UUID=AB12-CD34 /efi vfat umask=0077,x-systemd.automount,x-systemd.idle-timeout=60 0 2\n"
         );
-
-        let fstab = "UUID=b /efi vfat umask=0077,x-systemd.automount 0 0\n";
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("fstab"), fstab).unwrap();
-        esp_fstab_in(dir.path(), "/efi", true).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("fstab")).unwrap(),
-            fstab,
-            "a managed fstab only gets a warning"
-        );
-        esp_fstab_in(dir.path(), "/efi", false).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("fstab")).unwrap(),
-            "UUID=b /efi vfat umask=0077,x-systemd.automount 0 2\n"
-        );
     }
 
     #[test]
@@ -2396,15 +2339,6 @@ mod tests {
             let line = format!("UUID=b /efi vfat {options},x-systemd.automount 0 2\n");
             assert_eq!(esp_fstab(&line, "/efi", None), None, "{options} is the user's choice");
         }
-        let fstab = "UUID=b /efi vfat rw,x-systemd.automount 0 2\n";
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("fstab"), fstab).unwrap();
-        esp_fstab_in(dir.path(), "/efi", true).unwrap();
-        assert_eq!(
-            fs::read_to_string(dir.path().join("fstab")).unwrap(),
-            fstab,
-            "a managed fstab only gets a warning"
-        );
     }
 
     #[test]

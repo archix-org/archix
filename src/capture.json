@@ -93,7 +93,6 @@
     "/var/lib/sbctl/keys/"
   ],
   "recommended": [
-    "/etc/fstab",
     "/etc/crypttab",
     "/etc/mkinitcpio.conf",
     "/etc/default/grub",

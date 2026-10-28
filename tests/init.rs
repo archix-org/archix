@@ -284,14 +284,40 @@ fn put(path: &str, text: &str) {
 
 const UNITS: &str = "/usr/lib/systemd/system/archix-init-handmade";
 
+const FSTAB: &str = "# <file system> <dir> <type> <options> <dump> <pass>\n\
+UUID=archix-init-root / ext4 rw,relatime 0 1\n\
+UUID=ABCD-1234 /efi vfat rw,fmask=0077,dmask=0077 0 2\n\
+UUID=archix-init-home /home ext4 rw,relatime 0 2\n\
+LABEL=archix-media /mnt/media ext4 nofail,noatime 0 0\n\
+/dev/mapper/secret /mnt/secret ext4 defaults,nofail 0 0\n\
+/srv/archix-a /srv/archix-b none bind 0 0\n\
+UUID=archix-init-var /var ext4 defaults 0 2\n\
+/swapfile none swap defaults,pri=5 0 0\n";
+
 #[test]
 #[ignore]
 fn init_takes_over_what_was_set_up_by_hand_and_names_everything_it_leaves_out() {
     let _system = lock_system();
-    let _restore: Vec<RestoreFile> = ["/etc/vconsole.conf", "/etc/locale.gen", "/etc/locale.conf"]
-        .into_iter()
-        .map(|path| RestoreFile::new(std::path::Path::new(path)))
-        .collect();
+    let _restore: Vec<RestoreFile> = [
+        "/etc/vconsole.conf",
+        "/etc/locale.gen",
+        "/etc/locale.conf",
+        "/etc/fstab",
+        "/etc/crypttab",
+        "/etc/systemd/zram-generator.conf",
+    ]
+    .into_iter()
+    .map(|path| RestoreFile::new(std::path::Path::new(path)))
+    .collect();
+    put("/etc/fstab", FSTAB);
+    put(
+        "/etc/crypttab",
+        "secret UUID=archix-init-luks /etc/archix-init.key luks,discard\n",
+    );
+    put(
+        "/etc/systemd/zram-generator.conf",
+        "[zram0]\nzram-size = ram / 2\ncompression-algorithm = zstd\n",
+    );
     let default_target = fs::read_link("/etc/systemd/system/default.target").ok();
     put(
         &format!("{UNITS}.service"),
@@ -401,4 +427,49 @@ fn init_takes_over_what_was_set_up_by_hand_and_names_everything_it_leaves_out() 
         out.contains("left out as secrets") && out.contains("/etc/wireguard/ (1 file)"),
         "{out}"
     );
+    let checks = Checks::default();
+    for path in ["/etc/fstab", "/etc/crypttab", "/etc/systemd/zram-generator.conf"] {
+        checks.check(
+            !host.contains(&format!("[\"{path}\"]")),
+            format!("{path} is taken into options, not kept as a file:\n{host}"),
+        );
+    }
+    checks.check(
+        host.contains("file_systems = {") && host.contains("swap = {") && host.contains("zram = {"),
+        format!("init writes file_systems, swap and zram:\n{host}"),
+    );
+    checks.check(
+        out.contains("/var is left out") && out.contains("pacman database"),
+        format!("init says why it leaves the /var line out:\n{out}"),
+    );
+    let evaluation = archix::eval::evaluate(&archix::eval::Input {
+        config_dir: config.into(),
+        hostname: "initbox".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    let rendered = archix::system::render(&evaluation.config, std::path::Path::new(config)).unwrap();
+    let lines: Vec<String> = rendered.state.fstab.iter().map(|line| line.line()).collect();
+    checks.eq(
+        lines,
+        vec![
+            "UUID=archix-init-home /home ext4 rw,relatime 0 2".to_string(),
+            "LABEL=archix-media /mnt/media ext4 noatime,nofail,x-systemd.device-timeout=30s 0 0".to_string(),
+            "/dev/mapper/secret /mnt/secret ext4 nofail 0 0".to_string(),
+            "/srv/archix-a /srv/archix-b none bind 0 0".to_string(),
+            "/swapfile none swap pri=5 0 0".to_string(),
+        ],
+        "the captured config renders the fstab's lines but the root's, the ESP's and /var's again",
+    );
+    let crypttab = rendered
+        .state
+        .files
+        .get("/etc/crypttab")
+        .map(|file| String::from_utf8_lossy(&rendered.blobs[&file.sha256]).into_owned())
+        .unwrap_or_default();
+    checks.check(
+        crypttab.contains("secret UUID=archix-init-luks /etc/archix-init.key luks,discard,nofail\n"),
+        format!("crypttab's line comes back from encrypted: {crypttab}"),
+    );
+    checks.finish();
 }

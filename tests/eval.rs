@@ -107,6 +107,10 @@ fn option_descriptions_say_what_waits_for_the_next_boot() {
         ("services", "next boot"),
         ("user_services", "next boot"),
         ("firewall.enable", "next boot"),
+        ("file_systems", "next boot"),
+        ("file_systems", "rollback brings back"),
+        ("swap", "next boot"),
+        ("zram.enable", "next boot"),
         ("flatpak.apps", "first boot"),
     ] {
         let text = description(path);
@@ -711,4 +715,80 @@ fn credentials_that_arent_what_they_should_be_are_refused_without_printing_the_h
     }
     let warned = rendered_ok(r#"tmpfiles = { "R /home/*/.cache/thumbnails" }"#).warnings;
     assert!(warned.iter().any(|w| w.contains("under /home")), "{warned:?}");
+}
+
+#[test]
+fn file_systems_swap_and_zram_evaluate_and_render_into_fstab_lines() {
+    let dir = config(&[(
+        "init.lua",
+        r#"return {
+  file_systems = {
+    ["/mnt/data"] = { device = "UUID=1234", fs_type = "ext4", check = true },
+    ["/srv/www"] = { device = "/var/www", options = { "bind" } },
+  },
+  swap = { { file = "/swap/swapfile", size = "1G" } },
+  zram = { enable = true, size = "ram / 2" },
+}"#,
+    )]);
+    let evaluation = eval_at(dir.path(), "desktop").unwrap();
+    let out = serde_json::to_value(&evaluation.config).unwrap();
+    assert_eq!(
+        out["file_systems"]["/mnt/data"],
+        json!({ "device": "UUID=1234", "fs_type": "ext4", "options": [], "check": true, "required": false, "encrypted": null })
+    );
+    assert_eq!(out["packages"], json!(["zram-generator"]), "zram brings zram-generator");
+    let rendered = archix::system::render(&evaluation.config, dir.path()).unwrap();
+    let lines: Vec<String> = rendered.state.fstab.iter().map(|line| line.line()).collect();
+    assert_eq!(
+        lines,
+        [
+            "UUID=1234 /mnt/data ext4 nofail,x-systemd.device-timeout=30s 0 2",
+            "/var/www /srv/www none bind,nofail 0 0",
+            "/swap/swapfile none swap nofail 0 0",
+        ]
+    );
+    for path in [
+        "/etc/systemd/zram-generator.conf",
+        "/etc/systemd/system/archix-swapfile-swap-swapfile.service",
+    ] {
+        assert!(rendered.state.files.contains_key(path), "{path}");
+    }
+}
+
+#[test]
+fn a_config_that_writes_fstab_or_what_the_mount_options_write_is_refused() {
+    for (body, says) in [
+        (
+            r#"return { files = { ["/etc/fstab"] = { text = "UUID=1 / ext4 rw 0 1" } } }"#,
+            "declare mounts in file_systems and swap",
+        ),
+        (
+            r#"return { zram = { enable = true }, files = { ["/etc/systemd/zram-generator.conf"] = { text = "[zram0]" } } }"#,
+            "written by archix from zram",
+        ),
+        (
+            r#"return { files = { ["/etc/crypttab"] = { text = "x" } }, file_systems = { ["/mnt/s"] = { device = "/dev/mapper/s", encrypted = { device = "UUID=1" } } } }"#,
+            "written by archix from file_systems' encrypted devices",
+        ),
+        (
+            r#"return { file_systems = { ["/var/lib/pacman"] = { device = "UUID=1" } } }"#,
+            "pacman database",
+        ),
+        (
+            r#"return { file_systems = { ["/mnt/x"] = { fs_type = "ext4" } } }"#,
+            "device must name what to mount",
+        ),
+        (
+            r#"return { swap = { { file = "/archix/swapfile", size = "1G" } } }"#,
+            "deployments live in /archix",
+        ),
+    ] {
+        let dir = config(&[("init.lua", body)]);
+        let evaluation = eval_at(dir.path(), "desktop").unwrap();
+        let error = archix::system::render(&evaluation.config, dir.path())
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(error.contains(says), "{body}: {error}");
+    }
 }

@@ -949,7 +949,7 @@ mod tests {
         assert!(is_secret("/etc/NetworkManager/system-connections/home.nmconnection"));
         assert!(is_secret("/etc/ssh/ssh_host_ed25519_key"));
         assert!(!is_secret("/etc/sudoers"));
-        assert!(listed(&LISTS.recommended, "/etc/fstab"));
+        assert!(listed(&LISTS.recommended, "/etc/crypttab"));
         assert!(listed(&LISTS.recommended, "/etc/sysctl.d/99-swappiness.conf"));
         assert!(!listed(&LISTS.recommended, "/etc/shells"));
         assert!(listed(&LISTS.never, "/etc/pacman.d/gnupg/pubring.gpg"));

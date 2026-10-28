@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[3]
 # Everything in the repository that decides what the VM runs: archix's source and toolchain, the image builder and the driver.
 COMMON = ["src", "Cargo.toml", "Cargo.lock", "tests/arch/Dockerfile", "tests/arch/image.sh", "tests/vm/run.sh", "tests/vm/build-image.sh", "tests/vm/deploy/proto/check-deployment", "tests/vm/driver"]
 BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/boot/base.py"]
-BOOT_TESTS = ["layout", "secureboot", "reset-mid-switch", "counting", "revoke", "etc-merge", "fallback", "usr-local"]
+BOOT_TESTS = ["layout", "secureboot", "reset-mid-switch", "counting", "revoke", "etc-merge", "fallback", "usr-local", "file-systems"]
 SUITES = {"boot2": ["tests/vm/boot/config.lua", "tests/vm/boot/test.py"]} | {f"boot-{name}": BOOT_SHARED + [f"tests/vm/boot/{name}"] for name in BOOT_TESTS}
 ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": ""}
 IMAGE = "archix-arch-test"

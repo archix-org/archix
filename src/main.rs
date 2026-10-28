@@ -234,6 +234,9 @@ enum Command {
     /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
     #[command(hide = true)]
     PruneHidden { root: PathBuf },
+    /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
+    #[command(hide = true)]
+    Swapfile { path: PathBuf, bytes: u64 },
     /// Run by `archix eject` in a private mount namespace: lay the deployment out as the root's own trees and hand the ESP over
     #[command(hide = true)]
     EjectHere {
@@ -537,6 +540,10 @@ fn run() -> Result<ExitCode> {
         }
         Command::PruneHidden { root } => {
             commands::prune_hidden(&root)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Swapfile { path, bytes } => {
+            archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::MountDeployment { root, deployment } => {
@@ -855,6 +862,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployMount { .. }
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
+        | Command::Swapfile { .. }
         | Command::MountDeployment { .. }
         | Command::EjectHere { .. }
         | Command::EtcMerge { .. }
