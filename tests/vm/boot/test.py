@@ -3,6 +3,8 @@ import difflib
 import re
 import time
 
+from boot import common
+
 LOADER = "/efi/loader/loader.conf"
 CONFIG = "/etc/archix/init.lua"
 STATE = "/var/lib/archix-vmtest"
@@ -53,28 +55,9 @@ def run(m, t):
     def secure_boot():
         return ok("bootctl status 2> /dev/null | grep -q 'Secure Boot: enabled (user)'")
 
-    def network(wait=True):
-        if wait and ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1", 150):
-            return
-        nic_state = "for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
-        t.log("networkctl: " + out("networkctl list --no-pager 2>&1"))
-        t.log("networkd: " + out("journalctl -b -u systemd-networkd --no-pager | tail -30"))
-        t.log("nic at the report: " + out(nic_state) + out("for nic in /sys/class/net/en*; do ip -d link show $(basename $nic) 2>&1; done"))
-        t.log("kernel: " + out("journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30"))
-        dev = re.search(r"^(\S+).*\[virtio-net\]", m.hmp("info virtio"), re.M)
-        t.log("qemu: " + m.hmp("info network") + "".join(m.hmp(f"info virtio-queue-status {dev.group(1)} {q}") for q in (0, 1) if dev))
-        m.execute("for nic in /sys/class/net/en*; do ip link set $(basename $nic) down; ip link set $(basename $nic) up; done")
-        if ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1", 60):
-            t.log("nic: a link down/up brought it back")
-        else:
-            t.log("nic: still not configured 30 s after a link down/up; the host's set_link off and on")
-            m.hmp("set_link net0 off")
-            time.sleep(2)
-            m.hmp("set_link net0 on")
-            configured = ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=40 > /dev/null 2>&1", 70)
-            t.log(f"nic: after the host's set_link off/on {'it is' if configured else 'still not'} configured; qemu: {m.hmp('info network')}")
-        t.log("nic at the end: " + out(nic_state))
-        t.require(False, "networkd didn't configure the NIC's link within 90 s of this stage starting")
+    # The NIC report and its networkd-carrier-race attribution, shared with the split tests and nic-control.
+    common.bind(m, t)
+    network = common.network
 
     def boot(match=True):
         m.execute("systemctl is-system-running --wait > /dev/null", 900)

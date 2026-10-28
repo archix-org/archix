@@ -9,7 +9,8 @@ STATE = "/var/lib/archix-vmtest"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 HOST = "archix --host archix-vm"
 BACKDOOR = "archix-backdoor.service"
-NIC_STATE = "for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
+ATTRIBUTED = "ATTRIBUTED: "
+NIC_STATE ="for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
 SECURE_BOOT_CONFIG = "'s|boot = { loader = \"systemd-boot\" }|boot = { loader = \"systemd-boot\", secure_boot = true, protected_entry = true }|'"
 m = t = None
 
@@ -72,18 +73,30 @@ def secure_boot():
     return ok("bootctl status 2> /dev/null | grep -q 'Secure Boot: enabled (user)'")
 
 
+def carrier_race(networkctl, nic_state):
+    """The NICs networkd calls no-carrier while the kernel has their carrier after at least one change: docs/CI.md's networkd carrier race, read before any recovery."""
+    kernel = {line.split()[0]: dict(word.split("=", 1) for word in line.split()[1:] if "=" in word) for line in nic_state.splitlines() if line.strip()}
+    named = {words[1]: words[3] for words in (line.split() for line in networkctl.splitlines()) if len(words) >= 4 and words[0].isdigit()}
+    return [nic for nic, state in kernel.items() if named.get(nic) == "no-carrier" and state.get("carrier") == "1" and state.get("carrier_changes", "").isdigit() and int(state["carrier_changes"]) >= 1]
+
+
 def network(wait=True):
     if wait and ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=90 > /dev/null 2>&1", 150):
         return
-    t.log("networkctl: " + out("networkctl list --no-pager 2>&1"))
+    networkctl = out("networkctl list --no-pager 2>&1")
+    t.log("networkctl: " + networkctl)
     t.log("networkd: " + out("journalctl -b -u systemd-networkd --no-pager | tail -30"))
-    t.log("nic at the report: " + out(NIC_STATE) + out("for nic in /sys/class/net/en*; do ip -d link show $(basename $nic) 2>&1; done"))
+    nic_state = out(NIC_STATE)
+    t.log("nic at the report: " + nic_state + out("for nic in /sys/class/net/en*; do ip -d link show $(basename $nic) 2>&1; done"))
     t.log("kernel: " + out("journalctl -b -k --no-pager | grep -i -E 'virtio|net|enp|eth|link' | tail -30"))
     dev = re.search(r"^(\S+).*\[virtio-net\]", m.hmp("info virtio"), re.M)
     t.log("qemu: " + m.hmp("info network") + "".join(m.hmp(f"info virtio-queue-status {dev.group(1)} {q}") for q in (0, 1) if dev))
+    raced = carrier_race(networkctl, nic_state)
     m.execute("for nic in /sys/class/net/en*; do ip link set $(basename $nic) down; ip link set $(basename $nic) up; done")
     if ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1", 60):
         t.log("nic: a link down/up brought it back")
+        if raced:
+            t.log(f"{ATTRIBUTED}networkd-carrier-race on {' '.join(raced)} (known guest-stack flake, docs/CI.md#the-networkd-carrier-race)")
     else:
         t.log("nic: still not configured 30 s after a link down/up; the host's set_link off and on. nic after the down/up: " + out(NIC_STATE))
         m.hmp("set_link net0 off")
