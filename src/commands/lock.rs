@@ -401,6 +401,12 @@ pub fn diff(target: &Target) -> Result<()> {
             count(newer, "package is", "packages are")
         );
     }
+    if let Some(boot) = &declared.boot
+        && !archix::deploy::layout::laid_out(&paths.root)
+        && let Some(why) = archix::deploy::layout::unsupported(&paths.root, Path::new(&boot.esp))
+    {
+        println!("`archix switch` refuses to lay this system out as deployments until this is fixed: {why}");
+    }
     let (lines, warned, kept) = pending(target, &declared, &lock)?;
     if lines.is_empty() {
         println!("the system matches the lock and the config");

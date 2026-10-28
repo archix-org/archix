@@ -988,6 +988,11 @@ fn a_switch_without_systemd_boot_or_with_the_esp_in_boot_is_refused_before_anyth
     );
     fs::create_dir_all(setup.machine.root.join("boot/efi")).unwrap();
     setup.set_body(&[], &esp_in_boot);
+    let diff = setup.ok(&["diff"]);
+    assert!(
+        diff.contains("refuses to lay this system out") && diff.contains("in /boot"),
+        "diff names what the switch would refuse:\n{diff}"
+    );
     let err = setup.fails(&["switch", "--noconfirm"]);
     assert!(err.contains("in /boot") && err.contains("nothing was changed"), "{err}");
     assert!(!setup.machine.root.join("archix").exists());
