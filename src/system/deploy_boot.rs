@@ -22,6 +22,9 @@ pub const TREES: &[(&str, &str)] = &[
 /// Trees mounted read-only: on ext4 they share inodes with older deployments, so a write would change a rollback target; staging writes them instead.
 pub const READ_ONLY: &[&str] = &["usr", "opt", "boot"];
 
+/// What deploy-mount writes in its run directory when it booted current instead of the selected entry's committed deployment: the entry's id, then why.
+pub const ENTRY_REFUSED: &str = "entry-refused";
+
 /// Where the busybox initramfs has the root mounted when late hooks run.
 pub const BUSYBOX_ROOT: &str = "/new_root";
 
@@ -56,20 +59,52 @@ fn esp_path(path: &str) -> String {
     path.trim().replace('\\', "/").trim_start_matches('/').to_lowercase()
 }
 
-/// Whether the UKI systemd-stub reports starting is the one archix recorded for entry `id`; true when the stub reports none.
-fn started_recorded(root: &Path, id: &str, stub: Option<&str>) -> bool {
-    let Some(stub) = stub else {
-        return true;
+/// What firmware, systemd-boot and systemd-stub started this boot with, each None when unknown, which checks nothing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Started<'a> {
+    /// The UKI's path on the ESP, systemd-stub's StubImageIdentifier.
+    pub stub: Option<&'a str>,
+    /// The kernel command line.
+    pub cmdline: Option<&'a str>,
+    /// The running kernel's release.
+    pub kernel: Option<&'a str>,
+}
+
+/// Why the boot entry `id` of deployment `generation` didn't start what archix wrote it to, going by archix's record of it.
+fn started_otherwise(root: &Path, id: &str, generation: u32, started: Started) -> Option<String> {
+    let paths = Paths::under(root);
+    let record = fs::read_to_string(boot::entry_records(&paths).join(boot::entry_id(id))).ok()?;
+    let uki = boot::recorded_uki(&record)?;
+    if let Some(stub) = started.stub
+        && esp_path(stub) != esp_path(uki)
+    {
+        return Some(format!(
+            "it started {}, but archix wrote it to start {uki}",
+            stub.trim().replace('\\', "/")
+        ));
+    }
+    if let Some(kernel) = started.kernel
+        && !is_dir(&root.join(format!("archix/deploy/{generation}/usr/lib/modules/{kernel}")))
+    {
+        return Some(format!(
+            "it started kernel {kernel}, which deployment {generation} doesn't have, so {uki} isn't the UKI archix built for it"
+        ));
+    }
+    let cmdline = started.cmdline?;
+    let name = uki.rsplit('/').next().unwrap_or_default();
+    let Ok(embedded) = fs::read_to_string(boot::cmdline_records(&paths).join(name)) else {
+        return Some(format!(
+            "archix has no record of the kernel command line {uki} embeds, so it can't tell whether this boot's is that one"
+        ));
     };
-    let record =
-        fs::read_to_string(boot::entry_records(&Paths::under(root)).join(boot::entry_id(id))).unwrap_or_default();
-    record
-        .lines()
-        .find_map(|line| match line.split_once(char::is_whitespace) {
-            Some(("efi" | "uki", path)) => Some(esp_path(path)),
-            _ => None,
-        })
-        .is_some_and(|recorded| recorded == esp_path(stub))
+    let words = |text: &str| text.replace('\0', " ").split_whitespace().collect::<Vec<_>>().join(" ");
+    (words(cmdline) != words(&embedded)).then(|| {
+        format!(
+            "the kernel command line `{}` isn't the one archix built {uki} with, `{}`; an options line in the entry or an edit in the boot menu's editor replaces it while Secure Boot is off",
+            words(cmdline),
+            words(&embedded)
+        )
+    })
 }
 
 #[derive(Debug, PartialEq)]
@@ -77,6 +112,8 @@ pub struct Chosen {
     pub generation: u32,
     /// Whether it's the selected boot entry's deployment rather than `current`.
     pub selected: bool,
+    /// Why the selected entry's committed deployment didn't boot: archix has no record of the entry, or it started another UKI, kernel or command line than archix wrote it with.
+    pub refused: Option<String>,
 }
 
 fn is_dir(path: &Path) -> bool {
@@ -121,27 +158,34 @@ fn recorded(root: &Path, id: &str) -> bool {
 
 /// The deployment to boot from `root`: the selected entry's if archix recorded that entry and its deployment is committed, else `current`; None on a root without deployments.
 pub fn choose(root: &Path, selected: Option<&str>) -> Result<Option<Chosen>> {
-    choose_started(root, selected, None)
+    choose_started(root, selected, Started::default())
 }
 
-/// `choose`, where the selected entry also has to have started the UKI archix recorded for it when systemd-stub says which it started.
-pub fn choose_started(root: &Path, selected: Option<&str>, stub: Option<&str>) -> Result<Option<Chosen>> {
+/// `choose`, where the selected entry also has to have started what archix wrote it to, as far as `started` tells: the UKI archix recorded for it, a kernel its deployment has, and the command line that UKI embeds.
+pub fn choose_started(root: &Path, selected: Option<&str>, started: Started) -> Result<Option<Chosen>> {
     let archix = root.join("archix");
+    let mut refused = None;
     if let Some(entry) = selected
         && let Some(generation) = generation_of_entry(entry)
-        && recorded(root, entry)
-        && started_recorded(root, entry, stub)
         && complete(&archix, generation)
     {
-        return Ok(Some(Chosen {
-            generation,
-            selected: true,
-        }));
+        refused = match recorded(root, entry) {
+            false => Some("archix has no record of writing it".to_string()),
+            true => started_otherwise(root, entry, generation, started),
+        };
+        if refused.is_none() {
+            return Ok(Some(Chosen {
+                generation,
+                selected: true,
+                refused,
+            }));
+        }
     }
     match current(&archix)? {
         Some(generation) if complete(&archix, generation) => Ok(Some(Chosen {
             generation,
             selected: false,
+            refused,
         })),
         Some(generation) => bail!(
             "{}/current names deployment {generation}, which isn't complete",
@@ -364,7 +408,13 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
         .parent()
         .and_then(|dir| fs::read(dir.join(STUB_IMAGE_VAR)).ok())
         .and_then(|bytes| boot::efivar_string(&bytes));
-    let Some(chosen) = choose_started(root, selected.as_deref(), stub.as_deref())? else {
+    let kernel = crate::testhooks::kernel_release();
+    let started = Started {
+        stub: stub.as_deref(),
+        cmdline: Some(cmdline),
+        kernel: kernel.as_deref(),
+    };
+    let Some(chosen) = choose_started(root, selected.as_deref(), started)? else {
         bail!("{} has no deployments", archix.display());
     };
     let deployment = archix.join("deploy").join(chosen.generation.to_string());
@@ -393,15 +443,21 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
         .with_context(|| format!("writing {}", run_dir.join("usr-local").display()))?;
     fs::write(run_dir.join("deployment"), format!("{}\n", chosen.generation))
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;
-    let why = match (&selected, chosen.selected) {
-        (Some(entry), true) => format!("the boot entry {entry}"),
-        (Some(entry), false) => {
-            format!(
-                "current; the boot entry {entry} isn't one archix recorded for a committed deployment, or it started another UKI ({}) than archix recorded for it",
-                stub.as_deref().unwrap_or("unknown")
-            )
+    let refused_record = run_dir.join(ENTRY_REFUSED);
+    match (&selected, &chosen.refused) {
+        (Some(entry), Some(why)) => fs::write(&refused_record, format!("{entry}\n{why}\n"))
+            .with_context(|| format!("writing {}", refused_record.display()))?,
+        _ => {
+            let _ = fs::remove_file(&refused_record);
         }
-        (None, _) => "current".to_string(),
+    }
+    let why = match (&selected, chosen.selected, &chosen.refused) {
+        (Some(entry), true, _) => format!("the boot entry {entry}"),
+        (Some(entry), false, Some(why)) => format!("current, not the boot entry {entry}'s: {why}"),
+        (Some(entry), false, None) => {
+            format!("current; the boot entry {entry} isn't one archix wrote for a committed deployment")
+        }
+        (None, ..) => "current".to_string(),
     };
     println!("archix: booting deployment {} ({why})", chosen.generation);
     Ok(chosen.generation)
@@ -587,8 +643,12 @@ mod tests {
         dir
     }
 
-    fn chosen(generation: u32, selected: bool) -> Option<Chosen> {
-        Some(Chosen { generation, selected })
+    fn chosen(generation: u32, selected: bool) -> Option<(u32, bool)> {
+        Some((generation, selected))
+    }
+
+    fn choose(root: &Path, selected: Option<&str>) -> Result<Option<(u32, bool)>> {
+        super::choose(root, selected).map(|chosen| chosen.map(|c| (c.generation, c.selected)))
     }
 
     #[test]
@@ -653,7 +713,15 @@ mod tests {
             "uki /EFI/Linux/archix-fallback-2.efi\n",
         )
         .unwrap();
-        let started = |entry: &str, stub: Option<&str>| choose_started(root, Some(entry), stub).unwrap();
+        let started = |entry: &str, stub: Option<&str>| {
+            let started = Started {
+                stub,
+                ..Started::default()
+            };
+            choose_started(root, Some(entry), started)
+                .unwrap()
+                .map(|c| (c.generation, c.selected))
+        };
         assert_eq!(
             started("archix-2.conf", Some("\\EFI\\archix\\7.2.9-arch1-1-aaaa.efi")),
             chosen(2, true)
@@ -680,6 +748,108 @@ mod tests {
         assert_eq!(
             started("archix-fallback-2.efi", Some("\\EFI\\Linux\\archix-fallback-1.efi")),
             chosen(1, false)
+        );
+    }
+
+    #[test]
+    fn an_entry_that_passed_another_command_line_than_its_uki_embeds_falls_back_to_current() {
+        let dir = layout();
+        let root = dir.path();
+        let paths = Paths::under(root);
+        let records = boot::entry_records(&paths);
+        fs::write(
+            records.join("archix-2.conf"),
+            "title archix\nversion 2\nefi /EFI/archix/7.2.9-arch1-1-aaaa.efi\n",
+        )
+        .unwrap();
+        fs::write(
+            records.join("archix-fallback-2.efi"),
+            "uki /EFI/Linux/archix-fallback-2.efi\n",
+        )
+        .unwrap();
+        let cmdlines = boot::cmdline_records(&paths);
+        fs::create_dir_all(&cmdlines).unwrap();
+        fs::write(cmdlines.join("7.2.9-arch1-1-aaaa.efi"), "root=UUID=x rw quiet").unwrap();
+        let stub = "\\EFI\\archix\\7.2.9-arch1-1-aaaa.efi";
+        fs::create_dir_all(root.join("archix/deploy/2/usr/lib/modules/7.2.9-arch1-1")).unwrap();
+        let started = |entry: &str, stub: &str, cmdline: &str| {
+            let started = Started {
+                stub: Some(stub),
+                cmdline: Some(cmdline),
+                kernel: Some("7.2.9-arch1-1"),
+            };
+            choose_started(root, Some(entry), started).unwrap().unwrap()
+        };
+        let booted = started("archix-2.conf", stub, "root=UUID=x  rw quiet\n");
+        assert_eq!((booted.generation, booted.selected, booted.refused), (2, true, None));
+        let edited = started("archix-2.conf", stub, "root=UUID=x rw quiet init=/bin/sh");
+        assert_eq!(
+            (edited.generation, edited.selected),
+            (1, false),
+            "an options line was added"
+        );
+        let why = edited.refused.unwrap();
+        assert!(
+            why.contains("`root=UUID=x rw quiet init=/bin/sh` isn't the one archix built /EFI/archix/7.2.9-arch1-1-aaaa.efi with, `root=UUID=x rw quiet`"),
+            "{why}"
+        );
+        let replaced = started("archix-2.conf", stub, "root=UUID=y rw quiet");
+        assert_eq!(replaced.generation, 1, "the root was replaced");
+        let other = started("archix-2.conf", "\\EFI\\archix\\other.efi", "root=UUID=x rw quiet");
+        assert_eq!(other.generation, 1);
+        assert_eq!(
+            other.refused.as_deref(),
+            Some("it started /EFI/archix/other.efi, but archix wrote it to start /EFI/archix/7.2.9-arch1-1-aaaa.efi")
+        );
+        let fallback = "\\EFI\\Linux\\archix-fallback-2.efi";
+        let unknown = started("archix-fallback-2.efi", fallback, "root=UUID=x rw quiet");
+        assert_eq!(unknown.generation, 1, "no record of the fallback's command line");
+        assert!(
+            unknown
+                .refused
+                .unwrap()
+                .contains("no record of the kernel command line")
+        );
+        fs::copy(
+            cmdlines.join("7.2.9-arch1-1-aaaa.efi"),
+            cmdlines.join("archix-fallback-2.efi"),
+        )
+        .unwrap();
+        assert_eq!(
+            started("archix-fallback-2.efi", fallback, "root=UUID=x rw quiet").generation,
+            2
+        );
+        let other_kernel = choose_started(
+            root,
+            Some("archix-2.conf"),
+            Started {
+                stub: Some(stub),
+                cmdline: Some("root=UUID=x rw quiet"),
+                kernel: Some("7.3.0-arch1-1"),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (other_kernel.generation, other_kernel.refused.as_deref()),
+            (
+                1,
+                Some(
+                    "it started kernel 7.3.0-arch1-1, which deployment 2 doesn't have, so /EFI/archix/7.2.9-arch1-1-aaaa.efi isn't the UKI archix built for it"
+                )
+            ),
+            "another signed UKI copied over this one's file"
+        );
+        let unrecorded = started("archix-5.conf", stub, "root=UUID=x rw quiet");
+        assert_eq!(
+            (unrecorded.generation, unrecorded.refused.as_deref()),
+            (1, Some("archix has no record of writing it"))
+        );
+        let staging = started("archix-3.conf", stub, "anything");
+        assert_eq!(
+            (staging.generation, staging.refused),
+            (1, None),
+            "an entry without a committed deployment isn't refused, only passed over"
         );
     }
 

@@ -176,7 +176,7 @@ jobs:
       fail-fast: false
       matrix:
         # Balanced by CI 40649673183's times, longest first: revoke (136 s) beside fallback (114), then secureboot (54) and usr-local (added later, not timed on CI yet); layout (95) beside reset-mid-switch (82), then etc-merge (77) and counting (74), then file-systems (added later, not timed on CI yet).
-        tests: ["revoke fallback secureboot usr-local", "layout reset-mid-switch etc-merge counting file-systems"]
+        tests: ["revoke fallback secureboot usr-local entry-edit", "layout reset-mid-switch etc-merge counting file-systems"]
         fs: [ext4, btrfs]
     name: boot (${{ matrix.tests }}, ${{ matrix.fs }})
     env:

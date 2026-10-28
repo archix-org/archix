@@ -104,7 +104,9 @@ ln -s deploy/2 /mnt/archix/current
 
 mkdir -p /mnt/efi/EFI/archix /mnt/efi/loader/entries
 cp "$deploy/1/boot/archix.efi" /mnt/efi/EFI/archix/shared.efi
-mkdir -p /mnt/var/lib/archix/boot/entries
+cp "$deploy/1/boot/archix.efi" /mnt/efi/EFI/archix/other.efi
+mkdir -p /mnt/var/lib/archix/boot/entries /mnt/var/lib/archix/boot/cmdlines
+cp "$deploy/1/etc/kernel/cmdline" /mnt/var/lib/archix/boot/cmdlines/shared.efi
 for n in 1 2 3; do
   printf 'title archix %s\nefi /EFI/archix/shared.efi\n' "$n" > "/mnt/efi/loader/entries/archix-$n.conf"
   cp "/mnt/efi/loader/entries/archix-$n.conf" /mnt/var/lib/archix/boot/entries/

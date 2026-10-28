@@ -40,6 +40,15 @@ pub fn kernel_cmdline() -> String {
     std::fs::read_to_string("/proc/cmdline").unwrap_or_default()
 }
 
+/// The running kernel's release, or ARCHIX_TEST_KERNEL in a debug build, where empty means unknown.
+pub fn kernel_release() -> Option<String> {
+    let release = match std::env::var("ARCHIX_TEST_KERNEL") {
+        Ok(release) if cfg!(debug_assertions) => release,
+        _ => std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default(),
+    };
+    Some(release.trim().to_string()).filter(|release| !release.is_empty())
+}
+
 /// Whether `archix rescue` asks for its login outside an initramfs too, with ARCHIX_TEST_RESCUE_LOGIN=1 in a debug build.
 pub fn rescue_login() -> bool {
     cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_RESCUE_LOGIN").as_deref() == Ok("1")

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs at every boot of the deployment boot VM: checks the mounted deployment, /usr/local and its activation, then boots the next entry; reports on the console.
+# Runs at every boot of the deployment boot VM: checks the mounted deployment, /usr/local and its activation, then boots the next entry, last deployment 1's entry edited on the ESP; reports on the console.
 set -u
 state=/var/lib/archix-vm-stage
 stage=$(cat "$state" 2> /dev/null || echo 1)
@@ -32,6 +32,15 @@ usr_local_shared() {
   echo "$1" >> /usr/local/archix-vm-written || fail "/usr/local should be writable"
 }
 
+refused_note() {
+  grep -qF "$1" /run/archix/entry-refused || fail "deploy-mount should record why it passed over archix-1.conf: $(cat /run/archix/entry-refused 2>&1)"
+  rm -f /var/lib/archix/notes
+  archix boot-check > /dev/console 2>&1 || fail "archix boot-check"
+  grep -F "systemd-boot started the boot entry archix-1.conf, but archix booted the current deployment 2 instead: " /var/lib/archix/notes | grep -qF "$1" \
+    || fail "the login notes should say why: $(cat /var/lib/archix/notes 2>&1)"
+  [ "$(readlink /archix/current)" = deploy/2 ] || fail "current should stay deployment 2: $(readlink /archix/current)"
+}
+
 case $stage in
   1)
     check_deployment 2
@@ -62,6 +71,31 @@ case $stage in
     usr_local_shared 3
     [ "$(cat /usr/local/archix-vm-written)" = "$(printf '1\n3')" ] || fail "what the first boot wrote to /usr/local should still be there: $(cat /usr/local/archix-vm-written)"
     say "PASS: the entry of an uncommitted staging tree booted the current deployment, with /var/usrlocal on /usr/local"
+    printf 'options %s archix.vmtest=edited\n' "$(cat /proc/cmdline)" >> /efi/loader/entries/archix-1.conf
+    sync -f /efi
+    echo 4 > "$state"
+    bootctl set-oneshot archix-1.conf || fail "bootctl set-oneshot"
+    systemctl reboot
+    ;;
+  4)
+    [ "$selected" = archix-1.conf ] || fail "entry archix-1.conf should have started this boot"
+    grep -qw archix.vmtest=edited /proc/cmdline || fail "the edited entry's options should be this boot's command line: $(cat /proc/cmdline)"
+    check_deployment 2
+    refused_note "isn't the one archix built /EFI/archix/shared.efi with"
+    say "PASS: deployment 1's entry edited to pass another command line booted the current deployment, with a login note"
+    sed 's|^efi .*|efi /EFI/archix/other.efi|' /var/lib/archix/boot/entries/archix-1.conf > /efi/loader/entries/archix-1.conf
+    sync -f /efi
+    echo 5 > "$state"
+    bootctl set-oneshot archix-1.conf || fail "bootctl set-oneshot"
+    systemctl reboot
+    ;;
+  5)
+    [ "$selected" = archix-1.conf ] || fail "entry archix-1.conf should have started this boot"
+    check_deployment 2
+    refused_note "it started /EFI/archix/other.efi, but archix wrote it to start /EFI/archix/shared.efi"
+    cp /var/lib/archix/boot/entries/archix-1.conf /efi/loader/entries/archix-1.conf
+    sync -f /efi
+    say "PASS: deployment 1's entry edited to start another UKI booted the current deployment, with a login note"
     echo done > "$state"
     say "OK"
     systemctl poweroff

@@ -17,6 +17,31 @@ use tempfile::TempDir;
 /// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
 pub const IMAGE_SNAPSHOT: &str = "2026-10-10";
 static SYSTEM: Mutex<()> = Mutex::new(());
+/// What a boot entry starts: the UKI's path on the ESP, the command line the kernel gets, and the kernel's release, empty when it's no UKI objcopy reads.
+pub struct Started {
+    pub uki: String,
+    pub cmdline: String,
+    pub kernel: String,
+}
+
+/// A UKI's PE section `name` as text, without its trailing NULs.
+fn section(uki: &Path, name: &str) -> Option<String> {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("section");
+    let copied = Command::new("objcopy")
+        .args(["-O", "binary", &format!("--only-section={name}")])
+        .arg(uki)
+        .arg(&out)
+        .output()
+        .is_ok_and(|done| done.status.success());
+    let text = String::from_utf8_lossy(&fs::read(&out).ok()?)
+        .trim_end_matches('\0')
+        .to_string();
+    (copied && !text.is_empty()).then_some(text)
+}
+
+/// The vendor GUID systemd-boot and systemd-stub put their EFI variables under.
+const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 /// Small packages the boot tests add one at a time.
 pub const UKI_TEST_PACKAGES: [&str; 10] = [
     "tree", "bc", "pv", "dos2unix", "figlet", "rlwrap", "cowsay", "sl", "toilet", "ncdu",
@@ -284,7 +309,22 @@ impl Machine {
                 let _ = fs::remove_file(&efivar);
             }
         }
-        let output = Command::new(env!("CARGO_BIN_EXE_archix"))
+        let stub = efivar.with_file_name(format!("StubImageIdentifier-{LOADER_GUID}"));
+        let mut mount = Command::new(env!("CARGO_BIN_EXE_archix"));
+        match entry.and_then(|entry| self.started_by(entry)) {
+            Some(started) => {
+                let mut bytes = vec![6, 0, 0, 0];
+                bytes.extend(started.uki.replace('/', "\\").encode_utf16().flat_map(u16::to_le_bytes));
+                bytes.extend([0, 0]);
+                fs::write(&stub, bytes).unwrap();
+                mount.env("ARCHIX_TEST_CMDLINE", started.cmdline);
+                mount.env("ARCHIX_TEST_KERNEL", started.kernel);
+            }
+            None => {
+                let _ = fs::remove_file(&stub);
+            }
+        }
+        let output = mount
             .arg("deploy-mount")
             .arg(&self.root)
             .arg("--efivar")
@@ -301,6 +341,40 @@ impl Machine {
         assert!(output.status.success(), "deploy-mount failed:\n{text}");
         *self.booted.borrow_mut() = entry.map(str::to_string);
         text
+    }
+
+    /// What systemd-boot and systemd-stub without Secure Boot start for boot entry `id` on this machine's ESP.
+    pub fn started_by(&self, id: &str) -> Option<Started> {
+        let esp = self.esp();
+        let text = match fs::read_dir(esp.join("loader/entries"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|file| archix::system::boot::entry_id(&file.file_name().to_string_lossy()) == id)
+        {
+            Some(file) => fs::read_to_string(file.path()).ok()?,
+            None if esp.join("EFI/Linux").join(id).is_file() => format!("uki /EFI/Linux/{id}\n"),
+            None => return None,
+        };
+        let uki = archix::system::boot::recorded_uki(&text)?.to_string();
+        let file = esp.join(uki.trim_start_matches('/'));
+        let options: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("options"))
+            .filter(|rest| rest.starts_with(char::is_whitespace))
+            .map(str::trim)
+            .collect();
+        let name = uki.rsplit('/').next().unwrap_or_default();
+        let cmdline = match (options.is_empty(), section(&file, ".cmdline")) {
+            (false, _) => options.join(" "),
+            (true, Some(cmdline)) => cmdline,
+            (true, None) => fs::read_to_string(Paths::under(&self.root).state.join("boot/cmdlines").join(name)).ok()?,
+        };
+        Some(Started {
+            kernel: section(&file, ".uname").unwrap_or_default(),
+            uki,
+            cmdline,
+        })
     }
 
     /// Takes the running deployment's binds and the read-only store off the root, leaving it as a live USB mounts it.

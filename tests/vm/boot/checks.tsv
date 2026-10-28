@@ -89,6 +89,14 @@ plain	'/boot should be read-only once laid out'
 5	f'the refused switch left a deployment behind: {deployments()}'
 5	f'the refused switch left its staging tree: {listing()}'
 5	'the switch never started staging'
+5	f'under Secure Boot loader.conf should turn the menu editor off: {text}'	added
+5	'adding an options line to the protected entry'	added
+5	bootctl set-oneshot protected	added
+5b	f'systemd-boot should have started {protected}, not {selected}'	added
+5b	f"systemd-stub should drop the options line for the protected UKI's own command line under Secure Boot: {cmdline}"	added
+5b	f"the UKI and command line it started are archix's, so nothing should be refused: {out('cat /run/archix/entry-refused 2>&1')}"	added
+5b	f'the login notes should say the entry was changed: {notes}'	added
+5b	'restoring the protected entry'	added
 6	f'after a power cut mid-switch, deployment {before} should still boot and be current'	renamed	f'after a reset mid-switch, deployment {before} should still boot and be current'
 6	f'the cut switch committed a deployment: {listing()}; deployments before {kept}, now {deployments()}'	renamed	f'the reset switch committed a deployment: {listing()}; deployments before {kept}, now {deployments()}'
 6	'the switch after the power cut'	renamed	'the switch after the reset'
@@ -237,3 +245,23 @@ fs3	'the data disk should be gone'	added
 fs3	"the data disk's mounts should be left out"	added
 fs3	'the mounts on the root and the swap file should still be there'	added
 fs3	'the deployment switched to with swap active should boot'	added
+ee1	f"a deployment older than {c} should have an entry: {out('ls /efi/loader/entries')}"	added
+ee1	'adding an options line to the older entry'	added
+ee1	bootctl set-oneshot entry	added
+ee2	f'systemd-boot should have started {entry}, not {selected}'	added
+ee2	f"without Secure Boot the options line should be the command line: {out('cat /proc/cmdline')}"	added
+ee2	f'the edited entry should boot the current deployment {c}, not {running}'	added
+ee2	f"deploy-mount should record why: {out('cat /run/archix/entry-refused 2>&1')}"	added
+ee2	f'the login notes should say so: {login}'	added
+ee2	f'deployment {c} should stay current: {current()}'	added
+ee2	'restoring the entry and copying its UKI'	added
+ee2	'pointing the entry at the copy'	added
+ee2	bootctl set-oneshot entry	added
+ee3	f'systemd-boot should have started {entry}, not {selected}'	added
+ee3	f'the entry pointed at another UKI should boot the current deployment {c}, not {running}'	added
+ee3	f'the login notes should say which UKI it started: {notes}'	added
+ee3	'restoring the entry'	added
+ee3	bootctl set-oneshot entry	added
+ee4	f'the restored entry should boot deployment {older}, not {running}'	added
+ee4	f"nothing should be refused: {out('cat /run/archix/entry-refused 2>&1')}"	added
+ee4	f"booting deployment {older}'s own entry should make it current, not {current()}"	added

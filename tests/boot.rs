@@ -319,10 +319,24 @@ fn every_deployment_gets_a_signed_boot_entry_and_booting_an_older_one_makes_it_c
     assert!(system_path("/etc/systemd/system/sysinit.target.wants/archix-deploy-activate.service").is_symlink());
     assert!(system_path("/etc/mkinitcpio.conf.d/archix-deploy.conf").exists());
 
-    setup.set_body(&[], &(boot_body(&esp, "") + keep));
+    let loader_conf = || fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+    let editor = || {
+        loader_conf()
+            .lines()
+            .filter(|line| line.starts_with("editor"))
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let unlocked: String = loader_conf()
+        .lines()
+        .filter(|line| !line.starts_with("editor"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    fs::write(esp.join("loader/loader.conf"), unlocked + "editor yes\n").unwrap();
+    setup.set_body(&[], &(boot_body(&esp, ", secure_boot = false") + keep));
     setup.ok(&["switch", "--noconfirm"]);
     let without_tree = machine.current().unwrap();
-    setup.set_body(&["tree"], &(boot_body(&esp, "") + keep));
+    setup.set_body(&["tree"], &(boot_body(&esp, ", secure_boot = false") + keep));
     setup.ok(&["switch", "--noconfirm"]);
     let newest = machine.current().unwrap();
     let kept: BTreeSet<String> = entries(machine).into_iter().collect();
@@ -346,6 +360,12 @@ fn every_deployment_gets_a_signed_boot_entry_and_booting_an_older_one_makes_it_c
     );
     assert!(installed("tree").is_none());
 
+    assert_eq!(
+        editor(),
+        ["editor yes"],
+        "unsigned, the menu editor is the user's to set:\n{}",
+        loader_conf()
+    );
     sbctl_keys(&esp);
     let loader = esp.join("EFI/systemd/systemd-bootx64.efi");
     fs::create_dir_all(loader.parent().unwrap()).unwrap();
@@ -353,6 +373,17 @@ fn every_deployment_gets_a_signed_boot_entry_and_booting_an_older_one_makes_it_c
     let unsigned = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&loader).unwrap());
     setup.set_body(&[], &(boot_body(&esp, ", secure_boot = true") + keep));
     setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(
+        editor(),
+        ["editor no"],
+        "signed, the menu editor is off:\n{}",
+        loader_conf()
+    );
+    assert!(
+        loader_conf().contains(&format!(" archix-{}", machine.current().unwrap())),
+        "{}",
+        loader_conf()
+    );
     assert_ne!(
         std::os::unix::fs::MetadataExt::ino(&fs::metadata(&loader).unwrap()),
         unsigned,
@@ -1002,6 +1033,154 @@ fn without_a_trustworthy_booted_entry_boot_check_changes_nothing() {
         Some(older),
         "booting deployment {older}'s own entry makes it current"
     );
+}
+
+/// The command line a UKI embeds, by word.
+fn embedded_cmdline(uki: &Path) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let section = dir.path().join("cmdline");
+    let copied = Command::new("objcopy")
+        .args(["-O", "binary", "--only-section=.cmdline"])
+        .arg(uki)
+        .arg(&section)
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    words(&fs::read_to_string(&section).unwrap())
+}
+
+fn words(text: &str) -> String {
+    text.replace('\0', " ").split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+#[ignore]
+fn an_entry_edited_to_pass_another_command_line_or_start_another_uki_boots_current_with_a_login_note() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let older = machine.current().unwrap();
+    setup.set_body(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let newest = machine.current().unwrap();
+    let cmdlines = setup.paths.state.join("boot/cmdlines");
+    for n in [older, newest] {
+        let uki = uki(machine, &format!("archix-{n}.conf"));
+        let recorded = fs::read_to_string(cmdlines.join(uki.file_name().unwrap())).unwrap();
+        assert_eq!(
+            words(&recorded),
+            embedded_cmdline(&uki),
+            "archix records the command line deployment {n}'s UKI embeds"
+        );
+    }
+    let fallback = machine.esp().join(format!("EFI/Linux/archix-fallback-{newest}.efi"));
+    let recorded = fs::read_to_string(cmdlines.join(fallback.file_name().unwrap())).unwrap();
+    assert_eq!(words(&recorded), embedded_cmdline(&fallback), "and the fallback UKI's");
+
+    let entry = format!("archix-{older}.conf");
+    let file = entry_file(machine, &entry);
+    let written = fs::read_to_string(&file).unwrap();
+    let embedded = embedded_cmdline(&uki(machine, &entry));
+    let refused = machine.root.join("run/archix/entry-refused");
+    let cmdline = ("ARCHIX_TEST_CMDLINE", "root=/dev/vda2 rw");
+    let boot_check = || setup.ok_env(&[cmdline, ("ARCHIX_TEST_ENTRY", entry.as_str())], &["boot-check"]);
+    let notes = || fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    let copy = machine.esp().join("EFI/archix/copy.efi");
+    fs::copy(uki(machine, &entry), &copy).unwrap();
+    for (case, edited, why) in [
+        (
+            "an options line that adds init=/bin/sh",
+            format!("{written}options {embedded} init=/bin/sh\n"),
+            format!("the kernel command line `{embedded} init=/bin/sh` isn't the one archix built"),
+        ),
+        (
+            "an options line that replaces the root",
+            format!("{written}options root=/dev/vdb2 rw\n"),
+            "the kernel command line `root=/dev/vdb2 rw` isn't the one archix built".to_string(),
+        ),
+        (
+            "an efi line that starts a copy of its UKI",
+            written
+                .lines()
+                .map(|line| match line.starts_with("efi ") || line.starts_with("uki ") {
+                    true => "efi /EFI/archix/copy.efi\n".to_string(),
+                    false => format!("{line}\n"),
+                })
+                .collect(),
+            "it started /EFI/archix/copy.efi, but archix wrote it to start /EFI/archix/".to_string(),
+        ),
+    ] {
+        fs::write(&file, &edited).unwrap();
+        let mounted = machine.reboot(Some(&entry));
+        assert!(
+            mounted.contains(&format!(
+                "booting deployment {newest} (current, not the boot entry {entry}'s: {why}"
+            )),
+            "{case}: {mounted}"
+        );
+        assert_eq!(
+            fs::read_to_string(machine.root.join("run/archix/deployment")).unwrap(),
+            format!("{newest}\n"),
+            "{case}"
+        );
+        assert!(fs::read_to_string(&refused).unwrap().contains(&why), "{case}");
+        boot_check();
+        boot_check();
+        assert_eq!(machine.current(), Some(newest), "{case}: current stays");
+        let notes = notes();
+        let note = format!(
+            "archix: systemd-boot started the boot entry {entry}, but archix booted the current deployment {newest} instead: {why}"
+        );
+        assert_eq!(
+            notes.matches(&note).count(),
+            1,
+            "{case}: the login note, once:\n{notes}"
+        );
+        assert!(
+            notes.contains(&format!("var/lib/archix/boot/entries/{entry}")),
+            "{case}: the note names archix's copy:\n{notes}"
+        );
+        assert!(
+            !notes.contains("isn't the entry archix wrote for that generation"),
+            "{case}: one note for one edit:\n{notes}"
+        );
+        fs::remove_file(setup.paths.notes()).unwrap();
+    }
+
+    fs::write(&file, written.replace("title ", "title edited ")).unwrap();
+    let mounted = machine.reboot(Some(&entry));
+    assert!(
+        mounted.contains(&format!("booting deployment {older} (the boot entry {entry})")),
+        "an edit to the title alone redirects nothing: {mounted}"
+    );
+    assert!(!refused.exists());
+    boot_check();
+    let edited = notes();
+    assert!(
+        edited.contains(&format!(
+            "archix: the boot entry {entry} isn't the entry archix wrote for that generation"
+        )) && edited.contains(&format!(
+            "so deployment {older} booted from it, but current stays as it is"
+        )),
+        "{edited}"
+    );
+    assert_eq!(machine.current(), Some(newest));
+    fs::remove_file(setup.paths.notes()).unwrap();
+
+    fs::write(&file, &written).unwrap();
+    let mounted = machine.reboot(Some(&entry));
+    assert!(
+        mounted.contains(&format!("booting deployment {older} (the boot entry {entry})")),
+        "{mounted}"
+    );
+    boot_check();
+    assert_eq!(
+        machine.current(),
+        Some(older),
+        "its own entry, as archix wrote it, boots it"
+    );
+    assert!(!notes().contains(&entry), "{}", notes());
 }
 
 #[test]

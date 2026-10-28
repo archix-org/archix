@@ -1916,14 +1916,31 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
     if laid_out && let Err(e) = system::usr_local::at_boot(&paths) {
         println!("archix: updating the /usr/local hold and its login note: {e:#}");
     }
+    let refused = system::boot::refused_entry_note(&paths);
+    if let Some(note) = &refused {
+        system::boot::add_login_note(&paths, note);
+    }
     let booted = match cmdline {
         Some(cmdline) => system::boot::booted_generation(&cmdline),
         None => system::boot::booted(),
     };
     let Some(booted) = booted else {
-        if let Some(entry) = system::boot::tampered_selected_entry() {
-            println!(
-                "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it may have been changed on the ESP; leaving current as it is"
+        if refused.is_none()
+            && let Some(entry) = system::boot::tampered_selected_entry()
+        {
+            let running = system::boot::booted_deployment(&paths.root);
+            let started = match running.filter(|n| system::deploy_boot::generation_of_entry(&entry) == Some(*n)) {
+                Some(n) => format!(
+                    "it started the UKI and command line archix wrote it with, so deployment {n} booted from it, but "
+                ),
+                None => String::new(),
+            };
+            system::boot::add_login_note(
+                &paths,
+                &format!(
+                    "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it was changed on the ESP outside archix (archix's copy is {}); {started}current stays as it is",
+                    system::boot::entry_record(&paths, &entry).display()
+                ),
             );
         }
         return Ok(());
