@@ -2,11 +2,13 @@
 import os
 import re
 
+from driver import MachineError
 from boot.common import NIC_STATE, bind, ok, out, settled
 
 ARM = os.environ.get("NIC_ARM", "plain")
 REBOOTS = int(os.environ.get("NIC_REBOOTS") or 30)
 RESETS = int(os.environ.get("NIC_RESETS") or 6)
+HANG = int(os.environ.get("NIC_HANG") or 300)
 MACHINE = {"global_timeout": max(int(os.environ.get("VM_TIMEOUT") or 2400), 120 * (REBOOTS + RESETS + 1))}
 ARCHIX = "/usr/bin/archix /usr/lib/archix /etc/archix /var/lib/archix /etc/systemd/system/archix-protected.service /etc/systemd/system/multi-user.target.wants/archix-protected.service"
 
@@ -20,10 +22,22 @@ def plan():
 
 def run(m, t):
     bind(m, t)
-    boots, good = [], []
+    boots, good, hangs = [], [], []
 
     def judged(n, how):
         boots.append(how)
+        # A boot that never reaches the shell is another fault than the NIC's: it's reported, counted and reset, and the arm goes on.
+        for _ in range(3):
+            try:
+                m.wait_for_shell(HANG)
+                break
+            except MachineError as e:
+                if not m.alive():
+                    raise
+                hangs.append(n)
+                cpus = " ".join(re.findall(r"(?:RIP|CR0|CR3)=\S+", m.hmp("info registers -a")))
+                t.log(f"NIC-CONTROL arm={ARM} boot={n} how={how} HANG: {e}; qemu: {m.hmp('info status').strip()}, {cpus}")
+                m.crash()
         m.execute("systemctl is-system-running --wait > /dev/null", 900)
         settled()
         if ARM == "deployed":
@@ -54,4 +68,4 @@ def run(m, t):
                     m.crash()
                 judged(n, how)
     finally:
-        t.log(f"NIC-CONTROL arm={ARM} boots={len(boots)} good={len(good)} reboots={good.count('reboot')} resets={good.count('reset')} planned=1+{REBOOTS}+{RESETS}")
+        t.log(f"NIC-CONTROL arm={ARM} boots={len(boots)} good={len(good)} hangs={len(hangs)}{' at ' + ','.join(map(str, hangs)) if hangs else ''} reboots={good.count('reboot')} resets={good.count('reset')} planned=1+{REBOOTS}+{RESETS}")
