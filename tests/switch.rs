@@ -1984,3 +1984,89 @@ fn a_boot_of_an_older_entry_keeps_the_newer_deployment_and_its_updates_wait_in_a
         "an explicit rollback lets keep = 1 drop the newer deployment"
     );
 }
+
+/// The paths `archix diff` or `status` lists under the carried section titled `title`.
+fn carried_section(out: &str, title: &str) -> Vec<String> {
+    out.lines()
+        .skip_while(|line| *line != format!("  {title}:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("    "))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn what_the_machine_carries_but_the_config_doesnt_declare_is_named_before_and_after_switches_and_a_rollback() {
+    let _system = lock_system();
+    let declared = r#"files = { ["/etc/xattr.conf"] = { text = "declared\n" } }"#;
+    let setup = Setup::new(&[], declared);
+    let machine = &setup.machine;
+    let checks = Checks::default();
+    for (path, text) in [
+        ("opt/foo/bin/foo", "#!/bin/sh\n"),
+        ("opt/foo/share/data", "data\n"),
+        ("etc/wireguard/wg0.conf", "[Interface]\n"),
+    ] {
+        let path = machine.root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    }
+    let edited = machine.root.join("etc/e2scrub.conf");
+    let shipped = fs::read_to_string(&edited).unwrap();
+    fs::write(&edited, format!("{shipped}# edited by hand\n")).unwrap();
+    fs::write(machine.root.join("etc/xattr.conf"), "by hand\n").unwrap();
+    let check = |out: &str, when: &str| {
+        let carried = out
+            .split_once(
+                "carried on this machine but not in the config (a machine built from this config won't have them):",
+            )
+            .map(|(_, carried)| carried);
+        checks.check(carried.is_some(), format!("{when}: no carried section:\n{out}"));
+        checks.check(
+            carried_section(out, "no package's, in /usr and /opt").contains(&"/opt/foo/ (2 files)".to_string()),
+            format!("{when}: /opt/foo isn't named:\n{out}"),
+        );
+        checks.check(
+            carried_section(out, "edited from what their package shipped, in /etc")
+                .contains(&"/etc/e2scrub.conf".to_string()),
+            format!("{when}: the edited /etc/e2scrub.conf isn't named:\n{out}"),
+        );
+        checks.check(
+            carried_section(out, "secrets, which no config carries").contains(&"/etc/wireguard/ (1 file)".to_string()),
+            format!("{when}: the secret /etc/wireguard isn't named:\n{out}"),
+        );
+        checks.check(
+            !carried.unwrap_or_default().contains("/etc/xattr.conf"),
+            format!("{when}: the declared /etc/xattr.conf is named:\n{out}"),
+        );
+    };
+    check(&setup.ok(&["diff", "--all"]), "before the first switch");
+
+    setup.lay_out();
+    setup.set_body(&["tree"], declared);
+    setup.ok(&["switch", "--noconfirm"]);
+    let second = machine.current().unwrap();
+    machine.reboot(None);
+    checks.check(
+        machine.root.join("opt/foo/bin/foo").is_file(),
+        "/opt/foo was dropped by the switches",
+    );
+    check(&setup.ok(&["diff", "--all"]), "after two switches");
+    check(&setup.ok(&["status", "--all"]), "status after two switches");
+    let cut = setup.ok(&["diff"]);
+    checks.check(
+        cut.lines().count() <= setup.ok(&["diff", "--all"]).lines().count(),
+        format!("plain diff lists more than --all:\n{cut}"),
+    );
+
+    setup.ok(&["rollback", "--noconfirm"]);
+    checks.check(machine.current() < Some(second), "the rollback went back");
+    machine.reboot(None);
+    checks.check(
+        machine.root.join("opt/foo/bin/foo").is_file(),
+        "/opt/foo was dropped by the rollback",
+    );
+    check(&setup.ok(&["diff", "--all"]), "after the rollback");
+    checks.finish();
+}

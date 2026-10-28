@@ -384,7 +384,38 @@ pub(super) fn pending(
     Ok((lines, warned, kept))
 }
 
-pub fn diff(target: &Target) -> Result<()> {
+/// What this machine carries into every deployment that the config doesn't declare, as `archix {command}` reports it.
+fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str) -> Result<Vec<String>> {
+    let paths = Paths::system();
+    let installed = archix::capture::read_installed(&super::switch::installed_db(&paths))?;
+    let exe = integration::own_path()?;
+    let mut declared: BTreeSet<String> = system::render(target.config, target.config_dir)?
+        .state
+        .files
+        .into_keys()
+        .collect();
+    declared.extend(
+        integration::files(&paths, &exe)
+            .into_iter()
+            .chain(integration::boot_files(&exe))
+            .chain(integration::boot_wants())
+            .map(|(path, _)| path.to_string_lossy().into_owned()),
+    );
+    let config_dir = std::fs::canonicalize(target.config_dir)
+        .ok()
+        .and_then(|dir| Some(format!("/{}", dir.strip_prefix(&paths.root).ok()?.display())));
+    let found = archix::carried::find(&archix::carried::Scan {
+        trees: &super::switch::current_root(&paths),
+        root: &paths.root,
+        installed: &installed,
+        declared: &declared,
+        ignored,
+        config_dir,
+    })?;
+    Ok(found.lines(all, command))
+}
+
+pub fn diff(target: &Target, all: bool) -> Result<()> {
     let paths = Paths::system();
     let declared = declared(target.config)?;
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
@@ -418,10 +449,13 @@ pub fn diff(target: &Target) -> Result<()> {
     for line in &kept {
         println!("{line}");
     }
+    for line in carried(target, &declared.ignored, all, "diff")? {
+        println!("{line}");
+    }
     Ok(())
 }
 
-pub fn status(target: &Target) -> Result<()> {
+pub fn status(target: &Target, all: bool) -> Result<()> {
     let paths = Paths::system();
     let store = Store::new(&paths);
     match store.current()? {
@@ -488,6 +522,9 @@ pub fn status(target: &Target) -> Result<()> {
     let lockfile = load_lockfile(target)?;
     let Some(lock) = lockfile.hosts.get(target.host) else {
         println!("{LOCK_FILE} has no entry for {}; run `archix lock`", target.host);
+        for line in carried(target, &declared(target.config)?.ignored, all, "status")? {
+            println!("{line}");
+        }
         return Ok(());
     };
     let pins = if lock.pinned.is_empty() {
@@ -551,6 +588,9 @@ pub fn status(target: &Target) -> Result<()> {
             n => println!("{} pending; see `archix diff`", count(n, "change", "changes")),
         }
         print_missing_ignored(&declared.ignored, &installed);
+    }
+    for line in carried(target, &declared.ignored, all, "status")? {
+        println!("{line}");
     }
     Ok(())
 }

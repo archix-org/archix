@@ -57,8 +57,12 @@ enum Command {
         #[arg(long)]
         noconfirm: bool,
     },
-    /// Show what a switch would change to make this machine match the lock
-    Diff,
+    /// Show what a switch would change to make this machine match the lock, and what it carries that the config doesn't declare
+    Diff {
+        /// List everything carried but not declared, not only the first lines of each kind
+        #[arg(long)]
+        all: bool,
+    },
     /// Build the next deployment from the lock and the config; it boots at the next restart
     Switch {
         /// Don't ask for confirmation
@@ -77,8 +81,12 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         rest: Vec<String>,
     },
-    /// Show the lock, the current and booted generations and pending changes
-    Status,
+    /// Show the lock, the current and booted generations, pending changes and what the machine carries that the config doesn't declare
+    Status {
+        /// List everything carried but not declared, not only the first lines of each kind
+        #[arg(long)]
+        all: bool,
+    },
     /// Make an earlier generation current (the previous one by default): its deployment if kept, else rebuilt from the package cache; it boots at the next restart
     Rollback {
         /// Generation number; `archix generations` lists them
@@ -798,13 +806,13 @@ fn run() -> Result<ExitCode> {
             to: Some(date),
             noconfirm,
         } => commands::lock(&target, commands::Snapshot::On(date), noconfirm)?,
-        Command::Diff => commands::diff(&target)?,
+        Command::Diff { all } => commands::diff(&target, all)?,
         Command::Switch {
             noconfirm,
             accept_nearest,
             allow_unsafe_downgrade,
         } => commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?,
-        Command::Status => commands::status(&target)?,
+        Command::Status { all } => commands::status(&target, all)?,
         Command::Recover { .. }
         | Command::Init { .. }
         | Command::HookRecord

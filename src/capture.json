@@ -155,6 +155,32 @@
     "/etc/dracut.conf.d/",
     "/etc/snapper/configs/"
   ],
+  "generated": [
+    "/usr/lib/modules/*/modules.*",
+    "/usr/lib/modules/*/updates/dkms/*",
+    "*/__pycache__/*",
+    "*/icon-theme.cache",
+    "*/fonts.dir",
+    "*/fonts.scale",
+    "*/.uuid",
+    "/usr/share/mime/*",
+    "/usr/share/glib-2.0/schemas/gschemas.compiled",
+    "/usr/share/applications/mimeinfo.cache",
+    "/usr/share/info/dir",
+    "/usr/share/vim/vimfiles/doc/tags",
+    "/usr/lib/locale/locale-archive",
+    "/usr/lib/gconv/gconv-modules.cache",
+    "/usr/lib/gio/modules/giomodule.cache",
+    "/usr/lib/gdk-pixbuf-2.0/*/loaders.cache",
+    "/usr/lib/gtk-*/immodules.cache",
+    "/usr/lib/graphviz/config*",
+    "/usr/lib/vlc/plugins/plugins.dat",
+    "/usr/lib/udev/hwdb.bin",
+    "/usr/lib/jvm/default",
+    "/usr/lib/jvm/default-runtime",
+    "*/package.conf.d/package.cache*",
+    "*/texmf-dist/ls-R"
+  ],
   "dotfiles": {
     "recommended": [
       ".bashrc",

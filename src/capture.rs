@@ -34,6 +34,8 @@ pub struct Lists {
     pub secret_elsewhere: Vec<String>,
     /// Worth managing by default; an entry ending in `/` covers everything under it.
     pub recommended: Vec<String>,
+    /// Paths under /usr no package owns that pacman hooks make again on any machine (depmod's, caches); `*` stands for any run of characters, and a directory has its trailing `/`.
+    pub generated: Vec<String>,
     pub dotfiles: DotfileLists,
 }
 
@@ -102,6 +104,8 @@ pub struct FoundFile {
 pub struct Found {
     pub files: Vec<FoundFile>,
     pub secrets: Vec<String>,
+    /// Package config files this user can't read, so whether they were edited isn't known.
+    pub unreadable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,11 +221,15 @@ pub fn holds_secret(path: &Path) -> bool {
         if seen > MAX_FILES {
             break;
         }
-        if let Ok(bytes) = fs::read(&path) {
-            let text = String::from_utf8_lossy(&bytes);
-            if LISTS.secret_content.iter().any(|marker| text.contains(marker.as_str())) {
-                return true;
+        match fs::read(&path) {
+            Ok(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                if LISTS.secret_content.iter().any(|marker| text.contains(marker.as_str())) {
+                    return true;
+                }
             }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return true,
+            Err(_) => {}
         }
     }
     false
@@ -253,6 +261,31 @@ fn found(root: &Path, path: &str, edited: bool) -> Option<FoundFile> {
         source: None,
         link,
     })
+}
+
+/// Whether `pattern`, where each `*` stands for any run of characters, matches all of `path`.
+pub fn glob(pattern: &str, path: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or_default();
+    let Some(mut rest) = path.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.ends_with(last)
+}
+
+/// Whether pacman hooks make `path` (a directory with its trailing `/`) again on any machine with the same packages.
+pub fn is_generated(path: &str) -> bool {
+    LISTS.generated.iter().any(|pattern| glob(pattern, path))
 }
 
 /// Every path the installed packages own, absolute.
@@ -287,19 +320,38 @@ fn unowned_under(root: &Path, dir: &str, owned: &BTreeSet<String>) -> Vec<String
 
 /// Backup files edited since their package installed them, plus every file and symlink in /etc no package owns, but for leftovers, generated files and archix's own.
 pub fn config_files(root: &Path, installed: &BTreeMap<String, Installed>, skip: &BTreeSet<String>) -> Result<Found> {
+    config_files_owned(root, installed, &owned(installed), skip)
+}
+
+/// `config_files` with `owned`, every path `installed` owns, already gathered.
+pub fn config_files_owned(
+    root: &Path,
+    installed: &BTreeMap<String, Installed>,
+    owned: &BTreeSet<String>,
+    skip: &BTreeSet<String>,
+) -> Result<Found> {
     let mut candidates: BTreeMap<String, bool> = BTreeMap::new();
+    let mut out = Found::default();
     for pkg in installed.values() {
         for (path, sum) in &pkg.backups {
             let file = on_disk(root, path);
-            if file.is_file() && md5(&file).is_ok_and(|now| now != *sum) {
-                candidates.insert(path.clone(), true);
+            if !file.is_file() {
+                continue;
+            }
+            match md5(&file) {
+                Ok(now) if now != *sum => {
+                    candidates.insert(path.clone(), true);
+                }
+                Ok(_) => {}
+                Err(_) if !excluded(path, skip) => out.unreadable.push(path.clone()),
+                Err(_) => {}
             }
         }
     }
-    for path in unowned_under(root, "/etc", &owned(installed)) {
+    out.unreadable.sort();
+    for path in unowned_under(root, "/etc", owned) {
         candidates.entry(path).or_insert(false);
     }
-    let mut out = Found::default();
     for (path, edited) in candidates {
         if excluded(&path, skip) || is_backup(&path) {
             continue;

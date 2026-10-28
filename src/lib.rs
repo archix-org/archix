@@ -2,6 +2,7 @@ pub mod adopt;
 pub mod archive;
 pub mod aur;
 pub mod capture;
+pub mod carried;
 pub mod conflicts;
 pub mod date;
 pub mod deploy;
