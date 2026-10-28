@@ -233,12 +233,12 @@ pub fn quarantine(paths: &Paths) -> Result<String> {
 pub fn hold_status(paths: &Paths) -> Option<String> {
     let (hold, why) = read_hold(&paths.state)?;
     Some(match hold {
-        Hold::Trial => format!("/usr/local: held out since {why}; the next boot binds it again, once"),
+        Hold::Trial => format!("warning: /usr/local: held out since {why}; the next boot binds it again, once"),
         Hold::Trying => format!(
-            "/usr/local: held out since {why}; this boot bound it again, and the hold goes once it reaches multi-user.target"
+            "warning: /usr/local: held out since {why}; this boot bound it again, and the hold goes once it reaches multi-user.target"
         ),
         Hold::Held | Hold::Failed => format!(
-            "/usr/local: every boot leaves it out, held since {why}{}; `sudo archix usr-local quarantine` moves its boot-time files to /{QUARANTINE}, or once you've fixed them `sudo archix usr-local release` lets the next boot bind it again",
+            "warning: /usr/local: every boot leaves it out, held since {why}{}, so nothing in it runs or applies at boot, its units, udev rules and module settings included, even ones that are fine; `sudo archix usr-local quarantine` moves its boot-time files to /{QUARANTINE}, or once you've fixed them `sudo archix usr-local release` lets the next boot bind it again",
             if hold == Hold::Failed {
                 ", and the last boot that bound it again didn't finish"
             } else {
@@ -277,11 +277,11 @@ fn skipped_note(why: &str, hold: Option<Hold>, files: &[String]) -> String {
     );
     match (hold, files.is_empty()) {
         (Some(Hold::Held | Hold::Failed | Hold::Trying), false) => note.push_str(&format!(
-            ". It holds files that systemd, udev or the module loader read at boot ({}), so every boot leaves it out until you clear them: `sudo archix usr-local quarantine` moves them to /{QUARANTINE}, or fix them and `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
+            ". It holds files that systemd, udev or the module loader read at boot ({}), so every boot leaves it out until you clear them, and your /usr/local units, udev rules and module settings aren't running until you do, even ones that are fine, whatever made this boot leave it out: `sudo archix usr-local quarantine` moves them to /{QUARANTINE}, or fix them and `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
             shown(files)
         )),
         (Some(Hold::Held | Hold::Failed | Hold::Trying), true) => note.push_str(
-            ". Every boot leaves it out until `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
+            ". Every boot leaves it out, and nothing in it runs, until `sudo archix usr-local release`; the next boot then binds it, and if that boot doesn't reach multi-user.target, the one after leaves it out again",
         ),
         _ => note.push_str(
             ": if a unit, udev rule or module setting there broke the boot, fix or remove it there, then reboot into the current deployment",
