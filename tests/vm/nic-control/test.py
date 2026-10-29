@@ -74,10 +74,9 @@ def traced(t, n):
 
 def run(m, t):
     bind(m, t)
-    boots, good, hangs = [], [], []
+    boots, good, hangs, races = [], [], [], []
 
-    def judged(n, how):
-        boots.append(how)
+    def up(n, how):
         # A boot that never reaches the shell is another fault than the NIC's: it's reported, counted and reset, and the arm goes on.
         for _ in range(3):
             try:
@@ -91,8 +90,21 @@ def run(m, t):
                 t.log(f"NIC-CONTROL arm={ARM} boot={n} how={how} HANG phase={m.hang}; {m.hang_cpus}")
                 t.log(f"hang {n}: {e}")
                 m.crash()
+
+    def judged(n, how):
+        boots.append(how)
+        up(n, how)
         m.execute("systemctl is-system-running --wait > /dev/null", 900)
-        settled()
+        try:
+            settled()
+        except AssertionError:
+            # An attributed networkd carrier race is counted and the arm goes on, its link already back from the guest's down/up; any other NIC fault fails it.
+            if not (t.verdict or "").startswith("ATTRIBUTED: networkd-carrier-race"):
+                raise
+            races.append(n)
+            t.log(f"NIC-CONTROL arm={ARM} boot={n} how={how} RACE {t.verdict}")
+            t.verdict = None
+            m.succeed("systemctl reset-failed systemd-networkd-wait-online.service")
         if BASE == "deployed":
             t.require(ok("[ -e /run/archix/deployment ]"), "the deployed arm booted without a deployment")
         if REPLAY and n:
@@ -107,6 +119,7 @@ def run(m, t):
     try:
         with t.step(f"{ARM} 0: the first, cold boot"):
             m.start()
+            up(0, "cold")
             if BASE == "plain":
                 t.require(not ok("[ -e /archix ]"), "the plain arm's image should not be laid out")
                 m.succeed(f"systemctl disable --now archix-protected.service && rm -rf {ARCHIX} && systemctl daemon-reload")
@@ -131,4 +144,4 @@ def run(m, t):
                     m.crash()
                 judged(n, how)
     finally:
-        t.log(f"NIC-CONTROL arm={ARM} boots={len(boots)} good={len(good)} hangs={len(hangs)}{' at ' + ','.join(map(str, hangs)) if hangs else ''} reboots={good.count('reboot')} resets={good.count('reset')} planned=1+{REBOOTS}+{RESETS}")
+        t.log(f"NIC-CONTROL arm={ARM} boots={len(boots)} good={len(good)} hangs={len(hangs)}{' at ' + ','.join(map(str, hangs)) if hangs else ''} races={len(races)}{' at ' + ','.join(map(str, races)) if races else ''} reboots={good.count('reboot')} resets={good.count('reset')} planned=1+{REBOOTS}+{RESETS}")
