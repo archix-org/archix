@@ -237,6 +237,12 @@ enum Command {
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
+    /// Run by emergency.service before sulogin in a deployment with required mounts: say which didn't mount and what to do
+    #[command(hide = true)]
+    EmergencyHint {
+        #[arg(long)]
+        no_rescue_entry: bool,
+    },
     /// Run by `archix eject` in a private mount namespace: lay the deployment out as the root's own trees and hand the ESP over
     #[command(hide = true)]
     EjectHere {
@@ -546,6 +552,10 @@ fn run() -> Result<ExitCode> {
             archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::EmergencyHint { no_rescue_entry } => {
+            archix::system::emergency::run(&archix::paths::Paths::system(), !no_rescue_entry);
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::MountDeployment { root, deployment } => {
             commands::mount_deployment(&root, deployment)?;
             return Ok(ExitCode::SUCCESS);
@@ -684,6 +694,9 @@ fn run() -> Result<ExitCode> {
         Command::BootComplete => {
             if let Err(e) = archix::system::usr_local::confirm(&archix::paths::Paths::system()) {
                 println!("archix: {e:#}");
+            }
+            if let Some(booted) = archix::system::boot::booted() {
+                archix::system::emergency::forget(&archix::paths::Paths::system(), booted);
             }
             archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
             return Ok(ExitCode::SUCCESS);
@@ -863,6 +876,7 @@ fn run() -> Result<ExitCode> {
         | Command::DeployActivate { .. }
         | Command::PruneHidden { .. }
         | Command::Swapfile { .. }
+        | Command::EmergencyHint { .. }
         | Command::MountDeployment { .. }
         | Command::EjectHere { .. }
         | Command::EtcMerge { .. }

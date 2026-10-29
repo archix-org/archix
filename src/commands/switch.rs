@@ -1619,6 +1619,9 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
     if kept {
         deploy::verify::ensure_intact(&paths, &deployments, number)?;
         ensure_entry(&paths, &boot, number)?;
+        if system::boot::retry_entry(&esp, number)? {
+            println!("deployment {number}'s entry had used up its boot tries; it gets them again");
+        }
         carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
         boot::repoint(&paths, &esp, &deployments, number, &|| {
             deploy::build::entry_for(&deployments, &paths, &boot, number)
@@ -2027,9 +2030,15 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
     }
     let note = match current {
         Some(current) if system::boot::failed_to_boot(&paths, current) => {
-            let mut note = match system::health::read_failure(&paths, current) {
-                Some(failure) => system::health::fallback_note(current, booted, &failure),
-                None => format!(
+            let health = system::health::read_failure(&paths, current);
+            let mounts = system::emergency::read(&paths, current);
+            system::emergency::forget(&paths, current);
+            let mut note = match (health, mounts) {
+                (health, Some(mounts)) if health.as_ref().is_none_or(|health| health.at < mounts.at) => {
+                    system::emergency::fallback_note(current, booted, &mounts)
+                }
+                (Some(failure), _) => system::health::fallback_note(current, booted, &failure),
+                (None, _) => format!(
                     "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, which is current now"
                 ),
             };

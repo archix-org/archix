@@ -561,6 +561,89 @@ fn a_deployment_that_fails_its_tries_falls_back_and_the_one_that_booted_becomes_
 
 #[test]
 #[ignore]
+fn tries_that_stopped_for_a_missing_required_disk_say_so_after_the_fallback_and_a_rollback_retries_them() {
+    let _system = lock_system();
+    let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let machine = &setup.machine;
+    let entries_dir = machine.esp().join("loader/entries");
+    let rename = |from: String, to: String| fs::rename(entries_dir.join(from), entries_dir.join(to)).unwrap();
+    rename("archix-1+3.conf".into(), "archix-1.conf".into());
+    machine.reboot(Some("archix-1.conf"));
+    setup.ok_env(&[counting], &["boot-complete"]);
+    setup.set_body(
+        &[],
+        r#"file_systems = { ["/home"] = { device = "UUID=archix-test-missing-home", fs_type = "ext4" } }"#,
+    );
+    setup.ok_env(&[counting], &["switch", "--noconfirm"]);
+    let new = machine.current().unwrap();
+    let drop_in = fs::read_to_string(
+        machine
+            .deployment(new)
+            .join("etc/systemd/system/emergency.service.d/archix-required-mounts.conf"),
+    )
+    .unwrap_or_default();
+    assert_eq!(
+        drop_in, "[Service]\nExecStartPre=-/usr/bin/archix emergency-hint --no-rescue-entry\n",
+        "a deployment with a required mount gets emergency mode's hint"
+    );
+
+    // A counted try of the new deployment, stopped in emergency mode without the /home disk.
+    rename(format!("archix-{new}+3.conf"), format!("archix-{new}+2-1.conf"));
+    machine.reboot(Some(&format!("archix-{new}.conf")));
+    let hint = setup.ok_env(
+        &[counting, ("ARCHIX_TEST_COUNTED_BOOT", "1")],
+        &["emergency-hint", "--no-rescue-entry"],
+    );
+    for line in [
+        "archix:   /home (UUID=archix-test-missing-home): its disk isn't attached\n",
+        "archix: reattach the disk and reboot,\n",
+        &format!("archix: this is one of deployment {new}'s counted boot tries"),
+    ] {
+        assert!(hint.contains(line), "the hint should say {line:?}:\n{hint}");
+    }
+    assert!(!hint.contains("rescue entry"), "{hint}");
+
+    rename(format!("archix-{new}+2-1.conf"), format!("archix-{new}+0-3.conf"));
+    machine.reboot(Some("archix-1.conf"));
+    let out = setup.ok_env(&[counting], &["boot-check"]);
+    let why = format!(
+        "archix: deployment {new} failed its boot tries because /home (UUID=archix-test-missing-home) was missing, not because of the deployment, so systemd-boot started 1; switch again (or `archix rollback {new}`) to retry it"
+    );
+    assert!(out.contains(&why), "{out}");
+    assert_eq!(machine.current(), Some(1));
+    let notes = fs::read_to_string(setup.paths.notes()).unwrap_or_default();
+    assert!(notes.contains(&why), "{notes}");
+    let status = setup.ok(&["status"]);
+    assert!(status.contains(&why), "{status}");
+
+    let out = setup.ok_env(&[counting], &["rollback", &new.to_string(), "--noconfirm"]);
+    assert!(
+        out.contains(&format!(
+            "deployment {new}'s entry had used up its boot tries; it gets them again"
+        )),
+        "{out}"
+    );
+    assert!(
+        machine.entries().contains(&format!("archix-{new}+3.conf")),
+        "{:?}",
+        machine.entries()
+    );
+    let loader = machine.loader_conf();
+    assert!(
+        loader.contains("default archix-1.conf") && loader.contains(&format!("preferred archix-{new}.conf")),
+        "the retried deployment is preferred, the proven one still the default:\n{loader}"
+    );
+    assert_eq!(machine.current(), Some(new));
+    assert!(
+        !setup.ok(&["status"]).contains(&why),
+        "the note goes once the deployment is current again"
+    );
+}
+
+#[test]
+#[ignore]
 fn a_failed_health_check_falls_back_says_why_and_names_unsafe_downgrades_and_hibernation_waits_for_the_reboot() {
     let _system = lock_system();
     let counting = ("ARCHIX_TEST_LOADER_FEATURES", "4194303");

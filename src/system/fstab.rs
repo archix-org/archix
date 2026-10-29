@@ -203,7 +203,7 @@ pub fn size_bytes(text: &str) -> Option<u64> {
 }
 
 /// Whether `device` names a block device that udev has to bring up, so a missing one is waited for.
-fn device_backed(device: &str) -> bool {
+pub(crate) fn device_backed(device: &str) -> bool {
     ["UUID=", "LABEL=", "PARTUUID=", "PARTLABEL=", "ID="]
         .iter()
         .any(|prefix| device.starts_with(prefix))
@@ -362,6 +362,21 @@ pub fn render(config: &Value, esp: &str) -> Result<Declared> {
             bail!("{what}: file_systems declares {entry} too; drop_mounts is for lines nothing declares");
         }
     }
+    if out.lines.iter().any(|line| {
+        !line
+            .options
+            .split(',')
+            .any(|option| matches!(option, "nofail" | "noauto" | "x-systemd.automount"))
+    }) {
+        let boot = get(config, "boot");
+        let rescue_entry = matches!(boot.and_then(|boot| get(boot, "loader")), Some(Value::Str(_)))
+            && boot.and_then(|boot| get(boot, "rescue_entry")) != Some(&Value::Bool(false));
+        out.files.push((
+            super::emergency::DROP_IN.into(),
+            super::emergency::drop_in(rescue_entry),
+            "file_systems' required mounts",
+        ));
+    }
     if !crypttab.is_empty() {
         let mut text = "# Written by archix from file_systems' encrypted devices.\n".to_string();
         for line in crypttab.values() {
@@ -506,7 +521,7 @@ fn render_swap(out: &mut Declared, spec: &Value, what: &str, esp: &str) -> Resul
 }
 
 /// The fields of an fstab line that isn't a comment, unescaped.
-fn fields(line: &str) -> Option<Vec<String>> {
+pub(crate) fn fields(line: &str) -> Option<Vec<String>> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
         return None;
@@ -1034,7 +1049,7 @@ pub fn describe_at(here: &Path, config: &Value, declared: &[FstabLine]) -> Vec<S
 }
 
 /// The /dev path a device spec names, if it's attached now.
-fn resolve(device: &str) -> Option<PathBuf> {
+pub(crate) fn resolve(device: &str) -> Option<PathBuf> {
     let link = |kind: &str, name: &str| PathBuf::from("/dev/disk").join(kind).join(name.replace('/', "\\x2f"));
     let path = if let Some(uuid) = device.strip_prefix("UUID=") {
         link("by-uuid", uuid)
@@ -1526,7 +1541,29 @@ mod tests {
                 "/var/www /mnt/www none bind,nofail 0 0",
             ]
         );
-        assert!(declared.files.is_empty());
+        assert_eq!(
+            declared.files,
+            [(
+                super::super::emergency::DROP_IN.to_string(),
+                "[Service]\nExecStartPre=-/usr/bin/archix emergency-hint --no-rescue-entry\n".to_string(),
+                "file_systems' required mounts"
+            )],
+            "a required /home gets emergency mode's hint, without the rescue entry when there's no boot.loader"
+        );
+        let optional = render(
+            &config(serde_json::json!({
+                "boot": { "loader": "systemd-boot" },
+                "file_systems": { "/mnt/data": { "device": "UUID=1234" }, "/home/x": { "device": "UUID=x", "options": ["noauto"] } },
+                "swap": [{ "device": "UUID=swap", "required": true }],
+            })),
+            "/efi",
+        )
+        .unwrap();
+        assert!(
+            optional.files.is_empty(),
+            "no mount stops the boot: {:?}",
+            optional.files
+        );
     }
 
     #[test]
@@ -1559,7 +1596,12 @@ mod tests {
             ]
         );
         assert_eq!(
-            declared.files[0].1, "# Written by archix from file_systems' encrypted devices.\nsrv UUID=luks none luks\n",
+            declared.files[0].0,
+            super::super::emergency::DROP_IN,
+            "required mounts get emergency mode's hint"
+        );
+        assert_eq!(
+            declared.files[1].1, "# Written by archix from file_systems' encrypted devices.\nsrv UUID=luks none luks\n",
             "a required mount's volume isn't nofail either"
         );
         assert!(
@@ -1643,7 +1685,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            declared.files,
+            declared.files[1..],
             [(
                 "/etc/crypttab".to_string(),
                 "# Written by archix from file_systems' encrypted devices.\nsecret UUID=luks /etc/keys/secret.key luks,discard,nofail\nvault /dev/vdc none luks\n".to_string(),

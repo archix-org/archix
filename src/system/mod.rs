@@ -7,6 +7,7 @@ pub mod btrfs;
 pub mod capabilities;
 pub mod credentials;
 pub mod deploy_boot;
+pub mod emergency;
 pub mod firewall;
 pub mod fstab;
 pub mod health;

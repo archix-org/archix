@@ -272,5 +272,9 @@ fs4	'moving /home to its own disk'	added
 fs4	'a switch declaring /home'	added
 fs4	f"/home's line should have no nofail: {fstab}"	added
 fs4	f"/home should be its disk: {out('findmnt /home')}"	added
+fs4	'a switch to a deployment with one boot try'	added
+fs4	f"the new deployment should get one counted try: {out('ls /efi/loader/entries')}"	added
 fs5	f'the boot should stop before multi-user without /home, not reach the shell: {found!r}'	added
+fs5	f'emergency mode should name the missing /home and what to do before sulogin: {console[-3000:]}'	added
 fs6	f"/home should be its disk again: {out('findmnt /home')}"	added
+fs6	f"status should say the missing disk failed deployment {pending}'s try: {status}"	added

@@ -1,5 +1,6 @@
-# file_systems, swap and zram: a data disk, a LUKS volume with a key file, a bind mount and a tmpfs mount at the next boot, a swap file archix makes and zram; hibernating to that swap file and resuming; a switch with swap active; the boot with the data disk gone; /home on a disk of its own, required by default, stopping the boot when it's gone.
+# file_systems, swap and zram: a data disk, a LUKS volume with a key file, a bind mount and a tmpfs mount at the next boot, a swap file archix makes and zram; hibernating to that swap file and resuming; a switch with swap active; the boot with the data disk gone; /home on a disk of its own, required by default, stopping a pending deployment's one try in emergency mode with a hint when it's gone, and status blaming the disk after the fallback.
 import os
+import re
 import shlex
 import subprocess
 
@@ -8,6 +9,7 @@ from boot.common import CONFIG, HOST, bind, boot, current, ok, out
 KEY = "/var/lib/archix-vmtest/secret.key"
 SOURCE = "/var/lib/archix-vmtest/bind-source"
 EMERGENCY = r"Emergency Mode|emergency mode|root account is locked"
+SULOGIN = r"You are in emergency mode|root account is locked|Give root password"
 
 
 def mounts(data, luks):
@@ -99,20 +101,33 @@ def run(m, t):
         m.reboot()
         boot()
         t.check(out("findmnt -no FSTYPE /home").strip() == "ext4" and out("cat /home/archix-vmtest-home").strip() == "home", f"/home should be its disk: {out('findmnt /home')}")
+        good = current()
+        m.succeed(f"sed -i 's|boot = {{ loader = \"systemd-boot\" }}|boot = {{ loader = \"systemd-boot\", tries = 1 }}|; s|\"vm.swappiness\"] = 30|\"vm.swappiness\"] = 40|' {CONFIG}")
+        m.succeed(f"{HOST} switch --noconfirm", what="a switch to a deployment with one boot try")
+        pending = current()
+        t.check(pending != good and ok(f"[ -f /efi/loader/entries/archix-{pending}+1.conf ]"), f"the new deployment should get one counted try: {out('ls /efi/loader/entries')}")
         m.shutdown()
         m.disks.pop()
         m.process = None
 
-    with t.step("fs5: without the /home disk the boot stops in emergency mode instead of showing an empty /home"):
+    with t.step("fs5: without the /home disk the pending deployment's try stops in emergency mode instead of showing an empty /home, saying which mount is missing and what to do"):
         found, shell = m.boot_stopping_at(EMERGENCY)
+        m.wait_for_console_text(r"hold Space at power-on", 120)
+        m.wait_for_console_text(SULOGIN, 60)
         console = m.console_since(0)
         t.check(not shell and ("home.mount" in console or "/home" in console), f"the boot should stop before multi-user without /home, not reach the shell: {found!r}")
+        hint = [f"archix:   /home (UUID={home}): its disk isn't attached", "archix: reattach the disk and reboot,", "archix: or start the archix rescue entry from the boot menu (hold Space at power-on)", f"archix: this is one of deployment {pending}'s counted boot tries"]
+        sulogin = re.search(SULOGIN, console)
+        t.check(all(line in console for line in hint) and sulogin and console.index(hint[0]) < sulogin.start(), f"emergency mode should name the missing /home and what to do before sulogin: {console[-3000:]}")
         m.kill()
         m.stop()
         m.process = None
         m.connected = False
 
     m.disks.append(f"file={m.work}/home.qcow2,format=qcow2,if=virtio")
-    with t.step("fs6: with the disk back the boot mounts /home again"):
+    with t.step("fs6: with the disk back the boot falls back to the deployment before, mounting /home again, and status blames the missing disk, not the deployment"):
         boot()
         t.check(out("cat /home/archix-vmtest-home").strip() == "home", f"/home should be its disk again: {out('findmnt /home')}")
+        status = out(f"{HOST} status")
+        why = f"deployment {pending} failed its boot tries because /home (UUID={home}) was missing, not because of the deployment, so systemd-boot started {good}; switch again (or `archix rollback {pending}`) to retry it"
+        t.check(current() == good and why in status, f"status should say the missing disk failed deployment {pending}'s try: {status}")
