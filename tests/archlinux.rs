@@ -1,5 +1,7 @@
 //! Needs pacman and network access; run inside Arch with `tests/arch/run.sh`.
 
+mod common;
+
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -190,7 +192,16 @@ fn a_dkms_module_pulled_in_as_a_dependency_brings_the_kernels_headers() {
 #[test]
 #[ignore]
 fn unknown_packages_fail_to_lock() {
-    let dir = config(&["base", "definitely-not-a-package"]);
+    let aur = common::LocalAur::new();
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("init.lua"),
+        format!(
+            "return {{ packages = {{ \"base\", \"definitely-not-a-package\" }}, aur = {{ url = {:?} }} }}",
+            aur.url()
+        ),
+    )
+    .unwrap();
     let output = archix(dir.path(), &["lock"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);

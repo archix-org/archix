@@ -38,6 +38,41 @@ Every runner builds the test image through `tests/arch/image.sh`, which skips `d
 
 Every job runs `tests/ci/archive-proxy.py` on port 8079 and points `ARCHIX_TEST_ARCHIVE` at it. It caches only immutable files, `/repos/<date>/` and `/packages/`, plus each `/packages/<l>/<name>/` listing a hold without a pkgrel reads, pinned at its first fetch: served as first fetched from then on, with a file of that package it doesn't list a 404 without asking the archive, and a debug archix leaves out rows dated after `ARCHIX_TEST_TODAY`, so a listing fetched on any later day gives the same versions. It keeps a file only once it's whole and checked: a package against its repo db's size and sha256, a signature against the db's, a db or a package in no db by reading its whole compressed stream. Downloads go to a temporary file that's renamed into place after the check. `actions/cache` saves the cache only when a job added files to it. A restored cache is checked again before use, and a bad file is dropped and downloaded again. The `base` cache holds the test image's packages and the container suite's, and every other job adds to a cache of its own. The container shards don't each save a copy of `base`: each uploads just the files it newly cached as `archive-new-container-<i>`, and `container-sum` merges them into one `base` cache, checked again before it's saved.
 
+## Tests that need the internet
+
+With the archive proxy's cache warm, these two are the only container tests that reach past it. Measured with `tests/ci/offline-check.sh` (the test containers have no network but loopback, where the proxy's relay listens, and the proxy's upstream is a closed port): on the commit that added this section 551 of 553 tests passed and these two failed on the name lookup each names; none hung. On e3442fa the three fixed below failed too (539 of 544), and all 544 passed online with the same cache.
+
+| Test | Host | Why |
+| --- | --- | --- |
+| `aur::real_aur_packages_resolve` | aur.archlinux.org (the package list `packages-meta-ext-v1.json.gz`, `yay-bin`'s recipe over git) | By design: the one check that the real AUR's list and recipes still resolve; every other AUR test uses `LocalAur` (`tests/common`). |
+| `recipes::patched_packages_rebuild_archs_recipe_with_the_patches` | gitlab.archlinux.org (`unix-tree.git`, tag 2.3.2-1), gitlab.com (tree's source tarball, the PKGBUILD's `source`) | By design: patches apply to Arch's real recipe, cloned at the locked version's tag, and the patched package is built; a fixture would need a recipe URL hook and stop testing the GitLab path mapping on a real project. |
+
+Fixed on the branch that added this section, each red offline before and green offline after (they used the default AUR URL by accident):
+
+| Test | Host it reached | Now |
+| --- | --- | --- |
+| `archlinux::unknown_packages_fail_to_lock` | aur.archlinux.org (the package list, to find the name in none of the sources) | an empty `LocalAur` as `aur.url` |
+| `init::init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_config` | aur.archlinux.org (`archix init` asks the real AUR which foreign packages it has) | a fresh empty list in `/var/cache/archix`'s AUR index cache for the test, the old one put back after |
+| `switch::bare_terms_search_and_install_the_picks_like_yay` | aur.archlinux.org (search lists AUR matches) | a `LocalAur` with `tree-git`, which the test now checks is listed |
+
+So no hold test, and no test but the two in the first table, needs more than the archive proxy. The proxy log of the offline run still shows `core.db.sig` and `extra.db.sig` misses: the archive has no db signatures (404 online, which the proxy doesn't cache), and archix treats the refused fetch as it treats the 404.
+
+Building needs more than the tests:
+
+- the test image (`tests/arch/image.sh`): `archlinux:latest` from Docker Hub, its packages from the archive or the proxy passed as the `archive` build secret (`tests/ci/proxy-up.sh`), and `swtpm` and `openssh` (the Dockerfile's second layer) straight from archive.archlinux.org even with the secret, as the first layer's last step points the mirrorlist back at it (known; changing the Dockerfile rebuilds every image and cargo cache keyed on it);
+- `cargo build` and the doc tests: index.crates.io and static.crates.io for any crate the registry volume (`archix-cargo`, CI's cargo cache) lacks; `offline-check.sh` sets `CARGO_NET_OFFLINE`, so a cold registry fails it at once.
+
+The VM suites were not run offline; from their scripts, beyond the image, crates and the archive (`ARCHIX_TEST_ARCHIVE` or archive.archlinux.org, for pacstrap and in the guest, which has QEMU's user network):
+
+| Suite | Host | Why |
+| --- | --- | --- |
+| `cachyos` | mirror.cachyos.org (the keyring package and the live `cachyos*` repos) | By design: CachyOS's real repos, which no snapshot pins; the suite then makes the mirror unreachable to rebuild from archix's own copies |
+| `nvidia` | aur.archlinux.org (package list, `nvidia-580xx-dkms` and `nvidia-580xx-utils` recipes), NVIDIA's download server (the recipes' driver source) | By design: the closed driver is an AUR package |
+| `powercut` (the runner's build) | git.kernel.org (`replay-log.c`, `log-writes.c`, `log-writes.h` from xfstests) | The dm-log-writes replay tool |
+| `tests/vm/deploy/powercut/run.sh` | git.kernel.org (a shallow clone of xfstests-dev) | The same tool |
+
+To check again: `tests/ci/offline-check.sh --warm` runs the suite online through a proxy of its own on port 8093 (`ARCHIX_OFFLINE_PORT`), filling its cache in `~/.cache/archix-offline-check` (`ARCHIX_OFFLINE_STATE`) from archive.archlinux.org or `ARCHIX_OFFLINE_UPSTREAM` (the local `http://127.0.0.1:8079` cache, say); then `tests/ci/offline-check.sh` runs it offline (`tests/arch/run.sh --jobs 2` with `ARCHIX_TEST_OFFLINE=1`, which starts the test containers with `--network none`), and prints the proxy's hit and miss counts and every request it couldn't answer. Arguments after the optional `--warm` go to `tests/arch/run.sh`, as `--test switch bare_terms` for one test. A test outside the tables above that fails there and passes online needs the internet; give it a `LocalAur`, a fixture or the proxy, or add it here with why.
+
 ## Where the time went
 
 Measured on CI 40048123448 and gate 40048113502 (both c42290b, 2026-10-24), from each job's step times and its log's timestamps; minutes.

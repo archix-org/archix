@@ -4,6 +4,7 @@ mod common;
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::process::Command;
 
 use common::*;
@@ -162,6 +163,10 @@ fn install_handmade(work: &std::path::Path) {
 #[ignore]
 fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_config() {
     let _system = lock_system();
+    // init asks the real AUR which foreign packages it has; a fresh empty list in its cache answers none, offline.
+    let dump = archix::aur::index::dump_path(Path::new("/var/cache/archix"), archix::aur::DEFAULT_URL);
+    let _dump = RestoreFile::new(&dump);
+    write_aur_dump(&dump, &[]);
     let work = tempfile::tempdir().unwrap();
     install_handmade(work.path());
     let conf = format!("/etc/{HANDMADE}.conf");

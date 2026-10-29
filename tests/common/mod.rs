@@ -754,8 +754,10 @@ pub struct LocalAur {
 
 impl LocalAur {
     pub fn new() -> LocalAur {
+        let dir = TempDir::new().unwrap();
+        write_aur_dump(&dir.path().join("packages-meta-ext-v1.json.gz"), &[]);
         LocalAur {
-            dir: TempDir::new().unwrap(),
+            dir,
             published: Vec::new(),
         }
     }
@@ -848,15 +850,17 @@ impl LocalAur {
                 serde_json::json!({ "Name": name, "PackageBase": name, "Version": version, "Provides": provides, "Popularity": 0.0, "Maintainer": maintainer })
             })
             .collect();
-        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-        gz.write_all(serde_json::to_string(&entries).unwrap().as_bytes())
-            .unwrap();
-        fs::write(
-            self.dir.path().join("packages-meta-ext-v1.json.gz"),
-            gz.finish().unwrap(),
-        )
-        .unwrap();
+        write_aur_dump(&self.dir.path().join("packages-meta-ext-v1.json.gz"), &entries);
     }
+}
+
+/// Writes an AUR metadata dump listing `entries` at `path`.
+pub fn write_aur_dump(path: &Path, entries: &[serde_json::Value]) {
+    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
+    gz.write_all(serde_json::to_string(entries).unwrap().as_bytes())
+        .unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, gz.finish().unwrap()).unwrap();
 }
 
 /// Writes an executable file.

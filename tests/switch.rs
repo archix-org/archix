@@ -1562,7 +1562,9 @@ fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
 #[ignore]
 fn bare_terms_search_and_install_the_picks_like_yay() {
     let _system = lock_system();
-    let setup = Setup::new(&[], "");
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new("tree-git", "2.3.2"));
+    let setup = Setup::new(&[], &format!("aur = {{ url = {:?} }}", aur.url()));
     setup.lay_out();
     let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
     let out = setup.answering("\n", &["tree"]);
@@ -1576,6 +1578,10 @@ fn bare_terms_search_and_install_the_picks_like_yay() {
     assert!(
         last_result.starts_with("1 extra/tree "),
         "the best match is 1, printed last:\n{out}"
+    );
+    assert!(
+        out.contains(" aur/tree-git "),
+        "the AUR's matches are listed too:\n{out}"
     );
     assert!(installed("tree").is_some());
     assert_eq!(

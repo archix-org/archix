@@ -53,9 +53,10 @@ elif [ -n "${ARCHIX_TEST_ARCHIVE:-}" ]; then
   echo "warning: ARCHIX_TEST_ARCHIVE=$ARCHIX_TEST_ARCHIVE isn't an http://127.0.0.1:PORT proxy, so the tests use archive.archlinux.org" >&2
 fi
 archive=()
+# ARCHIX_TEST_OFFLINE=1 gives the test containers no network but loopback, where the proxy's relay still listens (tests/ci/offline-check.sh).
 # start: boots a test container, sets $cid, and points it at the archive proxy when there is one.
 start() {
-  cid=$(docker run -d --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
+  cid=$(docker run -d ${ARCHIX_TEST_OFFLINE:+--network none -e CARGO_NET_OFFLINE=true} --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /tmp \
     -v "$root":/src:ro -v "$target":/target -v "$registry":/root/.cargo/registry ${relay_dir:+-v "$relay_dir":/archive-relay} \
     ${out:+-v "$out":/out} ${ARCHIX_PREBUILT:+-v "$ARCHIX_PREBUILT":/prebuilt:ro} archix-arch-test /usr/lib/systemd/systemd)
   cids+=("$cid")
@@ -71,6 +72,7 @@ start() {
     # A request that misses the proxy then fails instead of passing while the archive happens to be up.
     docker exec "$cid" sh -c 'for a in $(getent ahosts archive.archlinux.org | cut -d" " -f1 | sort -u); do ip route add blackhole "$a" || [ "${a#*:}" != "$a" ] || exit 1; done'
   else
+    [ -z "${ARCHIX_TEST_OFFLINE:-}" ] || { echo "the offline container can't reach the archive proxy at $ARCHIX_TEST_ARCHIVE" >&2; exit 1; }
     echo "warning: the container can't reach the archive proxy at $ARCHIX_TEST_ARCHIVE, so the tests use archive.archlinux.org" >&2
   fi
 }
