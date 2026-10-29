@@ -174,19 +174,30 @@ The race's signature, which `carrier_race()` and `network()` in `tests/vm/boot/c
 
 ## Hangs on GitHub's nested VMs
 
-On GitHub about one boot in 250 never reaches the guest's shell: `nic-control` logs it as a `HANG` after `NIC_HANG` (300) s, resets it and goes on. `hang_phase()` in `tests/vm/nic-control/test.py` places it from the console since the reboot or reset and each vCPU's CR0, which is `80050033` once Linux runs and `80010033` in OVMF: `shutdown` (Linux still running, the firmware never reached), `firmware-before-BdsDxe` (OVMF, before it starts the boot entry), `loader-after-BdsDxe` (OVMF, systemd-boot or the UKI's stub, after `BdsDxe: starting Boot0002`), `early-kernel` (Linux, before the initramfs's systemd prints `Booting initrd of`), `initramfs`, `initramfs-archix-deploy-mount` (archix's mount unit started and not finished) and `after-switch-root` (after `Welcome to`). Gate 40788971056 (446b4f8, ext4, 300 reboots and 60 resets an arm in each of 20 jobs):
+On GitHub about one boot in 250 never reaches the guest's shell. Whenever the driver's wait for the shell runs out (`Machine.wait_for_shell`, 900 s in the boot tests and `boot2`, `NIC_HANG`'s 300 s in `nic-control`, which then resets the VM and goes on), `tests/vm/driver/hang.py` places the hang from the console since the reboot or reset and each vCPU's CR0, which is `80050033` once Linux runs and `80010033` in OVMF and its SMI handler, and the driver logs `hang phase=<phase>` with the vCPUs' RIP, CR0 and CR3:
+
+- `shutdown`: Linux still running, the reset never came.
+- `firmware-before-BdsDxe`: OVMF, before it starts the boot entry (after a warm reboot's `reboot: Restarting system`, or a reset with nothing on the console).
+- `loader-after-BdsDxe`: OVMF, systemd-boot or the UKI's stub, after `BdsDxe: starting Boot0002` and before Linux writes anything.
+- `firmware-smm-under-linux`: every vCPU in OVMF's SMI handler (RIP and CR3 in SMRAM, just under 2 GiB), though Linux had written to the console since the entry started and no reset came: an SMI, such as an EFI variable access, that never returned.
+- `early-kernel`: Linux, before the initramfs's systemd prints `Booting initrd of`.
+- `initramfs`, and `initramfs-archix-deploy-mount` while archix's mount unit has started and not finished.
+- `after-switch-root`: after `Welcome to`.
+
+Gate 40788971056 (446b4f8, ext4, 300 reboots and 60 resets an arm in each of 20 jobs), its hangs placed again by `hang.py` (the run's own first classifier had put the four SMM ones under `loader-after-BdsDxe`):
 
 | Phase | plain | deployed |
 | --- | --- | --- |
 | shutdown | 0 | 0 |
 | firmware-before-BdsDxe | 4 | 7 |
-| loader-after-BdsDxe | 19 | 20 |
+| loader-after-BdsDxe | 19 | 16 |
+| firmware-smm-under-linux | 0 | 4 |
 | early-kernel | 0 | 0 |
 | initramfs | 1 | 0 |
 | initramfs-archix-deploy-mount | (none, no archix) | 0 |
 | after-switch-root | 1 | 0 |
 | all | 25 of 6864 boots | 27 of 6321 boots |
 
-The firmware hangs stop at the same few instructions in both arms (RIP `7b0e71bb` 12 plain and 8 deployed, `7b0e21bb` 5 and 4, `7fedb331` 4 and 5), before archix's code runs. Gate 40749520475 kept the console of only the hangs in its five failed jobs, as a passing job uploaded no logs then; placed by hand the same way they were 3 loader-after-BdsDxe (2 plain, 1 deployed, RIP `7b0e71bb`), 1 firmware-before-BdsDxe and 1 early-kernel (both deployed, the latter at a TDX message from the kernel). None of these were seen in the 252 local boots.
+The firmware hangs stop at the same few instructions in both arms (RIP `7b0e71bb` 12 plain and 8 deployed, `7b0e21bb` 5 and 4, `7fedb331` 4 and 5), before archix's code runs. The SMM ones are all deployed, at RIP `7ffcf597` and `7ffd6e11` with CR3 `7ff83000`; the one whose console was kept had got as far as archix's own units and the test's backdoor; gate 40749520475's deployed boot 217 was one too (then placed by hand as before BdsDxe), so 5 deployed and none plain. Gate 40749520475 kept the console of only the hangs in its five failed jobs, as a passing job uploaded no logs then; the others there were 3 loader-after-BdsDxe (2 plain, 1 deployed, RIP `7b0e71bb`) and 1 early-kernel (deployed, at a TDX message from the kernel). None of these were seen in the 252 local boots. `python3 tests/vm/driver/hang.py`, which `run.sh boot` and `boot2` run first, places 19 of these captures and cuts of a passing boot's console at each phase as recorded in `tests/vm/driver/hang-captures.json`, and checks the rule below.
 
-The rule: hangs are a GitHub nested-virtualisation fault, attributed, while plain Arch's hangs span the phases archix's do; a deployed hang in a phase plain never shows, an initramfs one above all, where archix's deploy-mount and archix-static run, is archix's to look into and isn't attributed. On 446b4f8 the deployed arm's 27 fall in the two firmware phases plain shows too, so they are attributed; a gate hang is attributed only against this table.
+The rule: a hang is a GitHub nested-virtualisation fault while plain Arch shows hangs in its phase too; a phase only the deployed arm shows is archix's to look into. So the driver prints, after a hang's FAIL, `ATTRIBUTED: nested-virt-hang (<phase>; ...)` for `firmware-before-BdsDxe`, `loader-after-BdsDxe` and `early-kernel`, and for `initramfs` and `after-switch-root` an `ATTRIBUTED:` line noting it holds only while `nic-control` keeps showing plain Arch hang there at a like rate: one plain hang each on 446b4f8, so re-check it when `nic-control` runs again and drop it if plain stops. A hang in archix's deploy-mount is never attributed, and neither, on this table, is `firmware-smm-under-linux` or `shutdown`: the driver prints `NOT ATTRIBUTED: ...` and it's a plain failure. As with the networkd carrier race, the test still fails and is rerun; `run.sh` puts the verdict on the test's summary row and annotation. The SMM hangs are open, archix's to look into: the deployed boots read and write EFI variables that plain boots don't (archix's deploy-mount reads `LoaderEntrySelected`; archix clears `LoaderEntryDefault` and `LoaderEntryPreferred`), each an SMI under OVMF's SMM-protected variable store, which would fit, but nothing has shown it yet.

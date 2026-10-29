@@ -39,11 +39,12 @@ def main():
     began = time.monotonic()
     try:
         module.run(machine, t)
-    except StepFailed as e:
+    except (StepFailed, MachineError) as e:
         print(f"FAIL: {e}", flush=True)
-        return 1
-    except MachineError as e:
-        print(f"FAIL: {e}", flush=True)
+        # A failure docs/CI.md's rules place: run.sh marks the test's summary row by this line.
+        verdict = t.verdict or machine.verdict
+        if verdict:
+            print(verdict, flush=True)
         return 1
     finally:
         machine.stop()

@@ -96,7 +96,7 @@ def network(wait=True):
     if ok("/usr/lib/systemd/systemd-networkd-wait-online --timeout=30 > /dev/null 2>&1", 60):
         t.log("nic: a link down/up brought it back")
         if raced:
-            t.log(f"{ATTRIBUTED}networkd-carrier-race on {' '.join(raced)} (known guest-stack flake, docs/CI.md#the-networkd-carrier-race)")
+            t.attribute(f"{ATTRIBUTED}networkd-carrier-race on {' '.join(raced)} (known guest-stack flake, docs/CI.md#the-networkd-carrier-race)")
     else:
         t.log("nic: still not configured 30 s after a link down/up; the host's set_link off and on. nic after the down/up: " + out(NIC_STATE))
         m.hmp("set_link net0 off")

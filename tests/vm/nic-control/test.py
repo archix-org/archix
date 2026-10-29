@@ -10,9 +10,6 @@ REBOOTS = int(os.environ.get("NIC_REBOOTS") or 30)
 RESETS = int(os.environ.get("NIC_RESETS") or 6)
 HANG = int(os.environ.get("NIC_HANG") or 300)
 MACHINE = {"global_timeout": max(int(os.environ.get("VM_TIMEOUT") or 2400), 120 * (REBOOTS + RESETS + 1))}
-# Linux runs with CR0 0x80050033 (PE, WP, AM, PG and the rest), OVMF without AM.
-LINUX_CR0 = "80050033"
-ANSI = re.compile(r"\x1b\[[0-9;?=!]*[A-Za-z]|\x1b\][^\x1b]*\x1b\\|\x1b[78]")
 ARCHIX = "/usr/bin/archix /usr/lib/archix /etc/archix /var/lib/archix /etc/systemd/system/archix-protected.service /etc/systemd/system/multi-user.target.wants/archix-protected.service"
 
 
@@ -21,24 +18,6 @@ def plan():
     total = REBOOTS + RESETS
     resets = {round((k + 1) * total / (RESETS + 1)) for k in range(RESETS)} if RESETS else set()
     return ["reset" if n in resets else "reboot" for n in range(1, total + 1)]
-
-
-def hang_phase(console, registers):
-    """Where a boot that never reached the shell stopped, from the console since the reboot or reset and each vCPU's CR0 and RIP; docs/CI.md's hang table counts by these."""
-    text = ANSI.sub("", console)
-    linux = [cpu for cpu in registers.split("CPU#")[1:] if f"CR0={LINUX_CR0}" in cpu]
-    started = text.rfind("BdsDxe: starting")
-    if started < 0:
-        return "shutdown" if linux else "firmware-before-BdsDxe"
-    after = text[started:]
-    if not linux:
-        return "loader-after-BdsDxe"
-    if "Welcome to" in after:
-        return "after-switch-root"
-    if "Booting initrd of" in after:
-        mount = "archix: mount the deployment this boot belongs to"
-        return "initramfs-archix-deploy-mount" if after.count(mount) == 1 else "initramfs"
-    return "early-kernel"
 
 
 def run(m, t):
@@ -56,11 +35,9 @@ def run(m, t):
                 if not m.alive():
                     raise
                 hangs.append(n)
-                registers = m.hmp("info registers -a")
-                cpus = " ".join(re.findall(r"(?:RIP|CR0|CR3)=\S+", registers))
-                phase = hang_phase(m.console_since(m.console_mark), registers)
-                t.log(f"NIC-CONTROL arm={ARM} boot={n} how={how} HANG phase={phase}; {cpus}")
-                t.log(f"hang {n}: {e}; qemu: {m.hmp('info status').strip()}")
+                # The driver placed it (tests/vm/driver/hang.py); the reset clears its verdict, as the arm goes on.
+                t.log(f"NIC-CONTROL arm={ARM} boot={n} how={how} HANG phase={m.hang}; {m.hang_cpus}")
+                t.log(f"hang {n}: {e}")
                 m.crash()
         m.execute("systemctl is-system-running --wait > /dev/null", 900)
         settled()

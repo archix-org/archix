@@ -11,6 +11,8 @@ import time
 import uuid
 from pathlib import Path
 
+from . import hang
+
 OVMF_CODE = "/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd"
 OVMF_VARS = "/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
@@ -78,6 +80,7 @@ class Machine:
         self.console_mark = 0
         self.boot_started = None
         self.last_stderr = ""
+        self.hang = self.verdict = self.hang_cpus = None
 
     def log(self, msg):
         self.timeline.log(msg)
@@ -209,10 +212,23 @@ class Machine:
                     raise self.gone("waiting for the guest's shell")
                 left = deadline - time.monotonic()
                 if left <= 0:
-                    raise self.fault(f"the guest's shell didn't come up within {timeout} s of the boot; console: {short(self.console_since(self.console_mark), 1500)}")
+                    break
                 self.lock.wait(min(left, 1))
+        if not fresh:
+            raise self.hung(timeout)
         self.connected = True
         self.log(f"booted ({time.monotonic() - self.boot_started:.1f} s), boot id {self.boot_id[:8]}")
+
+    def hung(self, timeout):
+        """The error for a boot whose shell didn't come up: its phase from hang.py, logged with each vCPU's registers and docs/CI.md's verdict on it, which run.sh puts on the test's summary row."""
+        console = self.console_since(self.console_mark)
+        registers = self.hmp("info registers -a")
+        self.hang = hang.phase(console, registers)
+        self.verdict = hang.attribution(self.hang)
+        self.hang_cpus = " ".join(re.findall(r"(?:RIP|CR0|CR3)=[0-9a-f]+", registers))
+        self.log(f"hang phase={self.hang}; {self.hang_cpus}; qemu: {self.hmp('info status').strip()}")
+        self.log(self.verdict)
+        return self.fault(f"the guest's shell didn't come up within {timeout} s of the boot, in phase {self.hang}; console: {short(console, 1500)}")
 
     def send(self, cmd, timeout):
         token = uuid.uuid4().hex[:12]
@@ -311,6 +327,7 @@ class Machine:
     def new_boot(self, how):
         self.log(how)
         self.connected = False
+        self.hang = self.verdict = self.hang_cpus = None
         self.console_mark = self.serial.stat().st_size if self.serial.exists() else 0
         self.boot_started = time.monotonic()
 

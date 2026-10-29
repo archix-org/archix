@@ -1,0 +1,236 @@
+[
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "deployed",
+  "boot": 115,
+  "registers": "RIP=000000007fedb331 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e06 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000",
+  "console": "....\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/dkms\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/pacman/local\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unset automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/92D9-5308\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    8.717971] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=27c609c8897947f9a8f818cc9ca658c1\u001b\\[    8.807064] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.509324] watchdog: watchdog0: watchdog did not stop!\n[    9.521053] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001H",
+  "phase": "firmware-before-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "deployed",
+  "boot": 188,
+  "registers": "RIP=000000007b0e21b9 CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...t automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/92D9-5308\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[   10.535062] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=0101696428974a2c8751a3a77022fb41\u001b\\[   10.581667] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   11.275209] watchdog: watchdog0: watchdog did not stop!\n[   11.289473] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "deployed",
+  "boot": 191,
+  "registers": "RIP=000000007fedb328 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000",
+  "console": "....\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/dkms\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/pacman/local\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unset automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/92D9-5308\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    8.650439] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=f5b7b29b1d194ad5a34d403b9f323cd2\u001b\\[    8.852056] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.615296] watchdog: watchdog0: watchdog did not stop!\n[    9.638590] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001H",
+  "phase": "firmware-before-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "deployed",
+  "boot": 191,
+  "registers": "RIP=000000007b0e21bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000",
+  "console": "\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "plain",
+  "boot": 23,
+  "registers": "RIP=000000007b0e21bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...nting \u001b[0;1;39m/efi\u001b[0m...\n         Unmounting \u001b[0;1;39mTemporary Directory /tmp\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/efi\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39mTemporary Directory /tmp\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    9.181117] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=59afae85ff684c1dad668adb74f26f25\u001b\\[    9.247274] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.952187] watchdog: watchdog0: watchdog did not stop!\n[    9.967202] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "plain",
+  "boot": 100,
+  "registers": "RIP=000000007b0e21b5 CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000",
+  "console": "\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 12,
+  "arm": "plain",
+  "boot": 192,
+  "registers": "RIP=000000007fedb331 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000",
+  "console": "...\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mLocal File Systems\u001b[0m.\n         Unmounting \u001b[0;1;39m/efi\u001b[0m...\n         Unmounting \u001b[0;1;39mTemporary Directory /tmp\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mLoad/Save OS Random Seed\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/efi\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39mTemporary Directory /tmp\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    8.922103] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=f72c4223dd3949fc8356df841052f048\u001b\\[    8.955285] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.651809] watchdog: watchdog0: watchdog did not stop!\n[    9.661999] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001H",
+  "phase": "firmware-before-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 13,
+  "arm": "deployed",
+  "boot": 226,
+  "registers": "RIP=000000007b0e71bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000",
+  "console": "...t automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/95A5-8000\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[   12.179820] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=7f650c3287e544a4ba9acf47a0aa696b\u001b\\[   12.286592] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   13.028782] watchdog: watchdog0: watchdog did not stop!\n[   13.041844] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 2,
+  "arm": "deployed",
+  "boot": 19,
+  "registers": "RIP=000000007ffcf597 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 CR0=00000010 CR3=00000000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000",
+  "console": "...;1;39mGnuPG network certifi\u2026ent daemon for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mGnuPG cryptographic a\u2026 browsers) for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mGnuPG cryptographic a\u2026estricted) for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mGnuPG cryptographic a\u2026emulation) for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mGnuPG cryptographic a\u2026rase cache for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mGnuPG public key mana\u2026nt service for /etc/pacman.d/gnupg\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mAuthorization Manager Agent Helper\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mUser Login Management Varlink Socket\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mVirtual Machine and C\u2026tainer Registration Service Socket\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSocket Units\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39marchix: carry /etc changes\u2026nto the deployment that boots next\u001b[0m.\n         Starting \u001b[0;1;39mD-Bus System Message Bus\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39mD-Bus System Message Bus\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mBasic System\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39marchix VM test driver's root shell\u001b[0m.\n         Starting \u001b[0;1;39marchix: make a generation that booted fine the default\u001b[0m...\n         Starting \u001b[0;1;39marchix-marker.service\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39marchix-protected.service\u001b[0m.",
+  "phase": "firmware-smm-under-linux",
+  "source": "nic-control HANG in a failed job's kept timeline",
+  "note": "placed loader-after-BdsDxe by the run's first classifier; its console shows Linux since the entry started and no reset, and every vCPU is at an SMRAM address (CR3 7ff83000)"
+ },
+ {
+  "gate": "40788971056",
+  "job": 4,
+  "arm": "deployed",
+  "boot": 32,
+  "registers": "RIP=000000007b0e71bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...t automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/93AB-5DAF\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    9.642931] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=da13513897c84c75b495e96dc14eca45\u001b\\[    9.786295] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   10.538494] watchdog: watchdog0: watchdog did not stop!\n[   10.629504] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 4,
+  "arm": "deployed",
+  "boot": 80,
+  "registers": "RIP=000000007b0e71bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...t automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/93AB-5DAF\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[   10.860250] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=d359472761054d63909418216752e053\u001b\\[   10.941004] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   11.655185] watchdog: watchdog0: watchdog did not stop!\n[   11.670210] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 4,
+  "arm": "deployed",
+  "boot": 86,
+  "registers": "RIP=000000007b0e71b5 CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...t automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/93AB-5DAF\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[   15.755975] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=b3ef8da32cea487ba91a9e5d9c454bad\u001b\\[   15.928435] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   16.700457] watchdog: watchdog0: watchdog did not stop!\n[   16.719187] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 4,
+  "arm": "plain",
+  "boot": 48,
+  "registers": "RIP=000000007b0e71bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "...nting \u001b[0;1;39m/efi\u001b[0m...\n         Unmounting \u001b[0;1;39mTemporary Directory /tmp\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/efi\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39mTemporary Directory /tmp\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    9.877967] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=b092335331d8454ebd78e2cb0e83756b\u001b\\[    9.951341] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   10.657511] watchdog: watchdog0: watchdog did not stop!\n[   10.668646] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 5,
+  "arm": "deployed",
+  "boot": 76,
+  "registers": "RIP=000000007fedb328 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e04 CR0=80010033 CR3=000000007ff83000",
+  "console": "....\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/dkms\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/var/lib/pacman/local\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unset automount \u001b[0;1;39mefi.automount\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mFile System Check on /dev/disk/by-uuid/938D-1D77\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Removed slice \u001b[0;1;39mSlice /system/systemd-fsck\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    8.885234] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=75259ace11f74755a0838499a561577d\u001b\\[    8.952915] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.653660] watchdog: watchdog0: watchdog did not stop!\n[    9.681371] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001H",
+  "phase": "firmware-before-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 5,
+  "arm": "deployed",
+  "boot": 153,
+  "registers": "RIP=000000007fedb331 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e06 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000",
+  "console": "\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001H",
+  "phase": "firmware-before-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 5,
+  "arm": "plain",
+  "boot": 37,
+  "registers": "RIP=000000007b0e21bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000",
+  "console": "...nting \u001b[0;1;39m/efi\u001b[0m...\n         Unmounting \u001b[0;1;39mTemporary Directory /tmp\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39mTemporary Directory /tmp\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/efi\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[   21.967473] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=d6a1d93ff459465ea9a7de3f9029fc51\u001b\\[   22.282616] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[   23.073840] watchdog: watchdog0: watchdog did not stop!\n[   23.139262] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 5,
+  "arm": "plain",
+  "boot": 65,
+  "registers": "RIP=000000007b0e21b5 CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000",
+  "console": "\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40788971056",
+  "job": 5,
+  "arm": "plain",
+  "boot": 134,
+  "registers": "RIP=000000007b0e21bb CR0=80010033 CR3=000000007b801000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 RIP=000000007bec4034 CR0=80010033 CR3=000000007bec3000 CR0=00000010 CR3=00000000",
+  "console": "...nting \u001b[0;1;39m/efi\u001b[0m...\n         Unmounting \u001b[0;1;39mTemporary Directory /tmp\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39m/efi\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mPreparation for Local File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mRemount Root and Kernel File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped \u001b[0;1;39mCreate Static Device Nodes in /dev gracefully\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Unmounted \u001b[0;1;39mTemporary Directory /tmp\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Stopped target \u001b[0;1;39mSwaps\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Shutdown\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mUnmount All Filesystems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLate Shutdown Services\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mSystem Reboot\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mSystem Reboot\u001b[0m.\n[    8.414748] watchdog: watchdog0: watchdog did not stop!\n\u001b]3008;end=d6a12952c06b4398a67e4f6fe76d0135\u001b\\[    8.463782] watchdog: watchdog0: watchdog did not stop!\n\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J[    9.162797] watchdog: watchdog0: watchdog did not stop!\n[    9.183157] reboot: Restarting system\n\u001b[2J\u001b[001;001H\u001b[=3h\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;042;160t\u001b[2J\u001b[001;001H\u001b[2J\u001b[001;001H\u001b[8;056;240t\u001b[2J\u001b[001;001HBdsDxe: loading Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\nBdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)",
+  "phase": "loader-after-BdsDxe",
+  "source": "nic-control HANG in a failed job's kept timeline"
+ },
+ {
+  "gate": "40749520475",
+  "job": 2,
+  "arm": "deployed",
+  "boot": 217,
+  "registers": "RIP=000000007ffcf597 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 RIP=000000007ffd6e11 CR0=80010033 CR3=000000007ff83000 CR0=00000010 CR3=00000000",
+  "console": "...m.\n[\u001b[0;32m  OK  \u001b[0m] Set up automount \u001b[0;1;39mefi.automount\u001b[0m.\n         Starting \u001b[0;1;39mRule-based Manager for Device Events and Files\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39mNetwork Name Resolution\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mHost and Network Name Lookups\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39mRule-based Manager for Device Events and Files\u001b[0m.\n         Starting \u001b[0;1;39mNetwork Management\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Started \u001b[0;1;39mNetwork Management\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mNetwork\u001b[0m.\n         Starting \u001b[0;1;39mEnable Persistent Storage in systemd-networkd\u001b[0m...\n         Starting \u001b[0;1;39mWait for Network to be Online\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mEnable Persistent Storage in systemd-networkd\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mLoad/Save RF Kill Switch Status /dev/rfkill Watch\u001b[0m.\n         Starting \u001b[0;1;39mVirtual Console Setup\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39mVirtual Console Setup\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Reached target \u001b[0;1;39mLocal File Systems\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mBoot Loader Control Service Socket\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mDisk Image Download Service Socket\u001b[0m.\n[\u001b[0;32m  OK  \u001b[0m] Listening on \u001b[0;1;39mSystem Extension Image Management\u001b[0m.\n         Starting \u001b[0;1;39marchix: match the booted generation\u001b[0m...\n         Starting \u001b[0;1;39mUpdate Boot Loader Random Seed\u001b[0m...\n         Starting \u001b[0;1;39mLoad JSON user/group",
+  "phase": "firmware-smm-under-linux",
+  "source": "nic-control HANG in a failed job's kept timeline",
+  "note": "placed firmware-before-BdsDxe by hand by the run's first classifier; its console shows Linux since the entry started and no reset, and every vCPU is at an SMRAM address (CR3 7ff83000)"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n[    0.225045] virt/tdx: TDX not supported by the host platform\n",
+  "phase": "early-kernel"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n\u001bP+q6E616D65\u001b\\\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[0;1;39mBooting initrd of \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m.\u001b[0m\n",
+  "phase": "initramfs"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n\u001bP+q6E616D65\u001b\\\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[0;1;39mBooting initrd of \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m.\u001b[0m\n         Starting \u001b[0;1;39marchix: mount the deployment this boot belongs to\u001b[0m...\n",
+  "phase": "initramfs-archix-deploy-mount"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n\u001bP+q6E616D65\u001b\\\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[0;1;39mBooting initrd of \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m.\u001b[0m\n         Starting \u001b[0;1;39marchix: mount the deployment this boot belongs to\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39marchix: mount the deployment this boot belongs to\u001b[0m.\n",
+  "phase": "initramfs"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n\u001bP+q6E616D65\u001b\\\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[0;1;39mBooting initrd of \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m.\u001b[0m\n         Starting \u001b[0;1;39marchix: mount the deployment this boot belongs to\u001b[0m...\n[\u001b[0;32m  OK  \u001b[0m] Finished \u001b[0;1;39marchix: mount the deployment this boot belongs to\u001b[0m.\n\u001b[0;1;39mWelcome to \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m!\u001b[0m\n",
+  "phase": "after-switch-root"
+ },
+ {
+  "source": "console lines of a passing deployed boot in gate 40749520475, cut at the phase, with the registers of deployed boot 314's early-kernel hang there",
+  "registers": "RIP=ffffffff9b499c34 CR0=80050033 CR3=0000000026022001 RIP=ffffffff9b4e947b CR0=80050033 CR3=0000000026022001",
+  "console": "         Stopping systemd-networkd.service...\n",
+  "phase": "shutdown"
+ },
+ {
+  "source": "the same console lines: a warm reboot's restart with the firmware's registers",
+  "registers": "RIP=000000007fedb331 CR0=80010033 CR3=000000007fe9e000",
+  "console": "BdsDxe: starting Boot0002 \"UEFI Misc Device\" from PciRoot(0x0)/Pci(0x4,0x0)\n\u001bP+q6E616D65\u001b\\\u001b[18t\u001b7\u001b[32766;32766H\u001b[6n\u001b8\u001b[!p\u001b]104\u001b\\\u001b[0m\u001b[?7h\u001b[1G\u001b[0J\u001b[0;1;39mBooting initrd of \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m.\u001b[0m\n\u001b[0;1;39mWelcome to \u001b[0m\u001b[38;2;23;147;209mArch Linux\u001b[0m\u001b[0;1;39m!\u001b[0m\n[   11.312053] reboot: Restarting system\n",
+  "phase": "firmware-before-BdsDxe"
+ }
+]

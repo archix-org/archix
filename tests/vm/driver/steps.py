@@ -18,11 +18,13 @@ class Test:
         self.timeline = timeline
         self.failures = []
         self.passed = []
+        self.verdict = None
 
     @contextmanager
     def step(self, name):
         self.timeline.step = name
         self.failures = []
+        self.verdict = None
         began = time.monotonic()
         self.timeline.log("step begins")
         try:
@@ -51,6 +53,11 @@ class Test:
     def require(self, ok, msg):
         if not ok:
             raise AssertionError(msg)
+
+    def attribute(self, verdict):
+        """Logs docs/CI.md's ATTRIBUTED: or NOT ATTRIBUTED: line for this step's failure, which the driver prints after FAIL."""
+        self.verdict = verdict
+        self.timeline.log(verdict)
 
     def log(self, msg):
         self.timeline.log(msg)
