@@ -41,6 +41,20 @@ def current():
     return out("archix generations | awk '$1 == \"*\" { print $2 }'").strip()
 
 
+# The image's plain Arch has these too: sysusers gives systemd-journal a GID of its own, and build-image.sh links resolv.conf to resolved's stub.
+STOCK_QKK = {"warning: systemd: /var/log/journal (GID mismatch)", "warning: filesystem: /etc/resolv.conf (File type mismatch)"}
+
+
+def qkk_warnings():
+    """pacman -Qkk's warnings and errors, from its stderr alone, where each is a line of its own."""
+    return set(out("pacman -Qkk 2>&1 > /dev/null | grep -E '^(warning|error):' || true").splitlines())
+
+
+def qkk_problems():
+    """pacman -Qkk's warnings and errors that the image's plain Arch, as pacstrap left it, doesn't have."""
+    return sorted(qkk_warnings() - STOCK_QKK)
+
+
 def deployments():
     return out("ls /archix/deploy 2>/dev/null | sort -n | tr '\\n' ' '")
 

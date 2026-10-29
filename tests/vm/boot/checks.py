@@ -6,7 +6,7 @@ from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TESTS = ["layout", "secureboot", "reset-mid-switch", "counting", "revoke", "etc-merge", "fallback", "usr-local", "file-systems", "entry-edit"]
+TESTS = ["layout", "secureboot", "reset-mid-switch", "counting", "revoke", "etc-merge", "fallback", "usr-local", "file-systems", "entry-edit", "eject-pending", "eject-chroot"]
 
 
 def message(call):

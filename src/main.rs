@@ -116,6 +116,9 @@ enum Command {
         /// Also delete /var/lib/archix and /var/cache/archix
         #[arg(long)]
         purge: bool,
+        /// With --noconfirm, eject the running deployment though another is current (a switch waiting for its reboot), which goes with the rest
+        #[arg(long)]
+        discard_pending: bool,
         /// What becomes of declared secrets, which plain Arch has nothing to decrypt: drop their links, or materialize them as real files from /run/archix/secrets (from a booted system only)
         #[arg(long, value_enum)]
         secrets: Option<archix::deploy::eject::SecretsMode>,
@@ -692,7 +695,9 @@ fn run() -> Result<ExitCode> {
     if changes_things {
         hold_exclusive()?;
     }
-    if is_root() {
+    // An eject in a chroot works in the live system's namespace, so the binds it takes off are gone for the chroot's shell too.
+    let chroot_eject = matches!(command, Command::Eject { .. }) && archix::system::secureboot::in_chroot();
+    if is_root() && !chroot_eject {
         archix::system::deploy_boot::writable_store(&archix::testhooks::root())?;
     }
     match command {
@@ -720,9 +725,16 @@ fn run() -> Result<ExitCode> {
             noconfirm,
             restore_originals,
             purge,
+            discard_pending,
             secrets,
         } => {
-            commands::eject(noconfirm, restore_originals, purge, secrets)?;
+            let how = commands::EjectHow {
+                noconfirm,
+                restore_originals,
+                purge,
+                discard_pending,
+            };
+            commands::eject(how, secrets)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Secrets(Secrets::Init { replace }) => {

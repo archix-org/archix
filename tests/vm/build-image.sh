@@ -195,6 +195,8 @@ if [ "$dir" = /vm/boot ]; then
   ls /mnt/efi/EFI/Linux
   sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist
   [ ! -f /mnt/var/lib/archix/archive-url ] || sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/var/lib/archix/archive-url
+  # The live USB eject-chroot boots, a copy of this plain root without archix, built only when that test runs.
+  [ -z "${LIVE_DISK:-}" ] || /vm/boot/eject-chroot/build-live.sh
   exit 0
 fi
 arch-chroot /mnt archix --host archix-vm switch --noconfirm

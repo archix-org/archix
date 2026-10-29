@@ -756,6 +756,11 @@ fn run_hooks(root: &Path, state: &Path, generation: u32) -> Result<()> {
     Ok(())
 }
 
+/// Whether a boot of deployment `generation`, at `deployment`, did the work of its first boot, as recorded under the state directory `state`.
+pub fn activated(state: &Path, deployment: &Path, generation: u32) -> bool {
+    deployment_id(deployment, generation).is_ok_and(|id| state.join("activated").join(id).exists())
+}
+
 /// Tells deployment `generation` from an earlier one with its number: the directory's inode and birth time, and its package list.
 pub fn deployment_id(deployment: &Path, generation: u32) -> Result<String> {
     let meta = fs::metadata(deployment).with_context(|| format!("reading {}", deployment.display()))?;

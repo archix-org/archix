@@ -285,6 +285,15 @@ pub fn protect_store(root: &Path) -> Result<()> {
     bind(&archix, &archix, true).with_context(|| format!("binding {} read-only", archix.display()))
 }
 
+/// Makes `root`/archix writable in this mount namespace itself, for an eject in a chroot, which deletes it and takes the deployment binds off where `mount-deployment` made them.
+pub fn writable_store_in_place(root: &Path) -> Result<()> {
+    let archix = root.join("archix");
+    if !read_only_mount_point(&archix)? {
+        return Ok(());
+    }
+    remount_bind(&archix, false).with_context(|| format!("making {} writable for archix", archix.display()))
+}
+
 /// Makes `root`/archix writable for this process and its children alone when the boot bound it read-only: the process gets a mount namespace of its own, whose copy of the bind is remounted read-write; mount propagation stays as it was.
 pub fn writable_store(root: &Path) -> Result<()> {
     let archix = root.join("archix");

@@ -575,8 +575,11 @@ fn detach(path: &Path) -> Result<()> {
     bail!("{} stays mounted", path.display())
 }
 
-/// Runs `work` in the mount namespace of PID 1, where the running system's mounts are, since archix works in a copy of its own; in this process when it's that one.
+/// Runs `work` in the mount namespace of PID 1, where the running system's mounts are, since archix works in a copy of its own; in this process when it's that one. Nothing runs in a chroot, where PID 1 is the live system's, whose `/` isn't this root.
 fn in_init_namespace(work: impl FnOnce() -> Result<()>) -> Result<()> {
+    if crate::system::secureboot::in_chroot() {
+        return Ok(());
+    }
     let ns = |pid: &str| fs::read_link(format!("/proc/{pid}/ns/mnt")).ok();
     if ns("1").is_none() || ns("1") == ns("thread-self") {
         return work();
@@ -611,27 +614,92 @@ fn in_init_namespace(work: impl FnOnce() -> Result<()>) -> Result<()> {
     }
 }
 
-/// What a fresh eject would lay out: the deployment the system runs from, which has to be the current one.
-pub fn deployment_to_eject(root: &Path) -> Result<u32> {
+/// What a fresh eject lays out: the deployment that runs, and the current one, which goes with the rest when it's another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub deployment: u32,
+    pub current: u32,
+    /// Run in a chroot from a live USB, where `mount-deployment` bound the deployment and nothing booted it.
+    pub chroot: bool,
+}
+
+/// The committed deployment whose /usr is bound over `root`'s, as `mount-deployment` binds one for a chroot.
+pub fn bound_deployment(root: &Path) -> Option<u32> {
+    let store = Store::open(root).ok()?;
+    let usr = identity(&root.join("usr"))?;
+    store
+        .deployments()
+        .ok()?
+        .into_iter()
+        .find(|number| identity(&store.path(*number).join("usr")) == Some(usr))
+}
+
+/// What a fresh eject would lay out: the deployment the system runs from, booted or, in a chroot, bound by `mount-deployment`; in a chroot it must have booted once, as its first boot does work plain Arch never would.
+pub fn deployment_to_eject(root: &Path) -> Result<Target> {
     let store = Store::open(root)?;
     let current = store.current()?.context("there's no current deployment")?;
-    let Some(booted) = boot::booted_deployment(root) else {
-        bail!("this boot didn't come from a deployment, so there's none running to eject to");
+    let chroot = crate::system::secureboot::in_chroot();
+    let running = if chroot {
+        let Some(bound) = bound_deployment(root) else {
+            bail!(
+                "this chroot's /usr isn't bound from a deployment, so there's none running to eject to; from the live system, bind one with `ROOT/archix/deploy/N/usr/lib/archix/archix-static mount-deployment ROOT N`, then `arch-chroot ROOT`; nothing was changed"
+            );
+        };
+        if !crate::system::activate::activated(&Paths::under(root).state, &store.path(bound), bound) {
+            bail!(
+                "deployment {bound} has never booted, so the work of its first boot (its /var changes, new users, waiting hooks) never ran, and plain Arch would never run it; bind one that booted (`archix generations` in the chroot lists them), or boot {bound} once first; nothing was changed"
+            );
+        }
+        bound
+    } else {
+        boot::booted_deployment(root)
+            .context("this boot didn't come from a deployment, so there's none running to eject to")?
     };
-    if booted != current {
-        bail!(
-            "deployment {current} is current, but this boot runs deployment {booted}; restart into {current} (or `archix rollback {booted}`) and eject then; nothing was changed"
-        );
+    if !store.deployments()?.contains(&running) {
+        bail!("deployment {running} isn't complete; nothing was changed");
     }
-    if !store.deployments()?.contains(&booted) {
-        bail!("deployment {booted} isn't complete; nothing was changed");
+    Ok(Target {
+        deployment: running,
+        current,
+        chroot,
+    })
+}
+
+/// Makes deployment `number` current and, while its entry is on the ESP, the boot default, as a rollback by repointing does, so a cut-off eject boots what ran and never the deployment it discards.
+fn make_current(paths: &Paths, store: &Store, number: u32) -> Result<()> {
+    if store.current()? == Some(number) {
+        return Ok(());
     }
-    Ok(booted)
+    if let Some(esp) = esp(paths)
+        && boot::entries(&esp).iter().any(|(n, extra, _)| *n == number && !extra)
+    {
+        boot::set_default_entry(&esp, number)?;
+        crate::durable::sync_esp(&esp)?;
+        boot::follow_with_fallback(paths, &esp, number)?;
+    }
+    store.point_current(number)?;
+    store.choose(number)
+}
+
+/// Deletes what archix kept for deployments other than `kept`, all gone with /archix: the /etc merge's state and the hooks waiting for their first boot.
+fn remove_deployment_state(paths: &Paths, kept: u32) -> Result<()> {
+    super::stage::remove_any(&crate::etcmerge::dir(paths))?;
+    let waiting = crate::system::hooks::pending_path(&paths.state, kept);
+    let dir = waiting.parent().context("the pending hooks have no directory")?;
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.path() != waiting {
+            super::stage::remove_any(&entry.path())?;
+        }
+    }
+    Ok(())
 }
 
 /// Ejects the system under `paths.root` from its deployments, resuming any eject under way; `archix` is the binary that runs `eject-here`. Returns what the ESP handover wrote.
 pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool, secrets: SecretsMode) -> Result<Vec<String>> {
     let root = &paths.root;
+    if crate::system::secureboot::in_chroot() {
+        crate::system::deploy_boot::writable_store_in_place(root)?;
+    }
     let lock = match root.join("archix").exists() {
         true => Some(Store::open(root)?.lock()?),
         false => None,
@@ -639,18 +707,24 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool, secrets: Sec
     let state = match read_state(&paths.state)? {
         Some(state) if state.phase < Phase::Copied && running_on_deployment(root) => {
             // A switch since an unfinished eject started may have made another deployment current; the copy is redone anyway.
-            let deployment = deployment_to_eject(root)?;
+            let deployment = deployment_to_eject(root)?.deployment;
             State { deployment, ..state }
         }
         Some(state) => state,
         None => State {
-            deployment: deployment_to_eject(root)?,
+            deployment: deployment_to_eject(root)?.deployment,
             phase: Phase::Copying,
             restore_originals,
             secrets,
         },
     };
     write_state(&paths.state, &state)?;
+    if state.phase < Phase::Copied && root.join("archix").exists() {
+        // The watcher writes into the pending deployment, which goes; its last pass runs as it stops.
+        crate::etcmerge::pause(paths)?;
+        make_current(paths, &Store::open(root)?, state.deployment)?;
+        mark("eject-repointed");
+    }
     let mut written = Vec::new();
     if state.phase < Phase::Plain {
         written = run_here(root, paths, archix)?;
@@ -668,6 +742,7 @@ pub fn eject(paths: &Paths, archix: &Path, restore_originals: bool, secrets: Sec
     drop(lock);
     remove_store(root)?;
     remove_shared_usr_local(root)?;
+    remove_deployment_state(paths, state.deployment)?;
     crate::durable::sync_filesystems_checked(&[root])?;
     mark("eject-removed");
     Ok(written)

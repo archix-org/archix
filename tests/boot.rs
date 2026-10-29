@@ -655,6 +655,256 @@ fn eject_from_deployments_leaves_plain_arch_with_the_same_packages_that_plain_pa
     assert!(root.join("usr/bin/tree").is_file());
 }
 
+fn run_shell(script: &str) {
+    let output = Command::new("bash").args(["-ec", script]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{script}\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// What a plain Arch root left by eject must hold: deployment `ejected`'s packages as `before` checked them, no /archix or deployment binds, archix's integration off, and the ESP at `esp` booting a UKI mkinitcpio built without archix's hook.
+fn assert_plain_arch(machine: &Machine, esp: &Path, packages: &[&str], before: &str, what: &str) {
+    let root = &machine.root;
+    assert!(!root.join("archix").exists(), "{what}: /archix is still there");
+    for at in ["usr", "etc", "opt", "boot", "var/lib/pacman/local"] {
+        assert!(
+            !is_mountpoint(&root.join(at)),
+            "{what}: {at} is still bound from a deployment"
+        );
+    }
+    assert_eq!(
+        qkk(machine, packages),
+        before,
+        "{what}: pacman -Qkk differs from the deployment's"
+    );
+    let uki = esp.join("EFI/Linux/arch-linux.efi");
+    let inspected = Command::new("ukify").arg("inspect").arg(&uki).output().unwrap();
+    let inspected = String::from_utf8_lossy(&inspected.stdout);
+    assert!(
+        inspected.contains(".linux") && inspected.contains("root=/dev/vda2"),
+        "{what}: {inspected}"
+    );
+    let loader = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+    assert!(loader.contains("default arch-linux.efi\n"), "{what}: {loader}");
+    assert!(
+        archix::system::boot::entries(esp).is_empty()
+            && archix::system::boot::fallbacks(esp).is_empty()
+            && !esp.join("EFI/archix").exists(),
+        "{what}: archix's boot entries are still on the ESP"
+    );
+    let initramfs = initramfs_files(&uki);
+    assert!(
+        !initramfs.contains("archix-deploy"),
+        "{what}: the plain initramfs has archix's hook:\n{initramfs}"
+    );
+    for gone in [
+        "etc/initcpio/install/archix-deploy",
+        "etc/mkinitcpio.conf.d/archix-deploy.conf",
+        "etc/pacman.d/hooks/00-archix-deployment.hook",
+        "etc/systemd/system/archix-deploy-activate.service",
+        "etc/systemd/system/archix-etc-merge.service",
+        "boot/archix",
+    ] {
+        assert!(
+            root.join(gone).symlink_metadata().is_err(),
+            "{what}: {gone} is still there"
+        );
+    }
+    let fstab = fs::read_to_string(root.join("etc/fstab")).unwrap_or_default();
+    assert!(
+        !fstab.lines().filter(|line| !line.starts_with('#')).any(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            fields.get(1).is_some_and(|at| at.starts_with("/archix"))
+                || fields.get(3).is_some_and(|options| options.contains("archix"))
+        }),
+        "{what}: fstab mounts something of archix's:\n{fstab}"
+    );
+    let paths = archix::paths::Paths::under(root);
+    assert!(
+        archix::deploy::eject::read_state(&paths.state).unwrap().is_none(),
+        "{what}: the eject left its state"
+    );
+    assert!(
+        !archix::etcmerge::dir(&paths).exists(),
+        "{what}: the /etc merge's state outlived the deployments"
+    );
+}
+
+/// Plain pacman installs, removes and upgrades on the ejected root with the container's sync databases.
+fn assert_plain_pacman_works(machine: &Machine, what: &str) {
+    let copied = Command::new("cp")
+        .args(["-a", "/var/lib/pacman/sync"])
+        .arg(machine.root.join("var/lib/pacman/"))
+        .status()
+        .unwrap();
+    assert!(copied.success());
+    for args in [&["-S", "tree"][..], &["-R", "tree"], &["-Syu"]] {
+        let (ok, out) = plain_pacman(machine, args);
+        assert!(
+            ok && !out.contains("archix install"),
+            "{what}: pacman {args:?} after the eject: {out}"
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn eject_while_a_switch_waits_for_its_reboot_lays_out_the_running_deployment_and_discards_the_pending_one() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let root = machine.root.clone();
+    setup.lay_out();
+    let running = machine.current().unwrap();
+    let packages = ["bash", "pacman"];
+    let before = qkk(machine, &packages);
+    setup.set_body(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let pending = machine.current().unwrap();
+    assert!(pending > running && !root.join("usr/bin/tree").exists());
+    let state = &setup.paths.state;
+    let hooks = archix::system::hooks::pending_path(state, pending);
+    fs::create_dir_all(hooks.parent().unwrap()).unwrap();
+    fs::write(&hooks, "{}").unwrap();
+    fs::create_dir_all(archix::etcmerge::dir(&setup.paths)).unwrap();
+    fs::write(
+        archix::etcmerge::dir(&setup.paths).join(format!("{pending}.json")),
+        "{}",
+    )
+    .unwrap();
+
+    let refused = setup.fails(&["eject", "--noconfirm"]);
+    assert!(
+        refused.contains(&format!("deployment {pending}"))
+            && refused.contains("--discard-pending")
+            && refused.contains("nothing was changed"),
+        "{refused}"
+    );
+    assert!(archix::deploy::eject::read_state(state).unwrap().is_none() && machine.current() == Some(pending));
+
+    let out = setup.ok(&["eject", "--noconfirm", "--discard-pending"]);
+    println!("{out}");
+    assert!(
+        out.contains(&format!("deployment {running}, which runs now"))
+            && out.contains(&format!("deployment {pending}, which hasn't booted, is discarded"))
+            && out.contains("plain Arch now"),
+        "{out}"
+    );
+    assert_plain_arch(
+        machine,
+        &machine.esp(),
+        &packages,
+        &before,
+        "ejected with a switch pending",
+    );
+    assert!(
+        !root.join("usr/bin/tree").exists(),
+        "the pending deployment's tree came along"
+    );
+    assert!(
+        !hooks.exists(),
+        "the hooks waiting for the discarded deployment's boot are still there"
+    );
+    assert_plain_pacman_works(machine, "ejected with a switch pending");
+}
+
+/// Runs archix at `root` as typed at the shell of `arch-chroot ROOT` on a live USB: chrooted, with /proc, /sys, /dev and a fresh /run, and none of the test's environment.
+fn in_arch_chroot(root: &Path, args: &[&str]) -> (bool, String) {
+    let r = root.display();
+    run_shell(&format!(
+        "for d in proc sys dev run; do mountpoint -q {r}/$d && continue; case $d in proc) mount -t proc proc {r}/proc ;; run) mount -t tmpfs run {r}/run ;; *) mount --rbind /$d {r}/$d ;; esac; done"
+    ));
+    let output = Command::new("chroot")
+        .arg(root)
+        .arg(env!("CARGO_BIN_EXE_archix"))
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/bin")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
+    (output.status.success(), text)
+}
+
+#[test]
+#[ignore]
+fn eject_in_a_live_usbs_chroot_lays_out_the_bound_deployment_and_leaves_plain_arch() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let root = machine.root.clone();
+    let r = root.display().to_string();
+    setup.lay_out();
+    let booted = machine.current().unwrap();
+    let state = setup.paths.state.clone();
+    let id = archix::system::activate::deployment_id(&machine.deployment(booted), booted).unwrap();
+    fs::create_dir_all(state.join("activated")).unwrap();
+    fs::write(state.join("activated").join(id), "").unwrap();
+    let packages = ["bash", "pacman"];
+    let before = qkk(machine, &packages);
+    setup.set_body(&["tree"], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    let unbooted = machine.current().unwrap();
+
+    // As a live USB finds it: the root mounted at a mount point of its own, nothing bound, the ESP's path as a real install records it.
+    machine.power_off();
+    run_shell(&format!("mount --rbind {r} {r}"));
+    fs::write(state.join("boot/esp"), "/efi").unwrap();
+    let bound = mount_deployment(&root, None);
+    assert!(bound.status.success(), "{}", String::from_utf8_lossy(&bound.stderr));
+    let (ok, out) = in_arch_chroot(&root, &["eject", "--noconfirm", "--discard-pending"]);
+    assert!(
+        !ok && out.contains(&format!("deployment {unbooted} has never booted")) && out.contains("nothing was changed"),
+        "{out}"
+    );
+    assert!(archix::deploy::eject::read_state(&state).unwrap().is_none());
+    assert!(machine.deployment(unbooted).is_dir() && machine.current() == Some(unbooted));
+
+    machine.power_off();
+    let bound = mount_deployment(&root, Some(booted));
+    assert!(bound.status.success(), "{}", String::from_utf8_lossy(&bound.stderr));
+    let (ok, out) = in_arch_chroot(&root, &["eject", "--noconfirm"]);
+    assert!(
+        !ok && out.contains(&format!("deployment {unbooted}")) && out.contains("--discard-pending"),
+        "{out}"
+    );
+    let (ok, out) = in_arch_chroot(
+        &root,
+        &["eject", "--noconfirm", "--discard-pending", "--secrets", "materialize"],
+    );
+    assert!(!ok && out.contains("chroot") && out.contains("--secrets drop"), "{out}");
+    let (ok, out) = in_arch_chroot(&root, &["eject", "--noconfirm", "--discard-pending"]);
+    assert!(
+        !ok && out.contains("/efi") && out.contains("no FAT filesystem") && out.contains("nothing was changed"),
+        "{out}"
+    );
+    assert!(archix::deploy::eject::read_state(&state).unwrap().is_none() && machine.deployment(booted).is_dir());
+
+    let image_dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    run_shell(&format!(
+        "img={img}; truncate -s $(( $(du -sm {r}/efi | cut -f1) * 2 + 64 ))M $img; mkfs.fat -F 32 $img > /dev/null; t=$(mktemp -d); mount -o loop $img $t; cp -r {r}/efi/. $t/; umount $t; rmdir $t; mount -o loop $img {r}/efi",
+        img = image_dir.path().join("esp.img").display()
+    ));
+    let (ok, out) = in_arch_chroot(&root, &["eject", "--noconfirm", "--discard-pending"]);
+    println!("{out}");
+    assert!(ok, "{out}");
+    assert!(
+        out.contains(&format!("deployment {booted}, which this chroot runs"))
+            && out.contains(&format!("deployment {unbooted}, which hasn't booted, is discarded"))
+            && out.contains("umount -R"),
+        "{out}"
+    );
+    assert_plain_arch(machine, &root.join("efi"), &packages, &before, "ejected from a chroot");
+    assert!(
+        !root.join("usr/bin/tree").exists(),
+        "the unbooted deployment's tree came along"
+    );
+    assert_plain_pacman_works(machine, "ejected from a chroot");
+}
+
 #[test]
 #[ignore]
 fn the_fallback_uki_boots_the_current_deployment_under_its_own_title_and_follows_a_rollback() {

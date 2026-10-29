@@ -2722,6 +2722,76 @@ fn an_eject_killed_at_any_step_leaves_a_bootable_system_and_a_rerun_finishes_it(
     }
 }
 
+/// Makes deployment 2 current beside the running deployment 1, as a switch waiting for its reboot leaves them: a copy of 1 with a file of its own, its entry on the ESP and the boot default.
+fn with_pending_switch(root: &Path, fs_type: &str) {
+    let deploy = root.join("archix/deploy");
+    let copy = match fs_type {
+        "btrfs" => Command::new("btrfs")
+            .args(["-q", "subvolume", "snapshot"])
+            .arg(deploy.join("1"))
+            .arg(deploy.join("2"))
+            .status(),
+        _ => Command::new("cp")
+            .arg("-al")
+            .arg(deploy.join("1"))
+            .arg(deploy.join("2"))
+            .status(),
+    };
+    assert!(copy.unwrap().success());
+    fs::write(deploy.join("2/usr/bin/pending-only"), "pending\n").unwrap();
+    let esp = root.join("efi");
+    fs::write(esp.join("EFI/archix/9.9.9-test-bbbb.efi"), "uki-2").unwrap();
+    fs::write(
+        esp.join("loader/entries/archix-2.conf"),
+        "title archix\nversion 2\nsort-key archix\nefi /EFI/archix/9.9.9-test-bbbb.efi\n",
+    )
+    .unwrap();
+    fs::write(esp.join("loader/loader.conf"), "timeout 2\ndefault archix-2.conf\n").unwrap();
+    let store = archix::deploy::Store::open(root).unwrap();
+    store.point_current(2).unwrap();
+}
+
+#[test]
+#[ignore]
+fn an_eject_with_a_switch_pending_killed_at_any_step_boots_the_running_deployment_and_a_rerun_lays_it_out() {
+    let _serial = serial();
+    for fs_type in ["ext4", "btrfs"] {
+        for step in [
+            "eject-repointed",
+            "eject-copying",
+            "eject-copied",
+            "eject-loader",
+            "eject-plain",
+            "eject-unbound",
+            "eject-deleting",
+            "eject-removed",
+        ] {
+            let what = format!("{fs_type} with deployment 2 pending, killed at {step}");
+            let loop_fs = ejectable_root(fs_type);
+            let root = loop_fs.mnt.clone();
+            let usr = plain_usr(&root);
+            let qkk = pacman_qkk(&root, &["sed", "gzip"]);
+            with_pending_switch(&root, fs_type);
+            let killed = helper("eject", &root, &[("ARCHIX_TEST_CRASH", step)]).output().unwrap();
+            assert!(!killed.status.success(), "{what}: the eject never got there");
+            assert_eject_bootable(&root, &usr, &qkk, &what);
+            let conf = fs::read_to_string(root.join("efi/loader/loader.conf")).unwrap();
+            assert!(
+                !conf.contains("archix-2"),
+                "{what}: the pending deployment is still the boot default: {conf}"
+            );
+            let booted = restart(&root);
+            assert!(
+                !root.join("usr/bin/pending-only").exists(),
+                "{what}: the restart into {booted} runs the pending deployment"
+            );
+            let rerun = helper("eject", &root, &[]).output().unwrap();
+            assert!(rerun.status.success(), "{what}, then a rerun: {}", stderr(&rerun));
+            assert_ejected(&root, &usr, &qkk, &format!("{what}, then a rerun"));
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn a_switch_is_refused_before_staging_when_the_root_has_too_few_inodes_left() {

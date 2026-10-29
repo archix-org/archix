@@ -75,7 +75,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     }
     missing == 0
 }
-pub use eject::eject;
+pub use eject::{How as EjectHow, eject};
 pub use switch::{
     boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record, prune_hidden, rollback,
     switch, without_secrets,

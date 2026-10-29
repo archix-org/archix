@@ -175,8 +175,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; balanced by CI 40649673183's times: revoke (136 s) beside fallback (114), then secureboot (54) and usr-local; layout (95) beside reset-mid-switch (82), then etc-merge (77) and counting (74); file-systems and entry-edit, added later, not timed on CI yet.
-        tests: ["revoke fallback secureboot usr-local", "layout reset-mid-switch etc-merge counting", "file-systems entry-edit"]
+        # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; balanced by CI 40649673183's times: revoke (136 s) beside fallback (114), then secureboot (54) and usr-local; layout (95) beside reset-mid-switch (82), then etc-merge (77) and counting (74); file-systems, entry-edit, eject-pending and eject-chroot, added later, not timed on CI yet.
+        tests: ["revoke fallback secureboot usr-local", "layout reset-mid-switch etc-merge counting", "file-systems entry-edit eject-pending eject-chroot"]
         fs: [ext4, btrfs]
     name: boot (${{ matrix.tests }}, ${{ matrix.fs }})
     env:

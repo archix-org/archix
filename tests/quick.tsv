@@ -4,7 +4,7 @@ src/commands/helper.rs	test:helper test:aur
 src/commands/init/	test:init
 src/commands/switch.rs	test:switch test:system test:boot test:credentials
 src/commands/deployments.rs	test:switch test:deploy
-src/commands/eject.rs	test:deploy test:switch
+src/commands/eject.rs	test:deploy test:switch test:boot test:secrets
 src/commands/lock.rs	test:switch test:archlinux
 src/deploy/	test:deploy test:switch test:boot test:deploy_boot
 src/etcmerge/	test:etcmerge test:switch test:secrets

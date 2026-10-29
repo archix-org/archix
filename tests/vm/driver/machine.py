@@ -56,6 +56,8 @@ class Machine:
         self.work = Path(work)
         overlay = self.work / "disk.qcow2"
         self.disks = disks if disks is not None else [f"file={overlay},format=qcow2,if=virtio" if overlay.exists() else f"file={self.work}/disk.img,format=raw,if=virtio"]
+        # More QEMU arguments for the next start, such as -kernel for a live system booted the way a USB stick's own kernel is.
+        self.extra = []
         self.mem = mem or os.environ.get("VM_MEM", "3072")
         self.cpus = cpus or os.environ.get("VM_CPUS", "2")
         self.tpm = tpm
@@ -98,6 +100,7 @@ class Machine:
                "-drive", f"if=pflash,format=raw,unit=1,file={vars_fd}"]
         for disk in self.disks:
             cmd += ["-drive", disk]
+        cmd += self.extra
         if self.tpm:
             cmd += ["-chardev", f"socket,id=chrtpm,path={self.work}/swtpm/sock", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm", "-device", "tpm-tis,tpmdev=tpm0"]
         cmd += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,romfile=",

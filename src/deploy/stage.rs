@@ -294,8 +294,7 @@ fn layer_dirs(dir: &Path, tree: &str, lower: &Path) -> Result<()> {
 
 /// Whether a boot of deployment `number` applied its var-upper to the live /var.
 fn var_applied(store: &Store, deployment: &Path, number: u32) -> bool {
-    let state = crate::paths::Paths::under(store.root()).state;
-    crate::system::activate::deployment_id(deployment, number).is_ok_and(|id| state.join("activated").join(id).exists())
+    crate::system::activate::activated(&crate::paths::Paths::under(store.root()).state, deployment, number)
 }
 
 fn has_entries(dir: &Path) -> bool {

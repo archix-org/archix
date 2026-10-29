@@ -278,3 +278,59 @@ fs5	f'the boot should stop before multi-user without /home, not reach the shell:
 fs5	f'emergency mode should name the missing /home and what to do before sulogin: {console[-3000:]}'	added
 fs6	f"/home should be its disk again: {out('findmnt /home')}"	added
 fs6	f"status should say the missing disk failed deployment {pending}'s try: {status}"	added
+ep1	'a switch installing tree'	added
+ep1	f'the switch should leave deployment {pending} pending beside the running {running}'	added
+ep1	f'eject --noconfirm with a switch pending should ask for --discard-pending: {refused[1][-600:]}'	added
+ep1	'the refused eject should change nothing'	added
+ep1	'eject with a switch pending'	added
+ep1	f'eject should name the deployment it lays out and the one it discards: {said[-1200:]}'	added
+ep1	f"eject should delete /archix: {out('ls -A /archix 2>&1')}"	added
+ep1	f"/usr should be the root's own now: {out('findmnt -no SOURCE /usr')}"	added
+ep1	"the pending deployment's tree came along"	added
+ep1	'an /etc edit made after the switch should stay'	added
+ep1	f"the /etc merge should stop and its state go: {out('systemctl status archix-etc-merge.service --no-pager 2>&1 | head -5')}"	added
+ep1	'the hooks waiting for the discarded deployment should go'	added
+ep1	f'eject should make the plain UKI the default: {loader()}'	added
+ep1	"eject left archix's boot entries"	added
+ep2	f'plain Arch should boot through arch-linux.efi, not {selected}'	added
+ep2	'a plain boot mounts no deployment'	added
+ep2	f'plain Arch has other packages than deployment {running} had: {diff(packages, now)}'	added
+ep2	f"pacman -Qkk differs from the deployment's: {diff(qkk, now)}"	added
+ep2	f"pacman -Qkk should find nothing on plain Arch that stock Arch doesn't: {problems}"	added
+ep2	'the /etc edit should outlive the reboot'	added
+ep2	"plain Arch should keep /usr/local's files in its own /usr/local"	added
+ep2	f'eject should remove {unit}.service'	added
+ep2	'plain pacman -Syu after the eject'	added
+ep2	'plain pacman -S after the eject'	added
+ep2	'pacman -S tree should install it'	added
+ec1	f'deployment {running} should be current'	added
+ec2	'build-image.sh should have built the live system (LIVE_DISK)'	added
+ec2	f"the live system should run from its own disk: {out('findmnt /')}"	added
+ec2	'the live system should have no archix of its own'	added
+ec2	f'the live system, Arch as pacstrap leaves it, should have exactly the pacman -Qkk warnings plain Arch is allowed: {sorted(stock)}'	added
+ec2	'mounting the archix root on the live system'	added
+ec2	'mounting the ESP where boot/esp says'	added
+ec2	f'current should still be deployment {running}, not {n}'	added
+ec2	'mount-deployment from the live system'	added
+ec2	f'archix eject in arch-chroot failed: {said[-1500:]}'	added
+ec2	f'eject should say it lays out the bound deployment and what to do after: {said[-800:]}'	added
+ec2	f"eject should delete /archix: {out('ls -A /mnt/archix 2>&1')}"	added
+ec2	f"eject should take the deployment binds off the live system's mounts too: {out('findmnt -R /mnt')}"	added
+ec2	f"the root's own trees should hold the deployment's packages: {diff(packages, out('arch-chroot /mnt pacman -Q 2>&1'))}"	added
+ec2	f'eject should make a plain UKI the default: {conf}'	added
+ec2	"eject left archix's boot entries"	added
+ec2	'the plain initramfs config should have no archix hook'	added
+ec2	f"fstab should mount nothing of archix's: {out('cat /mnt/etc/fstab')}"	added
+ec2	'unmounting the root from the live system'	added
+ec3	f'plain Arch should boot through arch-linux.efi, not {selected}'	added
+ec3	'a plain boot mounts no deployment'	added
+ec3	"/usr should be the root's own"	added
+ec3	f'plain Arch has other packages than deployment {running} had: {diff(packages, now)}'	added
+ec3	f"pacman -Qkk differs from the deployment's: {diff(qkk, now)}"	added
+ec3	f"pacman -Qkk should find nothing on plain Arch that stock Arch doesn't: {problems}"	added
+ec3	"plain Arch should keep /usr/local's files in its own /usr/local"	added
+ec3	'the ProtectSystem=strict service should run on plain Arch'	added
+ec3	f'eject should remove {unit}.service'	added
+ec3	'plain pacman -Syu after the eject'	added
+ec3	'plain pacman -S after the eject'	added
+ec3	'pacman -S tree should install it'	added

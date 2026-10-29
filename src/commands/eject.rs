@@ -13,16 +13,42 @@ use archix::system::{SystemState, boot};
 
 use super::{check_pacman_free, confirm, require_root};
 
-/// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off; a system on deployments becomes plain Arch first.
-pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool, secrets: Option<SecretsMode>) -> Result<()> {
+/// What `archix eject` was asked to do.
+#[derive(Debug, Clone, Copy)]
+pub struct How {
+    pub noconfirm: bool,
+    pub restore_originals: bool,
+    pub purge: bool,
+    pub discard_pending: bool,
+}
+
+/// Stops archix managing the machine: systemd-boot starts the distro's kernels without it, and its hooks and boot service come off; a system on deployments becomes plain Arch first, from the deployment that runs.
+pub fn eject(how: How, secrets: Option<SecretsMode>) -> Result<()> {
+    let How {
+        noconfirm,
+        restore_originals,
+        purge,
+        ..
+    } = how;
     require_root("eject")?;
     let paths = Paths::system();
     check_pacman_free(&paths)?;
     let under_way = eject_deployments::read_state(&paths.state)?;
+    let target = match &under_way {
+        None if archix::system::deploy_boot::uses_deployments(&paths.root) => {
+            Some(eject_deployments::deployment_to_eject(&paths.root)?)
+        }
+        _ => None,
+    };
     let store = Store::new(&paths);
-    let current = match store.current()? {
-        Some(number) => Some(store.get(number)?),
-        None => None,
+    // The generation whose files and secrets come off: the deployment eject lays out, else current.
+    let current = match (&under_way, &target) {
+        (Some(state), _) => store.get(state.deployment).ok(),
+        (None, Some(target)) => Some(store.get(target.deployment)?),
+        (None, None) => match store.current()? {
+            Some(number) => Some(store.get(number)?),
+            None => None,
+        },
     };
     let declared = current
         .as_ref()
@@ -37,6 +63,17 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool, secrets: Opt
         ),
         (_, mode, None) => mode.unwrap_or_default(),
     };
+    if secrets == SecretsMode::Materialize
+        && archix::system::secureboot::in_chroot()
+        && under_way
+            .as_ref()
+            .is_none_or(|state| state.phase < eject_deployments::Phase::Copied)
+    {
+        bail!(
+            "--secrets materialize copies what a boot decrypted into {}, and nothing in a chroot did; eject with --secrets drop here (the identity and ciphertexts stay in /var/lib/archix/secrets), or with --secrets materialize from the booted system; nothing was changed",
+            archix::secrets::RUN_DIR
+        );
+    }
     if secrets == SecretsMode::Materialize
         && under_way.is_none()
         && declared.is_some()
@@ -59,8 +96,8 @@ pub fn eject(noconfirm: bool, restore_originals: bool, purge: bool, secrets: Opt
             }
         );
     }
-    if under_way.is_some() || archix::system::deploy_boot::uses_deployments(&paths.root) {
-        return from_deployments(&paths, under_way, noconfirm, restore_originals, purge, secrets);
+    if under_way.is_some() || target.is_some() {
+        return from_deployments(&paths, under_way, target, how, secrets);
     }
     let esp = fs::read_to_string(paths.state.join("boot/esp"))
         .ok()
@@ -169,24 +206,31 @@ fn purge_state(paths: &Paths) {
     }
 }
 
-/// Ejects a system that boots through deployments, or finishes an eject a crash cut off: the running deployment becomes the root's own trees, the ESP boots them through a plain UKI, and /archix goes.
+/// Ejects a system that boots through deployments, or finishes an eject a crash cut off: the deployment that runs, booted or bound for a live USB's chroot, becomes the root's own trees, the ESP boots them through a plain UKI, and /archix goes with every other deployment, current included.
 fn from_deployments(
     paths: &Paths,
     under_way: Option<eject_deployments::State>,
-    noconfirm: bool,
-    restore_originals: bool,
-    purge: bool,
+    target: Option<eject_deployments::Target>,
+    how: How,
     secrets: SecretsMode,
 ) -> Result<()> {
+    let How {
+        noconfirm,
+        restore_originals,
+        purge,
+        discard_pending,
+    } = how;
+    let chroot = archix::system::secureboot::in_chroot();
     let restore_originals = under_way
         .as_ref()
         .map_or(restore_originals, |state| state.restore_originals);
-    match &under_way {
-        Some(state) => println!(
+    match (&under_way, target) {
+        (Some(state), _) => println!(
             "archix eject: finishing the eject to plain Arch from deployment {} that was cut off",
             state.deployment
         ),
-        None => {
+        (None, None) => bail!("there's no deployment to eject to; nothing was changed"),
+        (None, Some(target)) => {
             let held = archix::system::usr_local::boot_files(&paths.root);
             if archix::system::usr_local::read_hold(&paths.state).is_some() && !held.is_empty() {
                 bail!(
@@ -194,11 +238,49 @@ fn from_deployments(
                     held.join(", ")
                 );
             }
-            let deployment = eject_deployments::deployment_to_eject(&paths.root)?;
+            let (deployment, current) = (target.deployment, target.current);
+            let runs = if chroot { "this chroot runs" } else { "this boot runs" };
+            if current != deployment && noconfirm && !discard_pending {
+                bail!(
+                    "deployment {current} is current, but {runs} deployment {deployment}, which eject lays out; deployment {current} would go with /archix. Run eject again with --discard-pending to do that, or restart into {current} and eject there; nothing was changed"
+                );
+            }
+            if let Some(esp) = eject_deployments::esp(paths) {
+                boot::require_esp(&esp).map_err(|e| match chroot {
+                    true => e.context(format!(
+                        "from the live system, mount the ESP at ROOT{} before `arch-chroot ROOT`",
+                        esp.display()
+                    )),
+                    false => e,
+                })?;
+            }
             println!("archix eject: archix stops managing this machine, which becomes plain Arch");
-            println!(
-                "  system    deployment {deployment}, which runs now, becomes the root's own /usr, /etc, /opt, /boot and pacman database; the running system switches to them at once"
-            );
+            if chroot {
+                println!(
+                    "  system    deployment {deployment}, which this chroot runs (bound by mount-deployment), becomes the root's own /usr, /etc, /opt, /boot and pacman database"
+                );
+            } else {
+                println!(
+                    "  system    deployment {deployment}, which runs now, becomes the root's own /usr, /etc, /opt, /boot and pacman database; the running system switches to them at once"
+                );
+            }
+            if current != deployment {
+                let store = archix::deploy::Store::open(&paths.root)?;
+                let booted = archix::system::activate::activated(&paths.state, &store.path(current), current);
+                println!(
+                    "  pending   deployment {current}, {}, is discarded: its packages and config never become the system{}; to keep it, restart into it and eject there",
+                    if booted {
+                        "the current one"
+                    } else {
+                        "which hasn't booted"
+                    },
+                    if booted {
+                        ""
+                    } else {
+                        ", and the hooks and /var changes waiting for its first boot never run"
+                    }
+                );
+            }
             println!("  /usr/local the shared /var/usrlocal becomes the root's own /usr/local, and /var/usrlocal goes");
             println!(
                 "  boot      a UKI that mkinitcpio's preset writes to EFI/Linux{}, the default instead of archix's entries, which go with the fallback UKI",
@@ -234,14 +316,19 @@ fn from_deployments(
     }
     let archix = archix::integration::own_path()?;
     let written = eject_deployments::eject(paths, &archix, restore_originals, secrets).map_err(|e| {
-        e.context(
-            "the eject stopped partway; the machine still boots, and running `sudo archix eject` again finishes it",
-        )
+        e.context(match chroot {
+            true => {
+                "the eject stopped partway; the deployments still boot, and running `archix eject` again in this chroot finishes it"
+            }
+            false => {
+                "the eject stopped partway; the machine still boots, and running `sudo archix eject` again finishes it"
+            }
+        })
     })?;
     for line in written {
         println!("boot: {line}");
     }
-    if paths.root == std::path::Path::new("/") {
+    if paths.root == std::path::Path::new("/") && !chroot {
         let _ = Command::new("systemctl").arg("daemon-reload").status();
     }
     if purge {
@@ -249,8 +336,14 @@ fn from_deployments(
     } else {
         eject_deployments::clear_state(&paths.state)?;
     }
-    println!(
-        "this machine is plain Arch now and archix no longer manages it; restart when convenient. `pacman -Rns archix` removes archix itself; `archix switch` would lay the machine out as deployments again"
-    );
+    if chroot {
+        println!(
+            "this root is plain Arch now and archix no longer manages it; leave the chroot (`exit`), `umount -R` the root and restart. `pacman -Rns archix` removes archix itself; `archix switch` would lay the machine out as deployments again"
+        );
+    } else {
+        println!(
+            "this machine is plain Arch now and archix no longer manages it; restart when convenient. `pacman -Rns archix` removes archix itself; `archix switch` would lay the machine out as deployments again"
+        );
+    }
     Ok(())
 }
