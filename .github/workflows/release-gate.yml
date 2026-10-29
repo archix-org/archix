@@ -126,9 +126,10 @@ jobs:
           ARCHIX_VM_CACHE: "0"
           # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
           ARCHIX_OLD: 3a99d0c
-          # nic-control's boots per arm after the first: about 80 min at GitHub's 13 s a boot.
-          NIC_REBOOTS: "300"
-          NIC_RESETS: "60"
+          # nic-control's boots per arm after the first, its four arms side by side: two to five hours a job.
+          NIC_REBOOTS: "250"
+          NIC_RESETS: "50"
+          ARCHIX_HEAVY_JOBS: ${{ matrix.suite == 'nic-control' && '4' || '2' }}
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
