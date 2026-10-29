@@ -55,6 +55,21 @@ def expected():
     return rows
 
 
+def ci_groups():
+    """Problems with ci.yml's boot groups: one larger than the caches boot-results.sh keeps a job, or a test in no group or in two."""
+    import json
+    import re
+    root = HERE.parents[2]
+    ci = (root / ".github/workflows/ci.yml").read_text()
+    limit = int(re.search(r"^MAX=(\d+)$", (root / "tests/ci/boot-results.sh").read_text(), re.M).group(1))
+    groups = [g.split() for g in json.loads(re.search(r"^\s*tests: (\[.*\])$", ci, re.M).group(1))]
+    problems = [f"ci.yml's boot group {' '.join(g)!r} has {len(g)} tests, more than boot-results.sh's MAX={limit}" for g in groups if len(g) > limit]
+    placed = Counter(t for g in groups for t in g)
+    problems += [f"ci.yml's boot groups run {t} {placed[t]} times, not once" for t in TESTS if placed[t] != 1]
+    problems += [f"ci.yml's boot groups name {t}, which isn't a split boot test" for t in placed if t not in TESTS]
+    return problems
+
+
 def main():
     if sys.argv[1:2] == ["--extract"]:
         for path in sys.argv[2:]:
@@ -72,6 +87,7 @@ def main():
     problems = [f"missing: {s}: {m}" for (s, m), n in want.items() if have[(s, m)] < n]
     problems += [f"more than once ({', '.join(where[(s, m)])}): {s}: {m}" for (s, m), n in have.items() if (s, m) in want and n > want[(s, m)]]
     problems += [f"not in checks.tsv ({', '.join(where[(s, m)])}): {s}: {m}" for (s, m) in have if (s, m) not in want]
+    problems += ci_groups()
     if problems:
         print("\n".join(problems))
         return 1
