@@ -54,6 +54,9 @@ pub struct State {
     /// Which of fstab and crypttab, archix's to write, were edited on the running system and carried.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub edited_tables: BTreeSet<String>,
+    /// Paths not carried because they hold a secret's value, with the secrets' names.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refused: BTreeMap<String, String>,
 }
 
 pub fn dir(paths: &Paths) -> PathBuf {
@@ -335,6 +338,10 @@ pub struct Merge<'a> {
     pub state: &'a mut State,
     /// archix's state directory, for the login notes and the ID registry; None leaves both alone.
     pub state_dir: Option<PathBuf>,
+    /// The root whose ramfs holds the values a carried file must not; None compares none.
+    pub secrets_root: Option<PathBuf>,
+    /// The values each pass reads from it, None when there are none to compare yet.
+    pub values: Option<crate::secrets::live::Values>,
 }
 
 impl Merge<'_> {
@@ -369,6 +376,10 @@ impl Merge<'_> {
             }
         }
         paths.retain(|rel| !rel.is_empty() && !self.skipped(rel));
+        self.read_values();
+        if dirty.is_none() {
+            self.take_back_carried_values();
+        }
         let mut outcome = Pass::default();
         let mut removed_dirs = Vec::new();
         for rel in &paths {
@@ -403,6 +414,104 @@ impl Merge<'_> {
         }
         self.state.last_pass = now();
         outcome
+    }
+
+    fn read_values(&mut self) {
+        let Some(root) = &self.secrets_root else { return };
+        self.values = match crate::secrets::live::read(root) {
+            Ok(values) => values,
+            Err(e) => {
+                eprintln!(
+                    "archix: /etc merge: reading the secrets' values to keep them out of deployment {} failed: {e:#}",
+                    self.state.target
+                );
+                None
+            }
+        };
+    }
+
+    /// Takes each version the merge put into the target that holds a value back out, as one copied before the values could be read.
+    fn take_back_carried_values(&mut self) {
+        let Some(values) = &self.values else { return };
+        let held: Vec<(String, String)> = self
+            .state
+            .carried
+            .iter()
+            .chain(&self.state.conflicts)
+            .filter_map(|rel| {
+                let bytes = tree::read_file(&self.theirs.join(rel)).ok()?;
+                Some((rel.clone(), values.in_bytes(&bytes)?))
+            })
+            .collect();
+        for (rel, names) in held {
+            if let Err(e) = self.take_back(&rel, &names) {
+                eprintln!("archix: /etc merge: /etc/{rel}: {e:#}");
+                self.state.failed.insert(rel, format!("{e:#}"));
+            }
+        }
+    }
+
+    /// The secrets whose values the live `rel` holds when it changed or was refused before; without values to compare, one refused before stays refused.
+    fn secret_in(&mut self, rel: &str, live: &Option<Fp>, base: &Option<Fp>) -> Option<String> {
+        let refused = self.state.refused.get(rel).cloned();
+        if live == base && refused.is_none() {
+            return None;
+        }
+        if !live.as_ref().is_some_and(|fp| matches!(fp.kind, Kind::File(_))) {
+            self.state.refused.remove(rel);
+            return None;
+        }
+        let Some(values) = &self.values else {
+            return refused;
+        };
+        let names = tree::read_file(&self.live.join(rel))
+            .ok()
+            .and_then(|bytes| values.in_bytes(&bytes));
+        if names.is_none() {
+            self.state.refused.remove(rel);
+        }
+        names
+    }
+
+    /// Leaves `rel`, which holds the values of secrets `names`, out of the target, and its version there too if that holds one; says so once, path and names only.
+    fn refuse(&mut self, rel: &str, names: &str) -> Result<()> {
+        let target = self.state.target;
+        let theirs_holds = self.values.as_ref().is_some_and(|values| {
+            tree::read_file(&self.theirs.join(rel)).is_ok_and(|bytes| values.in_bytes(&bytes).is_some())
+        });
+        if theirs_holds {
+            self.take_back(rel, names)?;
+        }
+        if self.state.refused.get(rel).map(String::as_str) == Some(names) {
+            return Ok(());
+        }
+        self.state.refused.insert(rel.to_string(), names.to_string());
+        println!(
+            "archix: /etc merge: /etc/{rel} holds secret {names}'s value in plain text, so it isn't carried into deployment {target}"
+        );
+        self.note(&format!(
+            "archix: /etc/{rel} holds secret {names}'s value in plain text, so the /etc merge doesn't carry it into deployment {target}; remove it, and change a NetworkManager connection whose secret archix places with `nmcli connection modify --temporary`, or in the config"
+        ));
+        Ok(())
+    }
+
+    /// Takes the target's `rel`, which holds a value, out: the target's own version back from .pacnew when the merge moved it there, else nothing; forgets its base, so a clean live version is carried again.
+    fn take_back(&mut self, rel: &str, names: &str) -> Result<()> {
+        let to = self.theirs.join(rel);
+        let pacnew = tree::with_suffix(&to, ".pacnew");
+        if self.state.conflicts.remove(rel) && fs::symlink_metadata(&pacnew).is_ok() {
+            fs::rename(&pacnew, &to).with_context(|| format!("renaming {} back", pacnew.display()))?;
+            crate::durable::sync_dir(&to)?;
+        } else {
+            tree::remove_entry(&to)?;
+        }
+        self.state.carried.remove(rel);
+        self.state.base.remove(rel);
+        println!(
+            "archix: /etc merge: took /etc/{rel}, which holds secret {names}'s value, back out of deployment {}",
+            self.state.target
+        );
+        Ok(())
     }
 
     fn note(&self, line: &str) {
@@ -453,6 +562,9 @@ impl Merge<'_> {
             Some(_) => None,
             None => tree::fingerprint(&self.live.join(rel))?,
         };
+        if let Some(names) = self.secret_in(rel, &live, &base) {
+            return self.refuse(rel, &names);
+        }
         if live == base {
             return Ok(());
         }
@@ -526,7 +638,18 @@ impl Merge<'_> {
                         fp.clone()
                     }
                     Kind::Symlink(_) => tree::copy_symlink(&from, &to)?,
-                    _ => tree::copy_file(&from, &to)?,
+                    _ => match &self.values {
+                        None => tree::copy_file(&from, &to)?,
+                        Some(values) => match tree::copy_file_unless(&from, &to, |bytes| values.in_bytes(bytes))? {
+                            Ok(fp) => fp,
+                            Err(names) => {
+                                if conflict {
+                                    fs::rename(tree::with_suffix(&to, ".pacnew"), &to)?;
+                                }
+                                return self.refuse(rel, &names);
+                            }
+                        },
+                    },
                 })
             }
         };
@@ -690,6 +813,8 @@ pub fn merge_for<'a>(paths: &Paths, state: &'a mut State, live: PathBuf, theirs:
         skip,
         state,
         state_dir: Some(paths.state.clone()),
+        secrets_root: Some(paths.root.clone()),
+        values: None,
     }
 }
 
@@ -717,6 +842,8 @@ pub struct Last {
     pub last_pass: u64,
     pub recovered: Vec<String>,
     pub clash: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refused: BTreeMap<String, String>,
 }
 
 /// Run early in every boot, before sysusers and activation: when the merge into the deployment that booted didn't finish its pass at shutdown, carries what the old /etc held on disk, and says so in the login notes and `archix status`.
@@ -819,6 +946,7 @@ pub fn boot(root: &Path) -> Result<()> {
         last_pass: state.last_pass,
         recovered: state.recovered.iter().cloned().collect(),
         clash: state.clash.clone(),
+        refused: state.refused.clone(),
     };
     save_json(&last_path(&paths), &last)?;
     discard(&paths, booted);
@@ -848,6 +976,11 @@ pub fn status_lines(paths: &Paths) -> Vec<String> {
         }
         for (rel, why) in &state.failed {
             lines.push(format!("  /etc/{rel} isn't carried: {why}"));
+        }
+        for (rel, names) in &state.refused {
+            lines.push(format!(
+                "  /etc/{rel} isn't carried: it holds secret {names}'s value in plain text; remove it, or put the secret back where archix places it"
+            ));
         }
         for rel in &state.edited_tables {
             lines.push(format!(
@@ -898,6 +1031,12 @@ pub fn status_lines(paths: &Paths) -> Vec<String> {
     }
     for (rel, why) in &last.failed {
         lines.push(format!("  /etc/{rel} didn't reach this deployment: {why}"));
+    }
+    for (rel, names) in &last.refused {
+        lines.push(format!(
+            "  /etc/{rel} didn't reach this deployment, as it held secret {names}'s value in plain text; deployment {}'s /etc still has it while it's kept",
+            last.from
+        ));
     }
     if let Some(clash) = &last.clash {
         lines.push(format!("  users and groups weren't carried: {clash}"));
@@ -983,6 +1122,8 @@ mod tests {
             skip: skip.iter().map(|s| s.to_string()).collect(),
             state,
             state_dir: None,
+            secrets_root: None,
+            values: None,
         }
     }
 
@@ -1062,6 +1203,89 @@ mod tests {
         assert_eq!(fs::read_to_string(t.join("x")).unwrap(), "live 2");
         assert_eq!(fs::read_to_string(t.join("x.pacnew")).unwrap(), "package");
         assert_eq!(merge.state.conflicts.len(), 1);
+    }
+
+    #[test]
+    fn a_file_holding_a_value_is_never_carried_a_carried_one_is_taken_back_and_a_fixed_one_goes_in() {
+        use crate::secrets::live::Values;
+        use crate::secrets::memory::SecretBuf;
+        const VALUE: &str = "0123456789abcdef-key";
+        let dir = tempfile::tempdir().unwrap();
+        let (b, l, t) = (
+            dir.path().join("base"),
+            dir.path().join("live"),
+            dir.path().join("theirs"),
+        );
+        for etc in [&b, &l, &t] {
+            fs::create_dir_all(etc).unwrap();
+        }
+        for (etc, text) in [(&b, "base"), (&l, "live 1"), (&t, "package")] {
+            fs::write(etc.join("x"), text).unwrap();
+        }
+        for etc in [&b, &l] {
+            fs::write(etc.join("y"), format!("y={VALUE}")).unwrap();
+        }
+        fs::write(t.join("y"), format!("y={VALUE}")).unwrap();
+        fs::write(l.join("p"), format!("[wireguard]\nprivate-key={VALUE}\n")).unwrap();
+        let mut state = snapshot(&b, 2, 1, &BTreeSet::new());
+        state.carried.insert("y".to_string());
+        let mut merge = merge(&l, &t, &mut state, &[]);
+        merge.values = Some(Values::new(vec![(
+            "wg0".to_string(),
+            SecretBuf::from_slice(VALUE.as_bytes()).unwrap(),
+        )]));
+        merge.pass(Some(&BTreeSet::from(["x".to_string()])), None);
+        assert_eq!(
+            fs::read_to_string(t.join("x")).unwrap(),
+            "live 1",
+            "a clean file goes in"
+        );
+        assert_eq!(fs::read_to_string(t.join("x.pacnew")).unwrap(), "package");
+        fs::write(l.join("x"), format!("live 2 {VALUE}")).unwrap();
+        fs::write(t.join("x"), format!("live 2 {VALUE}")).unwrap();
+        merge.pass(None, None);
+        assert!(!t.join("p").exists(), "a new file with the value stays out");
+        assert!(
+            !t.join("y").exists(),
+            "a carried version with the value is taken back out"
+        );
+        assert_eq!(
+            fs::read_to_string(t.join("x")).unwrap(),
+            "package",
+            "the target's own version comes back from .pacnew"
+        );
+        assert!(!t.join("x.pacnew").exists() && !merge.state.conflicts.contains("x"));
+        assert_eq!(
+            merge.state.refused.keys().collect::<Vec<_>>(),
+            ["p", "x", "y"],
+            "{:?}",
+            merge.state.refused
+        );
+        assert!(
+            ["p", "x", "y"].iter().all(|rel| !merge.state.base.contains_key(*rel)),
+            "no fingerprint of a version with the value: {:?}",
+            merge.state.base
+        );
+        merge.values = None;
+        merge.pass(None, None);
+        assert!(
+            !t.join("p").exists() && merge.state.refused.contains_key("p"),
+            "with no values to compare, what was refused stays refused"
+        );
+        merge.values = Some(Values::new(vec![(
+            "wg0".to_string(),
+            SecretBuf::from_slice(VALUE.as_bytes()).unwrap(),
+        )]));
+        fs::write(l.join("p"), "[wireguard]\nprivate-key-flags=1\n").unwrap();
+        merge.pass(Some(&BTreeSet::from(["p".to_string()])), None);
+        assert_eq!(
+            fs::read_to_string(t.join("p")).unwrap(),
+            "[wireguard]\nprivate-key-flags=1\n",
+            "fixed, it's carried"
+        );
+        assert!(!merge.state.refused.contains_key("p"));
+        let json = serde_json::to_string(&*merge.state).unwrap();
+        assert!(!json.contains(VALUE), "{json}");
     }
 
     #[test]

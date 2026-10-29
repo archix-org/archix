@@ -7,7 +7,7 @@ src/commands/deployments.rs	test:switch test:deploy
 src/commands/eject.rs	test:deploy test:switch
 src/commands/lock.rs	test:switch test:archlinux
 src/deploy/	test:deploy test:switch test:boot test:deploy_boot
-src/etcmerge/	test:etcmerge test:switch
+src/etcmerge/	test:etcmerge test:switch test:secrets
 src/eval/	test:init test:home test:recipes test:system test:fetch
 src/options/	test:system test:home
 src/value.rs	test:system test:home

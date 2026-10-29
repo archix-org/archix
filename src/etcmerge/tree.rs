@@ -266,6 +266,37 @@ pub fn copy_file(from: &Path, to: &Path) -> Result<Fp> {
     })
 }
 
+/// The bytes of the file at `path`, never through a symlink.
+pub fn read_file(path: &Path) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_nofollow(path)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// `copy_file`, but reading `from` whole first and writing nothing when `refuse` finds a reason in its bytes, so what was checked is what's written.
+pub fn copy_file_unless<T>(
+    from: &Path,
+    to: &Path,
+    refuse: impl FnOnce(&[u8]) -> Option<T>,
+) -> Result<std::result::Result<Fp, T>> {
+    let mut src = open_nofollow(from).with_context(|| format!("opening {}", from.display()))?;
+    let meta = src.metadata().with_context(|| format!("reading {}", from.display()))?;
+    if !meta.is_file() {
+        bail!("{} stopped being a file while it was copied", from.display());
+    }
+    let mut bytes = Vec::new();
+    src.read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", from.display()))?;
+    if let Some(why) = refuse(&bytes) {
+        return Ok(Err(why));
+    }
+    let fp = write_with(to, &meta, from, |dst| {
+        dst.write_all(&bytes)?;
+        Ok(hex(&Sha256::digest(&bytes)))
+    })?;
+    Ok(Ok(fp))
+}
+
 /// Writes `contents` to `to` like `copy_file`, with the owner, mode and xattrs of `like`.
 pub fn write_like(to: &Path, contents: &[u8], like: &Path) -> Result<()> {
     let meta = fs::metadata(like).with_context(|| format!("reading {}", like.display()))?;

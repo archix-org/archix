@@ -2,6 +2,7 @@
 
 pub mod activate;
 pub mod crypto;
+pub mod live;
 pub mod memory;
 pub mod prepare;
 pub mod scan;
@@ -594,6 +595,9 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
             ));
         }
     }
+    if let Some(manifest) = booted.as_ref().or(current) {
+        lines.extend(plaintext_lines(paths, manifest));
+    }
     for (name, entry) in current.map(|m| &m.secrets).into_iter().flatten() {
         if entry.absent {
             lines.push(format!(
@@ -617,6 +621,51 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
         ));
         if !crate::system::sleep::secrets_at_risk(root).is_empty() {
             lines.push(crate::system::sleep::secrets_note(&swaps));
+        }
+    }
+    lines
+}
+
+/// Files in the running /etc, and the pending deployment's, that hold a value of the booted deployment's file secrets on disk, as the /etc merge refuses to carry; reading the values takes root, and `manifest` is the booted one when it can be read.
+fn plaintext_lines(paths: &crate::paths::Paths, manifest: &Manifest) -> Vec<String> {
+    let root = &paths.root;
+    if !manifest
+        .secrets
+        .values()
+        .any(|entry| entry.kind == Kind::File && !entry.absent)
+    {
+        return Vec::new();
+    }
+    if unsafe { libc::geteuid() } != 0 {
+        return vec![format!(
+            "secrets: whether a file in /etc holds a secret's value takes root to check, as the values in {RUN_DIR} are root's: `sudo archix status`"
+        )];
+    }
+    let values = match live::read(root) {
+        Ok(Some(values)) => values,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            return vec![format!(
+                "secrets: reading their values to check /etc for them failed: {e:#}"
+            )];
+        }
+    };
+    let skip: BTreeSet<String> = manifest
+        .links()
+        .into_keys()
+        .filter_map(|path| path.strip_prefix("/etc/").map(str::to_string))
+        .collect();
+    let mut places = vec![(root.join("etc"), crate::system::boot::booted_deployment(root))];
+    if let Some((pending, _)) = crate::etcmerge::pending(root) {
+        places.push((crate::etcmerge::deployment_etc(root, pending), Some(pending)));
+    }
+    let mut lines = Vec::new();
+    for (etc, number) in places {
+        for (path, names) in live::scan_etc(&etc, &values, &skip) {
+            lines.push(format!(
+                "warning: {path} holds secret {names} in plaintext on disk{}; remove it (change a NetworkManager connection whose secret archix places with `nmcli connection modify --temporary`, or in the config)",
+                number.map_or(String::new(), |n| format!(" (deployment {n})"))
+            ));
         }
     }
     lines

@@ -1044,6 +1044,139 @@ fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_onl
 
 #[test]
 #[ignore]
+fn the_etc_merge_never_carries_a_file_holding_a_value_into_the_pending_deployment_and_status_names_it_until_its_gone() {
+    use std::time::{Duration, Instant};
+    let _system = lock_system();
+    let c = Checks::default();
+    let lab = Lab::new(&[]);
+    lab.ok(&["secrets", "init"]);
+    let key = lab.marker("wg0", 32);
+    let body = |n: u32| {
+        secrets_body(
+            &lab,
+            r#"wg0 = { file = "secrets/wg0.age" }"#,
+            &format!(
+                r#"files = {{ ["/etc/wireguard/wg0.conf"] = {{ secret = "wg0" }}, ["/etc/archix-test-merge"] = {{ text = "{n}" }} }}"#
+            ),
+        )
+    };
+    lab.setup.set_body(&[], &body(0));
+    lab.set("wg0", key.as_bytes());
+    lab.ok(&["switch", "--noconfirm"]);
+    let booted = lab.machine().current().unwrap();
+    let (activated, said) = lab.boot();
+    assert!(activated, "the boot's decrypt step: {said}");
+    lab.setup.set_body(&[], &body(1));
+    let (switched, out) = lab.run(&["switch", "--noconfirm"], &[("ARCHIX_TEST_ETC_MERGE", "1")], None);
+    assert!(switched, "{out}");
+    let pending = lab.machine().current().unwrap();
+    assert_ne!(pending, booted);
+    let unit = archix::etcmerge::unit_name(lab.root());
+    let (live, theirs) = (lab.root().join("etc"), lab.machine().deployment(pending).join("etc"));
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let started = Instant::now();
+        while !done() {
+            if started.elapsed() > Duration::from_secs(20) {
+                let journal = Command::new("journalctl")
+                    .args(["-u", &unit, "--no-pager"])
+                    .output()
+                    .unwrap();
+                let _ = Command::new("systemctl").args(["stop", &unit]).status();
+                panic!("waited for {what}: {}", String::from_utf8_lossy(&journal.stdout));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    };
+    let carried = |rel: &str, text: &str| fs::read_to_string(theirs.join(rel)).ok().as_deref() == Some(text);
+    fs::write(live.join("archix-test-before"), "clean\n").unwrap();
+    wait("a clean file carried", &|| carried("archix-test-before", "clean\n"));
+    let profile = "NetworkManager/system-connections/wg0.nmconnection";
+    fs::create_dir_all(live.join(profile).parent().unwrap()).unwrap();
+    fs::write(live.join(profile), format!("[wireguard]\nprivate-key={key}\n")).unwrap();
+    fs::set_permissions(live.join(profile), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::write(live.join("archix-test-before"), format!("clean\nkey={key}\n")).unwrap();
+    fs::write(live.join("archix-test-after"), "clean\n").unwrap();
+    wait("a clean file written after the profile carried", &|| {
+        carried("archix-test-after", "clean\n")
+    });
+    let notes = || fs::read_to_string(lab.root().join("var/lib/archix/notes")).unwrap_or_default();
+    wait("the login note", &|| notes().contains("archix-test-before"));
+    c.check(
+        !theirs.join(profile).exists(),
+        "a profile NetworkManager saved with the value isn't carried into the pending deployment",
+    );
+    c.eq(
+        fs::read_to_string(theirs.join("archix-test-before")).ok(),
+        Some("clean\n".to_string()),
+        "a file carried before keeps its clean version when the value is added to it",
+    );
+    let state = archix::etcmerge::load(&lab.setup.paths, pending).unwrap();
+    c.check(
+        !state.base.contains_key(profile) && !state.carried.contains(profile),
+        format!("the merge records no fingerprint of it: {:?}", state.base.get(profile)),
+    );
+    let notes = notes();
+    c.check(
+        notes.contains(&format!(
+            "/etc/{profile} holds secret wg0's value in plain text, so the /etc merge doesn't carry it into deployment {pending}"
+        )) && notes.contains("nmcli connection modify --temporary"),
+        format!("a login note names the file and the way out:\n{notes}"),
+    );
+    let status = lab.ok(&["status"]);
+    c.check(
+        status.contains(&format!(
+            "/etc/{profile} holds secret wg0 in plaintext on disk (deployment {booted})"
+        )) && status.contains("/etc/archix-test-before holds secret wg0 in plaintext on disk")
+            && status.contains(&format!("/etc/{profile} isn't carried: it holds secret wg0's value")),
+        format!("status warns:\n{status}"),
+    );
+    let nobody = Command::new("setpriv")
+        .args(["--reuid=65534", "--regid=65534", "--clear-groups", "--"])
+        .arg(env!("CARGO_BIN_EXE_archix"))
+        .args([
+            "--config",
+            lab.setup.config.to_str().unwrap(),
+            "--host",
+            "box",
+            "status",
+        ])
+        .envs(lab.machine().env())
+        .output()
+        .unwrap();
+    let as_nobody = lab.keep(&nobody);
+    c.check(
+        as_nobody.contains("takes root to check") && !as_nobody.contains("in plaintext on disk"),
+        format!("a user's status says the check needs root:\n{as_nobody}"),
+    );
+    lab.sweep(
+        &c,
+        "etc merge",
+        &|marker, place| {
+            marker == "wg0"
+                && (place.ends_with(&format!("/etc/{profile}")) || place.ends_with("/etc/archix-test-before"))
+                && !place.contains(&format!("/archix/deploy/{pending}/"))
+        },
+        &[],
+    );
+    fs::remove_file(live.join(profile)).unwrap();
+    fs::write(live.join("archix-test-before"), "clean\n").unwrap();
+    fs::write(live.join("archix-test-after"), "clean again\n").unwrap();
+    wait("the next pass", &|| carried("archix-test-after", "clean again\n"));
+    let status = lab.ok(&["status"]);
+    c.check(
+        !status.contains("in plaintext on disk") && !status.contains("isn't carried"),
+        format!("removing the file clears the warning:\n{status}"),
+    );
+    c.check(
+        !theirs.join(profile).exists() && carried("archix-test-before", "clean\n"),
+        "the pending deployment has neither",
+    );
+    let _ = Command::new("systemctl").args(["stop", &unit]).status();
+    c.finish();
+}
+
+#[test]
+#[ignore]
 fn secrets_are_refused_where_they_cant_go_and_the_boot_names_what_it_couldnt_open() {
     let _system = lock_system();
     let c = Checks::default();
