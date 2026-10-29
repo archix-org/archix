@@ -889,6 +889,50 @@ fn a_default_picked_in_the_boot_menu_is_cleared_at_the_commit_and_status_warns_u
     assert!(!setup.ok_env(&env, &["status"]).contains("LoaderEntryDefault"));
 }
 
+#[test]
+#[ignore]
+fn a_boot_where_nothing_changed_writes_no_efi_variable_and_leaves_loader_conf_alone() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    let machine = &setup.machine;
+    let vars = tempfile::tempdir().unwrap();
+    let var = |name: &str| vars.path().join(format!("{name}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
+    let current = machine.current().unwrap();
+    for name in ["LoaderEntrySelected", "LoaderEntryOneShot", "LoaderConfigTimeout"] {
+        fs::write(var(name), efivar(&format!("archix-{current}.conf"))).unwrap();
+    }
+    let env = [("ARCHIX_TEST_EFIVARS", vars.path().to_str().unwrap())];
+    let snapshot = || {
+        let mut files: Vec<(String, u64, i64, i64)> = fs::read_dir(vars.path())
+            .unwrap()
+            .chain(fs::read_dir(machine.esp().join("loader")).unwrap())
+            .map(|file| {
+                let file = file.unwrap();
+                let meta = file.metadata().unwrap();
+                (file.path().display().to_string(), meta.ino(), meta.mtime(), meta.mtime_nsec())
+            })
+            .collect();
+        files.sort();
+        files
+    };
+    setup.ok_env(&env, &["boot-check"]);
+    setup.ok_env(&env, &["boot-complete"]);
+    for boot in 1..=2 {
+        let before = snapshot();
+        machine.reboot(Some(&format!("archix-{current}.conf")));
+        setup.ok_env(&env, &["boot-check"]);
+        setup.ok_env(&env, &["boot-complete"]);
+        assert_eq!(
+            snapshot(),
+            before,
+            "steady-state boot {boot} wrote an EFI variable or loader.conf:\n{}",
+            machine.loader_conf()
+        );
+    }
+    assert!(machine.loader_conf().contains(&format!("default archix-{current}.conf")));
+}
+
 fn run(command: &mut Command) -> String {
     let out = command.output().unwrap();
     assert!(

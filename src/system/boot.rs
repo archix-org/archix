@@ -1207,7 +1207,9 @@ fn lock_editor(esp: &Path) -> Result<()> {
 /// Names systemd-boot's `default` and `preferred` entries in loader.conf, dropping either when it's None.
 fn write_loader(esp: &Path, default: Option<&str>, preferred: Option<&str>) -> Result<()> {
     let conf = esp.join("loader/loader.conf");
-    let mut lines: Vec<String> = fs::read_to_string(&conf)
+    let old = fs::read_to_string(&conf).ok();
+    let mut lines: Vec<String> = old
+        .as_deref()
         .unwrap_or_default()
         .lines()
         .filter(|line| !matches!(line.split_whitespace().next(), Some("default" | "preferred")))
@@ -1215,7 +1217,11 @@ fn write_loader(esp: &Path, default: Option<&str>, preferred: Option<&str>) -> R
         .collect();
     lines.extend(default.map(|id| format!("default {id}")));
     lines.extend(preferred.map(|id| format!("preferred {id}")));
-    crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())?;
+    let text = lines.join("\n") + "\n";
+    // Every boot-complete lands here; a loader.conf that already says it isn't rewritten on the ESP.
+    if old.as_deref() != Some(text.as_str()) {
+        crate::durable::write(&conf, text.as_bytes())?;
+    }
     clear_overrides(preferred.or(default));
     Ok(())
 }
@@ -1229,7 +1235,7 @@ fn loader_var(name: &str) -> Option<PathBuf> {
 
 /// The entry an EFI variable such as LoaderEntryDefault names, if it's set.
 fn loader_var_entry(name: &str) -> Option<String> {
-    efivar_string(&fs::read(loader_var(name)?).ok()?).filter(|entry| !entry.is_empty())
+    efivar_string(&read_efivar(&loader_var(name)?)?).filter(|entry| !entry.is_empty())
 }
 
 /// The partition systemd-boot started from (LoaderDevicePartUUID), lowercase, which is the ESP.
@@ -1860,7 +1866,30 @@ fn entry_unchanged(paths: &Paths, id: &str) -> bool {
 
 /// systemd-boot's LoaderEntrySelected: 4 bytes of attributes, then the entry's id in UTF-16LE.
 pub fn read_selected_entry() -> Option<String> {
-    efivar_string(&fs::read(SELECTED_ENTRY_VAR).ok()?)
+    static SELECTED: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    SELECTED
+        .get_or_init(|| match fs::read_to_string(Path::new(DEPLOYMENT_RECORD).with_file_name(SELECTED_RECORD)) {
+            Ok(entry) => (!entry.is_empty()).then_some(entry),
+            Err(_) => efivar_string(&read_efivar(Path::new(SELECTED_ENTRY_VAR))?),
+        })
+        .clone()
+}
+
+/// Where deploy-mount leaves the LoaderEntrySelected it read, empty when there was none, so later units needn't ask the firmware again.
+pub const SELECTED_RECORD: &str = "entry-selected";
+
+/// An EFI variable's bytes in one read(): efivarfs asks the firmware twice for every read() call, an SMI each under OVMF's SMM variable store, and a second read() to find EOF would ask again.
+pub fn read_efivar(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = fs::File::open(path).ok()?;
+    let mut bytes = vec![0; 4096];
+    let n = file.read(&mut bytes).ok()?;
+    if n == bytes.len() {
+        file.read_to_end(&mut bytes).ok()?;
+    } else {
+        bytes.truncate(n);
+    }
+    Some(bytes)
 }
 
 pub const SELECTED_ENTRY_VAR: &str =
@@ -1869,7 +1898,7 @@ pub const SELECTED_ENTRY_VAR: &str =
 /// systemd-boot's LoaderFeatures, a bit set of what the loader that started this boot supports.
 pub fn read_loader_features() -> u64 {
     const VAR: &str = "/sys/firmware/efi/efivars/LoaderFeatures-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
-    fs::read(VAR).ok().and_then(|bytes| efivar_u64(&bytes)).unwrap_or(0)
+    read_efivar(Path::new(VAR)).and_then(|bytes| efivar_u64(&bytes)).unwrap_or(0)
 }
 
 /// Whether the loader counts boots of an entry archix can write (systemd-boot counts only `linux` and `uki` entries, 258 added `uki`) and falls back past a bad one (260's `preferred`).
@@ -2086,6 +2115,18 @@ mod tests {
         let mut bytes = vec![6, 0, 0, 0];
         bytes.extend(0x1234_u64.to_le_bytes());
         assert_eq!(efivar_u64(&bytes), Some(0x1234));
+    }
+
+    #[test]
+    fn an_efivar_read_gets_the_whole_variable_small_or_past_the_first_read() {
+        let dir = tempfile::tempdir().unwrap();
+        for size in [0, 13, 4095, 4096, 4097, 20000] {
+            let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+            let path = dir.path().join(format!("var-{size}"));
+            fs::write(&path, &bytes).unwrap();
+            assert_eq!(read_efivar(&path), Some(bytes), "{size} bytes");
+        }
+        assert_eq!(read_efivar(&dir.path().join("missing")), None);
     }
 
     #[test]

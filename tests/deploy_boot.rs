@@ -136,6 +136,11 @@ fn the_initramfs_mounts_the_selected_committed_deployment_with_usr_opt_and_boot_
         fs::read_to_string(sysroot.dir.path().join("run/deployment")).unwrap(),
         "2\n"
     );
+    assert_eq!(
+        fs::read_to_string(sysroot.dir.path().join("run/entry-selected")).unwrap(),
+        "archix-2+1-2.conf",
+        "the entry read once for the later units"
+    );
     assert!(
         text(&out).contains("booting deployment 2 (the boot entry "),
         "{}",

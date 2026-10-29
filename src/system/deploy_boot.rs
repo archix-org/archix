@@ -403,10 +403,10 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
     if efivar == Path::new(boot::SELECTED_ENTRY_VAR) {
         boot::mount_efivars();
     }
-    let selected = fs::read(efivar).ok().and_then(|bytes| boot::efivar_string(&bytes));
+    let selected = boot::read_efivar(efivar).and_then(|bytes| boot::efivar_string(&bytes));
     let stub = efivar
         .parent()
-        .and_then(|dir| fs::read(dir.join(STUB_IMAGE_VAR)).ok())
+        .and_then(|dir| boot::read_efivar(&dir.join(STUB_IMAGE_VAR)))
         .and_then(|bytes| boot::efivar_string(&bytes));
     let kernel = crate::testhooks::kernel_release();
     let started = Started {
@@ -441,6 +441,9 @@ fn mount_for(root: &Path, efivar: &Path, run_dir: &Path, cmdline: &str) -> Resul
     fs::create_dir_all(run_dir).with_context(|| format!("creating {}", run_dir.display()))?;
     fs::write(run_dir.join("usr-local"), usr_local)
         .with_context(|| format!("writing {}", run_dir.join("usr-local").display()))?;
+    let selected_record = run_dir.join(boot::SELECTED_RECORD);
+    fs::write(&selected_record, selected.as_deref().unwrap_or_default())
+        .with_context(|| format!("writing {}", selected_record.display()))?;
     fs::write(run_dir.join("deployment"), format!("{}\n", chosen.generation))
         .with_context(|| format!("writing {}", run_dir.join("deployment").display()))?;
     let refused_record = run_dir.join(ENTRY_REFUSED);
