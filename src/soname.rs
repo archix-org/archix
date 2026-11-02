@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-/// Built packages whose DT_NEEDED soname's owner changes and stops shipping it; `new_files(name)` gives a changing package's files after the switch, None if removed.
+/// Packages whose DT_NEEDED soname's owner changes and stops shipping it, each as "name (links soname, which owner stops shipping)"; `new_files(name)` gives a changing package's files after the switch, None if removed.
 pub fn broken_builds(
     root: &Path,
     local_db: &Path,
@@ -49,8 +49,7 @@ pub fn broken_builds(
             }
         }
         if let Some(reason) = lost {
-            eprintln!(":: rebuilding {reason}");
-            broken.push(package.clone());
+            broken.push(reason);
         }
     }
     Ok(broken)

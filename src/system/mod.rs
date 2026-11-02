@@ -286,6 +286,11 @@ fn lines(value: &Value) -> String {
 
 /// Turns the evaluated config into the system state archix should apply.
 pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
+    render_linked(config, config_dir, config_dir)
+}
+
+/// Renders from `config_dir`, a root-owned capture of the config, with live home links pointing into `links`, the config directory itself.
+pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<Rendered> {
     let mut b = Builder {
         state: SystemState::default(),
         blobs: BTreeMap::new(),
@@ -490,7 +495,7 @@ pub fn render(config: &Value, config_dir: &Path) -> Result<Rendered> {
         b.state.services.insert(firewall::UNIT.to_string(), true);
     }
 
-    render_home(&mut b, config, config_dir)?;
+    render_home(&mut b, config, config_dir, links)?;
 
     for (name, spec) in map(config, "groups").into_iter().flatten() {
         let gid = match get(spec, "gid") {
@@ -705,7 +710,7 @@ fn render_environment(b: &mut Builder, environment: Option<&Value>) {
 }
 
 /// Home files of `home.user`, owned by them, keyed by absolute path.
-fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()> {
+fn render_home(b: &mut Builder, config: &Value, config_dir: &Path, links: &Path) -> Result<()> {
     let Some(home) = config_get(config, "home") else {
         return Ok(());
     };
@@ -777,7 +782,8 @@ fn render_home(b: &mut Builder, config: &Value, config_dir: &Path) -> Result<()>
                 bail!("home.files.{relative}.source {source:?} leaves the config directory");
             }
             if live {
-                b.owned_link(&path, &full.to_string_lossy(), user, &group);
+                let linked = links.canonicalize()?.join(full.strip_prefix(&root).unwrap_or(&full));
+                b.owned_link(&path, &linked.to_string_lossy(), user, &group);
             } else {
                 let content = fs::read(&full)
                     .with_context(|| format!("reading {}; directories need live = true", full.display()))?;

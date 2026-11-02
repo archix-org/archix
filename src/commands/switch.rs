@@ -121,14 +121,21 @@ fn switch_after_declaring(
     allow_unsafe: bool,
 ) -> Result<()> {
     edit_installed(target.config_dir, target.host, None, added, &[])?;
-    let evaluation = eval::evaluate(&eval::Input {
-        config_dir: target.config_dir.to_path_buf(),
-        hostname: target.host.to_string(),
-        overlay: super::lock::deferred_overlay(target.config_dir),
-    })
-    .map_err(|errors| anyhow::anyhow!("{errors}"))?;
+    let overlay = super::lock::deferred_overlay(target.config_dir);
+    let config = match target.captured {
+        Some(captured) => super::reevaluate(captured, target.host, &overlay).map_err(|e| anyhow::anyhow!("{e}"))?,
+        None => {
+            eval::evaluate(&eval::Input {
+                config_dir: target.config_dir.to_path_buf(),
+                hostname: target.host.to_string(),
+                overlay,
+            })
+            .map_err(|errors| anyhow::anyhow!("{errors}"))?
+            .config
+        }
+    };
     let target = Target {
-        config: &evaluation.config,
+        config: &config,
         ..*target
     };
     switch(&target, noconfirm, accept_nearest, allow_unsafe).context("installed.lua was left as it was")
@@ -266,7 +273,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         before_archix: false,
         package_capabilities: BTreeMap::new(),
     };
-    let mut rendered = system::render(target.config, target.config_dir)?;
+    let mut rendered = system::render_linked(target.config, target.tree, target.config_dir)?;
     for warning in &rendered.warnings {
         eprintln!("warning: {warning}");
     }
@@ -471,6 +478,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         noconfirm,
         allow_unsafe,
     )?;
+    check_partial(&paths, &archive, &lock, &installed, &changes, &declared.repos)?;
+    show_config_diff(target, &paths)?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + 1;
     if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
         bail!("aborted; nothing was changed");
@@ -717,6 +726,39 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     )
 }
 
+/// Prints how the captured config differs from the one archix last applied, from root's own copy of both.
+fn show_config_diff(target: &Target, paths: &Paths) -> Result<()> {
+    let Some(captured) = target.captured else {
+        return Ok(());
+    };
+    let applied = archix::captured::Applied::at(&paths.root, &paths.state);
+    applied.store_tree(captured)?;
+    match applied.diff(&captured.tree, 200)? {
+        Some(diff) if diff.is_empty() => {}
+        Some(diff) => println!(":: the config since the last generation archix applied\n{diff}"),
+        None => println!(
+            ":: no generation applied by archix yet; this one records config tree {}",
+            &captured.tree[..12]
+        ),
+    }
+    Ok(())
+}
+
+/// Stores generation `number` in root's repository: the captured config tree, the lock as written and the evaluated plan; and points the owner's refs/archix/generations/<number> at the tree.
+fn record_applied(target: &Target, paths: &Paths, number: u32) -> Result<()> {
+    let Some(captured) = target.captured else {
+        return Ok(());
+    };
+    let applied = archix::captured::Applied::at(&paths.root, &paths.state);
+    let tree = applied.store_tree(captured)?;
+    let lock = fs::read(target.config_dir.join("archix.lock")).unwrap_or_default();
+    applied.record(number, &tree, &lock, &archix::eval::isolated::plan_json(target.config))?;
+    if let Err(e) = archix::captured::record_for_owner(target.config_dir, captured, number) {
+        eprintln!("warning: couldn't point refs/archix/generations/{number} in the config's repository at it: {e:#}");
+    }
+    Ok(())
+}
+
 static WITHOUT_SECRETS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// `switch --without-secrets`: secrets that don't decrypt here are left out of the deployment instead of refusing it.
@@ -838,6 +880,16 @@ fn after_commit(
 ) -> Result<()> {
     // A config outside /etc gets this switch's writes only here, so a crash right after the commit leaves it as it was.
     super::lock::write_deferred()?;
+    for pkg in lock.packages.values().filter(|pkg| !pkg.file.is_empty()) {
+        if let Err(e) = archix::gc::keep_copy(paths, &pkg.file) {
+            soft_failures.push(format!("keeping {} in archix's package cache: {e:#}", pkg.file));
+        }
+    }
+    if let Err(e) = record_applied(target, paths, number) {
+        soft_failures.push(format!(
+            "recording generation {number}'s config in root's repository: {e:#}"
+        ));
+    }
     let deployment = paths.root.join("archix/deploy").join(number.to_string());
     let accounts = Accounts::read(&deployment.join("etc"));
     let with_password = system::credentials::with_password(&system_change.to.users);
@@ -1103,6 +1155,109 @@ fn collect_and_revoke(paths: &Paths, boot: Option<&BootPlan>, soft_failures: &mu
     Ok(())
 }
 
+/// Which of `packages` lose a library they link when `changing` move to `lock`'s versions; only those libraries' owners are downloaded to check.
+fn soname_breaks(
+    paths: &Paths,
+    archive: &Archive,
+    lock: &HostLock,
+    packages: &[String],
+    changing: &BTreeSet<String>,
+    repos: &[archix::repos::Repo],
+) -> Result<Vec<String>> {
+    archix::soname::broken_builds(
+        &current_root(paths),
+        &installed_db(paths),
+        packages,
+        changing,
+        |owner| {
+            let Some(pkg) = lock.packages.get(owner) else {
+                return Ok(None);
+            };
+            let wanted = super::wanted_file(archive, lock.date, owner, pkg, repos);
+            let file = fetch_all(
+                archive,
+                &paths.packages(),
+                std::slice::from_ref(&paths.pacman_cache),
+                &[wanted],
+            )?;
+            Ok(Some(archix::conflicts::contents(&file[0])?.files))
+        },
+    )
+}
+
+/// Refuses a switch that downgrades declared packages (a revert) when that breaks a package archix doesn't track, by its declared dependencies or the sonames its binaries load, unless --allow-partial.
+fn check_partial(
+    paths: &Paths,
+    archive: &Archive,
+    lock: &HostLock,
+    installed: &BTreeMap<String, archix::pacman::LocalPkg>,
+    changes: &[Change],
+    repos: &[archix::repos::Repo],
+) -> Result<()> {
+    if ALLOW_PARTIAL.load(std::sync::atomic::Ordering::Relaxed)
+        || !changes.iter().any(|change| matches!(change, Change::Downgrade { .. }))
+    {
+        return Ok(());
+    }
+    let removed: BTreeSet<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Remove { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    let changing: BTreeSet<String> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Change::Upgrade { name, .. } | Change::Downgrade { name, .. } | Change::Remove { name, .. } => {
+                Some(name.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    let untracked = archix::revert::untracked(
+        &installed.keys().cloned().collect(),
+        &lock.packages.keys().cloned().collect(),
+        &removed,
+    );
+    if untracked.is_empty() {
+        return Ok(());
+    }
+    let target: BTreeMap<String, String> = installed
+        .values()
+        .filter(|pkg| !removed.contains(&pkg.name))
+        .map(|pkg| {
+            let version = lock
+                .packages
+                .get(&pkg.name)
+                .map_or(&pkg.version, |locked| &locked.version);
+            (pkg.name.clone(), version.clone())
+        })
+        .chain(
+            lock.packages
+                .iter()
+                .filter(|(_, locked)| !locked.build_only)
+                .map(|(name, locked)| (name.clone(), locked.version.clone())),
+        )
+        .collect();
+    let mut breaks = archix::revert::dependency_breaks(&paths.local_db(), &untracked, &target);
+    breaks.extend(soname_breaks(paths, archive, lock, &untracked, &changing, repos)?);
+    if breaks.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "this switch downgrades declared packages, which would break packages archix doesn't track:\n  {}\ndeclare them, remove them, or pass --allow-partial to switch anyway; nothing was changed",
+        breaks.join("\n  ")
+    )
+}
+
+/// `switch --allow-partial`: a revert goes ahead though it breaks packages archix doesn't track.
+pub fn allow_partial() {
+    ALLOW_PARTIAL.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static ALLOW_PARTIAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Rebuilds for built packages that would lose a library they link once the snapshot moves; only the owners of those libraries are downloaded to check.
 fn broken_builds(
     paths: &Paths,
@@ -1138,20 +1293,13 @@ fn broken_builds(
             _ => None,
         })
         .collect();
-    let broken =
-        archix::soname::broken_builds(&current_root(paths), &installed_db(paths), &built, &changing, |owner| {
-            let Some(pkg) = lock.packages.get(owner) else {
-                return Ok(None);
-            };
-            let wanted = super::wanted_file(archive, lock.date, owner, pkg, repos);
-            let file = fetch_all(
-                archive,
-                &paths.packages(),
-                std::slice::from_ref(&paths.pacman_cache),
-                &[wanted],
-            )?;
-            Ok(Some(archix::conflicts::contents(&file[0])?.files))
-        })?;
+    let broken: Vec<String> = soname_breaks(paths, archive, lock, &built, &changing, repos)?
+        .into_iter()
+        .map(|reason| {
+            eprintln!(":: rebuilding {reason}");
+            reason.split(' ').next().unwrap_or_default().to_string()
+        })
+        .collect();
     Ok(broken
         .into_iter()
         .map(|name| Change::Rebuild {

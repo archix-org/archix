@@ -156,3 +156,18 @@ pub fn selected_entry() -> Option<String> {
     }
     crate::system::boot::read_selected_entry()
 }
+
+/// archix's own binary, or ARCHIX_TEST_SELF in a debug build, so library tests can start archix's child commands.
+pub fn own_exe() -> std::io::Result<std::path::PathBuf> {
+    if cfg!(debug_assertions)
+        && let Some(exe) = std::env::var_os("ARCHIX_TEST_SELF")
+    {
+        return Ok(exe.into());
+    }
+    // A chroot or a deleted binary leaves current_exe() unreachable, but the kernel's own link still execs it.
+    let own = std::path::Path::new("/proc/self/exe");
+    if own.exists() {
+        return Ok(own.to_path_buf());
+    }
+    std::env::current_exe()
+}

@@ -257,7 +257,11 @@ pub(super) fn stage_deferred(paths: &Paths, etc: &Path) -> Result<()> {
 
 /// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, so it's there before the /etc merge carries it.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
-    archix::durable::write_config(path, text)?;
+    if owned_by_someone_else(path) {
+        archix::captured::write_as_owner(path, text)?;
+    } else {
+        archix::durable::write_config(path, text)?;
+    }
     let paths = Paths::system();
     if let Some(etc) = pending_etc(&paths)
         && let Some(copy) = in_etc(&paths, path, &etc)
@@ -265,6 +269,16 @@ pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
         archix::durable::write_config(&copy, text).with_context(|| format!("writing {}", copy.display()))?;
     }
     Ok(())
+}
+
+/// Whether root is about to write into a directory another account owns, which it then does as that account.
+fn owned_by_someone_else(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    (unsafe { libc::geteuid() }) == 0
+        && path
+            .parent()
+            .and_then(|dir| std::fs::metadata(dir).ok())
+            .is_some_and(|meta| meta.uid() != 0)
 }
 
 fn identity(path: &Path) -> Option<(u64, u64)> {
@@ -348,7 +362,7 @@ pub(super) fn pending(
     );
     let store = Store::new(&paths);
     let current = store.current()?.map(|n| store.get(n)).transpose()?;
-    let rendered = system::render(target.config, target.config_dir)?;
+    let rendered = system::render_linked(target.config, target.tree, target.config_dir)?;
     for warning in &rendered.warnings {
         eprintln!("warning: {warning}");
     }
@@ -452,7 +466,7 @@ fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str
     let paths = Paths::system();
     let installed = archix::capture::read_installed(&super::switch::installed_db(&paths))?;
     let exe = integration::own_path()?;
-    let mut declared: BTreeSet<String> = system::render(target.config, target.config_dir)?
+    let mut declared: BTreeSet<String> = system::render_linked(target.config, target.tree, target.config_dir)?
         .state
         .files
         .into_keys()
@@ -532,6 +546,14 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
         Some(number) => {
             let generation = store.get(number)?;
             println!("current generation: {number} (snapshot {})", generation.date);
+            let cached = archix::gc::cache_size(&paths);
+            if cached > 0 {
+                println!(
+                    "package cache: {} MiB in {}, for reverts and rollbacks",
+                    cached >> 20,
+                    paths.packages().display()
+                );
+            }
             match archix::system::boot::booted_deployment(&paths.root) {
                 Some(booted) if booted != number => {
                     println!("booted generation: {booted}; generation {number} boots at the next restart")

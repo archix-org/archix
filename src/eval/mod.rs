@@ -1,4 +1,5 @@
 mod convert;
+pub mod isolated;
 mod sandbox;
 
 use std::collections::{BTreeSet, HashSet};

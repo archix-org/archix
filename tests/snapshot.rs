@@ -288,14 +288,21 @@ fn keep_killed_at(disk: &Disk, point: &str) {
         .status()
         .unwrap();
     use std::os::unix::process::ExitStatusExt;
-    assert_eq!(status.signal(), Some(libc::SIGKILL), "keep should have been killed at {point}: {status}");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "keep should have been killed at {point}: {status}"
+    );
 }
 
 /// Not a test of its own: what keep_killed_at runs.
 #[test]
 #[ignore]
 fn keep_in_a_child() {
-    let (Some(root), Some(top)) = (std::env::var_os("ARCHIX_TEST_KEEP_ROOT"), std::env::var_os("ARCHIX_TEST_KEEP_TOP")) else {
+    let (Some(root), Some(top)) = (
+        std::env::var_os("ARCHIX_TEST_KEEP_ROOT"),
+        std::env::var_os("ARCHIX_TEST_KEEP_TOP"),
+    ) else {
         return;
     };
     let _ = Store::open(Path::new(&root)).keep(1, Path::new(&top), replaced(), |_| Ok(()));

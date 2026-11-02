@@ -78,8 +78,8 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
 }
 pub use eject::{How as EjectHow, eject};
 pub use switch::{
-    boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record, prune_hidden, rollback,
-    switch, without_secrets,
+    allow_partial, boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record,
+    prune_hidden, rollback, switch, without_secrets,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
@@ -88,6 +88,53 @@ pub struct Target<'a> {
     pub config_dir: &'a Path,
     pub host: &'a str,
     pub config: &'a Value,
+    /// Where the evaluated config's files are read from: root's own copy of the captured tree, or the config directory itself when not root.
+    pub tree: &'a Path,
+    /// The tree a root command captured, which a switch records as applied.
+    pub captured: Option<&'a archix::captured::Captured>,
+}
+
+/// A config evaluated for a command: as root, captured as its owner into a root-owned copy and evaluated under a transient uid; otherwise in this process.
+pub struct Evaluated {
+    pub config: Value,
+    pub captured: Option<archix::captured::Captured>,
+    _work: Option<archix::captured::Work>,
+}
+
+pub fn evaluate_config(
+    config_dir: &Path,
+    host: &str,
+    overlay: std::collections::BTreeMap<std::path::PathBuf, String>,
+) -> Result<std::result::Result<Evaluated, String>> {
+    if unsafe { libc::geteuid() } != 0 {
+        return Ok(archix::eval::evaluate(&archix::eval::Input {
+            config_dir: config_dir.to_path_buf(),
+            hostname: host.to_string(),
+            overlay,
+        })
+        .map(|evaluation| Evaluated {
+            config: evaluation.config,
+            captured: None,
+            _work: None,
+        })
+        .map_err(|errors| errors.to_string()));
+    }
+    let work = archix::captured::Work::new(Path::new(archix::captured::CAPTURES))?;
+    let captured = archix::captured::capture(config_dir, &work)?;
+    Ok(reevaluate(&captured, host, &overlay).map(|config| Evaluated {
+        config,
+        captured: Some(captured),
+        _work: Some(work),
+    }))
+}
+
+/// Evaluates an already captured tree again, with another overlay, in the isolated child.
+pub fn reevaluate(
+    captured: &archix::captured::Captured,
+    host: &str,
+    overlay: &std::collections::BTreeMap<std::path::PathBuf, String>,
+) -> std::result::Result<Value, String> {
+    archix::eval::isolated::evaluate(&captured.dir, host, overlay, &Default::default()).map_err(|e| format!("{e:#}"))
 }
 
 /// Which archive snapshot `archix lock` resolves against.

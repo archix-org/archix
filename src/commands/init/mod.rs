@@ -442,6 +442,8 @@ fn write_and_lock(
         config_dir: &dir,
         host,
         config: &evaluation.config,
+        tree: &dir,
+        captured: None,
     };
     lock.flatpak = facts
         .flatpak_apps

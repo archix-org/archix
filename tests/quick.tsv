@@ -60,3 +60,5 @@ src/eval/modules/secrets.lua	test:secrets
 src/snapshot/	test:snapshot
 src/commands/snapshot.rs	test:snapshot
 src/system/btrfs.rs	test:system test:snapshot
+src/captured.rs	test:captured test:switch
+src/eval/isolated.rs	test:captured test:switch

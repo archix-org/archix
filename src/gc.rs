@@ -19,6 +19,66 @@ pub struct Report {
     pub retired: Vec<String>,
 }
 
+/// The package files archix's own cache keeps: every one an official repo doesn't serve from the Arch Linux Archive, for each kept generation, and every one of the newest two, so a revert to yesterday works offline.
+pub fn cached_files<'a>(
+    kept: &[(u32, &'a std::collections::BTreeMap<String, crate::lock::Locked>)],
+) -> BTreeSet<&'a str> {
+    let mut newest: Vec<u32> = kept.iter().map(|(number, _)| *number).collect();
+    newest.sort_unstable();
+    let recent: BTreeSet<u32> = newest.iter().rev().take(RECENT).copied().collect();
+    kept.iter()
+        .flat_map(|(number, packages)| {
+            let all = recent.contains(number);
+            packages
+                .values()
+                .filter(move |pkg| all || pkg.is_built() || !crate::repos::is_official(&pkg.repo))
+        })
+        .map(|pkg| pkg.file.as_str())
+        .collect()
+}
+
+/// How many of the newest generations keep every package file, official ones included.
+pub const RECENT: usize = 2;
+
+/// Copies `file` from pacman's cache into archix's own, as a reflink where the filesystem has them, unless it's there; paccache never touches archix's cache.
+pub fn keep_copy(paths: &Paths, file: &str) -> Result<bool> {
+    let target = paths.packages().join(file);
+    let source = paths.pacman_cache.join(file);
+    if target.is_file() || !source.is_file() {
+        return Ok(false);
+    }
+    fs::create_dir_all(paths.packages())?;
+    let temp = paths.packages().join(format!(".{file}.part"));
+    let status = std::process::Command::new("cp")
+        .arg("--reflink=auto")
+        .arg(&source)
+        .arg(&temp)
+        .status()
+        .context("running cp")?;
+    if !status.success() {
+        let _ = fs::remove_file(&temp);
+        anyhow::bail!(
+            "copying {} into {} failed",
+            source.display(),
+            paths.packages().display()
+        );
+    }
+    fs::rename(&temp, &target)?;
+    Ok(true)
+}
+
+/// The bytes archix's own package cache holds.
+pub fn cache_size(paths: &Paths) -> u64 {
+    fs::read_dir(paths.packages())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|meta| meta.is_file())
+        .map(|meta| meta.len())
+        .sum()
+}
+
 /// Drops the deployments `deployments.keep` leaves out (never the booted, current or boot-default one) with their boot entries, then generation records outside the generation limits that have no deployment, then cached files no kept generation needs.
 pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     let store = Store::new(paths);
@@ -78,11 +138,8 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     }
 
     let kept_generations: Vec<_> = generations.iter().filter(|g| keep.contains(&g.number)).collect();
-    let files: BTreeSet<&str> = kept_generations
-        .iter()
-        .flat_map(|g| g.packages.values())
-        .map(|pkg| pkg.file.as_str())
-        .collect();
+    let locks: Vec<_> = kept_generations.iter().map(|g| (g.number, &g.packages)).collect();
+    let files = cached_files(&locks);
     for dir in [paths.packages(), paths.cache.join("verified")] {
         let Ok(entries) = fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
@@ -129,4 +186,47 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         }
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lock::Locked;
+    use std::collections::BTreeMap;
+
+    fn generation(number: u32, packages: &[(&str, &str)]) -> (u32, BTreeMap<String, Locked>) {
+        let mut g = (number, BTreeMap::new());
+        for (name, repo) in packages {
+            g.1.insert(
+                name.to_string(),
+                Locked {
+                    version: number.to_string(),
+                    repo: repo.to_string(),
+                    file: format!("{name}-{number}.pkg.tar.zst"),
+                    ..Default::default()
+                },
+            );
+        }
+        g
+    }
+
+    #[test]
+    fn the_cache_keeps_every_package_of_the_newest_two_and_only_the_unarchived_ones_of_older_generations() {
+        let generations = [
+            generation(1, &[("vim", "extra"), ("cachy", "cachyos-v3")]),
+            generation(2, &[("vim", "extra")]),
+            generation(3, &[("vim", "core"), ("cachy", "cachyos-v3")]),
+        ];
+        let kept: Vec<_> = generations.iter().map(|(n, p)| (*n, p)).collect();
+        let files = cached_files(&kept);
+        assert_eq!(
+            files,
+            BTreeSet::from([
+                "cachy-1.pkg.tar.zst",
+                "vim-2.pkg.tar.zst",
+                "vim-3.pkg.tar.zst",
+                "cachy-3.pkg.tar.zst"
+            ])
+        );
+    }
 }

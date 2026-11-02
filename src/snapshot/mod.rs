@@ -394,7 +394,10 @@ impl Store {
         let dir = self.dir.join(journal.replaced.to_string());
         if clone.exists() {
             // A rename can't cross mounts, so the move goes through the top level's own view of @archix.
-            let in_top = top.join(layout::ARCHIX).join("snapshots").join(journal.replaced.to_string());
+            let in_top = top
+                .join(layout::ARCHIX)
+                .join("snapshots")
+                .join(journal.replaced.to_string());
             fs::create_dir_all(&in_top).with_context(|| format!("creating {}", in_top.display()))?;
             // The replaced root stays writable: it's the running system until the reboot.
             fs::rename(&clone, in_top.join(SNAPSHOT))

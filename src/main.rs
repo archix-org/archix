@@ -77,6 +77,9 @@ enum Command {
         /// Commit even though secrets don't decrypt on this machine yet: those are left out of the deployment, and what uses them fails until a switch after `archix secrets rekey`
         #[arg(long)]
         without_secrets: bool,
+        /// Downgrade declared packages even though that breaks packages archix doesn't track, by their dependencies or the libraries they load
+        #[arg(long)]
+        allow_partial: bool,
     },
     /// Gone: a switch commits a whole new deployment or nothing, so there's nothing to recover
     #[command(hide = true)]
@@ -294,6 +297,17 @@ enum Command {
     /// Run at boot by archix-split-var-lib.service, before /var/lib is mounted: move it into its own subvolume
     #[command(hide = true)]
     SplitVarLib,
+    /// Run by a root command under a transient uid: evaluate a captured config tree and print its plan
+    #[command(hide = true)]
+    EvaluateIsolated {
+        #[arg(long)]
+        dir: PathBuf,
+        #[arg(long)]
+        host: String,
+    },
+    /// Run by root as a directory's owner: write stdin to NAME in DIR without following a symlink
+    #[command(hide = true)]
+    WriteFile { dir: PathBuf, name: std::ffi::OsString },
     /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
     Verify {
         /// Restore what differs from the package cache
@@ -622,6 +636,16 @@ fn run() -> Result<ExitCode> {
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
     // Both run before the root is fully up, so they skip archix's locks and pending-state checks.
     let command = match command {
+        Command::EvaluateIsolated { dir, host } => {
+            let ok = archix::eval::isolated::child(&dir, &host)?;
+            return Ok(if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE });
+        }
+        Command::WriteFile { dir, name } => {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::stdin(), &mut bytes)?;
+            archix::captured::write_file_here(&dir, &name, &bytes)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::DeployMount { root, efivar, run_dir } => {
             if let Err(e) = archix::system::deploy_boot::mount(&root, &efivar, &run_dir) {
                 if efivar == std::path::Path::new(archix::system::boot::SELECTED_ENTRY_VAR) {
@@ -942,21 +966,23 @@ fn run() -> Result<ExitCode> {
         }
         _ => {}
     }
-    let evaluation = match eval::evaluate(&Input {
-        config_dir: cli.config.clone(),
-        hostname: hostname.clone(),
-        overlay: commands::deferred_overlay(&cli.config),
-    }) {
+    let evaluation = match commands::evaluate_config(&cli.config, &hostname, commands::deferred_overlay(&cli.config))? {
         Ok(evaluation) => evaluation,
         Err(errors) => {
             eprintln!("{errors}");
             return Ok(ExitCode::FAILURE);
         }
     };
+    let tree = evaluation
+        .captured
+        .as_ref()
+        .map_or(cli.config.clone(), |captured| captured.dir.clone());
     let target = commands::Target {
         config_dir: &cli.config,
         host: &hostname,
         config: &evaluation.config,
+        tree: &tree,
+        captured: evaluation.captured.as_ref(),
     };
     let state = archix::paths::Paths::system().state;
     match command {
@@ -970,7 +996,7 @@ fn run() -> Result<ExitCode> {
             archix::secrets::tool::rekey(&cli.config, &hostname, &state, &names, machine)?
         }
         Command::Secrets(Secrets::Check) => {
-            let rendered = archix::system::render(&evaluation.config, &cli.config)
+            let rendered = archix::system::render_linked(&evaluation.config, &tree, &cli.config)
                 .ok()
                 .and_then(|r| r.state.secrets);
             if !archix::secrets::tool::check(&cli.config, &hostname, &state, rendered.as_ref())? {
@@ -1014,7 +1040,30 @@ fn run() -> Result<ExitCode> {
         }
         Command::Upgrade { noconfirm } => commands::upgrade(&target, noconfirm)?,
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
-        Command::Options { json } => print!("{}", render_options(&evaluation, json)?),
+        Command::Options { json } => {
+            // As root the config's own options would need an in-process evaluation, so only archix's built-in ones are listed.
+            let dir = if is_root() {
+                std::env::temp_dir().join(format!("archix-options-{}", std::process::id()))
+            } else {
+                cli.config.clone()
+            };
+            if is_root() {
+                fs::create_dir_all(&dir)?;
+                fs::write(dir.join("init.lua"), "return {}\n")?;
+            }
+            let options = eval::evaluate(&Input {
+                config_dir: dir.clone(),
+                hostname: hostname.clone(),
+                ..Default::default()
+            });
+            if is_root() {
+                let _ = fs::remove_dir_all(&dir);
+            }
+            print!(
+                "{}",
+                render_options(&options.map_err(|errors| anyhow::anyhow!("{errors}"))?, json)?
+            )
+        }
         Command::Lock { noconfirm } => commands::lock(&target, commands::Snapshot::Locked, noconfirm)?,
         Command::Update { to: None, noconfirm } => commands::lock(&target, commands::Snapshot::Latest, noconfirm)?,
         Command::Update {
@@ -1027,9 +1076,13 @@ fn run() -> Result<ExitCode> {
             accept_nearest,
             allow_unsafe_downgrade,
             without_secrets,
+            allow_partial,
         } => {
             if without_secrets {
                 commands::without_secrets();
+            }
+            if allow_partial {
+                commands::allow_partial();
             }
             commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?
         }
@@ -1064,6 +1117,8 @@ fn run() -> Result<ExitCode> {
         | Command::UsrLocal(_)
         | Command::Snapshot(_)
         | Command::SplitVarLib
+        | Command::EvaluateIsolated { .. }
+        | Command::WriteFile { .. }
         | Command::Chroot { .. }
         | Command::Secrets(_)
         | Command::Verify { .. }
