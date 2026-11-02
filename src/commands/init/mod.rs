@@ -127,6 +127,8 @@ struct Facts {
     /// The secrets left out, by path, a secret directory standing for what's in it, and ones outside /etc.
     secret_paths: Vec<String>,
     btrfs: bool,
+    /// Why rollbacks can't work on this root, none when they can.
+    rollback_unavailable: Option<String>,
     boot: BootFacts,
     flatpak_apps: BTreeMap<String, InstalledApp>,
     flatpak_remotes: BTreeMap<String, Remote>,
@@ -162,6 +164,8 @@ struct Answers {
     /// Empty means the default; the wizard shows it as a placeholder.
     keep: String,
     keep_days: String,
+    /// Snapshot before every switch and pacman run; on by default where the root allows it.
+    rollbacks: bool,
     dotfiles_user: usize,
     dotfiles: BTreeSet<String>,
     settings: BTreeSet<usize>,
@@ -204,6 +208,7 @@ impl Answers {
             boot: matches!(facts.boot, BootFacts::Ready { .. }),
             keep: String::new(),
             keep_days: String::new(),
+            rollbacks: facts.rollback_unavailable.is_none(),
             dotfiles_user: 0,
             dotfiles: facts
                 .dotfiles
@@ -734,6 +739,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         files,
         secret_paths,
         btrfs: capture::is_btrfs(Path::new("/")),
+        rollback_unavailable: archix::snapshot::unsupported(Path::new("/")),
         boot,
         flatpak_apps,
         flatpak_remotes,
@@ -1082,6 +1088,9 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     }
     if !generations.is_empty() {
         config.set("generations", Lua::Table(generations));
+    }
+    if answers.rollbacks && facts.rollback_unavailable.is_none() {
+        config.set("rollback", Lua::Table(vec![("enable".to_string(), Lua::Bool(true))]));
     }
     if answers.read_only {
         config.set("mutable_files", Lua::Bool(false));
@@ -1956,6 +1965,29 @@ mod tests {
             host.contains("authorized_keys.d"),
             "an undeclared user's keys stay a file:\n{host}"
         );
+    }
+
+    #[test]
+    fn rollbacks_are_on_by_default_where_the_root_allows_them_and_never_written_where_it_doesnt() {
+        let mut facts = super::tui::tests::facts();
+        let answers = Answers::recommended(&facts);
+        assert!(answers.rollbacks);
+        let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            host.contains("rollback = {") && host.contains("enable = true"),
+            "{host}"
+        );
+        let off = Answers {
+            rollbacks: false,
+            ..answers.clone()
+        };
+        let host = Lua::Table(build(&facts, &off, Path::new("/cfg"), "box").fields).render(0);
+        assert!(!host.contains("rollback ="), "{host}");
+        facts.rollback_unavailable = Some("/ isn't on btrfs".into());
+        let answers = Answers::recommended(&facts);
+        assert!(!answers.rollbacks);
+        let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(!host.contains("rollback ="), "{host}");
     }
 
     #[test]

@@ -57,3 +57,6 @@ src/paths.rs	test:switch test:deploy
 src/testhooks.rs	test:switch test:deploy test:boot
 src/secrets/	test:secrets test:credentials test:deploy
 src/eval/modules/secrets.lua	test:secrets
+src/snapshot/	test:snapshot
+src/commands/snapshot.rs	test:snapshot
+src/system/btrfs.rs	test:system test:snapshot

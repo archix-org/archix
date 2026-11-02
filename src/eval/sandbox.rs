@@ -20,6 +20,7 @@ pub struct Markers {
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("packages", include_str!("modules/packages.lua")),
     ("generations", include_str!("modules/generations.lua")),
+    ("rollback", include_str!("modules/rollback.lua")),
     ("aur", include_str!("modules/aur.lua")),
     ("system", include_str!("modules/system.lua")),
     ("hooks", include_str!("modules/hooks.lua")),

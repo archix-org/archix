@@ -86,6 +86,7 @@ enum Control {
     Boot,
     Keep,
     KeepDays,
+    Rollbacks,
     DotUser,
     Dotfiles,
     Settings,
@@ -125,6 +126,10 @@ pub(super) enum Flow {
 const ORPHANS: [&str; 2] = [
     "keep them (listed in ignored_packages)",
     "let the first switch remove them",
+];
+const ROLLBACKS: [&str; 2] = [
+    "on: a btrfs snapshot before every switch and pacman run, to roll back to or boot (recommended)",
+    "off",
 ];
 const STRICT: [&str; 2] = [
     "switch offers to declare it, and removes it if you say no (recommended)",
@@ -376,7 +381,12 @@ impl<'a> App<'a> {
                     controls.push(Control::Boot);
                 }
             }
-            Step::Generations => controls.extend([Control::Keep, Control::KeepDays]),
+            Step::Generations => {
+                controls.extend([Control::Keep, Control::KeepDays]);
+                if facts.rollback_unavailable.is_none() {
+                    controls.push(Control::Rollbacks);
+                }
+            }
             Step::Dotfiles => {
                 if self.users().len() > 1 {
                     controls.push(Control::DotUser);
@@ -396,6 +406,7 @@ impl<'a> App<'a> {
             Control::MissingVersions => MISSING_VERSIONS.iter().map(|(_, label)| label.to_string()).collect(),
             Control::Orphans => ORPHANS.map(str::to_string).to_vec(),
             Control::Strict => STRICT.map(str::to_string).to_vec(),
+            Control::Rollbacks => ROLLBACKS.map(str::to_string).to_vec(),
             Control::DotUser => self.users().into_iter().cloned().collect(),
             _ => Vec::new(),
         }
@@ -408,6 +419,7 @@ impl<'a> App<'a> {
             Control::MissingVersions => answers.missing_versions,
             Control::Orphans => usize::from(!answers.keep_orphans),
             Control::Strict => usize::from(!answers.strict),
+            Control::Rollbacks => usize::from(!answers.rollbacks),
             Control::DotUser => answers.dotfiles_user,
             _ => 0,
         }
@@ -524,6 +536,7 @@ impl<'a> App<'a> {
                 Control::MissingVersions => answers.missing_versions = i,
                 Control::Orphans => answers.keep_orphans = i == 0,
                 Control::Strict => answers.strict = i == 0,
+                Control::Rollbacks => answers.rollbacks = i == 0,
                 Control::DotUser if answers.dotfiles_user != i => {
                     answers.dotfiles_user = i;
                     answers.dotfiles = self
@@ -1079,6 +1092,14 @@ impl<'a> App<'a> {
             ),
         ));
         lines.push(row(
+            "Rollbacks",
+            match &facts.rollback_unavailable {
+                Some(why) => format!("not available: {why}"),
+                None if answers.rollbacks => "a snapshot before every switch and pacman run".into(),
+                None => "off".into(),
+            },
+        ));
+        lines.push(row(
             "Dotfiles",
             if answers.dotfiles.is_empty() {
                 "none".into()
@@ -1230,6 +1251,7 @@ impl<'a> App<'a> {
                     Control::Fallback => "If a locked package disappears from a third-party repo",
                     Control::Orphans => "Dependencies nothing needs any more",
                     Control::Strict => "Later, when you install something with plain pacman or yay",
+                    Control::Rollbacks => "Rollbacks",
                     Control::MissingVersions => "If a locked AUR version can't be built any more",
                     _ => "Whose dotfiles",
                 };
@@ -1324,6 +1346,7 @@ pub(super) mod tests {
             files: vec![file("/etc/fstab", true), file("/etc/shells", false)],
             secret_paths: vec!["/etc/wireguard/ (2 files)".into()],
             btrfs: true,
+            rollback_unavailable: None,
             boot: BootFacts::Ready {
                 esp: "/boot".into(),
                 kernel: "linux".into(),

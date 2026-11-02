@@ -280,6 +280,20 @@ enum Command {
     /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
     #[command(subcommand)]
     Secrets(Secrets),
+    /// The root's btrfs snapshots: taking, listing and deleting them, and laying the root out for rollbacks
+    #[command(subcommand)]
+    Snapshot(SnapshotAction),
+    /// Repair from a live USB: mount the root on a device as it boots, @archix, @varlib and the binds from /var/rollback included, and arch-chroot into it
+    Chroot {
+        /// The root's btrfs device, such as /dev/nvme0n1p2 or an opened /dev/mapper/root
+        device: String,
+        /// The command to run inside, a shell by default
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Run at boot by archix-split-var-lib.service, before /var/lib is mounted: move it into its own subvolume
+    #[command(hide = true)]
+    SplitVarLib,
     /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
     Verify {
         /// Restore what differs from the package cache
@@ -357,6 +371,22 @@ enum UsrLocal {
     Release,
     /// Move the files under /var/usrlocal that systemd, udev or the module loader read at boot to /var/usrlocal.quarantine, then release /usr/local
     Quarantine,
+}
+
+#[derive(Subcommand)]
+enum SnapshotAction {
+    /// Take a read-only snapshot of the root now; prune never drops it
+    Create {
+        /// A note to keep with it, shown by `archix snapshot list`
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// List the snapshots, oldest first, with what took each
+    List,
+    /// Delete a snapshot
+    Delete { number: u32 },
+    /// Lay the root out for rollbacks: /.archix and /var/lib as subvolumes of their own, with pacman's database, DKMS's and archix's state kept on the root; /var/lib moves at the next boot
+    Setup,
 }
 
 #[derive(Subcommand)]
@@ -502,6 +532,9 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Gc => Some("gc"),
         Command::Hooks(_) => Some("hooks"),
         Command::UsrLocal(_) => Some("usr-local"),
+        Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
+        Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
+        Command::Snapshot(SnapshotAction::Setup) => Some("snapshot setup"),
         Command::Secrets(Secrets::Init { .. }) => Some("secrets init"),
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
@@ -619,6 +652,17 @@ fn run() -> Result<ExitCode> {
         }
         Command::Swapfile { path, bytes } => {
             archix::system::fstab::make_swapfile(&path, bytes)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Chroot { device, command } => {
+            if !is_root() {
+                anyhow::bail!("`archix chroot` mounts filesystems; run it as root");
+            }
+            commands::snapshot::chroot(&device, &command)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::SplitVarLib => {
+            commands::snapshot::split_var_lib()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::EmergencyHint { no_rescue_entry } => {
@@ -768,6 +812,15 @@ fn run() -> Result<ExitCode> {
         }
         Command::Hooks(Hooks::Skip { deployment }) => {
             commands::hooks(false, deployment)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Snapshot(action) => {
+            match action {
+                SnapshotAction::Create { note } => commands::snapshot::create(note)?,
+                SnapshotAction::List => commands::snapshot::list()?,
+                SnapshotAction::Delete { number } => commands::snapshot::delete(number)?,
+                SnapshotAction::Setup => commands::snapshot::setup()?,
+            }
             return Ok(ExitCode::SUCCESS);
         }
         Command::UsrLocal(action) => {
@@ -1009,6 +1062,9 @@ fn run() -> Result<ExitCode> {
         | Command::Cache(_)
         | Command::Hooks(_)
         | Command::UsrLocal(_)
+        | Command::Snapshot(_)
+        | Command::SplitVarLib
+        | Command::Chroot { .. }
         | Command::Secrets(_)
         | Command::Verify { .. }
         | Command::Sync { .. } => {

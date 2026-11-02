@@ -36,6 +36,34 @@ fn parse(report: &str) -> Option<Usage> {
     })
 }
 
+/// The share of the btrfs at `mount` still free to write, in percent, as `btrfs filesystem usage -b` estimates it from unallocated space and room in the data chunks.
+pub fn free_percent(mount: &Path) -> Option<f64> {
+    let output = Command::new("btrfs")
+        .args(["filesystem", "usage", "-b"])
+        .arg(mount)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| free_percent_in(&String::from_utf8_lossy(&output.stdout)))
+        .flatten()
+}
+
+fn free_percent_in(report: &str) -> Option<f64> {
+    let field = |name: &str| {
+        report
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(name))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()
+    };
+    let (size, free) = (field("Device size:")?, field("Free (estimated):")?);
+    (size > 0).then(|| free as f64 * 100.0 / size as f64)
+}
+
 /// Bytes no chunk holds yet on the btrfs at `mount`.
 pub fn unallocated(mount: &Path) -> Option<u64> {
     usage(mount).map(|usage| usage.unallocated)
@@ -109,6 +137,14 @@ Data,single: Size:15993929728, Used:6254284800 (39.10%)
 Metadata,DUP: Size:268435456, Used:250662912 (93.38%)
    /dev/loop2	 536870912
 ";
+
+    #[test]
+    fn free_space_is_the_estimate_against_the_device_size() {
+        let report =
+            "Overall:\n    Device size:\t\t  1073741824\n    Free (estimated):\t\t   268435456\t(min: 134217728)\n";
+        assert_eq!(free_percent_in(report), Some(25.0));
+        assert_eq!(free_percent_in(STUCK), None, "no estimate, no number");
+    }
 
     #[test]
     fn a_device_full_of_data_chunks_is_short_of_metadata() {
