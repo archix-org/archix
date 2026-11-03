@@ -26,7 +26,7 @@ return {
       entries = archix.option {
         type = t.int,
         default = 5,
-        description = "How many of the newest snapshots get a boot entry.",
+        description = "How many of the newest snapshots get a boot entry (snapshots taken by switches, and by pacman transactions that changed the kernel or initramfs), besides the fallback slot: the first snapshot since the last boot that counted as good.",
       },
     },
   },

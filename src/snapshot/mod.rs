@@ -580,6 +580,38 @@ pub fn record_root(archix: &Path, top: &Path) -> Result<String> {
     Ok(uuid)
 }
 
+/// The UUID `record_root` recorded under `archix`, if any.
+pub fn recorded_root(archix: &Path) -> Option<String> {
+    let text = fs::read_to_string(archix.join("root.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value.get("uuid")?.as_str().map(str::to_string)
+}
+
+/// The UUID of the btrfs subvolume mounted at `path`.
+pub fn subvolume_uuid(path: &Path) -> Option<String> {
+    let output = Command::new("btrfs")
+        .args(["subvolume", "show"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix("UUID:"))
+        .map(|uuid| uuid.trim().to_string())
+        .filter(|uuid| output.status.success() && !uuid.is_empty() && uuid != "-")
+}
+
+/// Why the root at `root` isn't the `@` archix produced, when it isn't: its subvolume UUID differs from the one recorded after setup and each keep, as after a snapper or limine-snapper-sync rollback or a restore. None when they match, or there's nothing to compare.
+pub fn foreign_root(root: &Path) -> Option<String> {
+    let recorded = recorded_root(&root.join(MOUNT))?;
+    let uuid = subvolume_uuid(root)?;
+    (uuid != recorded).then(|| {
+        format!(
+            "the root subvolume ({uuid}) isn't the one archix last produced ({recorded}): another tool (a snapper or limine-snapper-sync rollback, a restore) replaced it, so archix's records describe another root; on Limine every fallback goes through limine-snapper-restore, so this is expected there. Switches and keeps refuse until `sudo archix resync` adopts it"
+        )
+    })
+}
+
 /// What `prune_root` did.
 #[derive(Debug, Default)]
 pub struct Freed {
@@ -589,11 +621,12 @@ pub struct Freed {
     pub warnings: Vec<String>,
 }
 
-/// Prunes the snapshots under `paths.root` by `policy`, measuring with `space`; when none may go and it's still under the floor, drops the packages the archive can serve again that only older locks name (not `current`, the lock now applied), then warns if that wasn't enough.
+/// Prunes the snapshots under `paths.root` by `policy`, never `pinned` ones, measuring with `space`; when none may go and it's still under the floor, drops the packages the archive can serve again that only older locks name (not `current`, the lock now applied), then warns if that wasn't enough.
 pub fn prune_root(
     paths: &crate::paths::Paths,
     policy: &Policy,
     current: &BTreeMap<String, Locked>,
+    pinned: &BTreeSet<u32>,
     space: impl Fn() -> Option<Space>,
 ) -> Freed {
     let store = Store::open(&paths.root);
@@ -612,7 +645,7 @@ pub fn prune_root(
                 .map(|g| g.packages),
         )
         .collect();
-    let pruned = match store.prune(policy, &BTreeSet::new(), &space) {
+    let pruned = match store.prune(policy, pinned, &space) {
         Ok(pruned) => pruned,
         Err(e) => {
             freed.warnings.push(format!("pruning snapshots: {e:#}"));

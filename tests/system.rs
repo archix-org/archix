@@ -707,7 +707,10 @@ fn file_systems_and_swap_are_the_fstab_after_archixs_own_root_and_esp_lines() {
             r#"files = { ["/etc/fstab"] = { text = "UUID=1 / ext4 rw 0 1" } }"#,
             "declare mounts in file_systems and swap",
         ),
-        (r#"file_systems = { ["/usr"] = { device = "UUID=1" } }"#, "own /usr"),
+        (
+            r#"file_systems = { ["/usr"] = { device = "UUID=1" } }"#,
+            "snapshot of the root holds it",
+        ),
     ];
     for (body, says) in refused {
         setup.set_body(&[], body);

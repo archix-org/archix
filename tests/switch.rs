@@ -1005,7 +1005,7 @@ fn applied_tree(number: u32) -> String {
         .tree
 }
 
-const ROLLBACKS: &str = "rollback = { enable = true, keep_switch = 2 }";
+const ROLLBACKS: &str = "rollback = { enable = true, keep_switch = 0, entries = 1 }";
 
 #[test]
 #[ignore]
@@ -1049,8 +1049,8 @@ fn on_btrfs_each_switch_snapshots_the_state_before_it_prunes_by_the_policy_and_g
     let taken = snapshots(&setup.machine);
     checks.eq(
         taken.iter().map(|r| r.generation).collect::<Vec<_>>(),
-        vec![Some(2), Some(3)],
-        "keep_switch = 2 pruned the oldest",
+        vec![Some(1), Some(3)],
+        "keep_switch = 0 pruned all but the fallback slot (the first snapshot, as no boot counted as good since) and the newest, which has the one entry",
     );
     checks.eq(
         fs::read_to_string(store.path(taken[1].number).join("etc/archix-snap")).ok(),
@@ -1073,9 +1073,11 @@ fn on_btrfs_each_switch_snapshots_the_state_before_it_prunes_by_the_policy_and_g
     checks.check(
         listed.contains("snapshots, by the state each holds")
             && listed.lines().any(|line| {
-                line.starts_with("* ") && line.contains("(generation 3)") && line.contains("system as of tree")
+                line.contains("(generation 4)")
+                    && line.contains("system as of tree")
+                    && line.contains("before rollback to generation 3")
             }),
-        format_args!("generations lists snapshots by state, the one holding the current generation marked: {listed}"),
+        format_args!("generations lists snapshots by the state each holds: {listed}"),
     );
     checks.finish();
 }
@@ -1216,5 +1218,79 @@ fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposi
     );
     checks.check(installed("tree").is_some(), "nothing changed after the changed object");
     checks.eq(setup.machine.current(), Some(2), "2 stays current");
+    checks.finish();
+}
+
+#[test]
+#[ignore]
+fn a_transaction_is_refused_before_it_starts_when_the_root_has_too_few_inodes_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let (image, mnt) = (dir.path().join("fs.img"), dir.path().join("mnt"));
+    fs::create_dir_all(&mnt).unwrap();
+    let sh = |script: &str| {
+        let status = Command::new("bash").args(["-ec", script]).status().unwrap();
+        assert!(status.success(), "{script}");
+    };
+    sh(&format!(
+        "truncate -s 64M {0} && mkfs.ext4 -q -N 8192 {0} && mount -o loop {0} {1}",
+        image.display(),
+        mnt.display()
+    ));
+    let db = mnt.join("var/lib/pacman/local");
+    fs::create_dir_all(&db).unwrap();
+    let checked = archix::conflicts::check(&[], &[], &db, &mnt);
+    let filler = mnt.join("filler");
+    fs::create_dir(&filler).unwrap();
+    let mut made = 0;
+    while fs::File::create(filler.join(made.to_string())).is_ok() {
+        made += 1;
+    }
+    for n in 0..64 {
+        fs::remove_file(filler.join(n.to_string())).unwrap();
+    }
+    let refused = archix::conflicts::check(&[], &[], &db, &mnt);
+    let _ = Command::new("umount").arg(&mnt).status();
+    checked.expect("a root with inodes to spare passes");
+    let text = format!(
+        "{:#}",
+        refused.expect_err("a root without inodes for the transaction passed")
+    );
+    assert!(
+        text.contains("free inodes") && text.contains("nothing was changed"),
+        "{text}"
+    );
+}
+
+#[test]
+#[ignore]
+fn on_btrfs_the_first_switch_with_rollbacks_lays_the_root_out_itself_and_snapshots_start_after_the_reboot() {
+    let _system = lock_system();
+    let setup = Setup::on(Machine::on_btrfs(), &[], ROLLBACKS, &[]);
+    let out = setup.first_switch();
+    let btrfs = setup.machine.btrfs.as_ref().unwrap();
+    let subvolumes = Command::new("btrfs")
+        .args(["subvolume", "list", "-o"])
+        .arg(&btrfs.top)
+        .output()
+        .unwrap();
+    let subvolumes = String::from_utf8_lossy(&subvolumes.stdout).into_owned();
+    let checks = Checks::default();
+    checks.check(
+        out.contains("set up     rollbacks") && out.contains("snapshots start after the next reboot"),
+        format_args!("the switch says it sets rollbacks up: {out}"),
+    );
+    checks.check(
+        subvolumes.contains("path @archix") && subvolumes.contains("path @varlib"),
+        format_args!("it made @archix and @varlib at the top level: {subvolumes}"),
+    );
+    let fstab = fs::read_to_string(setup.machine.system_file("etc/fstab")).unwrap_or_default();
+    checks.check(
+        fstab.contains("subvol=/@archix") && fstab.contains("/var/rollback/pacman /var/lib/pacman none bind"),
+        format_args!("and their fstab lines: {fstab}"),
+    );
+    checks.check(
+        snapshots(&setup.machine).is_empty(),
+        "no snapshot yet: @archix isn't mounted until the reboot",
+    );
     checks.finish();
 }

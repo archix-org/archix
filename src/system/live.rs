@@ -72,6 +72,24 @@ impl Root {
     }
 }
 
+impl super::boot::BootRoot for Root {
+    fn local_db(&self) -> PathBuf {
+        self.path.join("var/lib/pacman/local")
+    }
+
+    fn read_path(&self, path: &Path) -> Result<PathBuf> {
+        Ok(self.path.join(path.strip_prefix("/").unwrap_or(path)))
+    }
+
+    fn output(&self, argv: &[&str]) -> Result<Output> {
+        Root::output(self, argv)
+    }
+
+    fn signing_output(&self, argv: &[&str]) -> Result<Output> {
+        Root::output(self, argv)
+    }
+}
+
 impl RunsPacman for Root {
     fn pacman(&self) -> Result<Command> {
         let mut pacman = Command::new("pacman");
@@ -279,6 +297,11 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
     if !plan.packages.install.is_empty() || !plan.packages.remove.is_empty() {
         kernel.keep(paths, &before, plan.packages);
         let transacted = crate::packages::transact(root, plan.packages, &db);
+        if root.running() {
+            for failed in super::dkms::reconcile(Path::new(super::boot::MODULES)) {
+                eprintln!("warning: {failed} failed, so DKMS may not remove that module's files later");
+            }
+        }
         kernel.restore(paths);
         progress.step("the package transaction", transacted)?;
         progress.step(
@@ -353,7 +376,7 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
             .chain(after.keys().filter(|name| !before.contains_key(*name)).cloned())
             .collect();
         if !changed.is_empty() {
-            let restarts = super::restart::plan(&db, &changed, &BTreeMap::new(), plan.started);
+            let restarts = super::restart::plan(&db, &changed, &plan.system.to.restart_if_changed, plan.started);
             failures.extend(super::restart::run(&restarts));
         }
     }

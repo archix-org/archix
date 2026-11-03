@@ -33,10 +33,6 @@ const REMOVED: &[(&str, &str)] = &[
         "rollback.entries sets how many snapshots get a boot entry",
     ),
     (
-        "restart_if_changed",
-        "a switch restarts the units whose files it replaced, except the session's and the network's, and has no per-unit override yet",
-    ),
-    (
         "deployments.keep",
         "deployments are gone: a switch applies in place, and rollback.keep_switch sets how many switch snapshots stay",
     ),

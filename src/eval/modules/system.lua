@@ -70,10 +70,15 @@ return {
     default_target = archix.option {
       type = t.nullable(t.str),
       default = archix.null,
-      description = "The target the next deployment boots into, such as multi-user.target for a machine without a desktop; by default systemd's, graphical.target.",
+      description = "The target the system boots into, such as multi-user.target for a machine without a desktop; by default systemd's, graphical.target.",
     },
-    user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user in the next deployment; they start or stop at the next boot." },
-    sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf and applied at the next boot." },
+    user_services = archix.option { type = t.attrs_of(t.bool), default = {}, description = "User units to enable (true) or disable (false) for every user, from each user's next login." },
+    restart_if_changed = archix.option {
+      type = t.attrs_of(t.bool),
+      default = {},
+      description = "System or user units to always (true) or never (false) restart when a switch replaces files they use. By default archix restarts them, except the display manager, dbus, logind, NetworkManager, sshd, gettys and the desktop session's own units, which it lists for a logout instead.",
+    },
+    sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules." },
     modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf." },
     kernel_modules = archix.option { type = t.list_of(t.str), default = {}, description = "Kernel modules to load at boot." },

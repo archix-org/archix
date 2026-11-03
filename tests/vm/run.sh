@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix deployments in QEMU with OVMF; `run.sh` (`run.sh boot [TEST...]`) runs the boot tests side by side on the Python driver from one laid-out base (the first layout on a booted system; then layout, deployments and rollback, secureboot with blessing on a read-only ESP and unsigned switches refused, reset-mid-switch, boot counting, revoke under Secure Boot, etc-merge, the fallback UKI without loader/entries and eject back to plain Arch, usr-local: a unit in the shared /usr/local that fails every boot, got past by the fallbacks that leave /usr/local out,, file-systems: a data disk, a LUKS volume, bind and tmpfs mounts, a swap file and zram from file_systems, swap and zram, hibernating to the swap file and resuming, a switch with swap active, a boot without the data disk, and /home on a disk of its own, required by default, whose absence stops a pending deployment's one try in emergency mode with a hint naming it, and status blaming the disk after the fallback, entry-edit: an older deployment's entry edited on the ESP to pass another command line or start another UKI boots the current deployment with a login note, eject-pending: eject with a switch waiting for its reboot lays out the running deployment, and eject-chroot: eject from a plain live system's arch-chroot after mount-deployment, each booting plain Arch after), `run.sh boot2` the same checks as one sequential walk, `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers across deployments (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` refusing hibernation while a deployment is pending and boot.health_check's fallbacks (a firewall that blocks the network, a pulled cable), `run.sh pcr` signed PCR policies unlocking a LUKS volume with swtpm, `run.sh dkms2` DKMS with two kernels, `run.sh selfupgrade` archix upgrading itself from ARCHIX_OLD (HEAD~1 by default), `run.sh firewall` the firewall over ssh, `run.sh churn` a year of weekly switches, `run.sh recovery` a live-USB recovery (the ESP wiped and the current deployment damaged; a plain Arch rescue disk binds a kept deployment, chroots in and rolls back to it; it boots and switches again), `run.sh rescue` every deployment broken and a lost root password, each repaired through the rescue entry's `archix rescue` prompt behind its login, then under Secure Boot with root locked wrong and empty passwords refused, a wheel password let in and a TPM-bound LUKS volume asking for its passphrase, `run.sh secrets` declared secrets on real boots (consumers, an older entry's values, a lost identity and its recovery, a damaged ciphertext, a crash with no core, the rescue entry decrypting nothing, a rollback from a live system's chroot without the identity, swap and hibernation, each ending with a leak sweep, then a grep of the raw root and swap partitions), `run.sh powercut` the dm-log-writes power-cut replay (tests/vm/powercut/run.sh), `run.sh nic-control` the NIC no-carrier control: warm reboots and resets of plain Arch and of the laid-out system side by side (NIC_ARMS, NIC_REBOOTS, NIC_RESETS, NIC_HANG; never cached).
+# Boots archix in QEMU with OVMF; `run.sh` (`run.sh boot [TEST...]`) runs the snapshot boot tests side by side on the Python driver from one base (the first switch on a booted system sets rollbacks up and writes the menu, and the boot after counts as good; then counting: a kernel that panics falls back to the slot in try mode; try: an older snapshot picked by hand boots read-only with a throwaway layer; guard: an entry whose snapshot is gone boots the newest survivor, else the rescue entry; unattended: a boot stuck in emergency mode reboots itself until it falls back), which need FS=btrfs; the other suites below date from deployments and are rewritten in stage 5: `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` boot.health_check's fallbacks, `run.sh pcr` signed PCR policies unlocking a LUKS volume with swtpm, `run.sh dkms2` DKMS with two kernels, `run.sh selfupgrade` archix upgrading itself from ARCHIX_OLD (HEAD~1 by default), `run.sh firewall` the firewall over ssh, `run.sh churn` a year of weekly switches, `run.sh recovery` a live-USB recovery, `run.sh rescue` repairs through the rescue entry, `run.sh secrets` declared secrets on real boots, `run.sh powercut` the dm-log-writes power-cut replay (tests/vm/powercut/run.sh), `run.sh nic-control` the NIC no-carrier control (NIC_ARMS, NIC_REBOOTS, NIC_RESETS, NIC_HANG; never cached).
 set -euo pipefail
 suite=${1:-boot}
 case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; tests/vm/run.sh selfupgrade replaces it" >&2; exit 2 ;; esac
@@ -8,8 +8,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 # The driver's suites (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache or ARCHIX_VM_CACHE=0.
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
-case $suite in boot | boot2 | secrets | nic-control) driver=$suite ;; esac
-boot_tests=(fallback layout revoke secureboot etc-merge counting reset-mid-switch usr-local file-systems entry-edit eject-pending eject-chroot)
+case $suite in boot | secrets | nic-control) driver=$suite ;; esac
+boot_tests=(counting try guard unattended)
 for arg in "${@:2}"; do
   case $arg in
     --interactive) interactive=1 ;;
@@ -19,7 +19,7 @@ for arg in "${@:2}"; do
       names+=("$arg") ;;
   esac
 done
-[ -n "$driver" ] && [ "$suite" != nic-control ] || [ -z "$interactive" ] || { echo "--interactive needs a driver suite (boot, boot2)" >&2; exit 2; }
+[ -n "$driver" ] && [ "$suite" != nic-control ] || [ -z "$interactive" ] || { echo "--interactive needs a driver suite (boot, secrets)" >&2; exit 2; }
 [ "$suite" != boot ] || [ -z "$interactive" ] || [ ${#names[@]} = 1 ] || { echo "run.sh boot --interactive takes one test, or base" >&2; exit 2; }
 [ "$suite" != boot ] || [ ${#names[@]} -gt 0 ] || names=("${boot_tests[@]}")
 "$root/tests/arch/image.sh"
@@ -39,7 +39,6 @@ summary() {
 declare -A keys=()
 pending=()
 if [ "$suite" = boot ]; then
-  [ -n "$interactive" ] || python3 "$root/tests/vm/boot/checks.py"
   [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
   for name in "${names[@]}"; do [ "$name" = base ] || pending+=("boot-$name"); done
 elif [ -n "$driver" ] && [ "$suite" != nic-control ]; then
@@ -184,7 +183,6 @@ if [ "$suite" = nic-control ]; then
 fi
 if [ "$suite" != boot ]; then
   test=/vm/$suite/test.py
-  [ "$suite" != boot2 ] || test=/vm/boot/test.py
   if [ -n "$interactive" ]; then
     "${vm[@]}" python -m driver "$test" "${args[@]}"
     exit

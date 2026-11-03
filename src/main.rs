@@ -168,15 +168,26 @@ enum Command {
         #[command(subcommand)]
         action: Option<commands::rescue::Action>,
     },
-    /// Run at boot by archix-boot.service: the boot's own checks (the hibernation guard, notes)
+    /// Run at boot by archix-boot.service: the boot's own checks (the hibernation guard, failed entries, the try notice, a root archix didn't produce)
     #[command(hide = true)]
-    BootCheck {
-        #[arg(long)]
-        cmdline: Option<String>,
-    },
-    /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: make its generation the default
+    BootCheck,
+    /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: arm the fallback slot and note the failed units
     #[command(hide = true)]
     BootComplete,
+    /// Run in the initramfs: mount the snapshot the started entry names over the root, read-only with a throwaway layer
+    #[command(hide = true)]
+    BootMount { root: PathBuf },
+    /// Run every minute of a counted boot by archix-unblessed.timer: reboot it once it's stuck past boot.unblessed_timeout with nobody logged in
+    #[command(hide = true)]
+    Unblessed,
+    /// Print the try-mode notice, if this boot is one; with --desktop, send it as a desktop notification
+    #[command(hide = true)]
+    Notice {
+        #[arg(long)]
+        desktop: bool,
+    },
+    /// Adopt a root archix didn't produce (a snapper or limine-snapper-sync rollback, a restore): check its layout, carry accounts over from the root it replaced when that can be found, and record it
+    Resync,
     /// Run by systemd-bless-boot.service, before its own rename: count the booted entry as good, synced under its new name
     #[command(hide = true)]
     Bless,
@@ -328,7 +339,7 @@ enum SecureBoot {
         #[arg(long)]
         noconfirm: bool,
     },
-    /// Replace systemd's PCR policy signing key in every deployment and bind the TPM2 slot of each LUKS volume given to the new one; the next switch builds UKIs whose policies it signs, and UKIs built before no longer unlock those volumes
+    /// Replace systemd's PCR policy signing key in /etc and bind the TPM2 slot of each LUKS volume given to the new one; the next switch builds UKIs whose policies it signs, and UKIs built before no longer unlock those volumes
     RotatePcrKey {
         /// LUKS2 volumes to re-enroll, such as /dev/nvme0n1p2; systemd-cryptenroll asks for each one's passphrase or recovery key, or reads $PASSWORD
         devices: Vec<PathBuf>,
@@ -439,6 +450,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
         Command::Snapshot(SnapshotAction::Setup) => Some("snapshot setup"),
+        Command::Resync => Some("resync"),
         Command::Secrets(Secrets::Init { .. }) => Some("secrets init"),
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
@@ -560,6 +572,15 @@ fn run() -> Result<ExitCode> {
             archix::system::emergency::run(&archix::paths::Paths::system(), !no_rescue_entry);
             return Ok(ExitCode::SUCCESS);
         }
+        Command::BootMount { root } => {
+            let cmdline = archix::testhooks::kernel_cmdline();
+            archix::system::initrd::mount(&root, &archix::testhooks::run_dir(), &cmdline)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Notice { desktop } => {
+            commands::notice(desktop);
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::Recover { .. } => anyhow::bail!(
             "`archix recover` is gone: a switch that fails partway says what it applied, and with rollbacks on a snapshot holds the system as it was before; run `archix switch` again"
         ),
@@ -583,7 +604,7 @@ fn run() -> Result<ExitCode> {
     let changes_things = needs_root(&command).is_some()
         || matches!(
             command,
-            Command::BootCheck { .. } | Command::BootComplete | Command::Bless | Command::HealthCheck
+            Command::BootCheck | Command::BootComplete | Command::Bless | Command::HealthCheck | Command::Unblessed
         );
     if needs_root(&command).is_some() {
         leave_login_session();
@@ -650,15 +671,24 @@ fn run() -> Result<ExitCode> {
             commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::BootCheck { cmdline } => {
-            commands::boot_check(cmdline)?;
+        Command::BootCheck => {
+            commands::boot_check()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::BootComplete => {
-            if let Some(booted) = archix::system::boot::booted() {
-                archix::system::emergency::forget(&archix::paths::Paths::system(), booted);
+            let paths = archix::paths::Paths::system();
+            if archix::system::boot::booted() == Some(archix::system::menu::Entry::Current) {
+                archix::system::emergency::forget(&paths);
             }
-            archix::system::boot::promote_booted(&archix::paths::Paths::system())?;
+            archix::system::health::boot_complete(&paths)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Unblessed => {
+            archix::system::health::unblessed()?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Resync => {
+            commands::snapshot::resync()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Bless => {
@@ -863,8 +893,12 @@ fn run() -> Result<ExitCode> {
         | Command::Gc
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
-        | Command::BootCheck { .. }
+        | Command::BootCheck
         | Command::BootComplete
+        | Command::BootMount { .. }
+        | Command::Unblessed
+        | Command::Notice { .. }
+        | Command::Resync
         | Command::Bless
         | Command::HealthCheck
         | Command::Swapfile { .. }

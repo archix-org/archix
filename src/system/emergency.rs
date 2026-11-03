@@ -1,4 +1,4 @@
-//! What emergency mode prints before sulogin in a deployment with required mounts, and the record a counted try that stopped there leaves for the fallback boot's note.
+//! What emergency mode prints before sulogin on a system with required mounts, and the record a counted try that stopped there leaves for the fallback boot's note.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::fstab;
 use crate::paths::Paths;
 
-/// The drop-in on emergency.service in every deployment that declares a required mount.
+/// The drop-in on emergency.service on a system that declares a required mount.
 pub const DROP_IN: &str = "/etc/systemd/system/emergency.service.d/archix-required-mounts.conf";
 
 /// The drop-in's text: `archix emergency-hint` before sulogin, its failure ignored so sulogin always starts.
@@ -67,8 +67,8 @@ pub fn unmounted(root: &Path, fstab: &str, crypttab: &str) -> Vec<Unmounted> {
         .collect()
 }
 
-/// What emergency.service prints before sulogin: the required mounts that didn't mount and what to do; `counted` is the deployment whose counted try this is.
-pub fn hint(unmounted: &[Unmounted], counted: Option<u32>, rescue_entry: bool) -> Vec<String> {
+/// What emergency.service prints before sulogin: the required mounts that didn't mount and what to do; `counted` is the entry whose counted try this is.
+pub fn hint(unmounted: &[Unmounted], counted: Option<&str>, rescue_entry: bool) -> Vec<String> {
     let mut lines = Vec::new();
     if unmounted.is_empty() {
         lines.push("archix: this boot stopped in emergency mode, though every required mount in /etc/fstab is mounted; `systemctl --failed` and `journalctl -xb` say what failed".to_string());
@@ -102,50 +102,54 @@ pub fn hint(unmounted: &[Unmounted], counted: Option<u32>, rescue_entry: bool) -
             }
         ));
     }
-    if let Some(generation) = counted {
+    if let Some(entry) = counted {
         lines.push(format!(
-            "archix: this is one of deployment {generation}'s counted boot tries: each boot that stops here uses one, then systemd-boot starts the previous deployment"
+            "archix: this is one of {entry}'s counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; with nobody logged in, it reboots by itself after boot.unblessed_timeout"
         ));
     }
     lines
 }
 
-/// The required mounts a counted try of a deployment stopped in emergency mode without.
+/// The required mounts a counted try of an entry stopped in emergency mode without.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MountFailure {
-    pub generation: u32,
+    pub entry: String,
     pub mounts: Vec<Unmounted>,
     pub at: u64,
 }
 
-fn record(paths: &Paths, generation: u32) -> PathBuf {
-    paths.state.join("boot/mount-failed").join(format!("{generation}.json"))
+/// Beside the menu's state, so the fallback's try boot reads it.
+fn record(paths: &Paths) -> PathBuf {
+    super::menu::dir(paths).join("mount-failed.json")
 }
 
-pub fn read(paths: &Paths, generation: u32) -> Option<MountFailure> {
-    serde_json::from_str(&fs::read_to_string(record(paths, generation)).ok()?).ok()
+pub fn read(paths: &Paths) -> Option<MountFailure> {
+    serde_json::from_str(&fs::read_to_string(record(paths)).ok()?).ok()
 }
 
-/// Drops a deployment's record, once its fallback note says why or a boot of it reached boot-complete.target.
-pub fn forget(paths: &Paths, generation: u32) {
-    let _ = fs::remove_file(record(paths, generation));
+/// Drops the record, once a boot of the current system reached boot-complete.target.
+pub fn forget(paths: &Paths) {
+    let _ = fs::remove_file(record(paths));
 }
 
 /// Run by emergency.service before sulogin: prints the hint, and on a counted try records what was missing; never fails.
 pub fn run(paths: &Paths, rescue_entry: bool) {
     let read = |file: &str| fs::read_to_string(paths.root.join("etc").join(file)).unwrap_or_default();
     let found = unmounted(&paths.root, &read("fstab"), &read("crypttab"));
-    let counted = crate::testhooks::counted_boot().then(super::boot::booted).flatten();
+    let counted = crate::testhooks::counted_boot()
+        .then(super::boot::booted)
+        .flatten()
+        .map(|entry| entry.id());
     println!();
-    for line in hint(&found, counted, rescue_entry) {
+    for line in hint(&found, counted.as_deref(), rescue_entry) {
         println!("{line}");
     }
     println!();
-    if let Some(generation) = counted
+    if let Some(entry) = counted
         && !found.is_empty()
     {
         let failure = MountFailure {
-            generation,
+            entry,
             mounts: found,
             at: crate::generations::now(),
         };
@@ -156,13 +160,14 @@ pub fn run(paths: &Paths, rescue_entry: bool) {
 }
 
 fn write(paths: &Paths, failure: &MountFailure) -> Result<()> {
-    let path = record(paths, failure.generation);
+    let path = record(paths);
     fs::create_dir_all(path.parent().context("the record has a directory")?)?;
     crate::durable::write(&path, serde_json::to_string_pretty(failure)?.as_bytes())
 }
 
-/// What a fallback from a deployment whose tries stopped in emergency mode says at login and in `archix status`.
-pub fn fallback_note(from: u32, to: u32, failure: &MountFailure) -> String {
+/// What a fallback from an entry whose tries stopped in emergency mode says at login and in `archix status`.
+pub fn fallback_note(failure: &MountFailure) -> String {
+    let from = &failure.entry;
     let list: Vec<String> = failure.mounts.iter().map(Unmounted::describe).collect();
     let list = match list.split_last() {
         Some((last, [])) => last.clone(),
@@ -172,12 +177,12 @@ pub fn fallback_note(from: u32, to: u32, failure: &MountFailure) -> String {
     let one = failure.mounts.len() == 1;
     if failure.mounts.iter().all(|mount| !mount.attached) {
         return format!(
-            "archix: deployment {from} failed its boot tries because {list} {} missing, not because of the deployment, so systemd-boot started {to}; switch again (or `archix rollback {from}`) to retry it",
+            "archix: {from} failed its boot tries because {list} {} missing, not because of the system, so systemd-boot fell back; reattach it and reboot",
             if one { "was" } else { "were" }
         );
     }
     format!(
-        "archix: deployment {from} failed its boot tries in emergency mode, as {list} didn't mount (last at {}), so systemd-boot started {to}; switch again (or `archix rollback {from}`) once {} mounts",
+        "archix: {from} failed its boot tries in emergency mode, as {list} didn't mount (last at {}), so systemd-boot fell back; switch again once {} mounts",
         super::health::utc(failure.at),
         if one { "it" } else { "they" }
     )
@@ -233,11 +238,11 @@ mod tests {
         );
         let failed = [mount("/srv/x", "UUID=s", true)];
         assert_eq!(
-            hint(&failed, Some(7), false),
+            hint(&failed, Some("archix-current.conf"), false),
             [
                 "archix: this boot stopped in emergency mode because required mounts in /etc/fstab didn't mount:",
                 "archix:   /srv/x (UUID=s): its device is there, but it didn't mount; `journalctl -b -u srv-x.mount` says why",
-                "archix: this is one of deployment 7's counted boot tries: each boot that stops here uses one, then systemd-boot starts the previous deployment",
+                "archix: this is one of archix-current.conf's counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; with nobody logged in, it reboots by itself after boot.unblessed_timeout",
             ]
         );
         assert!(hint(&[], None, true)[0].contains("every required mount in /etc/fstab is mounted"));
@@ -253,32 +258,30 @@ mod tests {
     }
 
     #[test]
-    fn a_fallback_for_a_missing_disk_says_the_deployment_isnt_to_blame() {
+    fn a_fallback_for_a_missing_disk_says_the_system_isnt_to_blame() {
         let failure = MountFailure {
-            generation: 5,
+            entry: "archix-current.conf".into(),
             mounts: vec![mount("/home", "UUID=h", false)],
             at: 1_792_576_985,
         };
         assert_eq!(
-            fallback_note(5, 4, &failure),
-            "archix: deployment 5 failed its boot tries because /home (UUID=h) was missing, not because of the deployment, so systemd-boot started 4; switch again (or `archix rollback 5`) to retry it"
+            fallback_note(&failure),
+            "archix: archix-current.conf failed its boot tries because /home (UUID=h) was missing, not because of the system, so systemd-boot fell back; reattach it and reboot"
         );
         let both = MountFailure {
             mounts: vec![mount("/home", "UUID=h", false), mount("/srv", "UUID=s", false)],
             ..failure.clone()
         };
-        assert!(
-            fallback_note(5, 4, &both).contains("because /home (UUID=h) and /srv (UUID=s) were missing, not because")
-        );
+        assert!(fallback_note(&both).contains("because /home (UUID=h) and /srv (UUID=s) were missing, not because"));
         let attached = MountFailure {
             mounts: vec![mount("/home", "UUID=h", false), mount("/srv", "UUID=s", true)],
             ..failure
         };
-        let note = fallback_note(5, 4, &attached);
+        let note = fallback_note(&attached);
         assert!(
             note.contains(
                 "in emergency mode, as /home (UUID=h) and /srv (UUID=s) didn't mount (last at 2026-10-21 10:03:05 UTC)"
-            ) && !note.contains("not because of the deployment"),
+            ) && !note.contains("not because of the system"),
             "{note}"
         );
     }

@@ -179,7 +179,11 @@ fn rescue_login(setup: &Setup, input: &str, args: &[&str]) -> (Output, std::time
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
+    // A rescue that stays closed exits before it reads everything typed ahead.
+    match std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()) {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+        written => written.unwrap(),
+    }
     let output = child.wait_with_output().unwrap();
     (output, started.elapsed())
 }

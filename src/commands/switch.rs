@@ -122,6 +122,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let started = now();
     let paths = Paths::system();
     check_pacman_free(&paths)?;
+    refuse_unusual_root(&paths, "switch")?;
     let declared = declared(target.config)?;
     let boot = declared.boot_plan()?;
     let policy = archix::snapshot::Policy::from_config(target.config)?;
@@ -564,8 +565,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         ),
         None => format!("before switch to generation {number}"),
     };
+    if let Some(boot) = &boot {
+        system::menu::precheck(&paths, boot).map_err(|e| e.context("nothing was changed"))?;
+    }
     let taken = rollbacks
-        .before(&paths.root, current.as_ref(), label)
+        .before(&paths, current.as_ref(), label)
         .map_err(|e| e.context("nothing of the switch was applied"))?;
     let root = live::Root::new(&paths.root);
     eprintln!(":: applying generation {number}");
@@ -595,16 +599,14 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     system::credentials::forget_overrides(&paths.state, &passwords);
     let mut soft_failures = applied.failures;
     if !prepared.values.is_empty()
-        && let Err(e) = scan_live(&prepared, &paths.root)
+        && let Err(e) = scan_live(&prepared, &paths)
     {
         soft_failures.push(format!("{e:#}"));
     }
     generation.package_capabilities = applied.package_capabilities;
     store.save(&generation)?;
     store.set_current(number)?;
-    for warning in rollbacks.after(&paths, &generation.packages) {
-        eprintln!("warning: {warning}");
-    }
+    soft_failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &generation.packages));
     after_apply(
         target,
         &declared,
@@ -615,6 +617,74 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &previous_flatpak,
         soft_failures,
     )
+}
+
+/// Refuses `what` on a try boot, whose changes the next boot drops, and on a root archix didn't produce, whose records describe another one.
+fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
+    if let Some(trying) = system::initrd::trying() {
+        bail!(
+            "this boot is snapshot {n} in try mode, read-only with a throwaway layer, so a {what} would be lost at the next boot; `archix rollback {n}` to keep it, or reboot into the current system; nothing was changed",
+            n = trying.snapshot
+        );
+    }
+    if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
+        bail!("{why}; nothing was changed");
+    }
+    Ok(())
+}
+
+/// After an apply: builds the boot images of the root as it is now, prunes snapshots (keeping those with entries), then writes the menu, the rescue entry and the unblessed timeout; returns what failed, which leaves the applied system as it is.
+fn write_boot(
+    paths: &Paths,
+    rollbacks: &Rollbacks,
+    boot: Option<&system::boot::BootPlan>,
+    lock: &BTreeMap<String, Locked>,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    if let Err(e) = system::menu::adopt(paths) {
+        failures.push(format!("moving the boot menu's state into @archix: {e:#}"));
+    }
+    let root = live::Root::new(&paths.root);
+    if let Some(plan) = boot
+        && plan.loader != system::boot::Loader::Limine
+    {
+        eprintln!(":: building the boot images");
+        let built = system::boot::build(paths, plan, &root).and_then(|images| {
+            let dir = system::menu::dir(paths);
+            let mut state = system::menu::load(&dir)?;
+            state.current = images;
+            system::menu::save(&dir, &state)
+        });
+        if let Err(e) = built {
+            failures.push(format!(
+                "the boot images weren't built, so the boot menu still starts the old ones: {e:#}"
+            ));
+        }
+    }
+    for warning in rollbacks.after(paths, lock) {
+        eprintln!("warning: {warning}");
+    }
+    let Some(plan) = boot else {
+        return failures;
+    };
+    let cap = rollbacks.policy().map(|policy| policy.entries);
+    if let Err(e) = system::esp::clean_esp(Path::new(&plan.esp))
+        .and_then(|()| system::menu::refresh(paths, plan, cap, failures.is_empty()))
+    {
+        failures.push(format!("the boot menu wasn't written: {e:#}"));
+    }
+    match system::rescue::refresh(paths, plan, &root) {
+        Ok(line) if !line.is_empty() => println!("{line}"),
+        Ok(_) => {}
+        Err(e) => failures.push(format!("the rescue entry wasn't refreshed: {e:#}")),
+    }
+    if let Err(e) = archix::durable::write(
+        &paths.root.join(system::health::TIMEOUT_DROP_IN.trim_start_matches('/')),
+        system::health::timeout_drop_in(plan.unblessed_timeout).as_bytes(),
+    ) {
+        failures.push(format!("recording boot.unblessed_timeout: {e:#}"));
+    }
+    failures
 }
 
 /// Where the state before a failed apply is, for its error.
@@ -737,10 +807,29 @@ fn prepare_secrets(paths: &Paths, rendered: &mut system::Rendered) -> Result<arc
 }
 
 /// After the apply, with secrets: no value in /etc (a short one only warns), reported as a soft failure since the files are written by now.
-fn scan_live(prepared: &archix::secrets::prepare::Prepared, root: &Path) -> Result<()> {
+/// After the apply, scans /etc for the secrets' values: a long one in plain text is a soft failure, recorded so `archix status` names the file until it's gone; short ones only warn.
+fn scan_live(prepared: &archix::secrets::prepare::Prepared, paths: &Paths) -> Result<()> {
     use archix::secrets::{Kind, scan};
     let files = prepared.needles(&[Kind::File]);
-    let hits = scan::tree(&root.join("etc"), "/etc", &files, false);
+    let hits = scan::tree(&paths.root.join("etc"), "/etc", &files, false);
+    let certain: Vec<String> = hits
+        .iter()
+        .filter(|hit| !hit.short)
+        .map(|hit| hit.path.clone())
+        .collect();
+    archix::secrets::record_plaintext(paths, &certain)?;
+    if !certain.is_empty() {
+        let shown: Vec<String> = hits
+            .iter()
+            .filter(|hit| !hit.short)
+            .map(|hit| format!("secret {} in {}", hit.secret, hit.path))
+            .collect();
+        bail!(
+            "a secret's value is in plain text in /etc: {}; the switch applied, but take it out of there (secrets reach files only as links into {})",
+            shown.join(", "),
+            archix::secrets::RUN_DIR
+        );
+    }
     for warning in scan::judge(&hits, false)? {
         eprintln!("warning: {warning}");
     }
@@ -1322,6 +1411,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     let started = now();
     let paths = Paths::system();
     check_pacman_free(&paths)?;
+    refuse_unusual_root(&paths, "rollback")?;
     let store = Store::new(&paths);
     let current = store
         .current()?
@@ -1448,7 +1538,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
     let taken = rollbacks
         .before(
-            &paths.root,
+            &paths,
             Some(&current_generation),
             format!("before rollback to generation {number}"),
         )
@@ -1480,9 +1570,12 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
         store.update(&updated)?;
     }
     store.set_current(number)?;
-    for warning in rollbacks.after(&paths, &generation.packages) {
-        eprintln!("warning: {warning}");
-    }
+    soft_failures.extend(write_boot(
+        &paths,
+        &rollbacks,
+        generation.settings.boot.as_ref(),
+        &generation.packages,
+    ));
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
@@ -1615,25 +1708,73 @@ pub fn hook_record() {
 }
 
 /// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
-pub fn boot_check(cmdline: Option<String>) -> Result<()> {
+pub fn boot_check() -> Result<()> {
     let paths = Paths::system();
     if let Err(e) = system::sleep::sync(&paths.root) {
         println!("archix: couldn't update the hibernation guard: {e:#}");
     }
-    let booted = match cmdline {
-        Some(cmdline) => system::boot::booted_generation(&cmdline),
-        None => system::boot::booted(),
-    };
-    if booted.is_none()
-        && let Some(entry) = system::boot::tampered_selected_entry()
-    {
+    if let Some(entry) = system::boot::tampered_selected_entry() {
         system::boot::add_login_note(
             &paths,
             &format!(
-                "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it was changed on the ESP outside archix (archix's copy is {})",
+                "archix: the boot entry {entry} isn't what archix wrote, so it was changed on the ESP outside archix (archix's copy is {})",
                 system::boot::entry_record(&paths, &entry).display()
             ),
         );
+    }
+    if let Err(e) = system::menu::adopt(&paths) {
+        println!("archix: couldn't move the boot menu's state into @archix: {e:#}");
+    }
+    if let Err(e) = record_failed_entries(&paths) {
+        println!("archix: couldn't record which snapshot entries failed: {e:#}");
+    }
+    let mut notices = Vec::new();
+    if let Some(trying) = system::initrd::trying() {
+        notices.push(system::initrd::notice(&trying));
+        if let Some(failure) = system::health::read_failure(&paths) {
+            notices.push(system::health::fallback_note(&failure));
+        }
+        if let Some(failure) = system::emergency::read(&paths) {
+            notices.push(system::emergency::fallback_note(&failure));
+        }
+    } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
+        notices.push(format!("archix: {why}"));
+    }
+    for (dir, file) in [("/run/motd.d", "archix.motd"), ("/run/issue.d", "archix.issue")] {
+        let path = Path::new(dir).join(file);
+        match notices.is_empty() {
+            true => {
+                let _ = fs::remove_file(&path);
+            }
+            false => {
+                let _ = fs::create_dir_all(dir);
+                let _ = fs::write(&path, notices.join("\n\n") + "\n\n");
+            }
+        }
+    }
+    for notice in &notices {
+        println!("{notice}");
+    }
+    Ok(())
+}
+
+/// Notes the snapshot entries systemd-boot gave up on, which the missing-snapshot guard never boots.
+fn record_failed_entries(paths: &Paths) -> Result<()> {
+    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
+        return Ok(());
+    };
+    let dir = system::menu::dir(paths);
+    let mut state = system::menu::load(&dir)?;
+    let before = state.failed.clone();
+    for name in system::menu::on_esp(Path::new(esp.trim())).values() {
+        if let Some(system::menu::Entry::Snapshot(number)) = system::menu::Entry::parse(name)
+            && system::boot::is_bad(name)
+        {
+            state.failed.insert(number);
+        }
+    }
+    if state.failed != before {
+        system::menu::save(&dir, &state)?;
     }
     Ok(())
 }

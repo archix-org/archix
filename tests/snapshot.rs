@@ -254,7 +254,7 @@ fn refetchable_packages_leave_archix_s_cache_only_once_no_snapshot_may_go() {
     fs::write(cached("zlib-new.pkg.tar.zst"), "new").unwrap();
     let policy = Policy::default();
     let seen = std::cell::RefCell::new(Vec::new());
-    let freed = archix::snapshot::prune_root(&paths, &policy, &now, || {
+    let freed = archix::snapshot::prune_root(&paths, &policy, &now, &BTreeSet::new(), || {
         seen.borrow_mut()
             .push((numbers(&store).len(), cached("zlib-old.pkg.tar.zst").exists()));
         Some(Space { percent: 1.0, bytes: 0 })

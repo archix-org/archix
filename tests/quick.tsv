@@ -12,6 +12,11 @@ src/capture.rs	test:init test:switch
 src/capture.json	test:init test:switch
 src/carried.rs	test:switch test:fetch
 src/system/boot.rs	test:boot test:switch
+src/system/menu.rs	test:boot test:switch
+src/system/initrd.rs	test:boot
+src/system/grub.rs	test:boot
+src/system/health.rs	test:boot
+src/system/emergency.rs	test:boot test:system
 src/system/secureboot.rs	test:boot test:switch
 src/system/authenticode.rs	test:boot
 src/system/blobs.rs	test:boot
@@ -50,8 +55,8 @@ src/paths.rs	test:switch
 src/testhooks.rs	test:switch test:boot
 src/secrets/	test:secrets test:credentials
 src/eval/modules/secrets.lua	test:secrets
-src/snapshot/	test:snapshot
-src/commands/snapshot.rs	test:snapshot
+src/snapshot/	test:snapshot test:boot test:switch
+src/commands/snapshot.rs	test:snapshot test:boot test:switch
 src/system/btrfs.rs	test:system test:snapshot
 src/captured.rs	test:captured test:switch
 src/eval/isolated.rs	test:captured test:switch

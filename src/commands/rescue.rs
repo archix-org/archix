@@ -12,6 +12,8 @@ use archix::system::{boot, password, rescue, rescue_auth};
 
 /// Where the rescue boot mounts the root, and the ESP when the root can't say where it goes.
 const ROOT_MOUNT: &str = "/run/archix-rescue/root";
+/// Where `rollback` mounts the root with its layout and binds, as it boots.
+const LAYOUT_MOUNT: &str = "/run/archix-rescue/layout";
 const ESP_MOUNT: &str = "/run/archix-rescue/esp";
 /// Where the login mounts the root read-only to read its /etc/shadow.
 const LOGIN_MOUNT: &str = "/run/archix-rescue/login";
@@ -55,6 +57,8 @@ pub enum Action {
     },
     /// Open a shell; `exit` comes back to the prompt
     Shell,
+    /// Roll back to snapshot N: `archix rollback N` on the root with its layout mounted; only with rollbacks on btrfs
+    Rollback { number: u32 },
     /// Unmount everything and restart
     Reboot,
     /// Unmount everything and power off
@@ -285,12 +289,12 @@ impl Session {
     pub fn new(options: Options) -> Result<Session> {
         if options.root_dir.is_none() && options.root.is_none() && !in_initrd() {
             bail!(
-                "`archix rescue` runs in the rescue boot: pick \"archix rescue\" in the boot menu, or `sudo bootctl set-oneshot {}` and restart. On a running system `archix rollback`, `verify` and `eject` do the same; from a live USB, mount the root and pass --root-dir",
+                "`archix rescue` runs in the rescue boot: pick \"archix rescue\" in the boot menu, or `sudo bootctl set-oneshot {}` and restart. On a running system `archix rollback` does the same; from a live USB, mount the root and pass --root-dir",
                 rescue::ENTRY
             );
         }
         if options.root_dir.as_deref() == Some(Path::new("/")) {
-            bail!("--root-dir / is the running system; `archix rollback`, `verify` and `eject` work on it");
+            bail!("--root-dir / is the running system; `archix rollback` works on it");
         }
         Ok(Session { options })
     }
@@ -482,9 +486,48 @@ impl Session {
                 Ok(())
             }
             Action::Shell => self.shell(),
+            Action::Rollback { number } => self.rollback(number),
             Action::Reboot => self.power(libc::RB_AUTOBOOT),
             Action::Poweroff => self.power(libc::RB_POWER_OFF),
         }
+    }
+
+    /// Whether the root has rollbacks: btrfs with @archix, whose snapshots `rollback` can go back to.
+    fn has_rollbacks(&self) -> bool {
+        self.root_device()
+            .ok()
+            .filter(|device| fs_type(device).is_ok_and(|fs| fs == "btrfs"))
+            .is_some_and(|_| {
+                self.root()
+                    .is_ok_and(|root| root.join(archix::snapshot::MOUNT).is_dir())
+            })
+    }
+
+    fn rollback(&self, number: u32) -> Result<()> {
+        if !self.has_rollbacks() {
+            bail!(
+                "this root has no rollbacks (it isn't btrfs, or rollbacks were never set up), so there's no snapshot to go back to"
+            );
+        }
+        let device = self.root_device()?;
+        self.unmount_all()?;
+        let target = Path::new(LAYOUT_MOUNT);
+        let ran = archix::snapshot::layout::mount_all(&device.to_string_lossy(), target).and_then(|()| {
+            for (what, fs) in [("proc", "proc"), ("sys", "sysfs"), ("dev", "devtmpfs")] {
+                run_mount(Path::new(what), &target.join(what), fs, "rw")?;
+            }
+            let status = Command::new("chroot")
+                .arg(target)
+                .args(["/usr/bin/archix", "rollback", &number.to_string()])
+                .status()
+                .context("running archix rollback in the root")?;
+            if !status.success() {
+                bail!("archix rollback {number} failed in the root");
+            }
+            Ok(())
+        });
+        let _ = Command::new("umount").arg("-R").arg(target).status();
+        ran
     }
 
     fn check(&self, repair_btrfs: bool) -> Result<()> {
@@ -697,6 +740,11 @@ fn prompt(session: &mut Session) -> Result<()> {
     // A handler, not SIG_IGN, which children would keep: Ctrl-C stops what runs, not the prompt.
     unsafe { libc::signal(libc::SIGINT, ignore as *const () as libc::sighandler_t) };
     println!("\narchix rescue: this boot doesn't mount the root. Commands:\n{HELP}\n");
+    if session.has_rollbacks() {
+        println!(
+            "  rollback N                   roll back to snapshot N from the next boot on (`archix rollback N`)\n"
+        );
+    }
     let stdin = io::stdin();
     loop {
         print!("rescue> ");

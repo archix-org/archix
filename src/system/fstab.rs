@@ -12,7 +12,7 @@ use super::{get, map, str_of, strings};
 use crate::luagen::Lua;
 use crate::value::Value;
 
-/// One line of a deployment's /etc/fstab that file_systems or swap declares.
+/// One line of the root's /etc/fstab that file_systems or swap declares.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FstabLine {
     pub device: String,
@@ -65,9 +65,9 @@ pub struct Declared {
 }
 
 /// The first line of every fstab archix writes.
-pub const HEADER: &str = "# Written by archix at each switch: the root's and the ESP's lines as the deployment had them, then file_systems and swap from the config.";
+pub const HEADER: &str = "# Written by archix at each switch: the root's and the ESP's lines as the system had them, then file_systems and swap from the config.";
 
-/// Where archix-swapfile runs from at boot, the deployment's own archix.
+/// Where archix-swapfile runs from at boot, the root's own archix.
 const ARCHIX: &str = "/usr/bin/archix";
 
 /// How long a nofail mount's device is waited for unless its options say otherwise.
@@ -106,55 +106,53 @@ fn normal(point: &str) -> &str {
     }
 }
 
-/// Why `point` can't be a mount point file_systems declares, with the ESP at `esp`: archix writes the root's and the ESP's lines itself, and the trees each deployment keeps, the pacman database and DKMS state it binds at boot, and /archix must stay on the root filesystem, as the first switch's layout requires.
+/// Why `point` can't be a mount point file_systems declares, with the ESP at `esp`: archix writes the root's and the ESP's lines itself, the trees a snapshot of the root holds must stay on it, and /var/lib and /.archix are the layout's own.
 pub fn refused_point(point: &str, esp: &str) -> Option<String> {
     let esp = normal(esp);
     if point == "/" {
-        return Some("archix keeps the root's line as the deployment has it".into());
+        return Some("archix keeps the root's line as the system has it".into());
     }
     if under(point, esp) {
         return Some(format!(
             "archix writes the ESP's line at {esp} itself, mounted on access, fscked and readable by root only"
         ));
     }
-    if under(point, "/var/usrlocal") {
-        return Some("/var/usrlocal is the shared /usr/local, bound in the initramfs before fstab mounts anything; mount the filesystem at /usr/local instead".into());
-    }
     if under(point, "/usr") && !under(point, "/usr/local") {
-        return Some("each deployment keeps its own /usr on the root filesystem".into());
+        return Some("/usr stays on the root filesystem, so a snapshot of the root holds it whole".into());
     }
     for tree in ["/opt", "/boot", "/etc"] {
         if under(point, tree) {
-            return Some(format!("each deployment keeps its own {tree} on the root filesystem"));
+            return Some(format!(
+                "{tree} stays on the root filesystem, so a snapshot of the root holds it whole"
+            ));
         }
     }
-    if under(point, "/archix") {
-        return Some("deployments live in /archix, which the initramfs finds only on the root filesystem".into());
+    if under(point, "/.archix") {
+        return Some("archix mounts its own subvolume, @archix, at /.archix".into());
     }
     if point == "/var" || point == "/var/lib" || under(point, "/var/lib/pacman") || under(point, "/var/lib/dkms") {
-        return Some("a separate filesystem there would cover the pacman database and DKMS state each deployment keeps on the root filesystem".into());
+        return Some("with rollbacks, archix mounts @varlib at /var/lib and binds the pacman database and DKMS state from the root over it, so they roll back with it".into());
     }
     None
 }
 
-/// Why a swap file can't be at `file`: never in /archix or a tree a deployment keeps, nor where the boot can't keep it.
+/// Why a swap file can't be at `file`: never in a tree a snapshot of the root holds whole, nor where the boot can't keep it.
 fn refused_swap_file(file: &str, esp: &str) -> Option<String> {
     let esp = normal(esp);
     if under(file, esp) {
         return Some(format!("it's on the ESP at {esp}"));
     }
     for (dir, why) in [
-        ("/archix", "deployments live in /archix"),
+        ("/.archix", "snapshots live in /.archix"),
+        ("/usr", "/usr is part of every snapshot of the root"),
+        ("/opt", "/opt is part of every snapshot of the root"),
+        ("/boot", "/boot is part of every snapshot of the root"),
+        ("/etc", "/etc is part of every snapshot of the root"),
         (
-            "/usr",
-            "each deployment keeps its own /usr, and /usr/local is shared through /var/usrlocal",
+            "/var/lib/pacman",
+            "it's the pacman database, which rolls back with the root",
         ),
-        ("/var/usrlocal", "it's the shared /usr/local"),
-        ("/opt", "each deployment keeps its own /opt"),
-        ("/boot", "each deployment keeps its own /boot"),
-        ("/etc", "each deployment keeps its own /etc"),
-        ("/var/lib/pacman", "each deployment keeps its own pacman database"),
-        ("/var/lib/dkms", "each deployment keeps its own DKMS state"),
+        ("/var/lib/dkms", "it's DKMS's state, which rolls back with the root"),
         ("/proc", "it isn't on a disk"),
         ("/sys", "it isn't on a disk"),
         ("/dev", "it isn't on a disk"),
@@ -530,11 +528,20 @@ pub(crate) fn fields(line: &str) -> Option<Vec<String>> {
 }
 
 /// Whether an fstab line mounts the root or the ESP at `esp`, the lines archix keeps.
+/// Lines archix keeps as they are: the root's, the ESP's, and the rollback layout's (@varlib, @archix and the binds over /var/lib), which setup wrote.
 fn kept(fields: &[String], esp: &str) -> bool {
-    fields.len() >= 2 && (normal(&fields[1]) == "/" || normal(&fields[1]) == normal(esp))
+    let layout = [
+        "/var/lib",
+        "/.archix",
+        "/var/lib/pacman",
+        "/var/lib/dkms",
+        "/var/lib/archix",
+    ];
+    fields.len() >= 2
+        && (normal(&fields[1]) == "/" || normal(&fields[1]) == normal(esp) || layout.contains(&normal(&fields[1])))
 }
 
-/// The fstab archix writes into a deployment whose fstab was `old`: its root and ESP lines, the ESP's with its protections or added for the filesystem `uuid` names, then the declared lines; with what it changed on the ESP's.
+/// The fstab archix writes where the fstab was `old`: its root and ESP lines, the ESP's with its protections or added for the filesystem `uuid` names, then the declared lines; with what it changed on the ESP's.
 pub fn compose(
     old: &str,
     esp: &str,
@@ -558,7 +565,7 @@ pub fn compose(
     (text, changed)
 }
 
-/// Writes a staged deployment's /etc/fstab under `etc` whole: its root line, the ESP's at `esp` with archix's protections, then the declared lines.
+/// Writes the /etc/fstab under `etc` whole: its root line, the ESP's at `esp` with archix's protections, then the declared lines.
 pub fn write_in(etc: &Path, esp: &str, declared: &[FstabLine]) -> Result<()> {
     let path = etc.join("fstab");
     let old = fs::read_to_string(&path).unwrap_or_default();
@@ -573,7 +580,7 @@ pub fn write_in(etc: &Path, esp: &str, declared: &[FstabLine]) -> Result<()> {
     Ok(())
 }
 
-/// The systemd-sleep drop-in under /etc that turns hibernation off in a deployment that swaps on a file its initramfs can't resume from.
+/// The systemd-sleep drop-in under /etc that turns hibernation off on a system that swaps on a file its initramfs can't resume from.
 pub const NO_HIBERNATION: &str = "systemd/sleep.conf.d/archix-swap-file.conf";
 
 /// mkinitcpio's HOOKS as the configs under `etc` set them: mkinitcpio.conf, then its conf.d in order.
@@ -616,7 +623,7 @@ fn initramfs_hooks(etc: &Path) -> Vec<String> {
     hooks
 }
 
-/// Turns hibernation off in the staged /etc at `etc` when the deployment swaps on a file and nothing in its initramfs could resume from it: the systemd hook does, through the HibernateLocation EFI variable systemd-sleep sets as it hibernates, and so does a resume= the command line sets; archix sets no resume_offset= of its own, as remaking the file at boot at another size would outdate it. True when it's off.
+/// Turns hibernation off in the /etc at `etc` when the system swaps on a file and nothing in its initramfs could resume from it: the systemd hook does, through the HibernateLocation EFI variable systemd-sleep sets as it hibernates, and so does a resume= the command line sets; archix sets no resume_offset= of its own, as remaking the file at boot at another size would outdate it. True when it's off.
 pub fn hibernation_in(etc: &Path, declared: &[FstabLine]) -> Result<bool> {
     let file = declared
         .iter()
@@ -635,13 +642,13 @@ pub fn hibernation_in(etc: &Path, declared: &[FstabLine]) -> Result<bool> {
         }
     }
     let text = format!(
-        "# Written by archix: this deployment swaps on {}, but its initramfs has no systemd hook to resume from it through the HibernateLocation EFI variable, and the kernel command line no resume=, so a hibernated system would boot afresh and lose what was in memory.\n[Sleep]\nAllowHibernation=no\nAllowSuspendThenHibernate=no\nAllowHybridSleep=no\n",
+        "# Written by archix: this system swaps on {}, but its initramfs has no systemd hook to resume from it through the HibernateLocation EFI variable, and the kernel command line no resume=, so a hibernated system would boot afresh and lose what was in memory.\n[Sleep]\nAllowHibernation=no\nAllowSuspendThenHibernate=no\nAllowHybridSleep=no\n",
         file.map(|line| line.device.as_str()).unwrap_or_default()
     );
     fs::create_dir_all(path.parent().context("the drop-in has a directory")?)?;
     crate::durable::write(&path, text.as_bytes())?;
     println!(
-        "swap       hibernation is off in this deployment: mkinitcpio's HOOKS have no systemd hook, which resumes from the swap file through the HibernateLocation EFI variable; add it, or set resume= and resume_offset= in kernel_params yourself"
+        "swap       hibernation is off on this system: mkinitcpio's HOOKS have no systemd hook, which resumes from the swap file through the HibernateLocation EFI variable; add it, or set resume= and resume_offset= in kernel_params yourself"
     );
     Ok(true)
 }
@@ -663,7 +670,7 @@ fn others(fstab: &str, esp: &str) -> Vec<FstabLine> {
         .collect()
 }
 
-/// What the next boot mounts differently from the running deployment's fstab `current`, one line each, for the switch's list of changes.
+/// What the next boot mounts differently from the running system's fstab `current`, one line each, for the switch's list of changes.
 pub fn describe(current: &str, esp: &str, declared: &[FstabLine]) -> Vec<String> {
     let old = others(current, esp);
     let mut lines = Vec::new();
@@ -943,7 +950,7 @@ pub fn guarded_crypt_drops(
     out
 }
 
-/// Refuses a switch whose deployment would leave out guarded fstab or crypttab lines of the running /etc at `etc`, naming each and how to keep or drop it; returns warnings for drop_mounts entries neither file has.
+/// Refuses a switch that would leave out guarded fstab or crypttab lines of the running /etc at `etc`, naming each and how to keep or drop it; returns warnings for drop_mounts entries neither file has.
 pub fn check_drops(
     root: &Path,
     etc: &Path,
@@ -977,7 +984,7 @@ pub fn check_drops(
     if mounts.is_empty() && volumes.is_empty() {
         return Ok(warnings);
     }
-    let mut text = String::from("the next deployment would leave out lines that nothing in the config declares:\n");
+    let mut text = String::from("the switch would leave out fstab lines that nothing in the config declares:\n");
     for guarded in mounts.iter().chain(&volumes) {
         text.push_str(&format!("  {}    ({})\n", guarded.line, guarded.why.join("; ")));
     }
@@ -1017,13 +1024,13 @@ pub fn check_drops(
     )
 }
 
-/// Warnings for the fstab lines of the running system's `current` that a deployment with the fstab `target` leaves out and that are mounted now or protected, as a rollback can't refuse.
+/// Warnings for the fstab lines of the running system's `current` that the fstab `target` leaves out and that are mounted now or protected, as a rollback can't refuse.
 pub fn rollback_warnings(root: &Path, current: &str, target: &str, esp: &str) -> Vec<String> {
     guarded_drops(current, esp, &others(target, esp), &[], &|point| mounted(root, point))
         .into_iter()
         .map(|guarded| {
             format!(
-                "warning: the deployment rolled back to has no fstab line for {} ({}; {}), so it boots without it; declare it in file_systems and switch after the reboot",
+                "warning: the generation rolled back to has no fstab line for {} ({}; {}), so the next boot goes without it; declare it in file_systems and switch again",
                 guarded.what,
                 guarded.line,
                 guarded.why.join("; ")
@@ -1039,7 +1046,7 @@ pub fn esp_of(config: &Value) -> &str {
         .unwrap_or("/efi")
 }
 
-/// `describe` against the fstab of the deployment running at `here`, for a config.
+/// `describe` against the fstab of the system at `here`, for a config.
 pub fn describe_at(here: &Path, config: &Value, declared: &[FstabLine]) -> Vec<String> {
     describe(
         &fs::read_to_string(here.join("etc/fstab")).unwrap_or_default(),
@@ -1101,7 +1108,7 @@ fn nearest_existing(path: &Path) -> &Path {
     path.ancestors().find(|dir| dir.exists()).unwrap_or(Path::new("/"))
 }
 
-/// Checks the declared lines against the system under `root` before a switch: refuses a /dev/mapper mount nothing opens (with the new deployment's `crypttab`, crypttab.initramfs and kernel command line `cmdline`) and a swap file archix would make on btrfs outside a subvolume of its own; returns warnings for devices that aren't attached or hold another filesystem.
+/// Checks the declared lines against the system under `root` before a switch: refuses a /dev/mapper mount nothing opens (with the new `crypttab`, crypttab.initramfs and kernel command line `cmdline`) and a swap file archix would make on btrfs outside a subvolume of its own; returns warnings for devices that aren't attached or hold another filesystem.
 pub fn check(root: &Path, lines: &[FstabLine], crypttab: &str, cmdline: &str) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
     for line in lines {
@@ -1611,22 +1618,33 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_keeps_the_rollback_layouts_lines_as_setup_wrote_them() {
+        let old = "UUID=a / btrfs rw,subvol=/@ 0 0\n\
+                   UUID=a /var/lib btrfs rw,subvol=/@varlib 0 0\n\
+                   UUID=a /.archix btrfs rw,subvol=/@archix 0 0\n\
+                   /var/rollback/pacman /var/lib/pacman none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
+                   /var/rollback/dkms /var/lib/dkms none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
+                   /var/rollback/archix /var/lib/archix none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n";
+        let (text, _) = compose(old, "/efi", None, &[]);
+        assert_eq!(text, format!("{HEADER}\n{old}"));
+    }
+
+    #[test]
     fn mount_points_archix_lays_out_or_writes_itself_are_refused() {
         for (point, why) in [
             ("/", "root's line"),
             ("/efi", "ESP's line"),
             ("/efi/EFI", "ESP's line"),
-            ("/usr", "own /usr"),
-            ("/usr/share", "own /usr"),
-            ("/opt", "own /opt"),
-            ("/boot", "own /boot"),
-            ("/etc", "own /etc"),
-            ("/archix", "/archix"),
+            ("/usr", "snapshot of the root holds it"),
+            ("/usr/share", "snapshot of the root holds it"),
+            ("/opt", "snapshot of the root holds it"),
+            ("/boot", "snapshot of the root holds it"),
+            ("/etc", "snapshot of the root holds it"),
+            ("/.archix", "@archix"),
             ("/var", "pacman database"),
             ("/var/lib", "pacman database"),
             ("/var/lib/pacman", "pacman database"),
             ("/var/lib/dkms", "DKMS"),
-            ("/var/usrlocal", "/usr/local instead"),
             ("relative", "absolute"),
             ("/mnt/../etc", "plain absolute"),
             ("/mnt/", "end in /"),
@@ -1699,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn swap_files_with_a_size_are_made_at_boot_and_never_in_a_deployment() {
+    fn swap_files_with_a_size_are_made_at_boot_and_never_in_a_snapshotted_tree() {
         let declared = render(
             &config(serde_json::json!({
                 "swap": [
@@ -1740,14 +1758,17 @@ mod tests {
         );
         for (spec, why) in [
             (
-                serde_json::json!({ "file": "/archix/swapfile", "size": "1G" }),
-                "deployments live in /archix",
+                serde_json::json!({ "file": "/.archix/swapfile", "size": "1G" }),
+                "snapshots live in /.archix",
             ),
             (
                 serde_json::json!({ "file": "/usr/local/swapfile", "size": "1G" }),
-                "own /usr",
+                "/usr is part of every snapshot",
             ),
-            (serde_json::json!({ "file": "/etc/swapfile" }), "own /etc"),
+            (
+                serde_json::json!({ "file": "/etc/swapfile" }),
+                "/etc is part of every snapshot",
+            ),
             (serde_json::json!({ "file": "/var/lib/pacman/swap" }), "pacman database"),
             (serde_json::json!({ "file": "/efi/swap" }), "ESP"),
             (

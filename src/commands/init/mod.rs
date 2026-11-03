@@ -83,6 +83,8 @@ struct Machine {
 /// How archix could manage booting on this machine.
 enum BootFacts {
     NoLoader,
+    /// Limine boots the machine: archix writes no entries for it, and a fallback is a manual pick.
+    Limine,
     NoRoot,
     Ready {
         esp: String,
@@ -626,7 +628,9 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         })
         .collect();
 
+    let limine = machine.local.contains_key("limine") || Path::new("/usr/bin/limine").exists();
     let boot = match systemd_boot_esp {
+        None if limine => BootFacts::Limine,
         None => BootFacts::NoLoader,
         Some(esp) => {
             let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
@@ -1311,6 +1315,16 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
             false,
             "the kernel command line has no root=, which boot entries need; add it to kernel_params".to_string(),
         )],
+        BootFacts::Limine => vec![
+            (
+                false,
+                "Limine boots this machine: archix writes no Limine entries and leaves limine.conf to limine-snapper-sync, so a broken update doesn't fall back by itself; you pick an older snapshot in the menu".to_string(),
+            ),
+            (
+                false,
+                "automatic fallback needs systemd-boot 260 or newer, which archix recommends; switching this machine to it isn't offered yet".to_string(),
+            ),
+        ],
         BootFacts::Ready {
             esp,
             kernel,
@@ -1327,10 +1341,16 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
             lines
         }
     };
-    lines.push((
-        true,
-        "each switch applies in place, live, with no reboot; archix doesn't write boot entries yet".to_string(),
-    ));
+    lines.push((true, "each switch applies in place, live, with no reboot".to_string()));
+    if let BootFacts::Ready { .. } = &facts.boot {
+        lines.push((
+            true,
+            "a boot counts as good once it reaches its default target with no unit failed that hadn't failed before and the display manager, if one is enabled, active; on this machine now:".to_string(),
+        ));
+        for line in archix::system::health::conclude_now(Path::new("/"), None) {
+            lines.push((!line.starts_with("FAILS"), format!("  {line}")));
+        }
+    }
     lines
 }
 
@@ -1338,6 +1358,7 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
 fn first_step(facts: &Facts) -> Option<String> {
     match &facts.boot {
         BootFacts::NoLoader => Some("install systemd-boot (`bootctl install`)".to_string()),
+        BootFacts::Limine => None,
         BootFacts::NoRoot => Some("add the root= kernel parameter to kernel_params".to_string()),
         BootFacts::Ready { .. } => None,
     }

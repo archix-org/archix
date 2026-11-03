@@ -7,7 +7,7 @@ pub fn crash_at(point: &str) {
     }
 }
 
-/// A named step of a deployment switch: in a debug build, runs ARCHIX_TEST_MARK with the name, as the power-cut harness logs steps, then crashes there if ARCHIX_TEST_CRASH names it.
+/// A named step of a switch: in a debug build, runs ARCHIX_TEST_MARK with the name, as the power-cut harness logs steps, then crashes there if ARCHIX_TEST_CRASH names it.
 pub fn mark(step: &str) {
     if cfg!(debug_assertions)
         && let Some(program) = std::env::var_os("ARCHIX_TEST_MARK")
@@ -179,4 +179,14 @@ pub fn own_exe() -> std::io::Result<std::path::PathBuf> {
         return Ok(own.to_path_buf());
     }
     std::env::current_exe()
+}
+
+/// Where the initramfs leaves its records for the booted system, /run/archix, or ARCHIX_TEST_RUN in a debug build.
+pub fn run_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions)
+        && let Some(dir) = std::env::var_os("ARCHIX_TEST_RUN")
+    {
+        return dir.into();
+    }
+    std::path::PathBuf::from(crate::system::initrd::RUN)
 }

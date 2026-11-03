@@ -173,6 +173,7 @@ struct Declared {
 
 /// The boot.* settings, present when archix manages booting.
 struct BootSettings {
+    loader: archix::system::boot::Loader,
     esp: String,
     kernel: String,
     microcode: Vec<String>,
@@ -183,6 +184,7 @@ struct BootSettings {
     revoke_unused: bool,
     health_check: Option<archix::system::health::HealthCheck>,
     rescue_entry: bool,
+    unblessed_timeout: u32,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -195,6 +197,7 @@ enum ThirdPartyFallback {
 impl BootSettings {
     fn plan(&self) -> archix::system::boot::BootPlan {
         archix::system::boot::BootPlan {
+            loader: self.loader,
             esp: self.esp.clone(),
             kernel: self.kernel.clone(),
             microcode: self.microcode.clone(),
@@ -206,15 +209,16 @@ impl BootSettings {
             pcr_key: archix::system::boot::pcr_key_fingerprint(&switch::current_root(&Paths::system()).join("etc")),
             health_check: self.health_check.clone(),
             rescue: self.rescue_entry,
+            unblessed_timeout: self.unblessed_timeout,
         }
     }
 }
 
 impl Declared {
-    /// The boot.* settings a generation records; boot entries come with stage 3, so nothing acts on them yet.
+    /// The boot.* settings a generation records, which its boot entries are written from.
     fn boot_plan(&self) -> Result<Option<archix::system::boot::BootPlan>> {
         match &self.boot {
-            Some(boot) if boot.health_check.is_some() && boot.tries == 0 => bail!(
+            Some(boot) if boot.health_check.as_ref().is_some_and(|check| check.is_set()) && boot.tries == 0 => bail!(
                 "boot.health_check needs boot.tries > 0: a failed check falls back by systemd-boot's boot counting; nothing was changed"
             ),
             boot => Ok(boot.as_ref().map(BootSettings::plan)),
@@ -234,10 +238,10 @@ impl Declared {
     }
 }
 
-/// `boot.health_check`, None when it names no target.
+/// `boot.health_check`, the default checks when it's not set.
 fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::HealthCheck>> {
     let Some(Value::Map(check)) = value else {
-        return Ok(None);
+        return Ok(Some(archix::system::health::HealthCheck::default()));
     };
     let strings = |key: &str| -> Vec<String> {
         match check.get(key) {
@@ -267,6 +271,9 @@ fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::
         _ => Vec::new(),
     };
     let parsed = archix::system::health::HealthCheck {
+        default_target: check.get("default_target") != Some(&Value::Bool(false)),
+        failed_units: check.get("failed_units") != Some(&Value::Bool(false)),
+        display_manager: check.get("display_manager") != Some(&Value::Bool(false)),
         units: strings("units"),
         listening,
         reachable: strings("reachable"),
@@ -277,7 +284,24 @@ fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::
         },
         reboot_on_failure: check.get("reboot_on_failure") == Some(&Value::Bool(true)),
     };
-    Ok(parsed.is_set().then_some(parsed))
+    Ok(Some(parsed))
+}
+
+/// `archix notice`: the try boot's notice on stdout, or with `desktop` as a desktop notification, which the session's autostart entry sends; nothing outside a try boot.
+pub fn notice(desktop: bool) {
+    let Some(trying) = archix::system::initrd::trying() else {
+        return;
+    };
+    let text = archix::system::initrd::notice(&trying);
+    match desktop {
+        true => {
+            let _ = std::process::Command::new("notify-send")
+                .args(["--urgency=critical", "--app-name=archix", "archix: try mode"])
+                .arg(text.trim_start_matches("archix: "))
+                .status();
+        }
+        false => println!("{text}"),
+    }
 }
 
 /// Which version to take when a locked AUR version can't be built any more.
@@ -421,6 +445,11 @@ fn declared(config: &Value) -> Result<Declared> {
         require_locked_build: matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("require_locked_build") == Some(&Value::Bool(true))),
         boot: match map.get("boot") {
             Some(Value::Map(boot)) if matches!(boot.get("loader"), Some(Value::Str(_))) => {
+                let loader = match boot.get("loader") {
+                    Some(Value::Str(name)) => archix::system::boot::Loader::parse(name)
+                        .with_context(|| format!("boot.loader is {name:?}, which archix doesn't write entries for"))?,
+                    _ => archix::system::boot::Loader::SystemdBoot,
+                };
                 let text = |key: &str, default: &str| match boot.get(key) {
                     Some(Value::Str(s)) => s.clone(),
                     _ => default.to_string(),
@@ -432,6 +461,7 @@ fn declared(config: &Value) -> Result<Declared> {
                     );
                 }
                 Some(BootSettings {
+                    loader,
                     esp: text("esp", "/efi"),
                     kernel: text("kernel", "linux"),
                     microcode: match boot.get("microcode") {
@@ -452,7 +482,11 @@ fn declared(config: &Value) -> Result<Declared> {
                     protected_entry: boot.get("protected_entry") == Some(&Value::Bool(true)),
                     tries: match boot.get("tries") {
                         Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
-                        _ => 3,
+                        _ => 2,
+                    },
+                    unblessed_timeout: match boot.get("unblessed_timeout") {
+                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
+                        _ => 10,
                     },
                     revoke_unused: boot.get("revoke_unused") == Some(&Value::Bool(true)),
                     health_check: health_check(boot.get("health_check"))?,
@@ -999,14 +1033,33 @@ mod tests {
     }
 
     #[test]
-    fn a_health_check_is_off_by_default_parsed_into_the_boot_plan_and_needs_boot_counting() {
+    fn the_default_health_check_is_on_parsed_into_the_boot_plan_and_extra_targets_need_boot_counting() {
         let with = |check: &str, tries: u32| {
             declared_from(&format!(
                 r#"return {{ packages = {{ "base" }}, boot = {{ loader = "systemd-boot", tries = {tries}, health_check = {{ {check} }} }}, kernel_params = {{ "root=/dev/vda2" }} }}"#
             ))
             .boot_plan()
         };
-        assert_eq!(with("", 3).unwrap().unwrap().health_check, None, "off by default");
+        let default = with("", 3).unwrap().unwrap();
+        assert_eq!(
+            default.health_check,
+            Some(archix::system::health::HealthCheck::default()),
+            "the default target, new failed units and the display manager by default"
+        );
+        assert_eq!(
+            (default.tries, default.unblessed_timeout, default.loader),
+            (3, 10, archix::system::boot::Loader::SystemdBoot)
+        );
+        let off = with("display_manager = false, failed_units = false", 2)
+            .unwrap()
+            .unwrap()
+            .health_check
+            .unwrap();
+        assert!(off.default_target && !off.display_manager && !off.failed_units);
+        assert!(
+            with("", 0).is_ok(),
+            "the default checks run on counted boots only, so they don't need counting"
+        );
         let plan = with(
             r#"units = { "sshd.service" }, listening = { 22 }, reachable = { "gateway", "example.org:443" }, reboot_on_failure = true"#,
             3,

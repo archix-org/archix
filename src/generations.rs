@@ -50,7 +50,7 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
-    /// The boot.* settings, recorded for stage 3's entries; nothing acts on them yet.
+    /// The boot.* settings the boot entries were written with.
     #[serde(default)]
     pub boot: Option<crate::system::boot::BootPlan>,
     /// The config's `rollback` table, which a rollback away from this generation snapshots and prunes by.

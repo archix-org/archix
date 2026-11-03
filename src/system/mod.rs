@@ -6,13 +6,17 @@ pub mod boot;
 pub mod btrfs;
 pub mod capabilities;
 pub mod credentials;
+pub mod dkms;
 pub mod emergency;
 pub mod esp;
 pub mod firewall;
 pub mod fstab;
+pub mod grub;
 pub mod health;
 pub mod hooks;
+pub mod initrd;
 pub mod live;
+pub mod menu;
 pub mod merge;
 pub mod password;
 pub mod rescue;
@@ -47,6 +51,9 @@ pub struct SystemState {
     pub services: BTreeMap<String, bool>,
     #[serde(default)]
     pub user_services: BTreeMap<String, bool>,
+    /// Units to always (true) or never (false) restart when a switch replaces files they use.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub restart_if_changed: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub hooks: BTreeMap<String, Hook>,
     /// Scripts for managed files, keyed by path, run when a switch changes that file.
@@ -592,6 +599,7 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
     for (key, target) in [
         ("services", &mut b.state.services),
         ("user_services", &mut b.state.user_services),
+        ("restart_if_changed", &mut b.state.restart_if_changed),
     ] {
         for (name, enabled) in map(config, key).into_iter().flatten() {
             target.insert(unit_name(name)?.to_string(), *enabled == Value::Bool(true));
@@ -852,6 +860,19 @@ mod tests {
             }
         }
         convert(json)
+    }
+
+    #[test]
+    fn restart_overrides_are_part_of_the_plan() {
+        let rendered = render(
+            &config(serde_json::json!({ "restart_if_changed": { "sshd.service": true, "cups.service": false } })),
+            Path::new("/nonexistent"),
+        )
+        .unwrap();
+        assert_eq!(
+            rendered.state.restart_if_changed,
+            BTreeMap::from([("cups.service".to_string(), false), ("sshd.service".to_string(), true)])
+        );
     }
 
     #[test]

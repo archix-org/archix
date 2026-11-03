@@ -105,7 +105,7 @@ fn option_descriptions_say_what_waits_for_the_next_boot() {
         ("home.files.<name>.on_change", "right after"),
         ("home.files", "without waiting for the boot"),
         ("services", "next boot"),
-        ("user_services", "next boot"),
+        ("user_services", "next login"),
         ("firewall.enable", "next boot"),
         ("file_systems", "next boot"),
         ("file_systems", "rollback brings back"),
@@ -779,8 +779,8 @@ fn a_config_that_writes_fstab_or_what_the_mount_options_write_is_refused() {
             "device must name what to mount",
         ),
         (
-            r#"return { swap = { { file = "/archix/swapfile", size = "1G" } } }"#,
-            "deployments live in /archix",
+            r#"return { swap = { { file = "/.archix/swapfile", size = "1G" } } }"#,
+            "snapshots live in /.archix",
         ),
     ] {
         let dir = config(&[("init.lua", body)]);

@@ -548,10 +548,35 @@ pub fn hash_secret(declared: &Declared, uses: &mut Uses, user: &str, value: &str
 }
 
 /// What `archix status` says about secrets: those this boot couldn't decrypt or a switch left out, links someone replaced with plain files, and where values could reach a disk; `current` is the current generation's manifest.
+fn plaintext_record(paths: &crate::paths::Paths) -> std::path::PathBuf {
+    paths.state.join("secrets").join("plaintext.json")
+}
+
+/// Records the files under the root the last switch found a secret's value in, in plain text; none clears it.
+pub fn record_plaintext(paths: &crate::paths::Paths, found: &[String]) -> anyhow::Result<()> {
+    let record = plaintext_record(paths);
+    if found.is_empty() {
+        let _ = fs::remove_file(&record);
+        return Ok(());
+    }
+    crate::durable::write(&record, serde_json::to_string_pretty(found)?.as_bytes())
+}
+
 pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> Vec<String> {
     let root = &paths.root;
     let booted = Manifest::read(root);
     let mut lines = Vec::new();
+    let found: Vec<String> = fs::read_to_string(plaintext_record(paths))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    for path in found {
+        if root.join(path.trim_start_matches('/')).exists() {
+            lines.push(format!(
+                "warning: {path} holds a secret's value in plain text, as the last switch found; take it out of there"
+            ));
+        }
+    }
     let declared = booted.iter().chain(current).any(|m| !m.secrets.is_empty());
     if !declared {
         return lines;

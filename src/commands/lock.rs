@@ -451,9 +451,20 @@ fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str
             .into_iter()
             .chain(integration::boot_files(&exe))
             .chain(integration::boot_wants())
+            .chain(system::initrd::hook_files())
             .map(|(path, _)| path.to_string_lossy().into_owned()),
     );
-    declared.insert("/etc/fstab".to_string());
+    declared.extend(
+        [
+            "/etc/fstab",
+            system::health::TIMEOUT_DROP_IN,
+            "/etc/initcpio/install/archix-rescue",
+            "/etc/initcpio/hooks/archix-rescue",
+            "/etc/archix-rescue/mkinitcpio.conf",
+        ]
+        .map(str::to_string),
+    );
+    declared.insert(format!("/{}", system::grub::SCRIPT));
     let config_dir = std::fs::canonicalize(target.config_dir)
         .ok()
         .and_then(|dir| Some(format!("/{}", dir.strip_prefix(&paths.root).ok()?.display())));
@@ -511,6 +522,11 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
 pub fn status(target: &Target, all: bool) -> Result<()> {
     let paths = Paths::system();
     let store = Store::new(&paths);
+    if let Some(trying) = archix::system::initrd::trying() {
+        println!("{}", archix::system::initrd::notice(&trying));
+    } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
+        println!("warning: {why}");
+    }
     match store.current()? {
         Some(number) => {
             let generation = store.get(number)?;
@@ -523,8 +539,24 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                     paths.packages().display()
                 );
             }
+            let menu = archix::system::menu::load(&archix::system::menu::dir(&paths)).unwrap_or_default();
             for record in archix::snapshot::Store::open(&paths.root).list().unwrap_or_default() {
-                println!("snapshot  {}", super::snapshot::describe(&record).trim_start());
+                let slot = match menu.slot == Some(record.number) {
+                    true => "  (fallback slot)",
+                    false => "",
+                };
+                println!("snapshot  {}{slot}", super::snapshot::describe(&record).trim_start());
+            }
+            if let Some(esp) = generation
+                .settings
+                .boot
+                .as_ref()
+                .map(|boot| std::path::PathBuf::from(&boot.esp))
+            {
+                let entries: Vec<String> = archix::system::menu::on_esp(&esp).into_values().collect();
+                if !entries.is_empty() {
+                    println!("boot entries: {}", entries.join(" "));
+                }
             }
             if !archix::system::allows_no_password_login(target.config)
                 && archix::system::rescue_auth::accounts(&paths.root.join("etc")).is_ok_and(|found| found.is_empty())

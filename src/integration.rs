@@ -47,7 +47,7 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
 /// The statically linked archix the initramfs hook copies; the package installs it.
 pub const STATIC_BINARY: &str = "/usr/lib/archix/archix-static";
 
-/// The unit that decrypts a deployment's secrets at boot; not part of what boot counting judges, as every deployment shares the identity it needs.
+/// The unit that decrypts the config's secrets at boot; not part of what boot counting judges, as every snapshot shares the identity it needs.
 pub const SECRETS_UNIT: &str = "archix-secrets.service";
 
 /// The unit whose failure keeps a counted boot from being blessed; boot-complete.target, and so this unit, is only part of boots systemd-boot counts.
@@ -62,12 +62,12 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         archix.display()
     );
     let complete = format!(
-        "[Unit]\nDescription=archix: make a generation that booted fine the default\nAfter=systemd-bless-boot.service\n\n\
+        "[Unit]\nDescription=archix: note a boot that counted as good\nAfter=systemd-bless-boot.service\n\n\
          [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
         archix.display()
     );
     let health = format!(
-        "[Unit]\nDescription=archix: check this boot before it counts as good\nAfter=local-fs.target archix-boot.service\n\
+        "[Unit]\nDescription=archix: check this boot before it counts as good\nAfter=local-fs.target archix-boot.service default.target multi-user.target graphical.target\n\
          Before=boot-complete.target\n\n\
          [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={} health-check\nStandardOutput=journal+console\n\n\
          [Install]\nRequiredBy=boot-complete.target\n",
@@ -83,6 +83,12 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         archix.display()
     );
     let bless = format!("[Service]\nExecStartPre=-{} bless\n", archix.display());
+    let unblessed = format!(
+        "[Unit]\nDescription=archix: reboot a counted boot that's stuck, so it can fall back\nDefaultDependencies=no\n\n\
+         [Service]\nType=oneshot\nExecStart={} unblessed\nStandardOutput=journal+console\n",
+        archix.display()
+    );
+    let wants_timer = format!("[Unit]\nWants={UNBLESSED_TIMER}\n");
     let root = Path::new("/");
     vec![
         (
@@ -93,8 +99,34 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         (root.join(format!("etc/systemd/system/{SECRETS_UNIT}")), secrets),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
         (root.join(format!("etc/systemd/system/{HEALTH_UNIT}")), health),
+        (root.join("etc/systemd/system/archix-unblessed.service"), unblessed),
+        (
+            root.join(format!("etc/systemd/system/{UNBLESSED_TIMER}")),
+            UNBLESSED_TIMER_UNIT.to_string(),
+        ),
+        (
+            root.join("etc/systemd/system/emergency.target.d/archix-unblessed.conf"),
+            wants_timer.clone(),
+        ),
+        (
+            root.join("etc/systemd/system/rescue.target.d/archix-unblessed.conf"),
+            wants_timer,
+        ),
+        (
+            root.join("etc/xdg/autostart/archix-notice.desktop"),
+            format!(
+                "[Desktop Entry]\nType=Application\nName=archix try-mode notice\nExec={} notice --desktop\nNoDisplay=true\n",
+                archix.display()
+            ),
+        ),
     ]
 }
+
+/// Started early at every boot, and pulled in by emergency.target and rescue.target, which stop everything else: every minute it asks archix whether a counted boot is stuck.
+pub const UNBLESSED_TIMER: &str = "archix-unblessed.timer";
+const UNBLESSED_TIMER_UNIT: &str = "[Unit]\nDescription=archix: watch a counted boot until it counts as good\nDefaultDependencies=no\n\
+     Conflicts=shutdown.target\nBefore=shutdown.target\n\n\
+     [Timer]\nOnBootSec=1min\nOnUnitActiveSec=1min\nAccuracySec=10s\n\n[Install]\nWantedBy=sysinit.target\n";
 
 /// The links that start archix's boot units, and the units they name.
 pub fn boot_wants() -> Vec<(PathBuf, String)> {
@@ -103,6 +135,7 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
         ("sysinit.target.wants", SECRETS_UNIT),
         ("multi-user.target.wants", "archix-boot-complete.service"),
         ("boot-complete.target.requires", HEALTH_UNIT),
+        ("sysinit.target.wants", UNBLESSED_TIMER),
     ]
     .map(|(dir, unit)| {
         (
@@ -130,7 +163,11 @@ pub fn own_path() -> Result<PathBuf> {
 
 /// Writes every integration file and boot link that's missing or out of date where `place` puts each absolute path.
 pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<PathBuf>) -> Result<()> {
-    for (path, content) in files(paths, archix).into_iter().chain(boot_files(archix)) {
+    let initrd = match place(Path::new(STATIC_BINARY))?.is_file() {
+        true => crate::system::initrd::hook_files(),
+        false => Vec::new(),
+    };
+    for (path, content) in files(paths, archix).into_iter().chain(boot_files(archix)).chain(initrd) {
         let target = place(&path)?;
         if fs::read_to_string(&target).ok().as_deref() == Some(content.as_str()) {
             continue;

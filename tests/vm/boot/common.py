@@ -1,32 +1,23 @@
-# The split boot tests' shared helpers, bound to one test's machine and steps by bind(); each test starts from base.py's laid-out disk.
-import difflib
+# The split boot tests' shared helpers, bound to one test's machine and steps by bind(); each test starts from base.py's disk, set up for rollbacks with the boot menu written and one good boot behind it.
+import json
 import re
 import time
 
 LOADER = "/efi/loader/loader.conf"
+ENTRIES = "/efi/loader/entries"
 CONFIG = "/etc/archix/init.lua"
-STATE = "/var/lib/archix-vmtest"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+STATE = "/.archix/boot/state.json"
 HOST = "archix --host archix-vm"
 BACKDOOR = "archix-backdoor.service"
 ATTRIBUTED = "ATTRIBUTED: "
 NIC_STATE ="for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
-SECURE_BOOT_CONFIG = "'s|boot = { loader = \"systemd-boot\" }|boot = { loader = \"systemd-boot\", secure_boot = true, protected_entry = true }|'"
 m = t = None
 
 
 def bind(machine, test):
     global m, t
     m, t = machine, test
-
-
-def diff(old, new):
-    return "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True)))[:600]
-
-
-def number(text):
-    words = text.split()
-    return int(words[0]) if words and words[0].isdigit() else -1
 
 
 def out(cmd, timeout=900):
@@ -37,32 +28,6 @@ def ok(cmd, timeout=900):
     return m.execute(cmd, timeout)[0] == 0
 
 
-def current():
-    return out("archix generations | awk '$1 == \"*\" { print $2 }'").strip()
-
-
-# The image's plain Arch has these too: sysusers gives systemd-journal a GID of its own, and build-image.sh links resolv.conf to resolved's stub.
-STOCK_QKK = {"warning: systemd: /var/log/journal (GID mismatch)", "warning: filesystem: /etc/resolv.conf (File type mismatch)"}
-
-
-def qkk_warnings():
-    """pacman -Qkk's warnings and errors, from its stderr alone, where each is a line of its own."""
-    return set(out("pacman -Qkk 2>&1 > /dev/null | grep -E '^(warning|error):' || true").splitlines())
-
-
-def qkk_problems():
-    """pacman -Qkk's warnings and errors that the image's plain Arch, as pacstrap left it, doesn't have."""
-    return sorted(qkk_warnings() - STOCK_QKK)
-
-
-def deployments():
-    return out("ls /archix/deploy 2>/dev/null | sort -n | tr '\\n' ' '")
-
-
-def listing():
-    return out("ls -A /archix/deploy | tr '\\n' ' '")
-
-
 def loader():
     return out(f"cat {LOADER}")
 
@@ -71,20 +36,48 @@ def has_line(text, line):
     return line in text.splitlines()
 
 
-def hidden_usr():
-    return number(out("mkdir -p /run/vmtest-root && mount --bind / /run/vmtest-root && ls -A /run/vmtest-root/usr | wc -l; umount /run/vmtest-root"))
-
-
-def findings(n):
-    return out(f"/opt/archix-vmtest/bin/archix-check-deployment {n} | grep -E ': /(usr|opt|boot)/' || true")
-
-
 def edit_config(sed):
     m.succeed(f"sed -i {sed} {CONFIG}")
 
 
-def secure_boot():
-    return ok("bootctl status 2> /dev/null | grep -q 'Secure Boot: enabled (user)'")
+def entries():
+    """archix's entry files on the ESP, with their counters."""
+    return out(f"ls {ENTRIES} | grep '^archix-' || true").split()
+
+
+def entry(name):
+    """The file of entry id name (archix-snapshot-3.conf), whatever its counters, or None."""
+    stem = name.removesuffix(".conf")
+    return next((f for f in entries() if f == name or f.startswith(stem + "+")), None)
+
+
+def selected():
+    return out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
+
+
+def trying():
+    """This boot's try record, or None outside try mode."""
+    text = out("cat /run/archix/try 2>/dev/null")
+    return json.loads(text) if text.strip() else None
+
+
+def snapshots():
+    """The snapshot numbers, oldest first."""
+    return [int(line.split()[0]) for line in out("archix snapshot list").splitlines() if line.split() and line.split()[0].isdigit()]
+
+
+def state():
+    text = out(f"cat {STATE} 2>/dev/null")
+    return json.loads(text) if text.strip() else {}
+
+
+def switch(what="a switch"):
+    m.succeed(f"{HOST} switch --noconfirm", what=what)
+
+
+def bump(n):
+    """Changes the managed file /etc/archix-vmtest, so a switch has something to apply and takes a snapshot first."""
+    edit_config(f"'s|\\[\"/etc/archix-vmtest\"\\] = {{ text = \"[0-9]*\" }}|[\"/etc/archix-vmtest\"] = {{ text = \"{n}\" }}|'")
 
 
 def carrier_race(networkctl, nic_state):
@@ -122,18 +115,13 @@ def network(wait=True):
     t.require(False, "networkd didn't configure the NIC's link within 90 s of this stage starting")
 
 
-def boot(match=True):
-    """Judges a boot by the guest itself, not by the backdoor having connected: multi-user.target reached, no failed unit but the backdoor's own, the NIC up, the mounted deployment the one systemd-boot started."""
+def boot():
+    """Judges a boot by the guest itself: multi-user.target reached, no failed unit but the backdoor's own, the NIC up; returns the entry systemd-boot started."""
     m.execute("systemctl is-system-running --wait > /dev/null", 900)
-    selected = out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
-    found = re.search(r"archix-(?:fallback-)?([0-9]+)", selected)
-    booted = found.group(1) if found else ""
-    running = out("cat /run/archix/deployment 2>/dev/null").strip()
-    t.log(f"booted entry {selected}, mounted deployment {running}, current {current()}, deployments {deployments()}")
+    started = selected()
+    t.log(f"booted entry {started}, try {trying()}, entries {entries()}")
     settled()
-    if match:
-        t.require(booted == running, f"the initramfs mounted deployment {running}, but systemd-boot started {selected}")
-    return selected, booted, running
+    return started
 
 
 def settled():
@@ -150,12 +138,3 @@ def settled():
             network(wait=False)
         t.require(False, f"units failed at this boot: {' '.join(failed)}")
     network()
-
-
-def setup_secure_boot(install=""):
-    """Enrols archix's Secure Boot keys and switches with secure_boot and protected_entry, installing install with it; the next boot enforces it."""
-    boot()
-    m.succeed("archix secure-boot setup")
-    edit_config(SECURE_BOOT_CONFIG)
-    m.succeed(f"{HOST} {'install ' + install if install else 'switch'} --noconfirm")
-    m.reboot()

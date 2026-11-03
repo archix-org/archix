@@ -1161,3 +1161,53 @@ fn aur_and_recipe_builds_see_no_secret_no_identity_and_nothing_of_either_in_thei
     drop(planted);
     c.finish();
 }
+
+#[test]
+#[ignore]
+fn a_value_left_in_plain_text_in_etc_fails_the_switch_softly_and_status_names_it_until_its_gone() {
+    let _system = lock_system();
+    let c = Checks::default();
+    let lab = Lab::new(&[]);
+    lab.ok(&["secrets", "init"]);
+    let key = lab.marker("wg0", 32);
+    let body = |n: u32| {
+        secrets_body(
+            &lab,
+            r#"wg0 = { file = "secrets/wg0.age" }"#,
+            &format!(
+                r#"files = {{ ["/etc/wireguard/wg0.conf"] = {{ secret = "wg0" }}, ["/etc/archix-test-plain-n"] = {{ text = "{n}" }} }}"#
+            ),
+        )
+    };
+    lab.setup.set_body(&[], &body(0));
+    lab.set("wg0", key.as_bytes());
+    lab.ok(&["switch", "--noconfirm"]);
+    let copy = lab.root().join("etc/archix-test-plain");
+    fs::write(&copy, format!("private-key={key}\n")).unwrap();
+    lab.setup.set_body(&[], &body(1));
+    let (switched, out) = lab.run(&["switch", "--noconfirm"], &[], None);
+    c.check(
+        !switched
+            && out.contains("plain text in /etc")
+            && out.contains("/etc/archix-test-plain")
+            && out.contains("the switch applied"),
+        format!("the switch applied, then failed softly naming the file: {out}"),
+    );
+    c.eq(
+        fs::read_to_string(lab.root().join("etc/archix-test-plain-n")).ok(),
+        Some("1\n".to_string()),
+        "the switch applied",
+    );
+    let status = lab.ok(&["status"]);
+    c.check(
+        status.contains("/etc/archix-test-plain holds a secret's value in plain text"),
+        format!("status names the file: {status}"),
+    );
+    fs::remove_file(&copy).unwrap();
+    let status = lab.ok(&["status"]);
+    c.check(
+        !status.contains("archix-test-plain holds"),
+        format!("and stops once it's gone: {status}"),
+    );
+    c.finish();
+}

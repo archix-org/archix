@@ -1,4 +1,4 @@
-//! The checks a new deployment's counted boot must pass before boot-complete.target, run by archix-health-check.service; a failure marks its entry bad so the next boot starts the previous deployment.
+//! The checks a counted boot must pass before boot-complete.target, run by archix-health-check.service; a failure marks its entry bad, so the next boot falls back. Also what a good boot leaves behind, and the timeout that reboots a boot that never gets there.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -13,9 +13,19 @@ use serde::{Deserialize, Serialize};
 use super::User;
 use crate::paths::Paths;
 
-/// `boot.health_check`: what a new deployment's boot must reach, beyond boot-complete.target, to count as good.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+fn yes() -> bool {
+    true
+}
+
+/// `boot.health_check`: what a counted boot must reach, beyond boot-complete.target, to count as good.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HealthCheck {
+    #[serde(default = "yes")]
+    pub default_target: bool,
+    #[serde(default = "yes")]
+    pub failed_units: bool,
+    #[serde(default = "yes")]
+    pub display_manager: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -30,7 +40,24 @@ pub struct HealthCheck {
     pub reboot_on_failure: bool,
 }
 
+impl Default for HealthCheck {
+    fn default() -> HealthCheck {
+        HealthCheck {
+            default_target: true,
+            failed_units: true,
+            display_manager: true,
+            units: Vec::new(),
+            listening: Vec::new(),
+            reachable: Vec::new(),
+            login: false,
+            timeout: 120,
+            reboot_on_failure: false,
+        }
+    }
+}
+
 impl HealthCheck {
+    /// Whether it names targets of its own beyond the default ones.
     pub fn is_set(&self) -> bool {
         !self.units.is_empty() || !self.listening.is_empty() || !self.reachable.is_empty() || self.login
     }
@@ -39,6 +66,10 @@ impl HealthCheck {
 /// One thing a boot must reach, named as the notes name it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
+    DefaultTarget,
+    /// No unit failed but these, which had failed at the last good boot.
+    NoNewFailures(Vec<String>),
+    DisplayManager,
     Shells,
     Unit(String),
     Listening(u16),
@@ -49,6 +80,9 @@ pub enum Target {
 impl std::fmt::Display for Target {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Target::DefaultTarget => write!(f, "\"the default target reached\""),
+            Target::NoNewFailures(_) => write!(f, "\"no unit failed since the last good boot\""),
+            Target::DisplayManager => write!(f, "\"the display manager active\""),
             Target::Shells => write!(f, "\"declared users' login shells\""),
             Target::Unit(unit) => write!(f, "\"{unit} active\""),
             Target::Listening(port) => write!(f, "\"TCP port {port} listening\""),
@@ -58,12 +92,25 @@ impl std::fmt::Display for Target {
     }
 }
 
-/// The targets of a deployment's check: the declared users' shells always, then what `boot.health_check` lists.
-pub fn targets(check: Option<&HealthCheck>, users: &std::collections::BTreeMap<String, User>) -> Vec<Target> {
-    let mut targets = vec![Target::Shells];
-    let Some(check) = check else {
-        return targets;
-    };
+/// The targets of a boot's check: the default target, no new failed units and the display manager unless turned off, the declared users' shells always, then what `boot.health_check` lists; `allowed` are the units that had failed at the last good boot.
+pub fn targets(
+    check: Option<&HealthCheck>,
+    users: &std::collections::BTreeMap<String, User>,
+    allowed: &[String],
+) -> Vec<Target> {
+    let defaults = HealthCheck::default();
+    let check = check.unwrap_or(&defaults);
+    let mut targets = Vec::new();
+    if check.default_target {
+        targets.push(Target::DefaultTarget);
+    }
+    if check.failed_units {
+        targets.push(Target::NoNewFailures(allowed.to_vec()));
+    }
+    if check.display_manager {
+        targets.push(Target::DisplayManager);
+    }
+    targets.push(Target::Shells);
     targets.extend(check.units.iter().cloned().map(Target::Unit));
     targets.extend(check.listening.iter().copied().map(Target::Listening));
     targets.extend(check.reachable.iter().cloned().map(Target::Reachable));
@@ -183,6 +230,23 @@ fn has_port(target: &str) -> bool {
 /// Checks one target on the running system under `root`.
 pub fn check(root: &Path, target: &Target, users: &std::collections::BTreeMap<String, User>) -> Result<()> {
     match target {
+        Target::DefaultTarget => quiet(Command::new("systemctl").args(["is-active", "--quiet", "default.target"]))
+            .map_err(|_| anyhow::anyhow!("default.target isn't active")),
+        Target::NoNewFailures(allowed) => {
+            let new: Vec<String> = failed_units()
+                .into_iter()
+                .filter(|unit| !allowed.contains(unit) && !OWN_UNITS.contains(&unit.as_str()))
+                .collect();
+            match new.is_empty() {
+                true => Ok(()),
+                false => anyhow::bail!("{} failed", new.join(", ")),
+            }
+        }
+        Target::DisplayManager => match display_manager(root) {
+            None => Ok(()),
+            Some(unit) => quiet(Command::new("systemctl").args(["is-active", "--quiet", "display-manager.service"]))
+                .map_err(|_| anyhow::anyhow!("the display manager ({unit}) isn't active")),
+        },
         Target::Shells => match shell_problems(root, users).as_slice() {
             [] => Ok(()),
             problems => anyhow::bail!("{}", problems.join("; ")),
@@ -242,22 +306,66 @@ pub fn run(
     }
 }
 
+/// archix's own units, which the failed-unit check leaves to their own reports.
+const OWN_UNITS: &[&str] = &[super::super::integration::HEALTH_UNIT, "archix-unblessed.service"];
+
+/// The units systemd lists as failed now.
+pub fn failed_units() -> Vec<String> {
+    let Ok(output) = Command::new("systemctl")
+        .args([
+            "list-units",
+            "--state=failed",
+            "--plain",
+            "--no-legend",
+            "--no-pager",
+            "--all",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The display manager the root under `root` enables, by the unit display-manager.service links to.
+pub fn display_manager(root: &Path) -> Option<String> {
+    let link = fs::read_link(root.join("etc/systemd/system/display-manager.service")).ok()?;
+    Some(link.file_name()?.to_string_lossy().into_owned())
+}
+
+/// What the check would conclude on this machine now, one line per target, for init.
+pub fn conclude_now(root: &Path, check: Option<&HealthCheck>) -> Vec<String> {
+    let users = std::collections::BTreeMap::new();
+    targets(check, &users, &[])
+        .iter()
+        .map(|target| match self::check(root, target, &users) {
+            Ok(()) => format!("passes  {target}"),
+            Err(e) => format!("FAILS   {target}: {e:#}"),
+        })
+        .collect()
+}
+
 /// A health check that failed, kept until the fallback boot says why.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Failure {
-    pub generation: u32,
+    /// The entry whose boot failed it.
+    pub entry: String,
     pub target: String,
     pub why: String,
     pub at: u64,
 }
 
+/// Beside the menu's state, so a try boot of a snapshot, whose own /var/lib/archix is the snapshot's, reads it.
 pub fn failure_path(paths: &Paths) -> PathBuf {
-    paths.state.join("boot").join("health-failed.json")
+    super::menu::dir(paths).join("health-failed.json")
 }
 
-pub fn read_failure(paths: &Paths, generation: u32) -> Option<Failure> {
-    let failure: Failure = serde_json::from_str(&fs::read_to_string(failure_path(paths)).ok()?).ok()?;
-    (failure.generation == generation).then_some(failure)
+pub fn read_failure(paths: &Paths) -> Option<Failure> {
+    serde_json::from_str(&fs::read_to_string(failure_path(paths)).ok()?).ok()
 }
 
 /// A unix time as UTC, to the second.
@@ -268,70 +376,187 @@ pub fn utc(secs: u64) -> String {
 }
 
 /// What a fallback caused by a failed check says at login and in `archix status`.
-pub fn fallback_note(from: u32, to: u32, failure: &Failure) -> String {
+pub fn fallback_note(failure: &Failure) -> String {
     format!(
-        "archix: deployment {from} fell back to {to} because the health check {} failed at {} ({}); switch again once it passes",
+        "archix: the boot of {} failed the health check {} at {} ({}); switch again once it passes",
+        failure.entry,
         failure.target,
         utc(failure.at),
         failure.why
     )
 }
 
-/// archix-health-check.service: checks the booted deployment while systemd-boot is still counting its entry, and on failure marks the entry bad, notes why, and reboots if asked to.
+/// The ESP the menu was last written to.
+fn esp(paths: &Paths) -> Option<PathBuf> {
+    let text = fs::read_to_string(paths.state.join("boot").join("esp")).ok()?;
+    Some(PathBuf::from(text.trim()))
+}
+
+/// archix-health-check.service: checks a boot systemd-boot is still counting, and on failure marks its entry bad, records why, and reboots if asked to.
 pub fn run_boot(paths: &Paths) -> Result<bool> {
-    let Some(booted) = super::boot::booted() else {
+    let Some(entry) = super::boot::booted() else {
         println!("archix: this boot isn't from an archix entry; nothing to check");
         return Ok(true);
     };
-    let esp = fs::read_to_string(paths.state.join("boot").join("esp")).context("reading the ESP's path")?;
-    let esp = Path::new(esp.trim());
-    if !super::boot::counting(esp, booted) {
-        println!("archix: deployment {booted}'s entry already counts as good; nothing to check");
+    if !crate::testhooks::counted_boot() {
+        println!("archix: {} already counts as good; nothing to check", entry.id());
         return Ok(true);
     }
-    let generation = crate::generations::Store::new(paths).get(booted)?;
+    let store = crate::generations::Store::new(paths);
+    let generation = store.current()?.map(|number| store.get(number)).transpose()?;
     let check = generation
-        .settings
-        .boot
         .as_ref()
-        .and_then(|boot| boot.health_check.as_ref());
-    let users = &generation.system.users;
-    let targets = targets(check, users);
-    let timeout = check.filter(|check| check.is_set()).map_or(0, |check| check.timeout);
-    let Some((target, why)) = run(&paths.root, &targets, users, timeout) else {
-        println!("archix: deployment {booted} passed its health check");
+        .and_then(|g| g.settings.boot.as_ref())
+        .and_then(|boot| boot.health_check.clone());
+    let users = generation.as_ref().map(|g| g.system.users.clone()).unwrap_or_default();
+    let allowed = super::menu::load(&super::menu::dir(paths))
+        .map(|state| state.blessed_failed_units)
+        .unwrap_or_default();
+    let targets = targets(check.as_ref(), &users, &allowed);
+    let timeout = check.as_ref().map_or(120, |check| check.timeout);
+    let Some((target, why)) = run(&paths.root, &targets, &users, timeout) else {
+        println!("archix: {} passed its health check", entry.id());
         return Ok(true);
     };
     let failure = Failure {
-        generation: booted,
+        entry: entry.id(),
         target: target.to_string(),
         why,
         at: crate::generations::now(),
     };
-    let path = failure_path(paths);
-    fs::create_dir_all(path.parent().context("the record has a directory")?)?;
-    crate::durable::write(&path, serde_json::to_string_pretty(&failure)?.as_bytes())?;
-    let marked = super::boot::mark_bad(esp, booted)?;
-    let reboot = check.is_some_and(|check| check.reboot_on_failure);
+    crate::durable::write(&failure_path(paths), serde_json::to_string_pretty(&failure)?.as_bytes())?;
+    let marked = match esp(paths) {
+        Some(esp) => super::boot::mark_bad(&esp, &entry.id())?,
+        None => false,
+    };
+    let reboot = check.as_ref().is_some_and(|check| check.reboot_on_failure);
     let note = format!(
-        "archix: deployment {booted} failed its health check {} ({}); {}",
+        "archix: {} failed its health check {} ({}); {}",
+        failure.entry,
         failure.target,
         failure.why,
         match (marked, reboot) {
-            (true, true) => "its entry is marked bad, and the machine reboots into the previous deployment now",
-            (true, false) => "its entry is marked bad, so the next boot starts the previous deployment",
+            (true, true) => "its entry is marked bad, and the machine reboots into the fallback now",
+            (true, false) => "its entry is marked bad, so the next boot falls back",
             (false, _) => "but its entry couldn't be marked bad, so the next boot starts it again",
         }
     );
-    println!("{note}");
-    let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
-    notes.push_str(&note);
-    notes.push('\n');
-    let _ = fs::write(paths.notes(), notes);
+    super::boot::add_login_note(paths, &note);
     if marked && reboot {
         let _ = Command::new("systemctl").args(["--no-block", "reboot"]).status();
     }
     Ok(false)
+}
+
+/// archix-boot-complete.service, after systemd-bless-boot: a good boot of the current system arms the slot, so the next snapshot takes it, and its failed units become the ones the next check allows; a good try boot changes nothing.
+pub fn boot_complete(paths: &Paths) -> Result<()> {
+    if super::initrd::trying().is_some() {
+        return Ok(());
+    }
+    match super::boot::booted() {
+        Some(super::menu::Entry::Current) => {}
+        _ => return Ok(()),
+    }
+    let dir = super::menu::dir(paths);
+    let mut state = super::menu::load(&dir)?;
+    state.armed = true;
+    state.blessed_failed_units = failed_units()
+        .into_iter()
+        .filter(|unit| !OWN_UNITS.contains(&unit.as_str()))
+        .collect();
+    super::menu::save(&dir, &state)?;
+    let _ = fs::remove_file(failure_path(paths));
+    Ok(())
+}
+
+/// Whether anyone is logged in: a logind session, or a shell an emergency or rescue unit opened past sulogin.
+fn someone_logged_in() -> bool {
+    let sessions = Command::new("loginctl")
+        .args(["list-sessions", "--no-legend"])
+        .output()
+        .map(|output| !String::from_utf8_lossy(&output.stdout).trim().is_empty())
+        .unwrap_or(false);
+    sessions
+        || ["emergency.service", "rescue.service"].iter().any(|unit| {
+            fs::read_to_string(format!("/sys/fs/cgroup/system.slice/{unit}/cgroup.procs"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|pid| fs::read_to_string(format!("/proc/{}/comm", pid.trim())).ok())
+                .any(|comm| !comm.trim().starts_with("sulogin") && !comm.trim().starts_with("systemd-sulogin"))
+        })
+}
+
+fn active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Seconds since boot.
+fn uptime() -> u64 {
+    fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|text| text.split('.').next()?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Why an unblessed boot should reboot itself now, if it should: counted, past `timeout_secs` without boot-complete.target or in emergency or rescue mode, and nobody logged in.
+pub fn should_reboot(
+    counted: bool,
+    uptime: u64,
+    timeout_secs: u64,
+    complete: bool,
+    stuck: bool,
+    logged_in: bool,
+) -> Option<String> {
+    if !counted || timeout_secs == 0 || uptime < timeout_secs || logged_in {
+        return None;
+    }
+    match (stuck, complete) {
+        (true, _) => Some(format!(
+            "this boot has sat in emergency or rescue mode for {} min with nobody logged in",
+            timeout_secs / 60
+        )),
+        (false, false) => Some(format!(
+            "this boot hasn't counted as good within {} min, with nobody logged in",
+            timeout_secs / 60
+        )),
+        (false, true) => None,
+    }
+}
+
+/// Where the last switch puts boot.unblessed_timeout for archix-unblessed.service: in /etc, as emergency mode may have nothing else mounted.
+pub const TIMEOUT_DROP_IN: &str = "/etc/systemd/system/archix-unblessed.service.d/timeout.conf";
+const TIMEOUT_VARIABLE: &str = "ARCHIX_UNBLESSED_MINUTES";
+
+pub fn timeout_drop_in(minutes: u32) -> String {
+    format!("[Service]\nEnvironment={TIMEOUT_VARIABLE}={minutes}\n")
+}
+
+/// archix-unblessed.service, every minute of a boot from its start, in emergency and rescue mode too: reboots a counted boot that's stuck, so the boot counter runs down and systemd-boot falls back with nobody at the machine.
+pub fn unblessed() -> Result<()> {
+    let minutes: u64 = std::env::var(TIMEOUT_VARIABLE)
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(10);
+    let stuck = active("emergency.target") || active("rescue.target");
+    let why = should_reboot(
+        crate::testhooks::counted_boot(),
+        uptime(),
+        minutes * 60,
+        active("boot-complete.target"),
+        stuck,
+        someone_logged_in(),
+    );
+    if let Some(why) = why {
+        println!("archix: {why}; rebooting so the boot counter can fall back");
+        let status = Command::new("systemctl").args(["reboot"]).status();
+        if !status.is_ok_and(|status| status.success()) {
+            let _ = Command::new("systemctl").args(["reboot", "--force"]).status();
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -381,20 +606,36 @@ mod tests {
             login: true,
             ..Default::default()
         };
-        let named: Vec<String> = targets(Some(&check), &users).iter().map(Target::to_string).collect();
+        let named: Vec<String> = targets(Some(&check), &users, &[])
+            .iter()
+            .map(Target::to_string)
+            .collect();
         assert_eq!(
             named,
             [
+                "\"the default target reached\"",
+                "\"no unit failed since the last good boot\"",
+                "\"the display manager active\"",
                 "\"declared users' login shells\"",
                 "\"ann can log in\"",
                 "\"bob can log in\"",
                 "\"cat can log in\""
             ]
         );
+        let off = HealthCheck {
+            default_target: false,
+            failed_units: false,
+            display_manager: false,
+            ..HealthCheck::default()
+        };
         assert_eq!(
-            targets(None, &users),
+            targets(Some(&off), &users, &[]),
             [Target::Shells],
-            "the shells are checked by default"
+            "the shells are checked whatever is turned off"
+        );
+        assert_eq!(
+            targets(None, &users, &["a.service".to_string()])[1],
+            Target::NoNewFailures(vec!["a.service".to_string()])
         );
     }
 
@@ -443,14 +684,54 @@ mod tests {
     #[test]
     fn a_fallback_note_names_the_target_and_the_time() {
         let failure = Failure {
-            generation: 7,
+            entry: "archix-current.conf".into(),
             target: Target::Listening(22).to_string(),
             why: "nothing listens on TCP port 22".into(),
             at: 1_792_576_985,
         };
         assert_eq!(
-            fallback_note(7, 6, &failure),
-            "archix: deployment 7 fell back to 6 because the health check \"TCP port 22 listening\" failed at 2026-10-21 10:03:05 UTC (nothing listens on TCP port 22); switch again once it passes"
+            fallback_note(&failure),
+            "archix: the boot of archix-current.conf failed the health check \"TCP port 22 listening\" at 2026-10-21 10:03:05 UTC (nothing listens on TCP port 22); switch again once it passes"
         );
+    }
+
+    #[test]
+    fn a_stuck_counted_boot_reboots_once_its_time_is_up_and_nobody_is_logged_in() {
+        let ten = 600;
+        assert!(
+            should_reboot(true, 601, ten, false, false, false).is_some(),
+            "never got to boot-complete"
+        );
+        assert!(
+            should_reboot(true, 601, ten, true, true, false).is_some(),
+            "in emergency mode"
+        );
+        assert_eq!(
+            should_reboot(true, 601, ten, true, false, false),
+            None,
+            "it counted as good"
+        );
+        assert_eq!(should_reboot(true, 599, ten, false, true, false), None, "not yet");
+        assert_eq!(
+            should_reboot(true, 601, ten, false, true, true),
+            None,
+            "someone is logged in"
+        );
+        assert_eq!(should_reboot(false, 601, ten, false, true, false), None, "not counted");
+        assert_eq!(should_reboot(true, 6001, 0, false, true, false), None, "turned off");
+    }
+
+    #[test]
+    fn the_display_manager_is_whatever_display_manager_service_links_to() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(display_manager(dir.path()), None);
+        let units = dir.path().join("etc/systemd/system");
+        fs::create_dir_all(&units).unwrap();
+        std::os::unix::fs::symlink(
+            "/usr/lib/systemd/system/gdm.service",
+            units.join("display-manager.service"),
+        )
+        .unwrap();
+        assert_eq!(display_manager(dir.path()).as_deref(), Some("gdm.service"));
     }
 }

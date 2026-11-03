@@ -101,6 +101,7 @@ pub fn create(note: Option<String>) -> Result<()> {
         Kind::Manual,
         contents(current.as_ref(), "taken by hand".into(), note),
     )?;
+    archix::system::menu::snapshot_taken(&paths, record.number)?;
     println!(
         "snapshot {} taken: {}",
         record.number,
@@ -142,8 +143,17 @@ impl Rollbacks {
         }
     }
 
-    /// After the prompt, before anything is applied: sets the root up, or takes the snapshot of the system as `current` left it, labelled with what comes next.
-    pub(super) fn before(&self, root: &Path, current: Option<&Generation>, label: String) -> Result<Option<Record>> {
+    /// The policy, when rollbacks are on.
+    pub(super) fn policy(&self) -> Option<&Policy> {
+        match self {
+            Rollbacks::On(policy) => Some(policy),
+            _ => None,
+        }
+    }
+
+    /// After the prompt, before anything is applied: sets the root up, or takes the snapshot of the system as `current` left it, labelled with what comes next, which boots the image the system boots now.
+    pub(super) fn before(&self, paths: &Paths, current: Option<&Generation>, label: String) -> Result<Option<Record>> {
+        let root = &paths.root;
         match self {
             Rollbacks::Off => Ok(None),
             Rollbacks::Setup => {
@@ -159,6 +169,7 @@ impl Rollbacks {
                 let record = Store::open(root)
                     .create(root, Kind::Switch, contents(current, label, None))
                     .context("taking the snapshot before the switch")?;
+                archix::system::menu::snapshot_taken(paths, record.number)?;
                 println!(
                     "snapshot {} holds the system as it was before this change",
                     record.number
@@ -168,10 +179,13 @@ impl Rollbacks {
         }
     }
 
-    /// After the apply: prunes by the policy, then drops refetchable packages from archix's cache if the root is still short; returns warnings.
+    /// After the apply: prunes by the policy, never the snapshots with boot entries, then drops refetchable packages from archix's cache if the root is still short; returns warnings.
     pub(super) fn after(&self, paths: &Paths, current: &BTreeMap<String, archix::lock::Locked>) -> Vec<String> {
         let Rollbacks::On(policy) = self else { return Vec::new() };
-        let pruned = snapshot::prune_root(paths, policy, current, || archix::system::btrfs::space(&paths.root));
+        let pinned = archix::system::menu::pinned(paths, policy.entries);
+        let pruned = snapshot::prune_root(paths, policy, current, &pinned, || {
+            archix::system::btrfs::space(&paths.root)
+        });
         if !pruned.deleted.is_empty() {
             let numbers: Vec<String> = pruned.deleted.iter().map(u32::to_string).collect();
             println!("deleted snapshots {}", numbers.join(", "));
@@ -236,6 +250,18 @@ pub fn delete(number: u32) -> Result<()> {
     }
     store.delete(number)?;
     println!("snapshot {number} deleted");
+    let paths = Paths::system();
+    if let Some(generation) = current_generation(&paths)?
+        && let Some(plan) = &generation.settings.boot
+        && let Err(e) = archix::system::menu::refresh(
+            &paths,
+            plan,
+            Some(generation.settings.rollback.as_ref().map_or(0, |p| p.entries)),
+            false,
+        )
+    {
+        eprintln!("warning: snapshot {number}'s boot entry is still on the ESP: {e:#}");
+    }
     Ok(())
 }
 
@@ -277,4 +303,90 @@ pub fn chroot(device: &str, command: &[String]) -> Result<()> {
     let _ = Command::new("umount").arg("-R").arg(&target).status();
     let _ = std::fs::remove_dir(&target);
     ran
+}
+
+/// The subvolume path, from the top level, whose UUID is `uuid` in `btrfs subvolume list -u`'s output.
+fn listed_path(listing: &str, uuid: &str) -> Option<String> {
+    listing.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let at = fields.iter().position(|field| *field == "uuid")?;
+        if fields.get(at + 1) != Some(&uuid) {
+            return None;
+        }
+        fields.get(at + 3).map(|path| path.to_string())
+    })
+}
+
+/// The subvolume path, from the top level, whose UUID is `uuid`, among those under the mounted top level `top`.
+fn subvolume_by_uuid(top: &Path, uuid: &str) -> Option<String> {
+    let output = Command::new("btrfs")
+        .args(["subvolume", "list", "-u"])
+        .arg(top)
+        .output()
+        .ok()?;
+    listed_path(&String::from_utf8_lossy(&output.stdout), uuid)
+}
+
+/// `archix resync`: adopts a root another tool put in `@`'s place: lays it out for rollbacks again if it isn't, carries accounts over from the root it replaced when that root can still be found by its recorded UUID, and records the new root.
+pub fn resync() -> Result<()> {
+    let root = archix::testhooks::root();
+    let Some(why) = snapshot::foreign_root(&root) else {
+        println!("the root is the one archix last produced; nothing to resync");
+        return Ok(());
+    };
+    println!("{why}");
+    // Read first: setting the layout up again records the new root.
+    let recorded = snapshot::recorded_root(&root.join(snapshot::MOUNT)).unwrap_or_default();
+    let (uuid, options) = root_device(&root)?;
+    let top = Top::mount(&uuid)?;
+    if !archix_mounted(&root) || !root.join(layout::ON_ROOT).is_dir() {
+        match layout::setup(&root, &top.dir, &uuid, &options)? {
+            layout::Setup::Done => println!("laid the root out for rollbacks again"),
+            layout::Setup::AtNextBoot => {
+                println!("laid the root out for rollbacks again; /var/lib moves at the next boot")
+            }
+        }
+    }
+    match subvolume_by_uuid(&top.dir, &recorded) {
+        Some(path) => {
+            let old = top.dir.join(path.trim_start_matches('/'));
+            let read = |etc: &Path| -> archix::system::accounts::Texts {
+                archix::system::accounts::FILES.map(|file| std::fs::read_to_string(etc.join(file)).ok())
+            };
+            let carried = archix::system::accounts::carry(&read(&old.join("etc")), &read(&root.join("etc")));
+            for (file, text) in archix::system::accounts::FILES.iter().zip(&carried.texts) {
+                if let Some(text) = text {
+                    let path = root.join("etc").join(file);
+                    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+                }
+            }
+            println!("carried users, groups and passwords over from the root it replaced ({path})");
+            if !carried.skipped.is_empty() {
+                println!(
+                    "left out, as their IDs belong to other names here: {}",
+                    carried.skipped.join(", ")
+                );
+            }
+        }
+        None => println!(
+            "the root it replaced ({recorded}) isn't among the subvolumes any more (another tool may have moved or deleted it), so no accounts were carried over; check users and passwords"
+        ),
+    }
+    snapshot::record_root(&root.join(snapshot::MOUNT), &top.dir)?;
+    println!("recorded the root; switches and keeps work again");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_root_a_foreign_one_replaced_is_found_by_its_uuid() {
+        let listing = "ID 256 gen 10 top level 5 uuid 1c0a-aa path @\nID 300 gen 12 top level 5 uuid 77-bb path @snapshots/4/snapshot\n";
+        assert_eq!(
+            super::listed_path(listing, "77-bb").as_deref(),
+            Some("@snapshots/4/snapshot")
+        );
+        assert_eq!(super::listed_path(listing, "1c0a-aa").as_deref(), Some("@"));
+        assert_eq!(super::listed_path(listing, "gone"), None);
+    }
 }
