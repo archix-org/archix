@@ -123,6 +123,11 @@ fn a_hostile_git_config_in_the_owners_repo_never_runs_as_root() {
     let captured = captured::capture(&dir, &work).unwrap();
     assert!(captured.dir.join("init.lua").is_file());
     assert_eq!(
+        fs::metadata(work.dir.join("git/HEAD")).unwrap().uid(),
+        owner.uid,
+        "git ran as someone other than the config's owner"
+    );
+    assert_eq!(
         fs::read_dir(&marks).unwrap().count(),
         0,
         "the capture ran something from the owner's .git/config"
@@ -147,6 +152,9 @@ fn a_hostile_git_config_in_the_owners_repo_never_runs_as_root() {
 fn the_captured_copy_is_roots_so_changing_the_config_after_the_capture_changes_nothing() {
     let owner = setup();
     let dir = config(&owner, "toctou", "return { packages = { \"vim\" } }\n");
+    // Reachable by any uid, so only the capture can be what keeps the change out.
+    fs::set_permissions(&owner.home, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
     let work = Work::new(&captures()).unwrap();
     let captured = captured::capture(&dir, &work).unwrap();
     sh(&format!(
@@ -202,28 +210,62 @@ fn evaluate(owner: &Owner, name: &str, init: &str, limits: &Limits) -> Result<St
 #[test]
 fn the_config_cant_reach_outside_its_tree_or_run_anything() {
     let owner = setup();
-    fs::write("/root/archix-only-root", "root's").unwrap();
     for (name, init, want) in [
-        ("io", "local f = io.open('/etc/passwd') return {}", "io"),
-        ("os", "os.execute('touch /tmp/archix-escaped') return {}", "os"),
-        ("load", "load('return 1')() return {}", "load"),
-        ("dofile", "dofile('/etc/passwd') return {}", "dofile"),
-        (
-            "require-up",
-            "require('../../../../root/archix-only-root') return {}",
-            "archix-only-root",
-        ),
-        (
-            "read-file",
-            "return { files = { ['/etc/x'] = { text = archix.read_file('/root/archix-only-root') } } }",
-            "archix-only-root",
-        ),
+        ("io", "local f = io.open('/etc/passwd') return {}", "'io'"),
+        ("os", "os.execute('touch /tmp/archix-escaped') return {}", "'os'"),
+        ("load", "load('return 1')() return {}", "'load'"),
+        ("dofile", "dofile('/etc/passwd') return {}", "'dofile'"),
+        ("loadfile", "loadfile('/etc/passwd') return {}", "'loadfile'"),
     ] {
         let result = evaluate(&owner, &format!("escape-{name}"), init, &Limits::default());
         let error = result.expect_err(&format!("{name}: the config's escape worked"));
         assert!(error.contains(want), "{name}: {error}");
     }
     assert!(!Path::new("/tmp/archix-escaped").exists());
+    // Files any uid can read, so only the confinement can be what stops these, not the evaluator's uid.
+    let outside = PathBuf::from("/tmp/archix-outside");
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(&outside).unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(outside.join("mod.lua"), "return { packages = { 'escaped' } }\n").unwrap();
+    fs::set_permissions(outside.join("mod.lua"), fs::Permissions::from_mode(0o644)).unwrap();
+    let dir = config(&owner, "escape-links", "return require('linked.mod')\n");
+    fs::create_dir_all(dir.join("lua")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("lua/linked")).unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let result = isolated::evaluate(&captured.dir, "host", &BTreeMap::new(), &Limits::default());
+    let error = format!("{:#}", result.expect_err("require followed a link out of the tree"));
+    assert!(error.contains("leaves the config directory"), "require: {error}");
+
+    let dir = config(
+        &owner,
+        "escape-read",
+        "return { packages = { archix.read_file('linked/mod.lua') } }\n",
+    );
+    std::os::unix::fs::symlink(&outside, dir.join("linked")).unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let result = isolated::evaluate(&captured.dir, "host", &BTreeMap::new(), &Limits::default());
+    let error = format!("{:#}", result.expect_err("read_file followed a link out of the tree"));
+    assert!(error.contains("path leaves the config directory"), "read_file: {error}");
+
+    let dir = config(
+        &owner,
+        "escape-up",
+        "return { packages = { archix.read_file('../../../../../../tmp/archix-outside/mod.lua') } }\n",
+    );
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let result = isolated::evaluate(&captured.dir, "host", &BTreeMap::new(), &Limits::default());
+    let error = format!("{:#}", result.expect_err("read_file went up out of the tree"));
+    assert!(
+        error.contains("path leaves the config directory"),
+        "read_file with ..: {error}"
+    );
+    fs::remove_dir_all(&outside).unwrap();
 }
 
 #[test]
@@ -380,6 +422,22 @@ fn the_lock_a_root_command_reads_is_the_captured_one_so_changing_it_after_the_ca
         fs::read_to_string(dir.join("archix.lock"))
             .unwrap()
             .contains("2001-02-03"),
+        "the race never happened"
+    );
+}
+
+#[test]
+fn the_config_a_root_command_evaluates_is_the_captured_one_so_changing_it_after_the_capture_is_ignored() {
+    let owner = setup();
+    let dir = config(&owner, "eval-race", "return { packages = {} }\n");
+    fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    fs::set_permissions(&owner.home, fs::Permissions::from_mode(0o755)).unwrap();
+    let race = format!("echo 'this is not lua' > {}/init.lua", dir.display());
+    let (ok, said) = archix(&dir, Some(&race), &["status"]);
+    assert!(ok && said.contains("box is locked to snapshot 2026-10-10"), "{said}");
+    assert!(
+        fs::read_to_string(dir.join("init.lua")).unwrap().contains("not lua"),
         "the race never happened"
     );
 }
