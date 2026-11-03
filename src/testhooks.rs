@@ -17,6 +17,15 @@ pub fn mark(step: &str) {
     crash_at(step);
 }
 
+/// Runs ARCHIX_TEST_AFTER_CAPTURE in a shell in a debug build, right after a root command captured the config, as the config's owner racing the command would.
+pub fn after_capture() {
+    if cfg!(debug_assertions)
+        && let Some(script) = std::env::var_os("ARCHIX_TEST_AFTER_CAPTURE")
+    {
+        let _ = std::process::Command::new("sh").arg("-c").arg(script).status();
+    }
+}
+
 /// Whether ARCHIX_TEST_BREAK names `rule` in a debug build, so the power-cut harness can be seen catching a commit that breaks it.
 pub fn broken(rule: &str) -> bool {
     cfg!(debug_assertions) && std::env::var("ARCHIX_TEST_BREAK").as_deref() == Ok(rule)

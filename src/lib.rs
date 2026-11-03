@@ -26,6 +26,7 @@ pub mod packages;
 pub mod pacman;
 pub mod paths;
 pub mod plan;
+pub mod plan_diff;
 pub mod recipes;
 pub mod repack;
 pub mod repos;

@@ -121,6 +121,7 @@ pub fn evaluate_config(
     }
     let work = archix::captured::Work::new(Path::new(archix::captured::CAPTURES))?;
     let captured = archix::captured::capture(config_dir, &work)?;
+    archix::testhooks::after_capture();
     Ok(reevaluate(&captured, host, &overlay).map(|config| Evaluated {
         config,
         captured: Some(captured),
@@ -787,12 +788,15 @@ fn transaction_for(
         }
     }
     add_download_sizes(archive, paths, date, packages, &mut wanted);
-    install.extend(fetch_all(
-        archive,
-        &paths.packages(),
-        std::slice::from_ref(&paths.pacman_cache),
-        &wanted,
-    )?);
+    install.extend(
+        fetch_all(
+            archive,
+            &paths.packages(),
+            std::slice::from_ref(&paths.pacman_cache),
+            &wanted,
+        )
+        .context("a package the switch needs couldn't be fetched; nothing was changed")?,
+    );
     Ok(Packages {
         reinstall: changes.iter().any(|change| matches!(change, Change::Rebuild { .. })),
         install,
@@ -883,9 +887,9 @@ fn aur_git(declared: &Declared) -> Result<AurGit> {
     Ok(AurGit::new(&declared.aur_url, &user_cache()?))
 }
 
-/// The config's local recipes and patched packages.
+/// The config's local recipes and patched packages, from the capture when root.
 fn recipes(target: &Target, declared: &Declared) -> Result<Recipes> {
-    Recipes::load(target.config_dir, &declared.patches, &user_cache()?)
+    Recipes::load(target.tree, &declared.patches, &user_cache()?)
 }
 
 /// The AUR and the config's recipes as the resolver sees them; the AUR's package list is downloaded only if a name is in neither the repos nor pkgbuilds/.

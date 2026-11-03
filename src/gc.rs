@@ -40,43 +40,94 @@ pub fn cached_files<'a>(
 /// How many of the newest generations keep every package file, official ones included.
 pub const RECENT: usize = 2;
 
-/// Copies `file` from pacman's cache into archix's own, as a reflink where the filesystem has them, unless it's there; paccache never touches archix's cache.
-pub fn keep_copy(paths: &Paths, file: &str) -> Result<bool> {
+/// How a package file got into archix's own cache, cheapest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kept {
+    /// There already, or not in pacman's cache to take.
+    Nothing,
+    /// Shares its blocks with pacman's copy, which can go on its own.
+    Reflinked,
+    /// The same inode as pacman's copy, where the filesystem has no reflinks; paccache only unlinks its name.
+    Linked,
+    /// A full copy, as pacman's cache is on another filesystem.
+    Copied,
+}
+
+/// Takes `file` from pacman's cache into archix's own without duplicating it where it can: a reflink, else a hard link on the same filesystem, else a copy; paccache never touches archix's cache.
+pub fn keep_copy(paths: &Paths, file: &str) -> Result<Kept> {
     let target = paths.packages().join(file);
     let source = paths.pacman_cache.join(file);
     if target.is_file() || !source.is_file() {
-        return Ok(false);
+        return Ok(Kept::Nothing);
     }
     fs::create_dir_all(paths.packages())?;
     let temp = paths.packages().join(format!(".{file}.part"));
-    let status = std::process::Command::new("cp")
-        .arg("--reflink=auto")
-        .arg(&source)
-        .arg(&temp)
-        .status()
-        .context("running cp")?;
-    if !status.success() {
+    let _ = fs::remove_file(&temp);
+    let cp = |mode: &str| {
+        std::process::Command::new("cp")
+            .arg(mode)
+            .arg(&source)
+            .arg(&temp)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .context("running cp")
+            .map(|status| status.success())
+    };
+    let how = if cp("--reflink=always")? {
+        Kept::Reflinked
+    } else if fs::hard_link(&source, &temp).is_ok() {
+        Kept::Linked
+    } else if cp("--reflink=never")? {
+        Kept::Copied
+    } else {
         let _ = fs::remove_file(&temp);
         anyhow::bail!(
             "copying {} into {} failed",
             source.display(),
             paths.packages().display()
         );
-    }
+    };
     fs::rename(&temp, &target)?;
-    Ok(true)
+    Ok(how)
 }
 
-/// The bytes archix's own package cache holds.
+/// The bytes archix's own package cache holds on disk, each hard-linked file once; reflinked blocks count too, as this cache alone can pin them.
 pub fn cache_size(paths: &Paths) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut seen = BTreeSet::new();
     fs::read_dir(paths.packages())
         .into_iter()
         .flatten()
         .flatten()
         .filter_map(|entry| entry.metadata().ok())
-        .filter(|meta| meta.is_file())
-        .map(|meta| meta.len())
+        .filter(|meta| meta.is_file() && seen.insert((meta.dev(), meta.ino())))
+        .map(|meta| meta.blocks() * 512)
         .sum()
+}
+
+/// Under the free-space floor: drops the cached packages the Arch Linux Archive can serve again that `current`, the current lock, doesn't name, the first thing a low disk gives up after snapshots; returns the bytes freed.
+pub fn drop_refetchable(
+    paths: &Paths,
+    current: &std::collections::BTreeMap<String, crate::lock::Locked>,
+    older: &[&std::collections::BTreeMap<String, crate::lock::Locked>],
+) -> Result<u64> {
+    let keep: BTreeSet<&str> = current.values().map(|pkg| pkg.file.as_str()).collect();
+    let refetchable: BTreeSet<&str> = older
+        .iter()
+        .flat_map(|packages| packages.values())
+        .filter(|pkg| crate::repos::is_official(&pkg.repo) && !pkg.is_built())
+        .map(|pkg| pkg.file.as_str())
+        .filter(|file| !keep.contains(file))
+        .collect();
+    let mut freed = 0;
+    for file in refetchable {
+        let path = paths.packages().join(file);
+        if let Ok(meta) = fs::metadata(&path) {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            freed += meta.len();
+        }
+    }
+    Ok(freed)
 }
 
 /// Drops the deployments `deployments.keep` leaves out (never the booted, current or boot-default one) with their boot entries, then generation records outside the generation limits that have no deployment, then cached files no kept generation needs.
@@ -208,6 +259,79 @@ mod tests {
             );
         }
         g
+    }
+
+    fn cache_paths(dir: &Path) -> Paths {
+        let mut paths = Paths::under(dir);
+        paths.cache = dir.join("cache");
+        paths.pacman_cache = dir.join("pacman");
+        fs::create_dir_all(&paths.pacman_cache).unwrap();
+        paths
+    }
+
+    #[test]
+    fn a_package_kept_without_reflinks_is_a_hard_link_not_a_second_copy() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = cache_paths(dir.path());
+        fs::write(paths.pacman_cache.join("vim-1.pkg.tar.zst"), vec![7; 8192]).unwrap();
+        let how = keep_copy(&paths, "vim-1.pkg.tar.zst").unwrap();
+        let (pacman, kept) = (
+            fs::metadata(paths.pacman_cache.join("vim-1.pkg.tar.zst")).unwrap(),
+            fs::metadata(paths.packages().join("vim-1.pkg.tar.zst")).unwrap(),
+        );
+        match how {
+            Kept::Linked => assert_eq!(pacman.ino(), kept.ino()),
+            Kept::Reflinked => assert_ne!(pacman.ino(), kept.ino()),
+            other => panic!("kept as {other:?} on one filesystem"),
+        }
+        assert_eq!(keep_copy(&paths, "vim-1.pkg.tar.zst").unwrap(), Kept::Nothing);
+        assert_eq!(keep_copy(&paths, "absent.pkg.tar.zst").unwrap(), Kept::Nothing);
+        fs::remove_file(paths.pacman_cache.join("vim-1.pkg.tar.zst")).unwrap();
+        assert_eq!(
+            fs::read(paths.packages().join("vim-1.pkg.tar.zst")).unwrap().len(),
+            8192
+        );
+    }
+
+    #[test]
+    fn the_cache_counts_a_hard_linked_file_once_by_its_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = cache_paths(dir.path());
+        fs::create_dir_all(paths.packages()).unwrap();
+        fs::write(paths.packages().join("a"), vec![1; 65536]).unwrap();
+        fs::hard_link(paths.packages().join("a"), paths.packages().join("b")).unwrap();
+        let size = cache_size(&paths);
+        assert!((65536..2 * 65536).contains(&size), "{size}");
+    }
+
+    #[test]
+    fn a_low_disk_drops_cached_official_packages_of_older_locks_but_never_the_current_locks_or_unarchived_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = cache_paths(dir.path());
+        fs::create_dir_all(paths.packages()).unwrap();
+        let older = generation(1, &[("vim", "extra"), ("cachy", "cachyos-v3"), ("nano", "core")]).1;
+        let mut current = generation(2, &[("bash", "core")]).1;
+        current.insert("nano".to_string(), older["nano"].clone());
+        for file in [
+            "vim-1.pkg.tar.zst",
+            "cachy-1.pkg.tar.zst",
+            "nano-1.pkg.tar.zst",
+            "bash-2.pkg.tar.zst",
+        ] {
+            fs::write(paths.packages().join(file), vec![1; 100]).unwrap();
+        }
+        assert_eq!(drop_refetchable(&paths, &current, &[&older]).unwrap(), 100);
+        let mut left: Vec<String> = fs::read_dir(paths.packages())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            ["bash-2.pkg.tar.zst", "cachy-1.pkg.tar.zst", "nano-1.pkg.tar.zst"]
+        );
     }
 
     #[test]

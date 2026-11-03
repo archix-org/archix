@@ -203,6 +203,20 @@ impl Machine {
         }
     }
 
+    /// Where `path`, relative to the root, is in the running system, writable for a test.
+    pub fn system_file(&self, path: &str) -> PathBuf {
+        match self.current() {
+            Some(number) => self.deployment(number).join(path),
+            None => self.root.join(path),
+        }
+    }
+
+    /// The pacman database of the system as it is now.
+    pub fn local_db(&self) -> PathBuf {
+        self.deployment(self.current().expect("a laid out machine"))
+            .join("pacman/local")
+    }
+
     pub fn esp(&self) -> PathBuf {
         self.root.join("efi")
     }

@@ -2244,3 +2244,121 @@ fn what_the_machine_carries_but_the_config_doesnt_declare_is_named_before_and_af
     check(&setup.ok(&["diff", "--all"]), "after the rollback");
     checks.finish();
 }
+
+fn said(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+#[ignore]
+fn the_prompt_shows_the_plan_beside_the_source_diff_and_never_a_password_hash() {
+    let _system = lock_system();
+    const OLD: &str =
+        "$6$oldsaltoldsalt$XhmZ3VZFIhQfYh4lKgoNS5PvBOwS2o0B1E/SRuTM8GQpyC6sIh2rvkkgAuFSYi5RqBFAvQ2pnRfvqCNFh9UNt.";
+    const NEW: &str =
+        "$6$newsaltnewsalt$XhmZ3VZFIhQfYh4lKgoNS5PvBOwS2o0B1E/SRuTM8GQpyC6sIh2rvkkgAuFSYi5RqBFAvQ2pnRfvqCNFh9UNt.";
+    let setup = Setup::new(
+        &[],
+        &format!(
+            r#"users = {{ gone = {{}}, kept = {{ hashed_password = "{OLD}" }} }}, files = {{ ["/etc/archix-plan-old"] = {{ text = "a" }}, ["/etc/systemd/system/archix-plan-old.service"] = {{ text = "[Unit]\n[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=multi-user.target\n" }} }}, services = {{ ["archix-plan-old.service"] = true }}"#
+        ),
+    );
+    setup.lay_out();
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(
+        &["tree"],
+        &format!(
+            r#"users = {{ fresh = {{ groups = {{ "wheel" }} }}, kept = {{ hashed_password = "{NEW}" }} }}, files = {{ ["/etc/archix-plan-new"] = {{ text = "b" }}, ["/etc/systemd/system/archix-plan-new.service"] = {{ text = "[Unit]\n[Service]\nExecStart=/bin/true\n[Install]\nWantedBy=multi-user.target\n" }} }}, services = {{ ["archix-plan-new.service"] = true }}"#
+        ),
+    );
+    let output = setup.answering_raw("n\n", &["switch"]);
+    let text = said(&output);
+    for line in [
+        "package + tree ",
+        "file + /etc/archix-plan-new (0644 root:root)",
+        "file - /etc/archix-plan-old",
+        "unit + archix-plan-new.service enabled",
+        "unit - archix-plan-old.service",
+        "user + fresh (groups wheel",
+        "user - gone",
+        "user ~ kept: password",
+    ] {
+        assert!(text.contains(line), "the plan is missing {line:?}:\n{text}");
+    }
+    assert!(text.contains(":: the config since the last generation"), "{text}");
+    assert!(
+        !text.contains(OLD) && !text.contains(NEW) && !text.contains("oldsalt"),
+        "{text}"
+    );
+}
+
+#[test]
+#[ignore]
+fn a_package_that_cant_be_fetched_refuses_the_switch_before_anything_changes_and_names_it() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.lay_out();
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&["tree"], r#"files = { ["/etc/archix-unfetched"] = { text = "x" } }"#);
+    setup.ok(&["lock"]);
+    for dir in [setup.paths.pacman_cache.clone(), setup.paths.packages()] {
+        for cached in fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if cached.file_name().to_string_lossy().starts_with("tree-") {
+                fs::remove_file(cached.path()).unwrap();
+            }
+        }
+    }
+    let generation = setup.machine.current();
+    let output = setup.run_env(
+        &[("ARCHIX_TEST_ARCHIVE", "http://127.0.0.1:9")],
+        &["switch", "--noconfirm"],
+    );
+    let text = said(&output);
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("tree") && text.contains("nothing was changed"), "{text}");
+    assert_eq!(installed("tree"), None);
+    assert_eq!(setup.machine.current(), generation);
+    assert!(!setup.machine.system_file("etc/archix-unfetched").exists());
+}
+
+#[test]
+#[ignore]
+fn a_revert_to_the_last_generation_works_offline_from_archixs_own_cache_shown_in_status() {
+    let _system = lock_system();
+    let setup = Setup::new(&["tree"], "");
+    setup.lay_out();
+    setup.ok(&["switch", "--noconfirm"]);
+    let file = setup.lock().packages["tree"].file.clone();
+    assert!(setup.paths.packages().join(&file).is_file());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(installed("tree"), None);
+    assert!(
+        setup.paths.packages().join(&file).is_file(),
+        "the last 2 generations keep every package"
+    );
+    assert!(setup.ok(&["status"]).contains("package cache:"));
+    for cached in fs::read_dir(&setup.paths.pacman_cache).unwrap().flatten() {
+        if cached.file_name().to_string_lossy().starts_with("tree-") {
+            fs::remove_file(cached.path()).unwrap();
+        }
+    }
+    setup.set_body(&["tree"], "");
+    setup.ok_env(
+        &[("ARCHIX_TEST_ARCHIVE", "http://127.0.0.1:9")],
+        &["switch", "--noconfirm"],
+    );
+    assert!(installed("tree").is_some());
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    setup.set_body(&[], r#"files = { ["/etc/archix-newer"] = { text = "x" } }"#);
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(
+        !setup.paths.packages().join(&file).exists(),
+        "an official package two generations back is the archive's to serve"
+    );
+}

@@ -268,6 +268,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         },
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
+        applied: None,
         system: SystemState::default(),
         flatpak: lock.flatpak.clone(),
         before_archix: false,
@@ -479,6 +480,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         allow_unsafe,
     )?;
     check_partial(&paths, &archive, &lock, &installed, &changes, &declared.repos)?;
+    show_plan_diff(current.as_ref(), &lock.packages, &rendered.state);
     show_config_diff(target, &paths)?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + 1;
     if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
@@ -726,6 +728,24 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     )
 }
 
+/// Prints what the evaluated plan changes from the current generation's: packages, files, units, users and the rest, with no secret or password hash in it.
+fn show_plan_diff(current: Option<&Generation>, packages: &BTreeMap<String, Locked>, state: &SystemState) {
+    let no_packages = BTreeMap::new();
+    let no_state = SystemState::default();
+    let lines = archix::plan_diff::lines(
+        current.map_or(&no_packages, |g| &g.packages),
+        current.map_or(&no_state, |g| &g.system),
+        packages,
+        state,
+    );
+    if !lines.is_empty() {
+        println!(":: the plan since the last generation archix applied");
+    }
+    for line in archix::plan_diff::capped(&lines, 200) {
+        println!("{line}");
+    }
+}
+
 /// Prints how the captured config differs from the one archix last applied, from root's own copy of both.
 fn show_config_diff(target: &Target, paths: &Paths) -> Result<()> {
     let Some(captured) = target.captured else {
@@ -744,15 +764,24 @@ fn show_config_diff(target: &Target, paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-/// Stores generation `number` in root's repository: the captured config tree, the lock as written and the evaluated plan; and points the owner's refs/archix/generations/<number> at the tree.
-fn record_applied(target: &Target, paths: &Paths, number: u32) -> Result<()> {
+/// Stores generation `number` in root's repository: the captured config tree, the lock this switch applied and the evaluated plan; and points the owner's refs/archix/generations/<number> at the tree.
+fn record_applied(target: &Target, paths: &Paths, store: &Store, number: u32) -> Result<()> {
     let Some(captured) = target.captured else {
         return Ok(());
     };
     let applied = archix::captured::Applied::at(&paths.root, &paths.state);
     let tree = applied.store_tree(captured)?;
-    let lock = fs::read(target.config_dir.join("archix.lock")).unwrap_or_default();
-    applied.record(number, &tree, &lock, &archix::eval::isolated::plan_json(target.config))?;
+    let lock = super::lock::lock_text(target)?
+        .with_context(|| format!("this switch applied no {}", archix::lock::LOCK_FILE))?;
+    let stored = applied.record(
+        number,
+        &tree,
+        lock.as_bytes(),
+        &archix::eval::isolated::plan_json(target.config),
+    )?;
+    let mut generation = store.get(number)?;
+    generation.applied = Some(stored);
+    store.update(&generation)?;
     if let Err(e) = archix::captured::record_for_owner(target.config_dir, captured, number) {
         eprintln!("warning: couldn't point refs/archix/generations/{number} in the config's repository at it: {e:#}");
     }
@@ -885,7 +914,7 @@ fn after_commit(
             soft_failures.push(format!("keeping {} in archix's package cache: {e:#}", pkg.file));
         }
     }
-    if let Err(e) = record_applied(target, paths, number) {
+    if let Err(e) = record_applied(target, paths, store, number) {
         soft_failures.push(format!(
             "recording generation {number}'s config in root's repository: {e:#}"
         ));
@@ -983,6 +1012,7 @@ fn before_archix(target: &Generation, installed: &BTreeMap<String, archix::pacma
         flatpak: BTreeMap::new(),
         config_commit: None,
         config_dirty: false,
+        applied: None,
         before_archix: true,
         package_capabilities: BTreeMap::new(),
         ..target.clone()
@@ -1240,7 +1270,7 @@ fn check_partial(
                 .map(|(name, locked)| (name.clone(), locked.version.clone())),
         )
         .collect();
-    let mut breaks = archix::revert::dependency_breaks(&paths.local_db(), &untracked, &target);
+    let mut breaks = archix::revert::dependency_breaks(&installed_db(paths), &untracked, &target);
     breaks.extend(soname_breaks(paths, archive, lock, &untracked, &changing, repos)?);
     if breaks.is_empty() {
         return Ok(());

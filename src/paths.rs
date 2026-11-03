@@ -64,7 +64,12 @@ impl Paths {
         self.state.join("outside-changes.json")
     }
 
+    /// archix's own package cache: on @archix when the root has it, so it stays out of paccache's reach and survives a keep; else under the cache directory.
     pub fn packages(&self) -> PathBuf {
+        let on_archix = self.root.join(crate::snapshot::MOUNT);
+        if on_archix.is_dir() {
+            return on_archix.join("packages");
+        }
         self.cache.join("pkg")
     }
 }

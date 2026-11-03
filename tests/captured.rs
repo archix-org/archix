@@ -7,10 +7,52 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+mod common;
+
 use archix::captured::{self, Applied, Owner, Work};
 use archix::eval::isolated::{self, Limits};
+use archix::lock::{HostLock, Lockfile};
 
 const USER: &str = "archix-owner";
+
+fn rendered_lock(date: &str) -> String {
+    let mut lockfile = Lockfile::default();
+    lockfile.hosts.insert(
+        "box".to_string(),
+        HostLock {
+            date: date.parse().unwrap(),
+            repos: Vec::new(),
+            declared: Vec::new(),
+            prefer: Vec::new(),
+            pinned: Vec::new(),
+            held: BTreeMap::new(),
+            packages: BTreeMap::new(),
+            flatpak: BTreeMap::new(),
+            recipes: BTreeMap::new(),
+        },
+    );
+    lockfile.render()
+}
+
+/// Runs archix on `dir` with ARCHIX_TEST_AFTER_CAPTURE set to `race`, and returns its status and everything it said.
+fn archix(dir: &Path, race: Option<&str>, args: &[&str]) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_archix"));
+    command
+        .args(["--config", dir.to_str().unwrap(), "--host", "box"])
+        .args(args);
+    if let Some(race) = race {
+        command.env("ARCHIX_TEST_AFTER_CAPTURE", race);
+    }
+    let out = command.output().unwrap();
+    (
+        out.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    )
+}
 
 fn sh(command: &str) -> String {
     let output = Command::new("sh").arg("-c").arg(command).output().unwrap();
@@ -126,17 +168,12 @@ fn the_captured_copy_is_roots_so_changing_the_config_after_the_capture_changes_n
     };
     let tree = applied.store_tree(&captured).unwrap();
     assert_eq!(tree, captured.tree);
-    applied
+    let generation = applied
         .record(1, &tree, b"lock", &isolated::plan_json(&config))
         .unwrap();
-    let (stored, lock, plan) = applied.read(1, None).unwrap();
-    assert_eq!((stored, lock), (captured.tree.clone(), b"lock".to_vec()));
-    assert_eq!(isolated::read_plan(&plan).unwrap(), config);
-    assert!(
-        applied
-            .read(1, Some("0000000000000000000000000000000000000000"))
-            .is_err()
-    );
+    let stored = applied.verified(1, &generation.commit, Some(&tree)).unwrap();
+    assert_eq!((stored.tree, stored.lock), (captured.tree.clone(), b"lock".to_vec()));
+    assert_eq!(isolated::read_plan(&stored.plan).unwrap(), config);
 }
 
 #[test]
@@ -317,4 +354,220 @@ fn a_config_diff_never_prints_a_password_hash() {
         captured::redact_hashes(text),
         "+ hashed_password = \"<hash>\", other = \"<hash>\"\n"
     );
+    assert_eq!(
+        captured::redact_hashes("- initial_hashed_password = 'abJnggxhB/yWI', shell = \"/bin/sh\"\n"),
+        "- initial_hashed_password = '<hash>', shell = \"/bin/sh\"\n",
+        "a DES hash has no $ to spot it by"
+    );
+}
+
+#[test]
+fn the_lock_a_root_command_reads_is_the_captured_one_so_changing_it_after_the_capture_is_ignored() {
+    let owner = setup();
+    let dir = config(&owner, "lock-race", "return {}\n");
+    fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
+    let swapped = dir.with_file_name("lock-race-swapped");
+    fs::write(&swapped, rendered_lock("2001-02-03")).unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let race = format!("cp {} {}/archix.lock", swapped.display(), dir.display());
+    let (_, said) = archix(&dir, Some(&race), &["status"]);
+    assert!(
+        said.contains("box is locked to snapshot 2026-10-10"),
+        "the lock wasn't the captured one:\n{said}"
+    );
+    assert!(!said.contains("2001-02-03"), "{said}");
+    assert!(
+        fs::read_to_string(dir.join("archix.lock"))
+            .unwrap()
+            .contains("2001-02-03"),
+        "the race never happened"
+    );
+}
+
+#[test]
+fn the_recipes_a_root_command_reads_are_the_captured_ones_so_changing_them_after_the_capture_is_ignored() {
+    let owner = setup();
+    let dir = config(&owner, "recipe-race", "return { packages = { \"archix-race\" } }\n");
+    let recipe = dir.join("pkgbuilds/archix-race");
+    fs::create_dir_all(&recipe).unwrap();
+    let pkgbuild = |version: &str| {
+        format!("pkgname=archix-race\npkgver={version}\npkgrel=1\narch=(any)\nlicense=(MIT)\npackage() {{ :; }}\n")
+    };
+    fs::write(recipe.join("PKGBUILD"), pkgbuild("1.0")).unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let (ok, said) = archix(&dir, None, &["update", "--to", "2026-10-10", "--noconfirm"]);
+    assert!(ok, "{said}");
+    let stale = "the config changed since the lock";
+    let (_, said) = archix(&dir, None, &["status"]);
+    assert!(!said.contains(stale), "the lock should be fresh:\n{said}");
+    let swapped = dir.with_file_name("recipe-race-swapped");
+    fs::write(&swapped, pkgbuild("6.6.6")).unwrap();
+    let race = format!("cp {} {}/PKGBUILD", swapped.display(), recipe.display());
+    let (_, said) = archix(&dir, Some(&race), &["status"]);
+    assert!(
+        !said.contains(stale),
+        "the recipe changed after the capture counted:\n{said}"
+    );
+    assert!(
+        fs::read_to_string(recipe.join("PKGBUILD")).unwrap().contains("6.6.6"),
+        "the race never happened"
+    );
+    let (_, said) = archix(&dir, None, &["status"]);
+    assert!(
+        said.contains(stale),
+        "without a race the new recipe does count:\n{said}"
+    );
+}
+
+#[test]
+fn a_gitignored_lock_fails_loudly_rather_than_reading_as_no_lock() {
+    let owner = setup();
+    let dir = config(&owner, "lock-ignored", "return {}\n");
+    fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
+    fs::write(dir.join(".gitignore"), "archix.lock\n").unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let (ok, said) = archix(&dir, None, &["status"]);
+    assert!(
+        !ok && said.contains("archix.lock") && said.contains("gitignore"),
+        "{said}"
+    );
+}
+
+#[test]
+fn only_root_and_the_evaluator_can_read_a_capture() {
+    let owner = setup();
+    let dir = config(&owner, "private", "return { packages = { \"vim\" } }\n");
+    fs::write(dir.join("notes.txt"), "not for other users\n").unwrap();
+    sh(&format!("chown -R {USER}: {}", dir.display()));
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let mode = fs::metadata(&captured.dir).unwrap().mode() & 0o777;
+    assert_eq!(mode & 0o007, 0, "others can reach the capture: {mode:o}");
+    let attempt = |user: &str, what: String| {
+        Command::new("runuser")
+            .args(["-u", user, "--", "sh", "-c"])
+            .arg(what)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    for user in ["nobody", USER] {
+        for path in [
+            format!("cat {}/notes.txt", captured.dir.display()),
+            format!("ls {}", captured.dir.display()),
+            format!("find {} -type f -exec cat {{}} +", work.dir.join("root").display()),
+        ] {
+            assert!(!attempt(user, path.clone()), "{user} could run {path}");
+        }
+    }
+    let config = isolated::evaluate(&captured.dir, "host", &BTreeMap::new(), &Limits::default()).unwrap();
+    assert!(config.to_string().contains("vim"), "{config}");
+    assert_eq!(
+        fs::metadata(&captured.dir).unwrap().gid(),
+        0,
+        "the capture stays root's between evaluations"
+    );
+    assert_eq!(fs::metadata(&captured.dir).unwrap().mode() & 0o777, 0o700);
+}
+
+#[test]
+fn a_generation_is_read_back_only_if_its_record_and_every_object_agree() {
+    let owner = setup();
+    let dir = config(&owner, "verified", "return { packages = { \"vim\" } }\n");
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let applied = Applied {
+        git_dir: work.dir.join("root/applied.git"),
+    };
+    let tree = applied.store_tree(&captured).unwrap();
+    let first = applied
+        .record(1, &tree, b"first lock", b"{\"format\":1,\"config\":{}}")
+        .unwrap();
+    let second = applied
+        .record(2, &tree, b"second lock", b"{\"format\":1,\"config\":{}}")
+        .unwrap();
+    let stored = applied.verified(1, &first.commit, Some(&tree)).unwrap();
+    assert_eq!(stored.lock, b"first lock");
+
+    let error = format!("{:#}", applied.verified(1, &second.commit, None).unwrap_err());
+    assert!(error.contains("not the"), "the ref moved away from the record: {error}");
+    let elsewhere = "0".repeat(40);
+    let error = format!(
+        "{:#}",
+        applied.verified(1, &first.commit, Some(&elsewhere)).unwrap_err()
+    );
+    assert!(error.contains("tree") && error.contains(&elsewhere), "{error}");
+
+    let materialized = work.dir.join("root/materialized");
+    applied.materialize(&tree, &materialized).unwrap();
+    assert!(materialized.join("init.lua").is_file());
+    assert_eq!(fs::metadata(&materialized).unwrap().mode() & 0o777, 0o700);
+
+    let blob = sh(&format!(
+        "git --git-dir={} rev-parse {}:archix.lock",
+        applied.git_dir.display(),
+        first.commit
+    ));
+    let blob = blob.trim();
+    let object = applied.git_dir.join("objects").join(&blob[..2]).join(&blob[2..]);
+    fs::set_permissions(&object, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&object, b"not what was stored").unwrap();
+    let error = format!("{:#}", applied.verified(1, &first.commit, Some(&tree)).unwrap_err());
+    assert!(error.contains("damaged"), "a changed object must not be used: {error}");
+}
+
+#[test]
+fn a_record_without_a_commit_still_reads_and_one_with_it_keeps_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".archix/snapshots/1");
+    fs::create_dir_all(&path).unwrap();
+    fs::write(
+        path.join("record.json"),
+        r#"{"format":1,"number":1,"kind":"switch","tree":"abc"}"#,
+    )
+    .unwrap();
+    let store = archix::snapshot::Store::open(dir.path());
+    let record = store.get(1).unwrap().unwrap();
+    assert_eq!((record.tree.as_deref(), record.commit), (Some("abc"), None));
+    fs::write(
+        path.join("record.json"),
+        r#"{"format":1,"number":1,"kind":"switch","tree":"abc","commit":"def","generation":4}"#,
+    )
+    .unwrap();
+    let record = store.get(1).unwrap().unwrap();
+    assert_eq!((record.commit.as_deref(), record.generation), (Some("def"), Some(4)));
+}
+
+#[test]
+#[ignore]
+fn the_lock_recorded_with_a_generation_is_the_one_applied_even_if_the_live_one_changed() {
+    let _system = common::lock_system();
+    let setup = common::Setup::new(&[], "");
+    setup.lay_out();
+    let lock_path = setup.config.join("archix.lock");
+    let applied_lock = fs::read_to_string(&lock_path).unwrap();
+    let swapped = setup.config.with_extension("swapped");
+    fs::write(&swapped, rendered_lock("2001-02-03")).unwrap();
+    setup.write(
+        "init.lua",
+        &format!("{}\n-- a change\n", setup.read("init.lua").unwrap()),
+    );
+    let race = format!("cp {} {}", swapped.display(), lock_path.display());
+    setup.ok_env(&[("ARCHIX_TEST_AFTER_CAPTURE", &race)], &["switch", "--noconfirm"]);
+    let store = archix::generations::Store::new(&setup.paths);
+    let number = store.current().unwrap().unwrap();
+    let generation = store.get(number).unwrap();
+    let recorded = generation
+        .applied
+        .expect("the generation names its commit in root's repository");
+    let root = Applied::at(&setup.paths.root, &setup.paths.state);
+    let stored = root.verified(number, &recorded.commit, Some(&recorded.tree)).unwrap();
+    let text = String::from_utf8(stored.lock).unwrap();
+    assert!(
+        !text.contains("2001-02-03"),
+        "the recorded lock is the raced one:\n{text}"
+    );
+    assert_eq!(text, applied_lock);
+    let _ = fs::remove_file(swapped);
 }

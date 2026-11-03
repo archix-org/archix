@@ -57,6 +57,12 @@ pub struct Record {
     /// The config tree applied in it, by git tree hash; none if archix never applied one there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tree: Option<String>,
+    /// The commit in root's config repository holding that tree, its lock and its plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The generation that commit is at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u32>,
     /// The lock applied in it.
     #[serde(default)]
     pub packages: BTreeMap<String, Locked>,
@@ -75,6 +81,8 @@ fn other() -> Kind {
 #[derive(Debug, Clone, Default)]
 pub struct Meta {
     pub tree: Option<String>,
+    pub commit: Option<String>,
+    pub generation: Option<u32>,
     pub packages: BTreeMap<String, Locked>,
     pub label: String,
     pub note: Option<String>,
@@ -223,6 +231,8 @@ impl Store {
             kind,
             created: now(),
             tree: meta.tree,
+            commit: meta.commit,
+            generation: meta.generation,
             packages: meta.packages,
             label: meta.label,
             note: meta.note,
@@ -413,6 +423,8 @@ impl Store {
                 kind: Kind::Replaced,
                 created: now(),
                 tree: journal.meta.tree,
+                commit: journal.meta.commit,
+                generation: journal.meta.generation,
                 packages: journal.meta.packages,
                 label: journal.meta.label,
                 note: journal.meta.note,
@@ -451,6 +463,10 @@ struct Keeping {
 #[derive(Serialize, Deserialize)]
 struct Saved {
     tree: Option<String>,
+    #[serde(default)]
+    commit: Option<String>,
+    #[serde(default)]
+    generation: Option<u32>,
     packages: BTreeMap<String, Locked>,
     label: String,
     note: Option<String>,
@@ -460,6 +476,8 @@ impl From<Meta> for Saved {
     fn from(meta: Meta) -> Saved {
         Saved {
             tree: meta.tree,
+            commit: meta.commit,
+            generation: meta.generation,
             packages: meta.packages,
             label: meta.label,
             note: meta.note,
@@ -572,6 +590,8 @@ mod tests {
             kind,
             created: u64::from(number),
             tree: None,
+            commit: None,
+            generation: None,
             packages: BTreeMap::new(),
             label: String::new(),
             note: None,

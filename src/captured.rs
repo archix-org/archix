@@ -134,13 +134,15 @@ fn text(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).trim().to_string()
 }
 
-/// A config tree captured for a root command: its git tree id and a root-owned copy nobody else can write.
+/// A config tree captured for a root command: its git tree id and a root-owned copy nobody else can read, but for the evaluator while it runs.
 #[derive(Debug, Clone)]
 pub struct Captured {
     pub tree: String,
     pub dir: PathBuf,
     /// The owner's throwaway repository the tree was captured in, which the owner's own repository fetches it from.
     scratch: PathBuf,
+    /// Root's own scratch files about the tree, which nobody else can read.
+    private: PathBuf,
 }
 
 /// Where root commands keep their captures of the config while they run.
@@ -174,6 +176,9 @@ impl Drop for Work {
 /// Captures `config_dir` as its owner, in a throwaway repository the owner's own git config never reaches, and unpacks the tree into a root-owned copy whose tree id root checks itself.
 pub fn capture(config_dir: &Path, work: &Work) -> Result<Captured> {
     let owner = Owner::of(config_dir)?;
+    let private = work.dir.join("root");
+    fs::create_dir(&private)?;
+    fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
     let scratch = work.dir.join("git");
     fs::create_dir(&scratch)?;
     std::os::unix::fs::chown(&scratch, Some(owner.uid), Some(owner.gid))?;
@@ -211,7 +216,7 @@ pub fn capture(config_dir: &Path, work: &Work) -> Result<Captured> {
         .context("running git archive as the config's owner")?;
     let dir = work.dir.join("tree");
     fs::create_dir(&dir)?;
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     let mut tar = Vec::new();
     child
         .stdout
@@ -223,13 +228,18 @@ pub fn capture(config_dir: &Path, work: &Work) -> Result<Captured> {
         bail!("git archive of the config failed ({status})");
     }
     unpack(&tar, &dir)?;
-    let checked = tree_id(&dir, work)?;
+    let checked = tree_id(&dir, &private)?;
     if checked != tree {
         bail!(
             "the config tree root unpacked ({checked}) isn't the one its owner captured ({tree}); git submodules and files git can't archive aren't supported in the config"
         );
     }
-    Ok(Captured { tree, dir, scratch })
+    Ok(Captured {
+        tree,
+        dir,
+        scratch,
+        private,
+    })
 }
 
 /// Unpacks a tar of a config tree: regular files, directories and symlinks only, every path inside `dir`, owned by root.
@@ -270,8 +280,8 @@ pub fn unpack(tar: &[u8], dir: &Path) -> Result<()> {
 }
 
 /// The git tree id of `dir`, computed by root in a repository of its own with nothing from the config's owner.
-fn tree_id(dir: &Path, work: &Work) -> Result<String> {
-    let repo = work.dir.join("check.git");
+fn tree_id(dir: &Path, private: &Path) -> Result<String> {
+    let repo = private.join("check.git");
     let git = |args: &[&str]| {
         let mut command = Command::new("git");
         command.env_clear().env("PATH", "/usr/bin").env("HOME", "/");
@@ -325,11 +335,20 @@ pub struct Applied {
     pub git_dir: PathBuf,
 }
 
-/// The applied tree, lock and plan of one generation, as root stored them.
-#[derive(Debug, Clone, PartialEq)]
+/// Where a generation is in root's repository, as records hold it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Generation {
     pub commit: String,
     pub tree: String,
+}
+
+/// One generation read back from root's repository, checked against its record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stored {
+    pub commit: String,
+    pub tree: String,
+    pub lock: Vec<u8>,
+    pub plan: Vec<u8>,
 }
 
 impl Applied {
@@ -371,7 +390,7 @@ impl Applied {
     /// Stores `captured`'s tree into this repository, from root's own copy.
     pub fn store_tree(&self, captured: &Captured) -> Result<String> {
         self.ensure()?;
-        let index = captured.dir.with_file_name("applied-index");
+        let index = captured.private.join("applied-index");
         let mut add = self.git(&["add", "-A", "-f"]);
         add.env("GIT_INDEX_FILE", &index)
             .env("GIT_WORK_TREE", &captured.dir)
@@ -452,24 +471,44 @@ impl Applied {
         Some(text(out)).filter(|t| !t.is_empty())
     }
 
-    /// Generation `number`'s config tree, lock and plan, read back from root's own objects, the commit checked against `expected` when given.
-    pub fn read(&self, number: u32, expected: Option<&str>) -> Result<(String, Vec<u8>, Vec<u8>)> {
+    /// Generation `number`, read back for use: refs/generations/<number> must be the `commit` its record holds, every object must pass `git fsck`, and its config must be `tree` when the record names one; keep, revert and rollback read nothing else.
+    pub fn verified(&self, number: u32, commit: &str, tree: Option<&str>) -> Result<Stored> {
         let reference = format!("refs/generations/{number}");
-        let commit = text(run(
+        let found = text(run(
             self.git(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")]),
             "git rev-parse",
         )?);
-        if let Some(expected) = expected
-            && expected != commit
-        {
-            bail!(
-                "generation {number} in root's config repository is {commit}, not the {expected} its snapshot recorded"
-            );
+        if found != commit {
+            bail!("generation {number} in root's config repository is {found}, not the {commit} its record holds");
         }
-        let tree = text(run(
+        run(
+            self.git(&[
+                "fsck",
+                "--full",
+                "--strict",
+                "--no-dangling",
+                "--no-progress",
+                "--no-reflogs",
+            ]),
+            "git fsck of root's config repository",
+        )
+        .with_context(|| {
+            format!(
+                "generation {number}'s objects in {} are damaged",
+                self.git_dir.display()
+            )
+        })?;
+        let stored_tree = text(run(
             self.git(&["rev-parse", &format!("{commit}:config")]),
             "git rev-parse",
         )?);
+        if let Some(tree) = tree
+            && tree != stored_tree
+        {
+            bail!(
+                "generation {number}'s config in root's repository is tree {stored_tree}, not the {tree} its record holds"
+            );
+        }
         let lock = run(
             self.git(&["cat-file", "blob", &format!("{commit}:archix.lock")]),
             "git cat-file",
@@ -478,14 +517,30 @@ impl Applied {
             self.git(&["cat-file", "blob", &format!("{commit}:plan.json")]),
             "git cat-file",
         )?;
-        Ok((tree, lock, plan))
+        Ok(Stored {
+            commit: found,
+            tree: stored_tree,
+            lock,
+            plan,
+        })
     }
 
-    /// Unpacks a stored config tree into `dir`, root-owned.
+    /// Unpacks a stored config tree into `dir`, root-owned and root's alone, and checks what's on disk hashes to `tree`.
     pub fn materialize(&self, tree: &str, dir: &Path) -> Result<()> {
         let tar = run(self.git(&["archive", "--format=tar", tree]), "git archive")?;
         fs::create_dir_all(dir)?;
-        unpack(&tar, dir)
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        unpack(&tar, dir)?;
+        let private = self.git_dir.with_extension(format!("check-{}", std::process::id()));
+        fs::create_dir(&private).with_context(|| format!("creating {}", private.display()))?;
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
+        let checked = tree_id(dir, &private);
+        fs::remove_dir_all(&private)?;
+        let checked = checked?;
+        if checked != tree {
+            bail!("the config tree unpacked from root's repository is {checked}, not {tree}");
+        }
+        Ok(())
     }
 
     /// What changes from the last applied config tree to `tree`: a stat and the patch, at most `lines` lines of it.
@@ -522,8 +577,35 @@ impl Applied {
     }
 }
 
-/// `text` with every crypt(3) hash ($y$..., $6$..., $2b$...) replaced, so a diff of the config never prints a password hash.
+/// `text` with every crypt(3) hash ($y$..., $6$..., $2b$...) and the value of every `password` key replaced, so a diff of the config never prints a password hash, whichever scheme made it.
 pub fn redact_hashes(text: &str) -> String {
+    let lines: Vec<String> = redact_ids(text).split('\n').map(redact_password_key).collect();
+    lines.join("\n")
+}
+
+fn redact_password_key(line: &str) -> String {
+    let Some(key) = line.to_lowercase().find("password") else {
+        return line.to_string();
+    };
+    let Some(equals) = line[key..].find('=').map(|at| at + key) else {
+        return line.to_string();
+    };
+    let value = &line[equals..];
+    let Some(open) = value.find(['"', '\'']) else {
+        return line.to_string();
+    };
+    let quote = value[open..].chars().next().unwrap_or('"');
+    let Some(close) = value[open + 1..].find(quote) else {
+        return line.to_string();
+    };
+    format!(
+        "{}{quote}<hash>{quote}{}",
+        &line[..equals + open],
+        redact_password_key(&value[open + close + 2..])
+    )
+}
+
+fn redact_ids(text: &str) -> String {
     const IDS: &[&str] = &[
         "$y$", "$gy$", "$7$", "$6$", "$5$", "$2a$", "$2b$", "$2y$", "$1$", "$sha1$", "$md5$",
     ];

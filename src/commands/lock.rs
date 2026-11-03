@@ -166,6 +166,8 @@ pub(super) fn save_lock(
 thread_local! {
     /// While a switch runs, the config files it would write, which wait for it to commit.
     static DEFERRED: std::cell::RefCell<Option<Vec<ConfigWrite>>> = const { std::cell::RefCell::new(None) };
+    /// What this command already wrote to config files, which it reads back instead of the live directory.
+    static WRITTEN: std::cell::RefCell<Vec<ConfigWrite>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// From here on, config writes wait in memory until the switch commits its deployment.
@@ -188,12 +190,33 @@ pub(super) fn defer_write(path: &Path, text: &str) -> bool {
     })
 }
 
-/// archix.lock as this switch sees it: what it deferred, else what's on disk.
+/// archix.lock as this command sees it: what it deferred or wrote, else the capture's when root, else what's on disk; a root command never reads the live directory, which can change after the diff.
+pub(super) fn lock_text(target: &Target) -> Result<Option<String>> {
+    let path = target.config_dir.join(LOCK_FILE);
+    if let Some(text) = deferred_text(&path).or_else(|| written_text(&path)) {
+        return Ok(Some(text));
+    }
+    let source = target.tree.join(LOCK_FILE);
+    match std::fs::read_to_string(&source) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if target.captured.is_some() && path.symlink_metadata().is_ok() {
+                anyhow::bail!(
+                    "{} exists but isn't in the capture of the config, so it must be in a .gitignore; the lock is part of a generation, so stop ignoring it",
+                    path.display()
+                );
+            }
+            Ok(None)
+        }
+        Err(e) => Err(e).with_context(|| format!("reading {}", source.display())),
+    }
+}
+
 pub(super) fn load_lockfile(target: &Target) -> Result<Lockfile> {
     let path = target.config_dir.join(LOCK_FILE);
-    match deferred_text(&path) {
+    match lock_text(target)? {
         Some(text) => Lockfile::parse(&text, &path),
-        None => Lockfile::load(&path),
+        None => Ok(Lockfile::default()),
     }
 }
 
@@ -204,6 +227,16 @@ pub(super) fn store_lockfile(target: &Target, lockfile: &Lockfile) -> Result<()>
         write_config(&path, lockfile.render().as_bytes())?;
     }
     Ok(())
+}
+
+fn written_text(path: &Path) -> Option<String> {
+    WRITTEN.with(|written| {
+        written
+            .borrow()
+            .iter()
+            .find(|write| write.path == path)
+            .map(|write| write.text.clone())
+    })
 }
 
 /// The deferred text for `path`, which is what the config holds as far as this switch is concerned.
@@ -257,6 +290,14 @@ pub(super) fn stage_deferred(paths: &Paths, etc: &Path) -> Result<()> {
 
 /// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, so it's there before the /etc merge carries it.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
+    WRITTEN.with(|written| {
+        let mut written = written.borrow_mut();
+        written.retain(|write| write.path != path);
+        written.push(ConfigWrite {
+            path: path.to_path_buf(),
+            text: String::from_utf8_lossy(text).into_owned(),
+        });
+    });
     if owned_by_someone_else(path) {
         archix::captured::write_as_owner(path, text)?;
     } else {
@@ -549,7 +590,7 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
             let cached = archix::gc::cache_size(&paths);
             if cached > 0 {
                 println!(
-                    "package cache: {} MiB in {}, for reverts and rollbacks",
+                    "package cache: {} MiB on disk in {}, for reverts and rollbacks (reflinks and hard links share blocks with pacman's cache)",
                     cached >> 20,
                     paths.packages().display()
                 );

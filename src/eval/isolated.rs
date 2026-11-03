@@ -1,6 +1,7 @@
 //! Evaluating a captured config tree in a child process: a transient uid nobody else runs as, no_new_privs, and limits on CPU, memory and time; it hands back only the evaluated config as a versioned plan.
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -86,6 +87,27 @@ fn running_uids() -> std::collections::BTreeSet<u32> {
         .collect()
 }
 
+/// Lets the transient uid read a captured tree for as long as this lives; the tree is root's alone before and after.
+struct ReadableBy<'a> {
+    dir: &'a Path,
+}
+
+impl<'a> ReadableBy<'a> {
+    fn new(dir: &'a Path, gid: u32) -> Result<ReadableBy<'a>> {
+        std::os::unix::fs::chown(dir, None, Some(gid))
+            .with_context(|| format!("handing {} to the evaluator", dir.display()))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o750))?;
+        Ok(ReadableBy { dir })
+    }
+}
+
+impl Drop for ReadableBy<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(self.dir, std::fs::Permissions::from_mode(0o700));
+        let _ = std::os::unix::fs::chown(self.dir, None, Some(0));
+    }
+}
+
 /// Evaluates `dir` for `hostname` in a child under a transient uid, with `overlay`'s files instead of the tree's, and returns the evaluated config.
 pub fn evaluate(dir: &Path, hostname: &str, overlay: &BTreeMap<PathBuf, String>, limits: &Limits) -> Result<Value> {
     let exe = crate::testhooks::own_exe().context("finding archix's own binary")?;
@@ -123,6 +145,11 @@ pub fn evaluate(dir: &Path, hostname: &str, overlay: &BTreeMap<PathBuf, String>,
             Ok(())
         });
     }
+    let _readable = if unsafe { libc::geteuid() } == 0 {
+        Some(ReadableBy::new(dir, id)?)
+    } else {
+        None
+    };
     if unsafe { libc::geteuid() } == 0 {
         crate::captured::drop_to(&mut command, id, id, vec![id]);
     } else {
