@@ -84,7 +84,7 @@ fn fetched_files_and_appimages_are_locked_by_hash_and_roll_back() {
             && !without.join("usr/share/applications/archix-hello.desktop").exists(),
         "an AppImage that left the config takes its command and menu entry with it"
     );
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(
         fs::read_to_string(system_path("/etc/archix-fetched.conf")).unwrap(),
         "fetched = yes\n",

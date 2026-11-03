@@ -194,14 +194,14 @@ pub const SORT_SLOT: &str = "archix-1";
 pub const SORT_SNAPSHOT: &str = "archix-2";
 pub const SORT_EXTRA: &str = "archix-3";
 
-/// Which snapshots get an entry: those switches took and those pacman took before a transaction that changed the boot image, the newest `cap` of them, plus the slot; each needs an image on record.
+/// Which snapshots get an entry: those switches took, roots a keep replaced, and those pacman took before a transaction that changed the boot image, the newest `cap` of them, plus the slot; each needs an image on record.
 pub fn with_entries(state: &State, records: &[Record], cap: u32) -> Vec<u32> {
     let image = |number: u32| state.snapshots.get(&number);
     let mut candidates = Vec::new();
     for (i, record) in records.iter().enumerate() {
         let Some(own) = image(record.number) else { continue };
         let wanted = match record.kind {
-            Kind::Switch => true,
+            Kind::Switch | Kind::Replaced => true,
             Kind::Pacman => {
                 let next = records[i + 1..].iter().find_map(|later| image(later.number)).or(state
                     .current

@@ -93,8 +93,23 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Apply an earlier generation's record in place (the previous one by default): its packages from archix's cache and the archive, its files, users and services; the config and archix.lock stay as they are
+    /// Keep snapshot N: it becomes the root (`@`) from the next boot, with accounts made since carried over, and the running system is kept as a snapshot; `--cancel` undoes it before that boot
     Rollback {
+        /// Snapshot number; `archix snapshot list` lists them
+        #[arg(required_unless_present = "cancel")]
+        snapshot: Option<u32>,
+        /// Undo the pending rollback: the running system stays the root
+        #[arg(long, conflicts_with = "snapshot")]
+        cancel: bool,
+        /// Don't ask for confirmation
+        #[arg(long)]
+        noconfirm: bool,
+    },
+    /// Manage accounts a rollback brought back locked
+    #[command(subcommand)]
+    User(UserAction),
+    /// Apply an earlier generation's record live, in place (the previous one by default): its packages from archix's cache and the archive, its files, users and services; what it doesn't declare stays as it is, and the config and archix.lock stay as they are
+    Revert {
         /// Generation number; `archix generations` lists them
         generation: Option<u32>,
         /// Don't ask for confirmation
@@ -295,6 +310,12 @@ enum Secrets {
 }
 
 #[derive(Subcommand)]
+enum UserAction {
+    /// Enable a declared account a rollback brought back locked: its declared shell and password, not expired
+    Unlock { name: String },
+}
+
+#[derive(Subcommand)]
 enum SnapshotAction {
     /// Take a read-only snapshot of the root now; prune never drops it
     Create {
@@ -449,6 +470,8 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Switch { .. } => Some("switch"),
         Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
+        Command::Revert { .. } => Some("revert"),
+        Command::User(_) => Some("user"),
         Command::Gc => Some("gc"),
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
@@ -620,11 +643,27 @@ fn run() -> Result<ExitCode> {
     }
     match command {
         Command::Rollback {
+            snapshot,
+            cancel,
+            noconfirm,
+        } => {
+            match (cancel, snapshot) {
+                (true, _) => commands::keep::cancel()?,
+                (false, Some(number)) => commands::keep::keep(number, noconfirm)?,
+                (false, None) => unreachable!("clap requires a snapshot without --cancel"),
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::User(UserAction::Unlock { name }) => {
+            commands::keep::unlock(&name)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::Revert {
             generation,
             noconfirm,
             allow_unsafe_downgrade,
         } => {
-            commands::rollback(generation, noconfirm, allow_unsafe_downgrade)?;
+            commands::revert(generation, noconfirm, allow_unsafe_downgrade)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Generations => {
@@ -891,6 +930,8 @@ fn run() -> Result<ExitCode> {
         | Command::Init { .. }
         | Command::PacmanHook { .. }
         | Command::Rollback { .. }
+        | Command::User(_)
+        | Command::Revert { .. }
         | Command::Generations
         | Command::Gc
         | Command::Prefetch { .. }

@@ -108,7 +108,7 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed_commit().as_deref(), Some(second.as_str()));
 
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(
         installed_commit().as_deref(),
         Some(first.as_str()),

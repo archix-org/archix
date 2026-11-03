@@ -224,6 +224,19 @@ fn fs_type(device: &Path) -> Result<String> {
     Ok(fs)
 }
 
+/// Whether the current generation of the root mounted at `root` has rollbacks on; a root no switch recorded counts as on.
+fn rollbacks_on(root: &Path) -> bool {
+    let paths = Paths {
+        state: root.join(archix::snapshot::layout::ON_ROOT).join("archix"),
+        ..Paths::under(root)
+    };
+    let store = archix::generations::Store::new(&paths);
+    match store.current() {
+        Ok(Some(number)) => store.get(number).is_ok_and(|g| g.settings.rollback.is_some()),
+        _ => true,
+    }
+}
+
 fn run_mount(device: &Path, dir: &Path, fs: &str, options: &str) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let output = Command::new("mount")
@@ -492,14 +505,14 @@ impl Session {
         }
     }
 
-    /// Whether the root has rollbacks: btrfs with @archix, whose snapshots `rollback` can go back to.
+    /// Whether the root has rollbacks: btrfs with @archix, whose snapshots `rollback` can go back to, and not turned off by its current generation's config.
     fn has_rollbacks(&self) -> bool {
         self.root_device()
             .ok()
             .filter(|device| fs_type(device).is_ok_and(|fs| fs == "btrfs"))
             .is_some_and(|_| {
                 self.root()
-                    .is_ok_and(|root| root.join(archix::snapshot::MOUNT).is_dir())
+                    .is_ok_and(|root| root.join(archix::snapshot::MOUNT).is_dir() && rollbacks_on(&root))
             })
     }
 
@@ -515,6 +528,12 @@ impl Session {
         let ran = archix::snapshot::layout::mount_all(&device.to_string_lossy(), target).and_then(|()| {
             for (what, fs) in [("proc", "proc"), ("sys", "sysfs"), ("dev", "devtmpfs")] {
                 run_mount(Path::new(what), &target.join(what), fs, "rw")?;
+            }
+            // The keep points the boot menu at the kept root's kernel, so it needs the ESP where the root mounts it.
+            let esp = fs::read_to_string(target.join("var/lib/archix/boot/esp"));
+            if let (Ok(esp), Ok(device)) = (esp, self.esp_device()) {
+                run_mount(&device, &target.join(esp.trim().trim_start_matches('/')), "vfat", "rw")
+                    .context("mounting the ESP for the boot menu")?;
             }
             let status = Command::new("chroot")
                 .arg(target)

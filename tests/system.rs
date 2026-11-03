@@ -111,7 +111,7 @@ fn files_users_and_services_follow_the_config() {
         .expect("the hand edit was saved");
     assert_eq!(fs::read_to_string(saved).unwrap(), "edited by hand\n");
 
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(
         read("/etc/archix-test.conf"),
         "one\n",
@@ -211,7 +211,7 @@ fn hooks_run_after_each_switch_and_on_change_only_when_the_file_changed() {
     assert_eq!(read("/etc/archix-hook.conf"), "three\n");
     assert_eq!(log("var/tmp/archix-on-change").lines().count(), 4);
 
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(read("/etc/archix-hook.conf"), "two\n");
     assert_eq!(
         log("var/tmp/archix-on-change").lines().count(),
@@ -247,7 +247,7 @@ fn on_change_body(text: &str) -> String {
 
 #[test]
 #[ignore]
-fn on_change_runs_after_the_switch_that_writes_its_file_and_after_a_rollback() {
+fn on_change_runs_after_the_switch_that_writes_its_file_and_after_a_revert() {
     let _system = lock_system();
     let setup = Setup::new(&[], "users = { archixlive = {} }");
     setup.first_switch();
@@ -275,7 +275,7 @@ fn on_change_runs_after_the_switch_that_writes_its_file_and_after_a_rollback() {
     setup.set_body(&[], &on_change_body("two"));
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(runs(), [2, 2, 2]);
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(runs(), [3, 3, 3]);
 }
 
@@ -574,7 +574,7 @@ fn getcap(path: &std::path::Path) -> String {
 
 #[test]
 #[ignore]
-fn capabilities_go_on_a_copy_of_their_own_and_follow_switches_and_rollbacks() {
+fn capabilities_go_on_a_copy_of_their_own_and_follow_switches_and_reverts() {
     let _system = lock_system();
     let with_caps = r#"capabilities = { ["/usr/bin/tree"] = "cap_sys_nice+ep" }"#;
     let setup = Setup::new(&["tree"], "");
@@ -603,7 +603,7 @@ fn capabilities_go_on_a_copy_of_their_own_and_follow_switches_and_rollbacks() {
     assert!(out.contains("setcap     /usr/bin/tree (capabilities removed)"), "{out}");
     assert_eq!(getcap(&tree), "");
 
-    setup.ok(&["rollback", &again.to_string(), "--noconfirm"]);
+    setup.ok(&["revert", &again.to_string(), "--noconfirm"]);
     assert_eq!(machine.current(), Some(again));
     assert!(getcap(&tree).ends_with("cap_sys_nice=ep"));
     assert_ne!(capped, again);
@@ -790,7 +790,7 @@ fn file_systems_and_swap_are_the_fstab_after_archixs_own_root_and_esp_lines() {
         !system_path("/etc/crypttab").exists() || !read("/etc/crypttab").contains("archixsecret"),
         "and its crypttab line goes with it",
     );
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     checks.check(
         read("/etc/fstab").contains("UUID=archix-test-data /mnt/data"),
         "a rollback brings back the fstab of the generation it rolls back to",

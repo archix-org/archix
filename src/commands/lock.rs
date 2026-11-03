@@ -528,6 +528,12 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         println!("warning: {why}");
     }
+    if let Some(number) = archix::snapshot::keep_pending(&paths.root) {
+        println!("{}", super::keep::pending_notice(number));
+    }
+    if let Some(note) = super::keep::snap_pac_note(&paths) {
+        println!("{note}");
+    }
     for line in super::switch::hook_warnings(&paths) {
         println!("warning: {line}");
     }
@@ -549,7 +555,20 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
     match store.current()? {
         Some(number) => {
             let generation = store.get(number)?;
-            println!("current generation: {number} (snapshot {})", generation.date);
+            let tree = generation
+                .applied
+                .as_ref()
+                .map(|applied| format!("tree {}, ", &applied.tree[..applied.tree.len().min(12)]))
+                .unwrap_or_default();
+            println!("current generation: {number} ({tree}snapshot {})", generation.date);
+            let moved = archix::snapshot::varlib::size(&paths.root.join("var/lib"));
+            if moved > 0 {
+                println!(
+                    "files rollbacks moved aside: {} MiB in /var/lib/{}, each keep's kept as long as the snapshot it kept",
+                    moved >> 20,
+                    archix::snapshot::varlib::MOVED
+                );
+            }
             let cached = archix::gc::cache_size(&paths);
             if cached > 0 {
                 println!(

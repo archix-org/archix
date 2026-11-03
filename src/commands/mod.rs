@@ -1,5 +1,6 @@
 mod helper;
 mod init;
+pub mod keep;
 mod lock;
 pub mod pacman_hook;
 pub mod rescue;
@@ -75,7 +76,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     missing == 0
 }
 pub use switch::{
-    allow_partial, boot_check, cache_push, declare_and_switch, gc, generations, rollback, switch, without_secrets,
+    allow_partial, boot_check, cache_push, declare_and_switch, gc, generations, revert, switch, without_secrets,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";

@@ -10,12 +10,12 @@ use archix::paths::Paths;
 use archix::snapshot::{self, Kind, Meta, Policy, Record, Store, layout};
 
 /// The btrfs top level of the root's filesystem, mounted under /run for as long as this lives.
-struct Top {
-    dir: PathBuf,
+pub(super) struct Top {
+    pub(super) dir: PathBuf,
 }
 
 impl Top {
-    fn mount(uuid: &str) -> Result<Top> {
+    pub(super) fn mount(uuid: &str) -> Result<Top> {
         let dir = PathBuf::from(format!("/run/archix/top-{}", std::process::id()));
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let status = Command::new("mount")
@@ -42,7 +42,7 @@ impl Drop for Top {
 }
 
 /// The UUID and mount options of the filesystem `root` is on.
-fn root_device(root: &Path) -> Result<(String, String)> {
+pub(super) fn root_device(root: &Path) -> Result<(String, String)> {
     let output = Command::new("findmnt")
         .args(["-n", "-o", "UUID,OPTIONS", "-T"])
         .arg(root)
@@ -61,7 +61,7 @@ pub(super) fn archix_mounted(root: &Path) -> bool {
     layout::subvolume_of(&root.join(snapshot::MOUNT)).is_some_and(|path| path == format!("/{}", layout::ARCHIX))
 }
 
-fn store() -> Result<Store> {
+pub(super) fn store() -> Result<Store> {
     let root = archix::testhooks::root();
     if let Some(why) = snapshot::unsupported(&root) {
         bail!("{why}");
@@ -87,7 +87,7 @@ pub(super) fn contents(current: Option<&Generation>, label: String, note: Option
     }
 }
 
-fn current_generation(paths: &Paths) -> Result<Option<Generation>> {
+pub(super) fn current_generation(paths: &Paths) -> Result<Option<Generation>> {
     let store = archix::generations::Store::new(paths);
     store.current()?.map(|number| store.get(number)).transpose()
 }

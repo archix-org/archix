@@ -33,61 +33,6 @@ fn text(output: &Output) -> String {
     )
 }
 
-/// Packages built with makepkg, and a file:// repository of them for `pacman -S`.
-struct Packages {
-    dir: TempDir,
-}
-
-impl Packages {
-    fn new() -> Packages {
-        if !Command::new("id")
-            .arg("archix-build")
-            .output()
-            .unwrap()
-            .status
-            .success()
-        {
-            sh("useradd --system --no-create-home archix-build");
-        }
-        let dir = TempDir::new().unwrap();
-        sh(&format!("chmod 755 {}", dir.path().display()));
-        Packages { dir }
-    }
-
-    /// Builds `name` with `package` as more of its package() and adds it to the repo; returns its file.
-    fn build(&self, name: &str, package: &str) -> PathBuf {
-        let work = TempDir::new().unwrap();
-        fs::write(
-            work.path().join("PKGBUILD"),
-            format!(
-                "pkgname={name}\npkgver=1\npkgrel=1\narch=('any')\nlicense=('MIT')\noptions=('!strip' '!debug')\n\
-                 package() {{\n  install -d \"$pkgdir/usr/share/{name}\"\n  echo 1 > \"$pkgdir/usr/share/{name}/version\"\n  {package}\n}}\n"
-            ),
-        )
-        .unwrap();
-        sh(&format!(
-            "chown -R archix-build: {w} && cd {w} && setpriv --reuid=archix-build --regid=archix-build --init-groups env HOME={w} PKGEXT=.pkg.tar.zst makepkg --noconfirm >/dev/null && cp {w}/{name}-1-1-any.pkg.tar.zst {d}/ && repo-add -q {d}/archix-hooks.db.tar.gz {d}/{name}-1-1-any.pkg.tar.zst",
-            w = work.path().display(),
-            d = self.dir.path().display()
-        ));
-        self.dir.path().join(format!("{name}-1-1-any.pkg.tar.zst"))
-    }
-
-    /// A pacman.conf on `machine` with only this repo, for `pacman -S`.
-    fn conf(&self, machine: &Machine) -> PathBuf {
-        let conf = machine.root.join("etc/pacman-hooks-test.conf");
-        fs::write(
-            &conf,
-            format!(
-                "[options]\nArchitecture = auto\n\n[archix-hooks]\nSigLevel = Optional TrustAll\nServer = file://{}\n",
-                self.dir.path().display()
-            ),
-        )
-        .unwrap();
-        conf
-    }
-}
-
 /// pacman on `machine` with `env`, through `script` when `typed` is given, so it and the hooks have a terminal: each answer of `typed`, split at newlines, is typed once the output shows a prompt after the last answer (pacman throws away what was typed before it asks).
 fn pacman(machine: &Machine, env: &[(&str, &str)], args: &[&str], typed: Option<&str>) -> Output {
     let mut argv: Vec<String> = ["pacman", "--root"].map(str::to_string).to_vec();

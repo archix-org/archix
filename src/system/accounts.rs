@@ -367,6 +367,153 @@ pub fn carry(live: &Texts, target: &Texts) -> Carried {
     Carried { texts, skipped }
 }
 
+/// The shell an account a keep brings back as a placeholder gets.
+pub const PLACEHOLDER_SHELL: &str = "/usr/bin/nologin";
+
+/// The account files a keep makes, the people brought back as locked placeholders and the names left out for an ID clash.
+pub struct Kept {
+    pub texts: Texts,
+    pub placeholders: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+/// Group members for a keep: the replaced root's, but each user `declared` is a member only as the snapshot has it.
+fn kept_group_members(snapshot: Option<&String>, replaced: Option<&String>, declared: &BTreeSet<String>) -> String {
+    let mut out: Vec<String> = members(replaced)
+        .into_iter()
+        .filter(|m| !declared.contains(m))
+        .collect();
+    for m in members(snapshot) {
+        if declared.contains(&m) && !out.contains(&m) {
+            out.push(m);
+        }
+    }
+    out.join(",")
+}
+
+/// The accounts of the root a keep makes from a snapshot whose files are `snapshot`, replacing the root whose files are `replaced`: the users `declared` (the snapshot's config's) keep the snapshot's passwd entries and group memberships; every other user and group created or changed since comes by name from `replaced`, as does every shadow and gshadow entry, so a revoked password stays revoked; a person (root or the regular ID range) or a declared user `replaced` no longer has comes back as a placeholder whose password is "!", expired, with a nologin shell, so its ID stays taken and nobody logs in as it.
+pub fn keep(snapshot: &Texts, replaced: &Texts, declared: &BTreeSet<String>) -> Kept {
+    let mut texts: Texts = snapshot.clone();
+    let mut placeholders = Vec::new();
+    let mut skipped = Vec::new();
+    let mut added: [BTreeSet<String>; 2] = Default::default();
+    for i in [0, 1] {
+        let (Some(snapshot_text), Some(replaced_text)) = (&snapshot[i], &replaced[i]) else {
+            continue;
+        };
+        let replaced_entries = entries(replaced_text);
+        let mut ids: BTreeMap<String, String> = entries(snapshot_text)
+            .into_iter()
+            .filter_map(|(name, fields)| Some((fields.get(2)?.clone(), name)))
+            .collect();
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for line in parse(snapshot_text) {
+            let Line::Entry(name, fields) = line else {
+                out.push(line);
+                continue;
+            };
+            seen.insert(name.clone());
+            let fields = match (i, replaced_entries.get(&name)) {
+                (0, Some(_)) if declared.contains(&name) => fields,
+                (0, Some(now)) => now.clone(),
+                (0, None) if declared.contains(&name) || regular(fields.get(2)) => {
+                    placeholders.push(name.clone());
+                    let mut fields = fields;
+                    fields.resize(fields.len().max(7), String::new());
+                    fields[6] = PLACEHOLDER_SHELL.to_string();
+                    fields
+                }
+                (_, Some(now)) => {
+                    let mut now = now.clone();
+                    if now.len() > 3 {
+                        now[3] = kept_group_members(fields.get(3), replaced_entries[&name].get(3), declared);
+                    }
+                    now
+                }
+                (_, None) => fields,
+            };
+            out.push(Line::Entry(name, fields));
+        }
+        for line in parse(replaced_text) {
+            let Line::Entry(name, fields) = line else { continue };
+            if seen.contains(&name) {
+                continue;
+            }
+            let id = fields.get(2).cloned().unwrap_or_default();
+            if let Some(other) = ids.get(&id) {
+                skipped.push(format!(
+                    "{name} ({} {id}, which is {other}'s in the snapshot)",
+                    if i == 0 { "UID" } else { "GID" }
+                ));
+                continue;
+            }
+            ids.insert(id, name.clone());
+            added[i].insert(name.clone());
+            out.push(Line::Entry(name, fields));
+        }
+        texts[i] = Some(render(&out));
+    }
+    for (i, of) in [(2, 0), (3, 1)] {
+        let (Some(snapshot_text), Some(replaced_text)) = (&snapshot[i], &replaced[i]) else {
+            continue;
+        };
+        let replaced_entries = entries(replaced_text);
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for line in parse(snapshot_text) {
+            let Line::Entry(name, fields) = line else {
+                out.push(line);
+                continue;
+            };
+            seen.insert(name.clone());
+            let mut fields = match replaced_entries.get(&name) {
+                Some(now) => now.clone(),
+                None => fields,
+            };
+            if of == 0 && placeholders.contains(&name) {
+                fields.resize(fields.len().max(9), String::new());
+                fields[1] = "!".to_string();
+                fields[7] = "1".to_string();
+            }
+            if of == 1
+                && let Some(now) = replaced_entries.get(&name)
+                && now.len() > 3
+            {
+                fields[3] = kept_group_members(entries(snapshot_text)[&name].get(3), now.get(3), declared);
+            }
+            out.push(Line::Entry(name, fields));
+        }
+        for name in placeholders.iter().filter(|name| of == 0 && !seen.contains(*name)) {
+            let fields: Vec<String> = [name.as_str(), "!", "", "", "", "", "", "1", ""]
+                .map(str::to_string)
+                .to_vec();
+            out.push(Line::Entry(name.clone(), fields));
+        }
+        for line in parse(replaced_text) {
+            let Line::Entry(name, fields) = line else { continue };
+            if !seen.contains(&name) && added[of].contains(&name) {
+                out.push(Line::Entry(name, fields));
+            }
+        }
+        texts[i] = Some(render(&out));
+    }
+    Kept {
+        texts,
+        placeholders,
+        skipped,
+    }
+}
+
+/// Whether `name` is a placeholder a keep left in `passwd` and `shadow`: the nologin shell, "!" for a password and expired.
+pub fn is_placeholder(passwd: &str, shadow: &str, name: &str) -> bool {
+    let shell = entries(passwd).get(name).and_then(|fields| fields.get(6).cloned());
+    let held = entries(shadow).get(name).is_some_and(|fields| {
+        fields.get(1).map(String::as_str) == Some("!") && fields.get(7).map(String::as_str) == Some("1")
+    });
+    shell.as_deref() == Some(PLACEHOLDER_SHELL) && held
+}
+
 /// The UIDs and GIDs `texts` hands out, with their names.
 pub fn ids(texts: &Texts) -> [Vec<(u32, String)>; 2] {
     let list = |text: &Option<String>| -> Vec<(u32, String)> {
@@ -624,5 +771,77 @@ mod tests {
             gshadow.contains("wheel:::alice,bob\n") && gshadow.contains("bob:!::\n"),
             "{gshadow}"
         );
+    }
+    #[test]
+    fn a_keep_takes_declared_users_from_the_snapshot_carries_the_rest_and_brings_people_deleted_since_back_locked() {
+        let snapshot = texts(
+            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\nbob:x:1001:1001::/home/bob:/bin/bash\ndave:x:1002:1002::/home/dave:/bin/bash\nerin:x:1003:1003::/home/erin:/bin/zsh\nold:x:950:950::/:/usr/bin/nologin\n",
+            "root:x:0:\nwheel:x:998:bob,alice\nalice:x:1000:\nbob:x:1001:\ndave:x:1002:\nerin:x:1003:\nold:x:950:\n",
+            "root:$r0:20000::::::\nalice:$a1:20000:0:99999:7:::\nbob:$b1:20000:0:99999:7:::\ndave:$d1:20000:0:99999:7:::\nold:!*:20000::::::\n",
+            "root:::\nwheel:::bob,alice\nalice:!::\nbob:!::\ndave:!::\nerin:!::\nold:!::\n",
+        );
+        let replaced = texts(
+            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/fish\nbob:x:1001:1001::/home/bob:/bin/fish\ncarol:x:1004:1004::/home/carol:/bin/bash\nsvc:x:980:980::/var/lib/svc:/usr/bin/nologin\nfrank:x:1002:1005::/home/frank:/bin/bash\n",
+            "root:x:0:\nwheel:x:998:alice,carol\nalice:x:1000:\nbob:x:1001:\ncarol:x:1004:\nsvc:x:980:\n",
+            "root:$r2:20100::::::\nalice:!$a1:20100:0:99999:7:::\nbob:$b2:20100:0:99999:7:::\ncarol:$c1:20100:0:99999:7:::\nsvc:!*:20100::::::\nfrank:$f1:20100:0:99999:7:::\n",
+            "root:::\nwheel:::alice,carol\nalice:!::\nbob:!::\ncarol:!::\nsvc:!::\n",
+        );
+        let declared = BTreeSet::from(["bob".to_string(), "erin".to_string()]);
+        let kept = keep(&snapshot, &replaced, &declared);
+        let [passwd, group, shadow, gshadow] = kept.texts.map(Option::unwrap);
+        assert!(
+            passwd.contains("alice:x:1000:1000::/home/alice:/bin/fish\n"),
+            "a change since: {passwd}"
+        );
+        assert!(
+            passwd.contains("bob:x:1001:1001::/home/bob:/bin/bash\n"),
+            "a declared user follows the snapshot: {passwd}"
+        );
+        assert!(
+            passwd.contains("carol:x:1004:") && passwd.contains("svc:x:980:"),
+            "users created since: {passwd}"
+        );
+        assert!(
+            passwd.contains("dave:x:1002:1002::/home/dave:/usr/bin/nologin\n"),
+            "a person deleted since: {passwd}"
+        );
+        assert!(
+            passwd.contains("erin:x:1003:1003::/home/erin:/usr/bin/nologin\n"),
+            "a declared user deleted since: {passwd}"
+        );
+        assert!(
+            passwd.contains("old:x:950:950::/:/usr/bin/nologin\n"),
+            "a package's account as the snapshot has it"
+        );
+        assert!(!passwd.contains("frank"), "frank's UID is dave's there: {passwd}");
+        assert_eq!(kept.placeholders, ["dave", "erin"]);
+        assert_eq!(kept.skipped.len(), 1, "{:?}", kept.skipped);
+        assert!(
+            shadow.contains("alice:!$a1:"),
+            "a revoked password stays revoked: {shadow}"
+        );
+        assert!(
+            shadow.contains("bob:$b2:") && shadow.contains("root:$r2:"),
+            "passwords are the newest: {shadow}"
+        );
+        assert!(
+            shadow.contains("dave:!:20000:0:99999:7::1:\n"),
+            "locked and expired: {shadow}"
+        );
+        assert!(
+            shadow.contains("erin:!::::::1:\n"),
+            "one with no shadow entry gets one: {shadow}"
+        );
+        assert!(shadow.contains("carol:$c1:") && !shadow.contains("frank"), "{shadow}");
+        assert!(
+            group.contains("wheel:x:998:alice,carol,bob\n"),
+            "bob is in wheel as the snapshot has him: {group}"
+        );
+        assert!(gshadow.contains("wheel:::alice,carol,bob\n"), "{gshadow}");
+        assert!(
+            group.contains("carol:x:1004:") && group.contains("dave:x:1002:"),
+            "{group}"
+        );
+        assert!(is_placeholder(&passwd, &shadow, "dave") && !is_placeholder(&passwd, &shadow, "alice"));
     }
 }

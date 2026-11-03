@@ -55,8 +55,9 @@ src/paths.rs	test:switch
 src/testhooks.rs	test:switch test:boot
 src/secrets/	test:secrets test:credentials
 src/eval/modules/secrets.lua	test:secrets
-src/snapshot/	test:snapshot test:boot test:switch
-src/commands/snapshot.rs	test:snapshot test:boot test:switch
+src/snapshot/	test:snapshot test:boot test:switch test:keep
+src/commands/snapshot.rs	test:snapshot test:boot test:switch test:keep
+src/commands/keep.rs	test:keep
 src/system/btrfs.rs	test:system test:snapshot
 src/captured.rs	test:captured test:switch
 src/eval/isolated.rs	test:captured test:switch
@@ -65,7 +66,7 @@ src/system/live.rs	test:switch test:system test:snapshot
 src/system/restart.rs	test:switch
 src/system/running.rs	test:switch
 src/system/esp.rs	test:boot
-src/system/accounts.rs	test:credentials test:system
+src/system/accounts.rs	test:credentials test:system test:keep
 src/system/xattr.rs	test:system test:repos
 src/pacman/hooks.rs	test:pacman_hooks test:switch
 src/commands/pacman_hook.rs	test:pacman_hooks

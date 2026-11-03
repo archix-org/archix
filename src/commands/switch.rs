@@ -956,7 +956,7 @@ pub(super) fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -
     }
     if noconfirm {
         bail!(
-            "refusing unsafe downgrades with --noconfirm; to go ahead, run `archix switch` or `archix rollback` with --allow-unsafe-downgrade"
+            "refusing unsafe downgrades with --noconfirm; to go ahead, run `archix switch` or `archix revert` with --allow-unsafe-downgrade"
         );
     }
     if !confirm_no("downgrade anyway?")? {
@@ -1462,13 +1462,13 @@ fn print_gc(report: &gc::Report, always: bool) {
     }
 }
 
-/// Applies an earlier generation's record in place, its packages from archix's cache and the archive, and makes it current without a new record; archix.lock and the config stay as they are.
-pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()> {
-    require_root("rollback")?;
+/// `archix revert`: applies an earlier generation's record live, in place, its packages from archix's cache and the archive, and makes it current without a new record; archix.lock and the config stay as they are.
+pub fn revert(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()> {
+    require_root("revert")?;
     let started = now();
     let paths = Paths::system();
     check_pacman_free(&paths)?;
-    refuse_unusual_root(&paths, "rollback")?;
+    refuse_unusual_root(&paths, "revert")?;
     let store = Store::new(&paths);
     let current = store
         .current()?
@@ -1539,7 +1539,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     let place = place_in(&paths);
     let accounts = Accounts::read(&paths.root.join("etc"));
     let system_lines = system::apply::describe(&system_change, &place, &accounts, &paths.root)?;
-    println!("rolling back to {name}, applying its record in place");
+    println!("reverting to {name}, applying its record live, in place");
     print_warned(&warned);
     for line in &kept_lines {
         println!("{line}");
@@ -1575,7 +1575,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     system::live::refuse_packaged_usr_files(&system_change, &db)
         .map_err(|e| anyhow::anyhow!("{e:#}; nothing was changed"))?;
     guard_downgrades(&risky, noconfirm, allow_unsafe)?;
-    if !noconfirm && !confirm(&format!("roll back to {name}?"))? {
+    if !noconfirm && !confirm(&format!("revert to {name}?"))? {
         bail!("aborted; nothing was changed");
     }
     let archive = archix::archive::for_system(&paths.state);
@@ -1597,7 +1597,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
         .before(
             &paths,
             Some(&current_generation),
-            format!("before rollback to generation {number}"),
+            format!("before revert to generation {number}"),
         )
         .map_err(|e| e.context("nothing of the rollback was applied"))?;
     let root = live::Root::new(&paths.root);
@@ -1641,7 +1641,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
         Ok(report) => print_gc(&report, false),
         Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
     }
-    println!("rolled back to {name}. archix.lock is unchanged, so the next `archix switch` returns to the config");
+    println!("reverted to {name}. archix.lock is unchanged, so the next `archix switch` returns to the config");
     report_soft_failures(&soft_failures, &format!("{name} is applied and current"))
 }
 
@@ -1749,6 +1749,7 @@ pub fn gc() -> Result<()> {
 /// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
 pub fn boot_check() -> Result<()> {
     let paths = Paths::system();
+    super::keep::after_boot(&paths);
     if let Err(e) = system::sleep::sync(&paths.root) {
         println!("archix: couldn't update the hibernation guard: {e:#}");
     }

@@ -46,7 +46,7 @@ fn no_hash_in(c: &Checks, out: &str, what: &str) {
 
 #[test]
 #[ignore]
-fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_the_running_ones() {
+fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_revert_keeps_the_running_ones() {
     let _system = lock_system();
     let c = Checks::default();
     let setup = Setup::new(&[], &users(ALICE, ""));
@@ -153,7 +153,7 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
         "once unlocked, the next switch applies it",
     );
 
-    let rolled = setup.ok(&["rollback", &second.to_string(), "--noconfirm"]);
+    let rolled = setup.ok(&["revert", &second.to_string(), "--noconfirm"]);
     c.eq(
         hash(machine, "alice"),
         ALICE2.to_string(),

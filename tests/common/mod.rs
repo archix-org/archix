@@ -187,6 +187,8 @@ pub struct Machine {
     pub root: PathBuf,
     /// The btrfs the root is `@` of, when it's on one.
     pub btrfs: Option<Btrfs>,
+    /// On the whole rollback layout, whose archix state is the root's own, bound over the container's.
+    layout: bool,
 }
 
 impl Machine {
@@ -203,6 +205,7 @@ impl Machine {
             dir: Some(dir),
             root,
             btrfs: None,
+            layout: false,
         }
     }
 
@@ -221,7 +224,70 @@ impl Machine {
             dir: None,
             root,
             btrfs: Some(btrfs),
+            layout: false,
         }
+    }
+
+    /// A machine on the whole rollback layout, as `archix snapshot setup` and the next boot leave one: `@` with @archix at /.archix and @varlib at /var/lib, pacman's database, DKMS's and archix's state on `@` under /var/rollback and bound over their /var/lib paths, and /run a tmpfs; archix's state is bound over the container's own until the machine goes, so it rolls back with the root.
+    pub fn on_layout(size: &str) -> Machine {
+        let template = template();
+        let btrfs = Btrfs::new(size);
+        let root = btrfs.root.clone();
+        btrfs.mount_archix();
+        sh(&format!(
+            r#"r={root}; d="$(findmnt -n -o SOURCE {top} | cut -d'[' -f1)"
+            btrfs -q subvolume create {top}/@varlib && mkdir -p $r/var/lib && mount -o subvol=/@varlib "$d" $r/var/lib"#,
+            root = root.display(),
+            top = btrfs.top.display()
+        ));
+        Machine::populate(&root, &template, true);
+        sh(&format!(
+            r#"r={root}; umount $r/var/lib/archix; mkdir -p $r/var/rollback
+            for n in pacman dkms archix; do mv $r/var/lib/$n $r/var/rollback/$n; mkdir $r/var/lib/$n; : > $r/var/lib/$n/db.lck; done
+            cp -a /var/lib/archix/. $r/var/rollback/archix/"#,
+            root = root.display()
+        ));
+        let machine = Machine {
+            dir: None,
+            root,
+            btrfs: Some(btrfs),
+            layout: true,
+        };
+        machine.bind_rolled();
+        machine
+    }
+
+    fn bind_rolled(&self) {
+        sh(&format!(
+            r#"r={root}; mount --bind $r/var/rollback/archix /var/lib/archix
+            for n in pacman dkms archix; do mount --bind $r/var/rollback/$n $r/var/lib/$n; done
+            mount -t tmpfs -o mode=0755 run $r/run"#,
+            root = self.root.display()
+        ));
+    }
+
+    /// Unmounts everything and mounts the root again as a boot would, `@` being whatever subvolume has that name now, as after a keep.
+    pub fn reboot(&self) {
+        assert!(self.layout, "only a machine on the whole layout reboots");
+        let btrfs = self.btrfs.as_ref().unwrap();
+        let _ = Command::new("umount").arg("/var/lib/archix").status();
+        Machine::unmount_all(&self.root);
+        assert!(
+            Machine::mounts_under(&self.root).is_empty(),
+            "the old root is still mounted"
+        );
+        sh(&format!(
+            r#"r={root}; t={template}; d="$(findmnt -n -o SOURCE {top} | cut -d'[' -f1)"
+            mount -o subvol=/@ "$d" $r; mount -o subvol=/@archix "$d" $r/.archix; mount -o subvol=/@varlib "$d" $r/var/lib
+            mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work" "$r/usr"
+            mount --bind -o ro "$t/target" "$r/target"
+            for d in var/cache/archix var/cache/pacman/pkg; do mount --bind "/$d" "$r/$d"; done
+            mount -t proc proc "$r/proc"; mount --rbind /dev "$r/dev""#,
+            root = self.root.display(),
+            template = template().display(),
+            top = btrfs.top.display()
+        ));
+        self.bind_rolled();
     }
 
     fn populate(root: &Path, template: &Path, bound: bool) {
@@ -349,6 +415,9 @@ impl Machine {
 impl Drop for Machine {
     fn drop(&mut self) {
         let _ = Command::new("bash").args(["-c", FORGET]).status();
+        if self.layout {
+            let _ = Command::new("umount").arg("/var/lib/archix").status();
+        }
         let mut active = ACTIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if active.as_deref() == Some(self.root.as_path()) {
             *active = None;
@@ -618,6 +687,66 @@ impl Drop for RestoreFile {
                 let _ = fs::remove_file(&self.path);
             }
         }
+    }
+}
+
+/// Packages built with makepkg, and a file:// repository of them for `pacman -S`.
+pub struct Packages {
+    pub dir: TempDir,
+}
+
+impl Packages {
+    pub fn new() -> Packages {
+        if !Command::new("id")
+            .arg("archix-build")
+            .output()
+            .unwrap()
+            .status
+            .success()
+        {
+            sh_out("useradd --system --no-create-home archix-build");
+        }
+        let dir = TempDir::new().unwrap();
+        sh(&format!("chmod 755 {}", dir.path().display()));
+        Packages { dir }
+    }
+
+    /// Builds `name` with `package` as more of its package() and adds it to the repo; returns its file.
+    pub fn build(&self, name: &str, package: &str) -> PathBuf {
+        self.build_version(name, "1", package)
+    }
+
+    /// Like `build`, at version `version`, which `package` can read as $pkgver.
+    pub fn build_version(&self, name: &str, version: &str, package: &str) -> PathBuf {
+        let work = TempDir::new().unwrap();
+        fs::write(
+            work.path().join("PKGBUILD"),
+            format!(
+                "pkgname={name}\npkgver={version}\npkgrel=1\narch=('any')\nlicense=('MIT')\noptions=('!strip' '!debug')\n\
+                 package() {{\n  install -d \"$pkgdir/usr/share/{name}\"\n  echo {version} > \"$pkgdir/usr/share/{name}/version\"\n  {package}\n}}\n"
+            ),
+        )
+        .unwrap();
+        sh_out(&format!(
+            "chown -R archix-build: {w} && cd {w} && setpriv --reuid=archix-build --regid=archix-build --init-groups env HOME={w} PKGEXT=.pkg.tar.zst makepkg --noconfirm >/dev/null && cp {w}/{name}-{version}-1-any.pkg.tar.zst {d}/ && repo-add -q {d}/archix-hooks.db.tar.gz {d}/{name}-{version}-1-any.pkg.tar.zst",
+            w = work.path().display(),
+            d = self.dir.path().display()
+        ));
+        self.dir.path().join(format!("{name}-{version}-1-any.pkg.tar.zst"))
+    }
+
+    /// A pacman.conf on `machine` with only this repo, for `pacman -S`.
+    pub fn conf(&self, machine: &Machine) -> PathBuf {
+        let conf = machine.root.join("etc/pacman-hooks-test.conf");
+        fs::write(
+            &conf,
+            format!(
+                "[options]\nArchitecture = auto\n\n[archix-hooks]\nSigLevel = Optional TrustAll\nServer = file://{}\n",
+                self.dir.path().display()
+            ),
+        )
+        .unwrap();
+        conf
     }
 }
 

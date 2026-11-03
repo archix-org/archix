@@ -565,7 +565,7 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_a_left_out_one
 
 #[test]
 #[ignore]
-fn each_generation_activates_its_own_values_on_switch_and_rollback_and_a_rotated_key_retires_until_gc() {
+fn each_generation_activates_its_own_values_on_switch_and_revert_and_a_rotated_key_retires_until_gc() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -609,7 +609,7 @@ fn each_generation_activates_its_own_values_on_switch_and_rollback_and_a_rotated
         Some(v2.clone()),
         "the switch activates generation 2's value",
     );
-    lab.ok(&["rollback", &first.to_string(), "--noconfirm"]);
+    lab.ok(&["revert", &first.to_string(), "--noconfirm"]);
     c.eq(
         fs::read_to_string(lab.run_secret("wg0")).ok(),
         Some(v1.clone()),
@@ -623,7 +623,7 @@ fn each_generation_activates_its_own_values_on_switch_and_rollback_and_a_rotated
     );
     lab.sweep(&c, "rollbacks", &|_, _| false, &[]);
 
-    lab.ok(&["rollback", &second.to_string(), "--noconfirm"]);
+    lab.ok(&["revert", &second.to_string(), "--noconfirm"]);
     lab.boot();
     let old = archix::secrets::crypto::machine(&lab.setup.paths.state)
         .unwrap()

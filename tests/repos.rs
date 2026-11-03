@@ -277,7 +277,7 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
 
 #[test]
 #[ignore]
-fn a_rollback_never_takes_a_keyring_back() {
+fn a_revert_never_takes_a_keyring_back() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
     let keyring = "install -Dm644 /dev/null \"$pkgdir/usr/share/pacman/keyrings/archix-test.gpg\"";
@@ -294,7 +294,7 @@ fn a_rollback_never_takes_a_keyring_back() {
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
     setup.ok(&["gc"]);
 
-    let out = setup.ok(&["rollback", "--noconfirm"]);
+    let out = setup.ok(&["revert", "--noconfirm"]);
     assert!(
         out.contains("keeping archix-test-keyring 2.0-1 rather than going back to 1.0-1: an older keyring trusts keys revoked since"),
         "{out}"
@@ -356,13 +356,13 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
         "cap_ipc_lock=ep",
         "dropping the declaration gives back what the package set, rather than stripping it"
     );
-    setup.ok(&["rollback", &declared.to_string(), "--noconfirm"]);
+    setup.ok(&["revert", &declared.to_string(), "--noconfirm"]);
     assert_eq!(
         getcap(&file),
         "cap_sys_nice=ep",
         "a rollback applies the declared one again"
     );
-    setup.ok(&["rollback", &packaged.to_string(), "--noconfirm"]);
+    setup.ok(&["revert", &packaged.to_string(), "--noconfirm"]);
     assert_eq!(getcap(&file), "cap_ipc_lock=ep", "and back to the package's");
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
@@ -370,7 +370,7 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
 
 #[test]
 #[ignore]
-fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it() {
+fn a_revert_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
     repo.publish("archix-test-adopted", "1.0");
@@ -394,7 +394,7 @@ fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it
             fs::remove_file(entry.path()).unwrap();
         }
     }
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     assert_eq!(installed("archix-test-adopted").as_deref(), Some("1.0-1"));
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);

@@ -493,10 +493,10 @@ fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"), "--noconfirm adopts");
     setup.ok(&["gc"]);
-    let err = setup.fails(&["rollback", "--noconfirm"]);
+    let err = setup.fails(&["revert", "--noconfirm"]);
     assert!(err.contains("--allow-unsafe-downgrade"), "{err}");
     assert_eq!(installed("lemon").as_deref(), Some("3.54.0-1"));
-    setup.ok(&["rollback", "--noconfirm", "--allow-unsafe-downgrade"]);
+    setup.ok(&["revert", "--noconfirm", "--allow-unsafe-downgrade"]);
     assert_eq!(
         installed("lemon").as_deref(),
         Some("3.53.4-1"),
@@ -726,7 +726,7 @@ fn carried_section(out: &str, title: &str) -> Vec<String> {
 
 #[test]
 #[ignore]
-fn what_the_machine_carries_but_the_config_doesnt_declare_is_named_before_and_after_switches_and_a_rollback() {
+fn what_the_machine_carries_but_the_config_doesnt_declare_is_named_before_and_after_switches_and_a_revert() {
     let _system = lock_system();
     let declared = r#"files = { ["/etc/xattr.conf"] = { text = "declared\n" } }"#;
     let setup = Setup::new(&[], declared);
@@ -788,7 +788,7 @@ fn what_the_machine_carries_but_the_config_doesnt_declare_is_named_before_and_af
         format!("plain diff lists more than --all:\n{cut}"),
     );
 
-    setup.ok(&["rollback", "--noconfirm"]);
+    setup.ok(&["revert", "--noconfirm"]);
     checks.check(machine.current() < Some(second), "the rollback went back");
     checks.check(
         machine.root.join("opt/foo/bin/foo").is_file(),
@@ -1128,7 +1128,7 @@ fn on_btrfs_each_switch_snapshots_the_state_before_it_prunes_by_the_policy_and_g
         Some("two\n".to_string()),
         "the newest holds what generation 3 wrote",
     );
-    setup.ok(&["rollback", "3", "--noconfirm"]);
+    setup.ok(&["revert", "3", "--noconfirm"]);
     checks.eq(
         fs::read_to_string(setup.machine.system_file("etc/archix-snap")).ok(),
         Some("two\n".to_string()),
@@ -1137,7 +1137,7 @@ fn on_btrfs_each_switch_snapshots_the_state_before_it_prunes_by_the_policy_and_g
     let taken = snapshots(&setup.machine);
     checks.eq(
         taken.last().map(|r| r.label.clone()),
-        Some("before rollback to generation 3".to_string()),
+        Some("before revert to generation 3".to_string()),
         "a rollback snapshots first too",
     );
     let listed = setup.ok(&["generations"]);
@@ -1146,7 +1146,7 @@ fn on_btrfs_each_switch_snapshots_the_state_before_it_prunes_by_the_policy_and_g
             && listed.lines().any(|line| {
                 line.contains("(generation 4)")
                     && line.contains("system as of tree")
-                    && line.contains("before rollback to generation 3")
+                    && line.contains("before revert to generation 3")
             }),
         format_args!("generations lists snapshots by the state each holds: {listed}"),
     );
@@ -1214,7 +1214,7 @@ fn on_btrfs_a_refused_switch_changes_nothing_and_takes_no_snapshot() {
 
 #[test]
 #[ignore]
-fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_repository_doesnt_hold_as_recorded() {
+fn revert_applies_an_earlier_generation_in_place_and_refuses_one_root_s_repository_doesnt_hold_as_recorded() {
     let _system = lock_system();
     let setup = Setup::new(&[], r#"files = { ["/etc/archix-rolled"] = { text = "one" } }"#);
     setup.first_switch();
@@ -1222,7 +1222,7 @@ fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposi
     setup.ok(&["switch", "--noconfirm"]);
     let lock = fs::read_to_string(setup.config.join("archix.lock")).unwrap();
     let checks = Checks::default();
-    let out = setup.ok(&["rollback", "1", "--noconfirm"]);
+    let out = setup.ok(&["revert", "1", "--noconfirm"]);
     checks.eq(installed("tree"), None, "tree goes");
     checks.eq(
         fs::read_to_string(setup.machine.system_file("etc/archix-rolled")).ok(),
@@ -1239,7 +1239,7 @@ fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposi
         lock.clone(),
         "the lock isn't touched",
     );
-    setup.ok(&["rollback", "2", "--noconfirm"]);
+    setup.ok(&["revert", "2", "--noconfirm"]);
     checks.check(installed("tree").is_some(), "rolling forward brings tree back");
     checks.eq(
         setup
@@ -1267,7 +1267,7 @@ fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposi
     let one = git(&["rev-parse", "refs/generations/1"]);
     let two = git(&["rev-parse", "refs/generations/2"]);
     git(&["update-ref", "refs/generations/1", &two]);
-    let refused = setup.fails(&["rollback", "1", "--noconfirm"]);
+    let refused = setup.fails(&["revert", "1", "--noconfirm"]);
     checks.check(
         refused.contains("can't be read back") && refused.contains("nothing was changed"),
         format_args!("a moved ref: {refused}"),
@@ -1282,7 +1282,7 @@ fn rollback_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposi
     std::os::unix::fs::PermissionsExt::set_mode(&mut mode, 0o644);
     fs::set_permissions(&object, mode).unwrap();
     fs::write(&object, b"not a git object").unwrap();
-    let refused = setup.fails(&["rollback", "1", "--noconfirm"]);
+    let refused = setup.fails(&["revert", "1", "--noconfirm"]);
     checks.check(
         refused.contains("can't be read back") && refused.contains("nothing was changed"),
         format_args!("a changed object: {refused}"),

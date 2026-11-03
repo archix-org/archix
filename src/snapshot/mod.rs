@@ -1,4 +1,5 @@
 pub mod layout;
+pub mod varlib;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -481,6 +482,32 @@ impl Store {
         crate::durable::sync_dir(&self.dir)?;
         Ok(journal.replaced)
     }
+
+    /// Undoes the keep that filed the running root as snapshot `replaced`, before its reboot: swaps that root back into `@` and deletes the clone and the record; safe to run again after a crash.
+    pub fn cancel_keep(&self, top: &Path, replaced: u32) -> Result<()> {
+        let root = top.join(ROOT);
+        let filed = top
+            .join(layout::ARCHIX)
+            .join("snapshots")
+            .join(replaced.to_string())
+            .join(SNAPSHOT);
+        if !filed.join(CANCEL_MARK).exists() {
+            if !filed.is_dir() {
+                bail!("snapshot {replaced}, the root the keep replaced, isn't there, so there's nothing to swap back");
+            }
+            crate::durable::write(&root.join(CANCEL_MARK), b"")?;
+            crate::durable::sync_dir(&root)?;
+            crate::testhooks::crash_at("cancel-before-exchange");
+            exchange(&root, &filed)?;
+            crate::durable::sync_dir(top)?;
+            crate::testhooks::crash_at("cancel-exchanged");
+        }
+        let _ = fs::remove_file(root.join(CANCEL_MARK));
+        crate::durable::sync_dir(&root)?;
+        self.delete(replaced)?;
+        record_root(self.dir.parent().unwrap_or(&self.dir), top)?;
+        Ok(())
+    }
 }
 
 /// The root's subvolume name, which keep preserves so fstab and the command line need no change.
@@ -489,6 +516,8 @@ const KEEP_CLONE: &str = "@archix-keep";
 /// In the clone from before the exchange, so after a crash the new root shows whether the exchange happened.
 const KEEP_MARK: &str = ".archix-keep";
 const KEEP_JOURNAL: &str = "keep.json";
+/// In `@` while a cancel swaps the replaced root back, so a crash after the swap shows which subvolume is the clone to delete.
+const CANCEL_MARK: &str = ".archix-cancel";
 
 /// A keep in progress: the snapshot becoming the root and the number the replaced root takes.
 #[derive(Serialize, Deserialize)]
@@ -612,6 +641,9 @@ pub fn subvolume_uuid(path: &Path) -> Option<String> {
 
 /// Why the root at `root` isn't the `@` archix produced, when it isn't: its subvolume UUID differs from the one recorded after setup and each keep, as after a snapper or limine-snapper-sync rollback or a restore. None when they match, or there's nothing to compare.
 pub fn foreign_root(root: &Path) -> Option<String> {
+    if keep_pending(root).is_some() {
+        return None;
+    }
     let recorded = recorded_root(&root.join(MOUNT))?;
     let uuid = subvolume_uuid(root)?;
     (uuid != recorded).then(|| {
@@ -619,6 +651,12 @@ pub fn foreign_root(root: &Path) -> Option<String> {
             "the root subvolume ({uuid}) isn't the one archix last produced ({recorded}): another tool (a snapper or limine-snapper-sync rollback, a restore) replaced it, so archix's records describe another root; on Limine every fallback goes through limine-snapper-restore, so this is expected there. Switches and keeps refuse until `sudo archix resync` adopts it"
         )
     })
+}
+
+/// The snapshot a keep made `@` from the next boot, while the running root is still the one it replaced.
+pub fn keep_pending(root: &Path) -> Option<u32> {
+    let path = root.join(crate::pacman::hooks::KEEP_PENDING.trim_start_matches('/'));
+    fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// What `prune_root` did.
@@ -662,6 +700,15 @@ pub fn prune_root(
         }
     };
     freed.deleted = pruned.deleted;
+    if keep_pending(&paths.root).is_none() {
+        let existing: BTreeSet<u32> = store
+            .list()
+            .unwrap_or_default()
+            .iter()
+            .map(|record| record.number)
+            .collect();
+        varlib::prune(&paths.root.join("var/lib"), &existing);
+    }
     if pruned.short.is_none() {
         return freed;
     }
