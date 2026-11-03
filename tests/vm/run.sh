@@ -25,7 +25,17 @@ for arg in "${@:2}"; do
   esac
 done
 [ -z "$split" ] || [ -z "$interactive" ] || [ ${#names[@]} = 1 ] || { echo "run.sh $suite --interactive takes one test, or base" >&2; exit 2; }
-[ -z "$split" ] || [ ${#names[@]} -gt 0 ] || names=("${split[@]}")
+# ext4 is the only boot test for an ext4 base, and the only one a btrfs base can't run.
+for_fs() {
+  [ "$suite" = boot ] && [ "$1" != base ] || return 0
+  case ${FS:-ext4} in ext4) [ "$1" = ext4 ] ;; *) [ "$1" != ext4 ] ;; esac
+}
+if [ -n "$split" ] && [ ${#names[@]} -gt 0 ]; then
+  for name in "${names[@]}"; do for_fs "$name" || { echo "run.sh boot $name doesn't run on FS=${FS:-ext4}: ext4 needs FS=ext4, the rest FS=btrfs" >&2; exit 2; }; done
+fi
+if [ -n "$split" ] && [ ${#names[@]} = 0 ]; then
+  for name in "${split[@]}"; do ! for_fs "$name" || names+=("$name"); done
+fi
 "$root/tests/arch/image.sh"
 cache_py=$root/tests/vm/driver/cache.py
 # On GitHub each test's outcome is a row of the job's summary, and a failure an annotation naming the test, as one job runs several.

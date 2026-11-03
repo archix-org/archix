@@ -69,6 +69,8 @@ fn setup() -> Owner {
     if Command::new("id").arg(USER).output().unwrap().status.success() {
         return owner();
     }
+    // A machine's setup copies /etc, which useradd's temporary files would race.
+    let _system = common::lock_system();
     sh(&format!("useradd -m -u 1500 {USER} 2> /dev/null || id {USER}"));
     owner()
 }

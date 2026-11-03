@@ -109,6 +109,23 @@ fn switch_after_declaring(
             .config
         }
     };
+    let unread: Vec<&str> = {
+        let packages = declared(&config)?.packages;
+        added
+            .iter()
+            .filter(|name| !packages.contains(*name))
+            .map(String::as_str)
+            .collect()
+    };
+    if !unread.is_empty() {
+        bail!(
+            "{} went into {}, but the config still doesn't declare them with it, so adding them can't settle their drift. Declare them in packages yourself, or set drift = \"keep\"; nothing was changed",
+            unread.join(" "),
+            archix::installed::default_dir(target.config_dir, target.host)
+                .join(archix::installed::FILE)
+                .display()
+        );
+    }
     let target = Target {
         config: &config,
         ..*target
@@ -125,7 +142,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let declared = declared(target.config)?;
     let boot = declared.boot_plan()?;
     let policy = archix::snapshot::Policy::from_config(target.config)?;
-    let rollbacks = Rollbacks::of(&paths.root, policy.clone());
+    let rollbacks = Rollbacks::of(&paths.root, policy.clone())?;
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     if let Some(warning) = super::lock_age_warning(&lock, declared.lock_warn_after_days) {
         eprintln!("{warning}");
@@ -199,6 +216,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             pkg.explicit
                 && outside.contains(&pkg.name)
                 && !lock.packages.contains_key(&pkg.name)
+                && !declared.packages.contains(&pkg.name)
                 && !declared.ignored.contains(&pkg.name)
                 && !untracked.contains(&pkg.name)
         })
@@ -1515,7 +1533,7 @@ pub fn revert(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()
             .with_context(|| format!("generation {number}'s stored plan doesn't parse; nothing was changed"))?;
     }
     let current_generation = store.get(current)?;
-    let rollbacks = Rollbacks::of(&paths.root, current_generation.settings.rollback.clone());
+    let rollbacks = Rollbacks::of(&paths.root, current_generation.settings.rollback.clone())?;
     let db = paths.local_db();
     let installed = read_local_db(&db)?;
     let ignored = generation.settings.ignored.iter().cloned().collect();
@@ -1786,6 +1804,18 @@ pub fn boot_check() -> Result<()> {
                 system::boot::entry_record(&paths, &entry).display()
             ),
         );
+    }
+    if let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) {
+        match system::menu::drop_second_names(Path::new(esp.trim()), system::boot::boot_count_file().as_deref()) {
+            Ok(dropped) if !dropped.is_empty() => {
+                println!(
+                    "archix: dropped boot entries a power cut left under a second name: {}",
+                    dropped.join(", ")
+                )
+            }
+            Ok(_) => {}
+            Err(e) => println!("archix: couldn't drop boot entries left under a second name: {e:#}"),
+        }
     }
     if let Err(e) = record_failed_entries(&paths) {
         println!("archix: couldn't record which snapshot entries failed: {e:#}");

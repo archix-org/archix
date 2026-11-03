@@ -43,6 +43,9 @@ pub fn run(when: When) -> ExitCode {
         When::Pre => pre(&paths, pacman, &targets),
         When::Post => {
             post(&paths, pacman, &targets);
+            if let Err(e) = hooks::finished(&paths.state) {
+                println!("archix: warning: {e:#}; the next boot won't count as good until a transaction finishes");
+            }
             ExitCode::SUCCESS
         }
     }
@@ -172,12 +175,12 @@ fn pre(paths: &Paths, pacman: u32, targets: &[String]) -> ExitCode {
     if take {
         snapshot_before(paths, &current);
     }
-    count_before(paths, &current, &policy);
+    count_before(paths, pacman, &current, &policy);
     ExitCode::SUCCESS
 }
 
-/// Gives the current entry its tries and the slot its entry before the transaction changes anything, so a boot that a transaction cut off half way breaks still falls back.
-fn count_before(paths: &Paths, current: &Generation, policy: &Policy) {
+/// Gives the current entry its tries and the slot its entry before the transaction changes anything, so a boot that a transaction cut off half way breaks still falls back, then marks the transaction as running, so such a boot doesn't count as good.
+fn count_before(paths: &Paths, pacman: u32, current: &Generation, policy: &Policy) {
     let Some(plan) = current.settings.boot.as_ref() else {
         return;
     };
@@ -187,6 +190,19 @@ fn count_before(paths: &Paths, current: &Generation, policy: &Policy) {
     if let Err(e) = system::menu::refresh(paths, plan, Some(policy.entries), true) {
         println!(
             "archix: warning: the boot menu wasn't written before this transaction, so a boot it breaks may not fall back: {e:#}"
+        );
+        return;
+    }
+    let unfinished = hooks::Unfinished {
+        pacman,
+        started: archix::generations::now(),
+        slot: system::menu::load(&system::menu::dir(paths))
+            .ok()
+            .and_then(|state| state.slot),
+    };
+    if let Err(e) = hooks::mark_unfinished(&paths.state, &unfinished) {
+        println!(
+            "archix: warning: this transaction isn't marked as running, so a power cut during it may leave a torn system that counts as good: {e:#}"
         );
     }
 }

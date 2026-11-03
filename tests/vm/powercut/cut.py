@@ -13,11 +13,13 @@ from driver.steps import StepFailed
 VARIABLE = "/sys/firmware/efi/efivars/ArchixTestCut-0b9c7b5e-5f43-4f0e-9a4e-6a2d7c1e3f21"
 SAID = r"archix-test: power cut at (\S+)"
 FALLBACK = r"rebooting so the boot counter can fall back"
+COUNTED = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 results = []
 
 
 def arm(step):
     """Cuts the power the first time a process reaches mark step (or STEP#K, its Kth time) from now on, in this boot or a later one."""
+    disarm()
     common.m.succeed(f"printf '\\x07\\x00\\x00\\x00%s' {shlex.quote(step)} > {VARIABLE}", what=f"arming the cut at {step}")
 
 
@@ -66,12 +68,17 @@ def settle(timeout=2400):
             boots += 1
             continue
         try:
-            status, text = common.m.execute(f"cat /run/archix/try 2>/dev/null; echo; systemctl is-active boot-complete.target; tail -c +5 {common.EFIVAR} | tr -d '\\000'; echo; mountpoint -q /efi && ls {ENTRIES}", timeout=20, quiet=True)
+            if common.m.resync():
+                boots += 1
+            # An uncounted boot never reaches boot-complete.target; it's settled once the system is up.
+            counted = common.m.execute(f"[ -e {COUNTED} ]", timeout=20, quiet=True)[0] == 0
+            up = "systemctl is-active boot-complete.target" if counted else "systemctl is-system-running --wait"
+            status, text = common.m.execute(f"cat /run/archix/try 2>/dev/null; echo; {up}; tail -c +5 {common.EFIVAR} | tr -d '\\000'; echo; mountpoint -q /efi && ls {ENTRIES}", timeout=20 if counted else 300, quiet=True)
         except MachineError:
             continue
         lines = text.splitlines()
         tried = bool(lines and lines[0].strip())
-        complete = "active" in lines[1:2]
+        complete = lines[1:2] in (["active"], ["running"], ["degraded"])
         selected = lines[2].strip() if len(lines) > 2 else ""
         stem = selected.removesuffix(".conf")
         blessed = len(lines) > 3 and (selected in lines[3:] or not any(line.startswith(stem + "+") for line in lines[3:]))
@@ -96,10 +103,15 @@ def problems(snapshot=None, packages=True):
     missing = out(f"cd {ENTRIES} && for f in archix-*.conf; do awk '$1 == \"uki\" || $1 == \"efi\" {{ print $2 }}' $f | while read -r image; do [ -f \"/efi$image\" ] || echo \"$f -> $image\"; done; done")
     if missing.strip():
         found.append(f"entries start images that aren't there: {missing.strip()}")
+    ids = [re.sub(r"\+[0-9-]+\.conf$", ".conf", name) for name in common.entries()]
+    twice = sorted({i for i in ids if ids.count(i) > 1})
+    if twice:
+        found.append(f"entries on the ESP under two names: {twice} in {common.entries()}")
     try:
         state = json.loads(out(f"cat {common.STATE} 2>/dev/null || echo {{}}"))
         main = ((state.get("current") or {}).get("main") or {}).get("name")
-        if state and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")):
+        # A try boot can't see the image the current root built and recorded before a cut kept it from the ESP; back_to checks again after the keep.
+        if state and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")) and not common.ok("[ -s /run/archix/try ]"):
             found.append(f"the boot state's current image {main} isn't on the ESP")
     except ValueError as e:
         found.append(f"the boot state doesn't parse: {e}")

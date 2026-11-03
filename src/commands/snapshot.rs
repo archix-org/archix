@@ -121,16 +121,23 @@ pub(super) enum Rollbacks {
 }
 
 impl Rollbacks {
-    pub(super) fn of(root: &Path, policy: Option<Policy>) -> Rollbacks {
-        let Some(policy) = policy else { return Rollbacks::Off };
+    pub(super) fn of(root: &Path, policy: Option<Policy>) -> Result<Rollbacks> {
+        let Some(policy) = policy else {
+            return Ok(Rollbacks::Off);
+        };
         if let Some(why) = snapshot::unsupported(root) {
+            if snapshot::top_level_unmoved(root) {
+                bail!(
+                    "rollback.enable is set, but {why}. Set rollback.enable = false to switch without rollbacks until then; nothing was changed"
+                );
+            }
             eprintln!("warning: rollback.enable is set, but {why}");
-            return Rollbacks::Off;
+            return Ok(Rollbacks::Off);
         }
-        match archix_mounted(root) {
+        Ok(match archix_mounted(root) {
             true => Rollbacks::On(policy),
             false => Rollbacks::Setup,
-        }
+        })
     }
 
     /// The preview line, if any.
@@ -296,7 +303,7 @@ pub(super) fn schedule_root_move(root: &Path) -> Result<()> {
     }
     snapshot::rootmove::schedule(root)?;
     println!(
-        "the root moves into an @ subvolume at the next boot, in the initramfs: don't power off while it says so. Other subvolumes at the top level stay as they are; after that boot, the next switch lays the root out for rollbacks"
+        "the root moves into an @ subvolume at the next boot, in the initramfs: don't power off while it says so. Other subvolumes at the top level stay as they are, and get fstab lines to stay mounted where they are now, which the next switch asks you to declare in file_systems; after that boot, the next switch lays the root out for rollbacks"
     );
     Ok(())
 }

@@ -368,7 +368,20 @@ fn the_snapshot_hook_short_of_space_aborts_prunes_or_still_tries_as_asked_or_as_
         tried.status.success() && installed_on(machine, "archix-test-big"),
         format!("and installs: {out}"),
     );
-    checks.eq(snapshots(machine).len(), count + 1, "with its snapshot");
+    let after: Vec<u32> = snapshots(machine).iter().map(|record| record.number).collect();
+    let pruned: Vec<u32> = out
+        .lines()
+        .find_map(|line| line.strip_prefix("archix: deleted snapshots "))
+        .map(|numbers| numbers.split(", ").map(|n| n.trim().parse().unwrap()).collect())
+        .unwrap_or_default();
+    checks.check(
+        after.iter().any(|n| *n > slot) && after.contains(&slot),
+        format!("with its snapshot, and the slot stays: {after:?}"),
+    );
+    checks.check(
+        !pruned.is_empty() && after.len() == count + 1 - pruned.len(),
+        format!("the transaction left the root under min_free, so the step after it pruned what no entry pins: {pruned:?}, left {after:?}"),
+    );
     reset(&checks, "after still try");
 
     leave_free(machine, still_try);
@@ -635,10 +648,58 @@ fn a_transaction_cut_off_before_the_step_after_it_leaves_the_current_entry_count
             machine.entries()
         ),
     );
+    let marked = archix::pacman::hooks::unfinished(&setup.paths.state);
+    checks.check(
+        marked.as_ref().is_some_and(|unfinished| unfinished.slot == Some(slot)),
+        format!("the transaction is marked as unfinished, naming the slot: {marked:?}"),
+    );
+    let check = setup.run_env(
+        &[
+            COUNTING,
+            ("ARCHIX_TEST_COUNTED_BOOT", "1"),
+            ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
+        ],
+        &["health-check"],
+    );
+    checks.check(
+        !check.status.success()
+            && text(&check).contains("was cut off before the step after it finished")
+            && text(&check).contains(&format!("`archix rollback {slot}` keeps it")),
+        format!(
+            "so the boot after it fails its health check, naming the slot: {}",
+            text(&check)
+        ),
+    );
+    checks.check(
+        machine
+            .entries()
+            .iter()
+            .any(|entry| entry.starts_with("archix-current+0")),
+        format!(
+            "and its entry is marked bad, so the next boot falls back: {:?}",
+            machine.entries()
+        ),
+    );
     for lock in ["var/lib/pacman/db.lck", "var/rollback/pacman/db.lck"] {
         let _ = fs::remove_file(machine.root.join(lock));
     }
-    pacman(machine, &[OWN], &["-R", "--noconfirm", "archix-test-cut"], None);
+    let next = packages.build("archix-test-after-cut", "");
+    let out = pacman(
+        machine,
+        &[COUNTING],
+        &["-U", "--noconfirm", next.to_str().unwrap()],
+        None,
+    );
+    checks.check(
+        out.status.success() && archix::pacman::hooks::unfinished(&setup.paths.state).is_none(),
+        format!("a transaction that finishes drops the mark: {}", text(&out)),
+    );
+    pacman(
+        machine,
+        &[OWN],
+        &["-R", "--noconfirm", "archix-test-cut", "archix-test-after-cut"],
+        None,
+    );
     checks.finish();
 }
 

@@ -228,6 +228,20 @@ impl Machine {
         }
     }
 
+    /// A machine whose root is the btrfs's top level (subvolid 5), with `@` an empty subvolume beside its directories.
+    pub fn on_btrfs_top(size: &str) -> Machine {
+        let template = template();
+        let btrfs = Btrfs::new(size);
+        let root = btrfs.top.clone();
+        Machine::populate(&root, &template, true);
+        Machine {
+            dir: None,
+            root,
+            btrfs: Some(btrfs),
+            layout: false,
+        }
+    }
+
     /// A machine on the whole rollback layout, as `archix snapshot setup` and the next boot leave one: `@` with @archix at /.archix and @varlib at /var/lib, pacman's database, DKMS's and archix's state on `@` under /var/rollback and bound over their /var/lib paths, and /run a tmpfs; archix's state is bound over the container's own until the machine goes, so it rolls back with the root.
     pub fn on_layout(size: &str) -> Machine {
         let template = template();

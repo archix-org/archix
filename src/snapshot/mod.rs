@@ -798,6 +798,11 @@ pub fn unsupported(root: &Path) -> Option<String> {
     }
 }
 
+/// Whether the root at `root` is btrfs's top level with no move into `@` scheduled, where rollback.enable can't be honoured at all.
+pub fn top_level_unmoved(root: &Path) -> bool {
+    matches!(layout::subvolume_of(root), Some(path) if path == "/" || path.is_empty()) && !rootmove::scheduled(root)
+}
+
 fn btrfs(command: &mut Command, what: &str) -> Result<()> {
     let output = command.output().context("running btrfs")?;
     if !output.status.success() {

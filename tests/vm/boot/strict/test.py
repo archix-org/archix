@@ -1,4 +1,4 @@
-# Strict mode's paths out on a real system: while on, plain pacman refuses; it lets pacman through again with archix's binary gone, its flag gone, the config gone, after strict = false and a switch, and when the transaction is pacman -R archix itself, after which plain pacman works.
+# Strict mode's paths out on a real system: while on, plain pacman refuses; it lets pacman through again with archix's binary gone (whose step after the transaction takes the hooks away until the next switch), its flag gone, the config gone, after strict = false and a switch, and when the transaction is pacman -R archix itself, after which plain pacman works.
 from boot.common import CONFIG, bind, boot, edit_config, ok, out, switch
 from boot.hook.test import BUILD, PKG
 
@@ -27,7 +27,8 @@ def run(m, t):
     with t.step("1: archix as a package, strict mode on"):
         boot()
         m.succeed(f"{BUILD} && {PACKAGE_ARCHIX} && pacman -U --noconfirm --overwrite '*' {ARCHIX_PKG} > /dev/null", what="installing archix as a package")
-        edit_config("'s|^return {|return { strict = true,|'")
+        # archix's own package is no repo's, so declaring it as drift would resolve to archix-git from the AUR.
+        edit_config("'s|^return {|return { strict = true, ignored_packages = { \"archix\" },|'")
         switch("switch to strict mode")
         flag = out(f"ls /var/lib/archix/ | grep -i strict").strip()
         t.require(flag, f"the switch should write strict mode's flag: {out('ls /var/lib/archix')}")
@@ -37,6 +38,8 @@ def run(m, t):
         m.succeed("mv /usr/bin/archix /root/archix.moved")
         plain(m, t, True, "with archix's binary gone")
         m.succeed("mv /root/archix.moved /usr/bin/archix")
+        t.check(not ok("[ -e /usr/share/libalpm/hooks/00-archix-strict.hook ]"), "the step after a transaction without archix's binary takes its hooks away")
+        switch("a switch with the binary back, which writes the hooks again")
         plain(m, t, False, "with the binary back")
         m.succeed(f"mv /var/lib/archix/{flag} /root/flag.moved")
         plain(m, t, True, "with the flag gone")
@@ -52,7 +55,8 @@ def run(m, t):
         t.check(status == 0, f"removing archix should work in strict mode: {said[-600:]}")
         plain(m, t, True, "after archix is removed")
         m.succeed(f"pacman -U --noconfirm {ARCHIX_PKG} > /dev/null", what="installing archix again")
-        plain(m, t, False, "with archix back and its flag still there")
+        switch("a switch with archix back, which writes the hooks again")
+        plain(m, t, False, "with archix back, the removal's marker of a pacman that's gone ignored")
 
     with t.step("4: strict = false and a switch turn it off"):
         edit_config("'s|^return { strict = true,|return {|'")

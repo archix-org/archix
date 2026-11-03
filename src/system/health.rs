@@ -426,15 +426,21 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     let allowed = super::menu::load(&super::menu::dir(paths))
         .map(|state| state.blessed_failed_units)
         .unwrap_or_default();
-    let targets = targets(check.as_ref(), &users, &allowed);
-    let timeout = check.as_ref().map_or(120, |check| check.timeout);
-    let Some((target, why)) = run(&paths.root, &targets, &users, timeout) else {
+    let failed = match crate::pacman::hooks::unfinished(&paths.state) {
+        Some(unfinished) => Some(("pacman-transaction".to_string(), unfinished.why())),
+        None => {
+            let targets = targets(check.as_ref(), &users, &allowed);
+            let timeout = check.as_ref().map_or(120, |check| check.timeout);
+            run(&paths.root, &targets, &users, timeout).map(|(target, why)| (target.to_string(), why))
+        }
+    };
+    let Some((target, why)) = failed else {
         println!("archix: {} passed its health check", entry.id());
         return Ok(true);
     };
     let failure = Failure {
         entry: entry.id(),
-        target: target.to_string(),
+        target,
         why,
         at: crate::generations::now(),
     };

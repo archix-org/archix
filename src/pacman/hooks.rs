@@ -436,6 +436,52 @@ pub fn save_pending(root: &Path, pending: &Pending) -> Result<()> {
     fs::write(&path, serde_json::to_string(pending)?).with_context(|| format!("writing {}", path.display()))
 }
 
+/// In archix's per-root state from the step before a plain transaction, once the slot has its entry, until the step after it has flushed the root: a boot that finds it was cut off mid-transaction, and doesn't count as good.
+pub const UNFINISHED: &str = "pacman-unfinished.json";
+
+/// A plain transaction that started and whose step after it hasn't finished.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Unfinished {
+    pub pacman: u32,
+    pub started: u64,
+    /// The fallback slot when it started, which predates it.
+    pub slot: Option<u32>,
+}
+
+impl Unfinished {
+    /// Why a boot that finds this doesn't count as good, and what to do.
+    pub fn why(&self) -> String {
+        let slot = match self.slot {
+            Some(slot) => format!(
+                "; the fallback slot, snapshot {slot}, is the system from before it: `archix rollback {slot}` keeps it"
+            ),
+            None => String::new(),
+        };
+        format!(
+            "the pacman transaction started at {} was cut off before the step after it finished, so the files it was changing may be torn{slot}, or boot this entry again and finish the update with pacman",
+            crate::system::health::utc(self.started)
+        )
+    }
+}
+
+pub fn mark_unfinished(state: &Path, unfinished: &Unfinished) -> Result<()> {
+    crate::durable::write(&state.join(UNFINISHED), serde_json::to_string(unfinished)?.as_bytes())
+}
+
+pub fn unfinished(state: &Path) -> Option<Unfinished> {
+    serde_json::from_str(&fs::read_to_string(state.join(UNFINISHED)).ok()?).ok()
+}
+
+/// Drops the mark once the transaction and the step after it are on disk; the caller has flushed the root.
+pub fn finished(state: &Path) -> Result<()> {
+    let path = state.join(UNFINISHED);
+    match fs::remove_file(&path) {
+        Ok(()) => crate::durable::sync_dir(&path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
+    }
+}
+
 /// One thing a hook did when space ran short.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {

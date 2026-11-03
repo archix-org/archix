@@ -1087,6 +1087,14 @@ pub fn read_selected_entry() -> Option<String> {
     efivar_string(&fs::read(SELECTED_ENTRY_VAR).ok()?)
 }
 
+/// The entry file systemd-boot is counting this boot's try on, from LoaderBootCountPath; None on an uncounted boot.
+pub fn boot_count_file() -> Option<String> {
+    let path = efivar_string(&fs::read(BOOT_COUNT_PATH_VAR).ok()?)?;
+    path.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
+const BOOT_COUNT_PATH_VAR: &str = "/sys/firmware/efi/efivars/LoaderBootCountPath-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+
 pub const SELECTED_ENTRY_VAR: &str =
     "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 

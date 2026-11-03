@@ -1,9 +1,18 @@
 # Try mode's layer: a try boot that fills its layer file gets "no space left on device" and the notice said where the limit is; on a near-full disk the layer's file shrinks, and with no room for any it goes to memory, so the fallback still comes up.
+import time
+
 from boot.common import bind, boot, bump, entries, entry, ok, out, snapshots, switch, trying
 
 
 def free_mib():
-    return int(out("df -B1M --output=avail / | tail -1").strip())
+    """Free MiB once the space a deleted file held is back: btrfs frees it after a commit, the last try's layer file included, which the initramfs deletes."""
+    last = None
+    while True:
+        now = int(out("btrfs filesystem sync / > /dev/null; df -B1M --output=avail / | tail -1").strip())
+        if now == last:
+            return now
+        last = now
+        time.sleep(2)
 
 
 def try_boot(m, t, older, why):
@@ -24,6 +33,9 @@ def run(m, t):
         older = snapshots()[-1]
         bump(2)
         switch()
+        # The 7 GiB disk leaves a 4 GiB layer only just room, which the downloaded packages can take.
+        m.succeed("rm -f /var/cache/pacman/pkg/*.pkg.tar.*")
+        t.log(f"free before the try boot: {free_mib()} MiB")
         tried = try_boot(m, t, older, "with room on the disk")
         t.check(tried.get("layer") == "file" and tried.get("size") == 4 << 30, f"a 4 GiB layer file: {tried}")
         status, said = m.execute("dd if=/dev/zero of=/root/fill bs=1M count=6000 2>&1", 900)

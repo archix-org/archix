@@ -287,13 +287,49 @@ pub fn text(planned: &Planned, counted: bool) -> String {
 
 /// archix's entry files on the ESP by id.
 pub fn on_esp(esp: &Path) -> BTreeMap<String, String> {
+    entry_files(esp)
+        .into_iter()
+        .map(|name| (boot::entry_id(&name), name))
+        .collect()
+}
+
+/// Drops the other names of an entry on the ESP under two, as a cut between writing its new name and removing its old one leaves it, keeping `booted` (the file this boot's try is counted on) if it's one of them, else the one without a counter; returns the names dropped. systemd-bless-boot can't rename a counted file onto a name that's there.
+pub fn drop_second_names(esp: &Path, booted: Option<&str>) -> Result<Vec<String>> {
+    let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in entry_files(esp) {
+        by_id.entry(boot::entry_id(&name)).or_default().push(name);
+    }
+    let mut dropped = Vec::new();
+    for (id, mut names) in by_id {
+        if names.len() < 2 {
+            continue;
+        }
+        names.sort();
+        let keep = booted
+            .filter(|booted| names.iter().any(|name| name == booted))
+            .map(str::to_string)
+            .or_else(|| names.iter().find(|name| **name == id).cloned())
+            .unwrap_or_else(|| names[0].clone());
+        for name in names.into_iter().filter(|name| *name != keep) {
+            let path = esp.join("loader/entries").join(&name);
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+            dropped.push(name);
+        }
+    }
+    if !dropped.is_empty() {
+        crate::durable::sync_esp(esp)?;
+    }
+    Ok(dropped)
+}
+
+/// The names of archix's entry files on the ESP, two for one entry included.
+fn entry_files(esp: &Path) -> Vec<String> {
     fs::read_dir(esp.join("loader/entries"))
         .into_iter()
         .flatten()
         .flatten()
         .map(|file| file.file_name().to_string_lossy().into_owned())
         .filter(|name| name.ends_with(".conf") && Entry::parse(name).is_some())
-        .map(|name| (boot::entry_id(&name), name))
         .collect()
 }
 
@@ -329,7 +365,8 @@ pub struct Write<'a> {
 fn drop_unwanted(esp: &Path, dir: &Path, planned: &[Planned]) -> Result<()> {
     let wanted: BTreeSet<String> = planned.iter().map(|p| p.entry.id()).collect();
     let mut dropped = false;
-    for (id, name) in on_esp(esp) {
+    for name in entry_files(esp) {
+        let id = boot::entry_id(&name);
         if !wanted.contains(&id) {
             let path = esp.join("loader/entries").join(&name);
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -373,6 +410,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     fs::create_dir_all(&entries).with_context(|| format!("creating {}", entries.display()))?;
     drop_unwanted(esp, how.dir, planned)?;
     let existing = on_esp(esp);
+    let names = entry_files(esp);
     for planned in planned {
         let id = planned.entry.id();
         let counted = how.counted && !matches!(planned.entry, Entry::Extra(_));
@@ -385,9 +423,8 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
             crate::durable::write(&entries.join(&name), text.as_bytes())?;
             crate::testhooks::mark("menu-entry-written");
         }
-        if let Some(old) = existing.get(&id)
-            && *old != name
-        {
+        // A cut between the write above and this removal leaves two names for one entry, so every other one goes.
+        for old in names.iter().filter(|old| boot::entry_id(old) == id && **old != name) {
             fs::remove_file(entries.join(old)).with_context(|| format!("removing {old}"))?;
             crate::testhooks::mark("menu-entry-replaced");
         }
@@ -402,6 +439,22 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
 }
 
 /// The images `planned` needs that aren't on the ESP yet, by name.
+/// Takes the snapshot entries whose image is neither on the ESP nor in `built` out of `planned`, as after a cut between recording a new image and copying it, when a try boot or keep refreshes the menu from another root; returns them. The current system's entry stays, so its missing image fails the refresh.
+fn drop_unreachable(esp: &Path, built: &Path, planned: &mut Vec<Planned>) -> Vec<(u32, String)> {
+    let mut dropped = Vec::new();
+    planned.retain(|p| {
+        let reachable = esp.join(IMAGES).join(&p.image).exists() || built.join(&p.image).is_file();
+        match (&p.entry, reachable) {
+            (Entry::Snapshot(number), false) => {
+                dropped.push((*number, p.image.clone()));
+                false
+            }
+            _ => true,
+        }
+    });
+    dropped
+}
+
 fn missing_images<'a>(esp: &Path, planned: &'a [Planned]) -> BTreeSet<&'a str> {
     planned
         .iter()
@@ -534,6 +587,12 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
         Loader::SystemdBoot | Loader::Grub => {}
     }
     fs::create_dir_all(esp.join(IMAGES)).with_context(|| format!("creating {}", esp.join(IMAGES).display()))?;
+    let built_dir = paths.root.join(boot::BUILT.trim_start_matches('/'));
+    for (number, image) in drop_unreachable(esp, &built_dir, &mut planned) {
+        eprintln!(
+            "warning: snapshot {number}'s boot image {image} is neither on the ESP nor among the images this root built, so it has no boot entry"
+        );
+    }
     let free = || boot::free_bytes(&esp.join(IMAGES));
     let dropped = fit(esp, &dir, &mut planned, &image_size, &free)?;
     if !dropped.is_empty() {
@@ -837,5 +896,91 @@ mod tests {
         }];
         let err = fit(&esp, &dir, &mut slot_only, &size, &free).unwrap_err().to_string();
         assert!(err.contains("MiB free"), "{err}");
+    }
+
+    #[test]
+    fn a_cut_between_writing_an_entry_and_removing_its_old_name_leaves_one_entry_after_the_next_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, dir) = (tmp.path().join("esp"), tmp.path().join("state"));
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        for name in [
+            "archix-current.conf",
+            "archix-current+2.conf",
+            "archix-current+0-2.conf",
+        ] {
+            fs::write(esp.join("loader/entries").join(name), "x").unwrap();
+        }
+        let how = Write {
+            esp: &esp,
+            dir: &dir,
+            counted: true,
+            tries: 2,
+            reset: true,
+            signed: false,
+        };
+        write(&how, &[planned(Entry::Current, "a.efi")]).unwrap();
+        let names: Vec<String> = fs::read_dir(esp.join("loader/entries"))
+            .unwrap()
+            .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["archix-current+2.conf"]);
+    }
+
+    #[test]
+    fn of_two_names_for_one_entry_the_boot_keeps_the_one_it_counts_on_else_the_uncounted_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path();
+        let entries = esp.join("loader/entries");
+        fs::create_dir_all(&entries).unwrap();
+        let names = |dir: &Path| {
+            let mut names: Vec<String> = fs::read_dir(dir)
+                .unwrap()
+                .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        for name in [
+            "archix-current.conf",
+            "archix-current+1-1.conf",
+            "archix-snapshot-2+1.conf",
+            "windows.conf",
+        ] {
+            fs::write(entries.join(name), "x").unwrap();
+        }
+        assert_eq!(
+            drop_second_names(esp, Some("archix-current+1-1.conf")).unwrap(),
+            ["archix-current.conf"]
+        );
+        assert_eq!(
+            names(&entries),
+            ["archix-current+1-1.conf", "archix-snapshot-2+1.conf", "windows.conf"]
+        );
+        fs::write(entries.join("archix-current.conf"), "x").unwrap();
+        assert_eq!(drop_second_names(esp, None).unwrap(), ["archix-current+1-1.conf"]);
+        assert!(drop_second_names(esp, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snapshot_entry_whose_image_is_nowhere_is_dropped_and_the_current_one_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, built) = (tmp.path().join("esp"), tmp.path().join("built"));
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::create_dir_all(&built).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        fs::write(built.join("b.efi"), "b").unwrap();
+        let mut planned = vec![
+            planned(Entry::Current, "gone.efi"),
+            planned(Entry::Snapshot(2), "a.efi"),
+            planned(Entry::Snapshot(3), "b.efi"),
+            planned(Entry::Snapshot(4), "gone.efi"),
+        ];
+        assert_eq!(
+            drop_unreachable(&esp, &built, &mut planned),
+            [(4, "gone.efi".to_string())]
+        );
+        assert_eq!(planned.len(), 3);
     }
 }

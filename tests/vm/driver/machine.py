@@ -334,9 +334,21 @@ class Machine:
         self.console_mark = self.serial.stat().st_size if self.serial.exists() else 0
         self.boot_started = time.monotonic()
 
+    def resync(self):
+        """Takes the boot whose shell answers as this one, with every READY so far seen, so one that went unnoticed (the guest rebooted between two commands) isn't taken for the next boot; returns whether the boot had changed."""
+        actual = self.execute("cat /proc/sys/kernel/random/boot_id", 30, quiet=True)[1].strip()
+        with self.lock:
+            changed = actual != self.boot_id
+            self.boot_id = actual
+            self.seen = len(self.ready)
+        if changed:
+            self.log(f"the shell answers from boot {actual[:8]}")
+        return changed
+
     def reboot(self):
         """A clean reboot; the next command waits for the next boot's shell."""
         self.wait_for_shell()
+        self.resync()
         self.send("systemctl reboot", 60)
         self.new_boot("rebooting")
 
