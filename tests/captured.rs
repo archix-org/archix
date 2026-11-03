@@ -602,7 +602,7 @@ fn a_record_without_a_commit_still_reads_and_one_with_it_keeps_it() {
 fn the_lock_recorded_with_a_generation_is_the_one_applied_even_if_the_live_one_changed() {
     let _system = common::lock_system();
     let setup = common::Setup::new(&[], "");
-    setup.lay_out();
+    setup.first_switch();
     let lock_path = setup.config.join("archix.lock");
     let applied_lock = fs::read_to_string(&lock_path).unwrap();
     let swapped = setup.config.with_extension("swapped");

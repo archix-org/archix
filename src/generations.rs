@@ -72,7 +72,7 @@ impl Generation {
     pub fn too_new(&self) -> Option<String> {
         (self.format > FORMAT).then(|| {
             format!(
-                "generation {}'s record was written by a newer archix (record format {}; this archix knows up to {FORMAT}); boot a deployment whose archix is as new, or upgrade archix",
+                "generation {}'s record was written by a newer archix (record format {}; this archix knows up to {FORMAT}); upgrade archix",
                 self.number, self.format
             )
         })
@@ -159,7 +159,7 @@ impl Store {
         Ok(self.list()?.last().map_or(0, |g| g.number) + 1)
     }
 
-    /// Stores a new generation under its own number, durably and whole; another archix storing the same record meanwhile, as any reader of the store does when it recovers a just-committed deployment's record, isn't an error.
+    /// Stores a new generation under its own number, durably and whole; another archix storing the same record meanwhile isn't an error.
     pub fn save(&self, generation: &Generation) -> Result<()> {
         fs::create_dir_all(&self.dir).with_context(|| format!("creating {}", self.dir.display()))?;
         let path = self.path(generation.number);
@@ -236,7 +236,7 @@ impl Store {
     }
 }
 
-/// The record in `dir`: a store entry or a deployment's own copy.
+/// The record in `dir`, a store entry.
 pub fn read(dir: &Path) -> Result<Generation> {
     let path = dir.join(GENERATION_FILE);
     let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;

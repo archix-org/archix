@@ -63,7 +63,7 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Build the next deployment from the lock and the config; it boots at the next restart
+    /// Apply the lock and the config to the running system, in place
     Switch {
         /// Don't ask for confirmation
         #[arg(long)]
@@ -74,14 +74,14 @@ enum Command {
         /// When a locked AUR version can't be built, take the nearest newer or older one without asking
         #[arg(long, value_enum)]
         accept_nearest: Option<commands::Nearest>,
-        /// Commit even though secrets don't decrypt on this machine yet: those are left out of the deployment, and what uses them fails until a switch after `archix secrets rekey`
+        /// Commit even though secrets don't decrypt on this machine yet: those are left out, and what uses them fails until a switch after `archix secrets rekey`
         #[arg(long)]
         without_secrets: bool,
         /// Downgrade declared packages even though that breaks packages archix doesn't track, by their dependencies or the libraries they load
         #[arg(long)]
         allow_partial: bool,
     },
-    /// Gone: a switch commits a whole new deployment or nothing, so there's nothing to recover
+    /// Gone: a switch that fails partway says what it applied
     #[command(hide = true)]
     Recover {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -161,7 +161,7 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Repair a machine from the rescue boot entry, which mounts no deployment; with no command, the rescue prompt
+    /// Repair a machine from the rescue boot entry, which doesn't mount the root; with no command, the rescue prompt
     Rescue {
         #[command(flatten)]
         options: commands::rescue::Options,
@@ -238,7 +238,7 @@ enum Command {
 enum Secrets {
     /// Make this machine's age identity in /var/lib/archix/secrets and print the key for secrets.machine_key
     Init {
-        /// Make a new identity even though one exists; the old one is retired, kept while a deployment needs it
+        /// Make a new identity even though one exists; the old one is retired, kept while a kept generation needs it
         #[arg(long)]
         replace: bool,
     },
@@ -266,13 +266,13 @@ enum Secrets {
     },
     /// Show for each secret who it should be encrypted to against who it was, whether this machine decrypts it, and what uses it
     Check,
-    /// Make a new machine identity; the old one is retired until no kept deployment needs it (gc drops it then)
+    /// Make a new machine identity; the old one is retired until no kept generation needs it (gc drops it then)
     RotateMachineKey {
         /// The old key leaked: delete it at once instead of retiring it
         #[arg(long)]
         compromised: bool,
     },
-    /// Run at boot by archix-secrets.service: decrypt the booted deployment's secrets into /run/archix/secrets
+    /// Run at boot by archix-secrets.service: decrypt the config's secrets into /run/archix/secrets
     #[command(hide = true)]
     Activate {
         #[arg(long, default_value = "/")]

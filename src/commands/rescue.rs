@@ -13,7 +13,7 @@ use archix::system::{boot, password, rescue, rescue_auth};
 /// Where the rescue boot mounts the root, and the ESP when the root can't say where it goes.
 const ROOT_MOUNT: &str = "/run/archix-rescue/root";
 const ESP_MOUNT: &str = "/run/archix-rescue/esp";
-/// Where the login mounts the root read-only to read the current deployment's /etc/shadow.
+/// Where the login mounts the root read-only to read its /etc/shadow.
 const LOGIN_MOUNT: &str = "/run/archix-rescue/login";
 /// The name an encrypted root opens as when the kernel command line names none.
 const LUKS_NAME: &str = "rescue-root";
@@ -344,7 +344,7 @@ impl Session {
         Ok(device)
     }
 
-    /// The login before the rescue opens: the root's current deployment's /etc/shadow, read from a read-only mount, must hold a password for root or a wheel user, and one of them must be typed.
+    /// The login before the rescue opens: the root's /etc/shadow, read from a read-only mount, must hold a password for root or a wheel user, and one of them must be typed.
     pub fn authenticate(&self) -> Result<()> {
         let mounted = match &self.options.root_dir {
             Some(dir) => dir.clone(),
@@ -487,7 +487,6 @@ impl Session {
         }
     }
 
-    /// The deployments `deployment` and `all` pick, current's by default.
     fn check(&self, repair_btrfs: bool) -> Result<()> {
         if self.options.root_dir.is_some() {
             bail!("check needs the root and the ESP unmounted; unmount them and pass --root DEVICE and --esp DEVICE");

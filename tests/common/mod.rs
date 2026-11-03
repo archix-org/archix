@@ -17,31 +17,6 @@ use tempfile::TempDir;
 /// The snapshot the test image is pinned to, so locking at it changes nothing but what a test declares.
 pub const IMAGE_SNAPSHOT: &str = "2026-10-10";
 static SYSTEM: Mutex<()> = Mutex::new(());
-/// What a boot entry starts: the UKI's path on the ESP, the command line the kernel gets, and the kernel's release, empty when it's no UKI objcopy reads.
-pub struct Started {
-    pub uki: String,
-    pub cmdline: String,
-    pub kernel: String,
-}
-
-/// A UKI's PE section `name` as text, without its trailing NULs.
-fn section(uki: &Path, name: &str) -> Option<String> {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("section");
-    let copied = Command::new("objcopy")
-        .args(["-O", "binary", &format!("--only-section={name}")])
-        .arg(uki)
-        .arg(&out)
-        .output()
-        .is_ok_and(|done| done.status.success());
-    let text = String::from_utf8_lossy(&fs::read(&out).ok()?)
-        .trim_end_matches('\0')
-        .to_string();
-    (copied && !text.is_empty()).then_some(text)
-}
-
-/// The vendor GUID systemd-boot and systemd-stub put their EFI variables under.
-const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 /// Small packages the boot tests add one at a time.
 pub const UKI_TEST_PACKAGES: [&str; 10] = [
     "tree", "bc", "pv", "dos2unix", "figlet", "rlwrap", "cowsay", "sl", "toilet", "ncdu",
@@ -142,27 +117,76 @@ fn template() -> PathBuf {
           | tar -C "$t" --xattrs --xattrs-include='*' -xpf -
         install -Dm755 {STATIC_BUILD} "$t/usr/lib/archix/archix-static"
         install -Dm755 {archix} "$t{archix}"
-        ln -s /var/lib/pacman/local "$t/pacman""#,
+        touch "$t/.done""#,
         archix = env!("CARGO_BIN_EXE_archix"),
     ));
-    // The image's layers lost some owners and modes its packages give (setgid tty, setuid dbus), which `archix verify` would rightly report.
-    for problem in archix::deploy::verify::check(Path::new(TEMPLATE)).unwrap() {
-        let path = Path::new(TEMPLATE).join(&problem.path);
-        if problem.what.starts_with("owner") || problem.what.starts_with("mode") {
-            std::os::unix::fs::lchown(&path, Some(problem.uid as u32), Some(problem.gid as u32)).unwrap();
-            fs::set_permissions(&path, fs::Permissions::from_mode(problem.mode)).unwrap();
-        }
-    }
-    sh(&format!("rm {TEMPLATE}/pacman; touch {TEMPLATE}/.done"));
     PathBuf::from(TEMPLATE)
 }
 
-/// A whole Arch root in a directory on the container's /tmp, which archix switches through ARCHIX_TEST_ROOT: its /usr is hardlinked from the template, /etc and pacman's database are the container's, and the container's package caches and archix state are bound in, so the staging root sees package files where archix put them.
+/// A loop btrfs laid out as CachyOS does, `@` at the top level, whose top level and `@` stay mounted until it's dropped.
+pub struct Btrfs {
+    _dir: TempDir,
+    pub top: PathBuf,
+    pub root: PathBuf,
+}
+
+impl Btrfs {
+    fn new(size: &str) -> Btrfs {
+        let dir = TempDir::new().unwrap();
+        let (image, top, root) = (
+            dir.path().join("disk.img"),
+            dir.path().join("top"),
+            dir.path().join("root"),
+        );
+        fs::create_dir_all(&top).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        sh(&format!(
+            "truncate -s {size} {image} && mkfs.btrfs -q {image} && mount -o loop {image} {top} && btrfs -q subvolume create {top}/@ && mount -o subvol=/@ \"$(findmnt -n -o SOURCE {top})\" {root}",
+            image = image.display(),
+            top = top.display(),
+            root = root.display()
+        ));
+        Btrfs { _dir: dir, top, root }
+    }
+
+    /// Mounts @archix at <root>/.archix, as the fstab line rollbacks' setup writes does from the next boot on.
+    pub fn mount_archix(&self) {
+        let device = sh_out(&format!("findmnt -n -o SOURCE {}", self.top.display()));
+        let device = device.trim().split('[').next().unwrap().to_string();
+        sh(&format!(
+            "btrfs -q subvolume create {top}/@archix && mkdir -p {root}/.archix && mount -o subvol=/@archix {device} {root}/.archix",
+            top = self.top.display(),
+            root = self.root.display()
+        ));
+    }
+}
+
+impl Drop for Btrfs {
+    fn drop(&mut self) {
+        Machine::unmount_all(&self.root);
+        Machine::unmount_all(&self.top);
+    }
+}
+
+fn sh_out(script: &str) -> String {
+    let output = Command::new("bash").args(["-ec", script]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{script}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// What a machine leaves in the container's archix state, which its next machine and tests on the container itself must not see.
+const FORGET: &str = "cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json config.git outside-changes.json notes kernels secrets";
+
+/// A whole Arch root in a directory, which archix switches through ARCHIX_TEST_ROOT: its /usr is hardlinked from the template (or, on btrfs, the template bound read-only), /etc and pacman's database are copies of the container's, and the container's package caches and archix state are bound in.
 pub struct Machine {
     dir: Option<TempDir>,
     pub root: PathBuf,
-    /// The boot entry LoaderEntrySelected names, as ARCHIX_TEST_ENTRY; None is a boot that set none.
-    booted: RefCell<Option<String>>,
+    /// The btrfs the root is `@` of, when it's on one.
+    pub btrfs: Option<Btrfs>,
 }
 
 impl Machine {
@@ -173,11 +197,39 @@ impl Machine {
             .tempdir_in(MACHINES)
             .unwrap();
         let root = dir.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        Machine::populate(&root, &template, false);
+        Machine {
+            dir: Some(dir),
+            root,
+            btrfs: None,
+        }
+    }
+
+    /// A machine whose root is `@` on a loop btrfs; its /usr is the template's, read-only, so switches there may change files and accounts but not packages.
+    pub fn on_btrfs() -> Machine {
+        let template = template();
+        let btrfs = Btrfs::new("2G");
+        let root = btrfs.root.clone();
+        Machine::populate(&root, &template, true);
+        Machine {
+            dir: None,
+            root,
+            btrfs: Some(btrfs),
+        }
+    }
+
+    fn populate(root: &Path, template: &Path, bound: bool) {
+        let usr = match bound {
+            false => r#"cp -al "$t/usr" "$r/usr"; cp -al "$t/target" "$r/target""#,
+            true => {
+                r#"mkdir -p "$r/usr" "$r/target"; mount --bind -o ro "$t/usr" "$r/usr"; mount --bind -o ro "$t/target" "$r/target""#
+            }
+        };
         sh(&format!(
             r#"r={root}; t={template}; umask 022
-            mkdir -p "$r"; chmod 755 "$(dirname "$r")"
-            cp -al "$t/usr" "$r/usr"
-            cp -al "$t/target" "$r/target"
+            chmod 755 "$(dirname "$r")"
+            {usr}
             cp -a /etc "$r/etc"
             rm -f "$r"/etc/pacman.d/hooks/zz-archix-test-*
             printf 'MODULES=()\nBINARIES=()\nFILES=()\nHOOKS=(base)\nCOMPRESSION=cat\n' > "$r/etc/mkinitcpio.conf"
@@ -190,83 +242,46 @@ impl Machine {
             : > "$r/var/log/pacman.log"
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
-            cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json id-registry.json etc-merge outside-changes.json \
-              pending-hooks notes layout-pruned eject activated accounts secrets"#,
+            mount -t proc proc "$r/proc"; mount --rbind /dev "$r/dev"
+            {FORGET}"#,
             root = root.display(),
             template = template.display(),
+            FORGET = FORGET,
         ));
-        *ACTIVE.lock().unwrap() = Some(root.clone());
-        Machine {
-            dir: Some(dir),
-            root,
-            booted: RefCell::new(None),
-        }
+        *ACTIVE.lock().unwrap() = Some(root.to_path_buf());
     }
 
-    /// Where `path`, relative to the root, is in the running system, writable for a test.
+    /// Where `path`, relative to the root, is on the machine.
     pub fn system_file(&self, path: &str) -> PathBuf {
-        match self.current() {
-            Some(number) => self.deployment(number).join(path),
-            None => self.root.join(path),
-        }
+        self.root.join(path)
     }
 
-    /// The pacman database of the system as it is now.
+    /// The machine's pacman database.
     pub fn local_db(&self) -> PathBuf {
-        self.deployment(self.current().expect("a laid out machine"))
-            .join("pacman/local")
+        self.root.join("var/lib/pacman/local")
     }
 
     pub fn esp(&self) -> PathBuf {
         self.root.join("efi")
     }
 
-    /// The environment that points archix at this machine and the boot it's in.
+    /// The environment that points archix at this machine.
     pub fn env(&self) -> Vec<(String, String)> {
-        vec![
-            ("ARCHIX_TEST_ROOT".into(), self.root.display().to_string()),
-            (
-                "ARCHIX_TEST_ENTRY".into(),
-                self.booted.borrow().clone().unwrap_or_default(),
-            ),
-        ]
+        vec![("ARCHIX_TEST_ROOT".into(), self.root.display().to_string())]
     }
 
+    /// The generation the machine was last switched or rolled back to.
     pub fn current(&self) -> Option<u32> {
-        let target = fs::read_link(self.root.join("archix/current")).ok()?;
-        target.to_str()?.strip_prefix("deploy/")?.parse().ok()
+        fs::read_to_string("/var/lib/archix/generations/current")
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
     }
 
-    pub fn deployment(&self, number: u32) -> PathBuf {
-        self.root.join("archix/deploy").join(number.to_string())
-    }
-
-    /// Committed deployments, oldest first.
-    pub fn deployments(&self) -> Vec<u32> {
-        let mut numbers: Vec<u32> = fs::read_dir(self.root.join("archix/deploy"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-            .collect();
-        numbers.sort_unstable();
-        numbers
-    }
-
-    /// What's in the archix deploy directory besides committed deployments, such as staging trees.
-    pub fn leftovers(&self) -> Vec<String> {
-        fs::read_dir(self.root.join("archix/deploy"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.parse::<u32>().is_err())
-            .collect()
-    }
-
-    /// A package's version in a deployment's pacman database.
-    pub fn installed_in(&self, number: u32, name: &str) -> Option<String> {
-        read_local_db(&self.deployment(number).join("pacman"))
+    /// A package's version in the machine's pacman database.
+    pub fn installed(&self, name: &str) -> Option<String> {
+        read_local_db(&self.local_db())
             .unwrap()
             .remove(name)
             .map(|pkg| pkg.version)
@@ -285,14 +300,9 @@ impl Machine {
         names
     }
 
-    pub fn loader_conf(&self) -> String {
-        fs::read_to_string(self.esp().join("loader/loader.conf")).unwrap_or_default()
-    }
-
     /// Mount points at or under `path`, deepest first.
     fn mounts_under(path: &Path) -> Vec<PathBuf> {
-        let info = fs::read("/proc/self/mountinfo").unwrap();
-        let mut points: Vec<PathBuf> = archix::deploy::view::mount_points(&info)
+        let mut points: Vec<PathBuf> = archix::conflicts::mount_points()
             .into_iter()
             .filter(|point| point.starts_with(path))
             .collect();
@@ -308,123 +318,8 @@ impl Machine {
         }
     }
 
-    /// Restarts the machine into the boot entry `entry`, or into `current` without one: the deployment binds go, and the initramfs's `archix deploy-mount` binds the deployment it picks.
-    pub fn reboot(&self, entry: Option<&str>) -> String {
-        self.power_off();
-        let efivar = self.root.join("run/test-efivar");
-        match entry {
-            Some(entry) => {
-                let mut bytes = vec![6, 0, 0, 0];
-                bytes.extend(entry.encode_utf16().flat_map(u16::to_le_bytes));
-                bytes.extend([0, 0]);
-                fs::write(&efivar, bytes).unwrap();
-            }
-            None => {
-                let _ = fs::remove_file(&efivar);
-            }
-        }
-        let stub = efivar.with_file_name(format!("StubImageIdentifier-{LOADER_GUID}"));
-        let mut mount = Command::new(env!("CARGO_BIN_EXE_archix"));
-        match entry.and_then(|entry| self.started_by(entry)) {
-            Some(started) => {
-                let mut bytes = vec![6, 0, 0, 0];
-                bytes.extend(started.uki.replace('/', "\\").encode_utf16().flat_map(u16::to_le_bytes));
-                bytes.extend([0, 0]);
-                fs::write(&stub, bytes).unwrap();
-                mount.env("ARCHIX_TEST_CMDLINE", started.cmdline);
-                mount.env("ARCHIX_TEST_KERNEL", started.kernel);
-            }
-            None => {
-                let _ = fs::remove_file(&stub);
-            }
-        }
-        let output = mount
-            .arg("deploy-mount")
-            .arg(&self.root)
-            .arg("--efivar")
-            .arg(&efivar)
-            .arg("--run-dir")
-            .arg(self.root.join("run/archix"))
-            .output()
-            .unwrap();
-        let text = format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(output.status.success(), "deploy-mount failed:\n{text}");
-        *self.booted.borrow_mut() = entry.map(str::to_string);
-        text
-    }
-
-    /// What systemd-boot and systemd-stub without Secure Boot start for boot entry `id` on this machine's ESP.
-    pub fn started_by(&self, id: &str) -> Option<Started> {
-        let esp = self.esp();
-        let text = match fs::read_dir(esp.join("loader/entries"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .find(|file| archix::system::boot::entry_id(&file.file_name().to_string_lossy()) == id)
-        {
-            Some(file) => fs::read_to_string(file.path()).ok()?,
-            None if esp.join("EFI/Linux").join(id).is_file() => format!("uki /EFI/Linux/{id}\n"),
-            None => return None,
-        };
-        let uki = archix::system::boot::recorded_uki(&text)?.to_string();
-        let file = esp.join(uki.trim_start_matches('/'));
-        let options: Vec<&str> = text
-            .lines()
-            .filter_map(|line| line.strip_prefix("options"))
-            .filter(|rest| rest.starts_with(char::is_whitespace))
-            .map(str::trim)
-            .collect();
-        let name = uki.rsplit('/').next().unwrap_or_default();
-        let cmdline = match (options.is_empty(), section(&file, ".cmdline")) {
-            (false, _) => options.join(" "),
-            (true, Some(cmdline)) => cmdline,
-            (true, None) => fs::read_to_string(Paths::under(&self.root).state.join("boot/cmdlines").join(name)).ok()?,
-        };
-        Some(Started {
-            kernel: section(&file, ".uname").unwrap_or_default(),
-            uki,
-            cmdline,
-        })
-    }
-
-    /// Takes the running deployment's binds and the read-only store off the root, leaving it as a live USB mounts it.
-    pub fn power_off(&self) {
-        for (_, at) in archix::system::deploy_boot::TREES {
-            Machine::unmount_all(&self.root.join(at));
-        }
-        let store = self.root.join("archix");
-        while Machine::mounts_under(&store).contains(&store) {
-            sh(&format!("umount {}", store.display()));
-        }
-    }
-
-    /// Makes the machine's /archix, which its boot bound read-only, writable or read-only again, as a test that edits a deployment by hand needs.
-    pub fn store_writable(&self, writable: bool) {
-        let store = self.root.join("archix");
-        if Machine::mounts_under(&store).contains(&store) {
-            let mode = if writable { "rw" } else { "ro" };
-            sh(&format!("mount -o remount,bind,{mode} {}", store.display()));
-        }
-    }
-
-    /// Runs plain pacman against the machine's running deployment, as `pacman -U` or yay would there, with /usr, /opt and /boot made writable for it.
+    /// Runs plain pacman against the machine, as `pacman -U` or yay would there.
     pub fn pacman(&self, args: &[&str]) {
-        let remount = |mode: &str| {
-            for tree in archix::system::deploy_boot::READ_ONLY {
-                let path = self.root.join(tree);
-                if Machine::mounts_under(&path).contains(&path) {
-                    let _ = Command::new("mount")
-                        .args(["-o", &format!("remount,bind,{mode}")])
-                        .arg(&path)
-                        .status();
-                }
-            }
-        };
-        remount("rw");
         let status = Command::new("pacman")
             .arg("--root")
             .arg(&self.root)
@@ -438,13 +333,13 @@ impl Machine {
             .arg("--noconfirm")
             .status()
             .unwrap();
-        remount("ro");
         assert!(status.success(), "pacman {args:?}");
     }
 }
 
 impl Drop for Machine {
     fn drop(&mut self) {
+        let _ = Command::new("bash").args(["-c", FORGET]).status();
         let mut active = ACTIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if active.as_deref() == Some(self.root.as_path()) {
             *active = None;
@@ -454,6 +349,7 @@ impl Drop for Machine {
         if !left.is_empty() {
             eprintln!("warning: still mounted, so {} is left: {left:?}", self.root.display());
             std::mem::forget(self.dir.take());
+            std::mem::forget(self.btrfs.take());
         }
     }
 }
@@ -482,9 +378,18 @@ impl Setup {
 
     /// Like `new`, with `files` (path relative to the config, content) written before the first lock.
     pub fn with_files(extra: &[&str], body: &str, files: &[(&str, &str)]) -> Setup {
-        let machine = Machine::new();
-        let mut paths = Paths::system();
-        paths.root = machine.root.clone();
+        Setup::on(Machine::new(), extra, body, files)
+    }
+
+    /// Like `new`, for a machine already made, such as one on btrfs.
+    pub fn on(machine: Machine, extra: &[&str], body: &str, files: &[(&str, &str)]) -> Setup {
+        let paths = Paths::under(&machine.root);
+        let paths = Paths {
+            state: PathBuf::from("/var/lib/archix"),
+            cache: PathBuf::from("/var/cache/archix"),
+            pacman_cache: PathBuf::from("/var/cache/pacman/pkg"),
+            ..paths
+        };
         let dir = TempDir::new().unwrap();
         for (path, content) in files {
             let path = dir.path().join(path);
@@ -502,7 +407,7 @@ impl Setup {
         setup
     }
 
-    /// Moves the config into the machine's running /etc/archix, as on a real machine, and runs archix with it there.
+    /// Moves the config into the machine's /etc/archix, as on a real machine, and runs archix with it there.
     pub fn move_config_to_etc(&mut self) {
         let etc = self.machine.root.join("etc/archix");
         sh(&format!(
@@ -617,12 +522,9 @@ impl Setup {
         self.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     }
 
-    /// The first switch, which lays the machine out as deployment 1 and builds deployment 2 if the config changes anything; the machine then boots the current deployment.
-    pub fn lay_out(&self) -> String {
-        let out = self.ok(&["switch", "--noconfirm"]);
-        self.machine
-            .reboot(Some(&format!("archix-{}.conf", self.machine.current().unwrap())));
-        out
+    /// The first switch, which records generation 1 (and applies whatever the config changes).
+    pub fn first_switch(&self) -> String {
+        self.ok(&["switch", "--noconfirm"])
     }
 }
 
@@ -644,46 +546,24 @@ pub fn line_diff(before: &str, after: &str) -> String {
     out.join("\n")
 }
 
-/// The version of `name` that boots next: in the active machine's current deployment, or before its first layout its own database.
+/// The version of `name` installed on the active machine.
 pub fn installed(name: &str) -> Option<String> {
     let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
-    let db = match fs::read_link(root.join("archix/current")) {
-        Ok(target) => root.join("archix").join(target).join("pacman"),
-        Err(_) => root.join("var/lib/pacman/local"),
-    };
-    read_local_db(&db).unwrap().remove(name).map(|pkg| pkg.version)
+    read_local_db(&root.join("var/lib/pacman/local"))
+        .unwrap()
+        .remove(name)
+        .map(|pkg| pkg.version)
 }
 
-/// A file in the active machine's current deployment, or its root before the first layout, or for /usr/local the shared /var/usrlocal; `path` is absolute.
+/// A file on the active machine; `path` is absolute.
 pub fn system_path(path: &str) -> PathBuf {
     let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
-    let rel = path.trim_start_matches('/');
-    if archix::system::usr_local::holds(path) {
-        return archix::system::usr_local::on_disk(&root, path);
-    }
-    let booted = fs::read_to_string(root.join("run/archix/deployment")).unwrap_or_default();
-    match fs::read_link(root.join("archix/current")) {
-        Ok(target) if target.to_str() == Some(&format!("deploy/{}", booted.trim())) => root.join(rel),
-        Ok(target) if archix::system::apply::deployment_tree(path).is_some() => {
-            root.join("archix").join(target).join(rel)
-        }
-        _ => root.join(rel),
-    }
+    root.join(path.trim_start_matches('/'))
 }
 
-/// Writes `path` of the active machine where `system_path` puts it, by hand as a user would, through /archix when it's in a deployment that isn't running.
+/// Writes `path` of the active machine by hand, as a user would.
 pub fn write_system_path(path: &str, contents: &str) {
-    let file = system_path(path);
-    let root = ACTIVE.lock().unwrap().clone().expect("no machine is active");
-    let store = root.join("archix");
-    let protected = file.starts_with(&store) && Machine::mounts_under(&store).contains(&store);
-    if protected {
-        sh(&format!("mount -o remount,bind,rw {}", store.display()));
-    }
-    fs::write(&file, contents).unwrap();
-    if protected {
-        sh(&format!("mount -o remount,bind,ro {}", store.display()));
-    }
+    fs::write(system_path(path), contents).unwrap();
 }
 
 /// Plain pacman on the container itself, for tests of what `archix init` reads from the machine it runs on.

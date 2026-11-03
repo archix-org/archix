@@ -115,12 +115,11 @@ fn a_rebuild_gets_the_commit_and_downloads_the_first_build_got() {
         "",
         &[("pkgbuilds/archix-test-vcs/PKGBUILD", recipe)],
     );
-    setup.lay_out();
+    setup.first_switch();
     let installed_content = || fs::read_to_string(system_path("/opt/archix-test-vcs/content")).unwrap_or_default();
     assert_eq!(installed_content(), "first");
     // As on a machine that never built it: no package, no build record, no built file.
     let forget_the_build = || {
-        setup.machine.reboot(None);
         setup.machine.pacman(&["-Rdd", "archix-test-vcs"]);
         let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-vcs");
         for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {
@@ -164,11 +163,10 @@ fn a_build_that_differs_from_the_locked_one_is_said_and_can_be_refused() {
         "",
         &[("pkgbuilds/archix-test-local/PKGBUILD", &pkgbuild("1.0"))],
     );
-    setup.lay_out();
+    setup.first_switch();
     let locked = setup.lock().packages["archix-test-local"].sha256.clone();
     // As on a machine that never built it: no package, no build record, no built file.
     let forget_the_build = || {
-        setup.machine.reboot(None);
         setup.machine.pacman(&["-Rdd", "archix-test-local"]);
         let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/local:archix-test-local");
         for file in fs::read_dir("/var/cache/archix/pkg").unwrap().flatten() {

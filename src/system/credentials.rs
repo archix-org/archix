@@ -335,7 +335,7 @@ pub fn override_lines(passwords: &Passwords) -> Vec<String> {
     });
     let replaced = passwords.superseded.iter().map(|name| match passwords.secret.get(name) {
         Some(secret) => format!(
-            "secret {secret} changed since the rescue entry set {name}'s password, so the new deployment's boot sets the declared one"
+            "secret {secret} changed since the rescue entry set {name}'s password, so this switch sets the declared one"
         ),
         None => format!(
             "users.{name}.hashed_password changed since the rescue entry set {name}'s password, so the declared one replaces it"
@@ -382,9 +382,7 @@ pub fn describe(passwords: &Passwords, etc: &Path) -> Vec<String> {
         .secret
         .iter()
         .filter(|(name, _)| !passwords.overridden.contains(*name))
-        .map(|(name, secret)| {
-            format!("password   {name}'s comes from secret {secret}, set when the new deployment boots")
-        })
+        .map(|(name, secret)| format!("password   {name}'s comes from secret {secret}, set by this switch"))
         .collect();
     if passwords.enforced.is_empty() && passwords.initial.is_empty() {
         return lines;
@@ -483,7 +481,7 @@ pub fn lockout(etc: &Path, live: &Path, allowed: bool, logins: &BTreeSet<String>
         );
     }
     Ok(Some(format!(
-        "warning: no account can log in with a password ({what}), here or in the new deployment, and the rescue boot entry needs one; give root or a wheel user a password with passwd or users.<name>.hashed_password, or set allow_no_password_login = true to silence this"
+        "warning: no account can log in with a password ({what}), so recovering would need a live USB; give root or a wheel user a password with passwd or users.<name>.hashed_password, or set allow_no_password_login = true to silence this"
     )))
 }
 

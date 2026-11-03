@@ -23,6 +23,9 @@ pub struct Report {
     pub written: Vec<String>,
     /// Secrets left out, with why.
     pub missing: BTreeMap<String, String>,
+    /// Secrets `switch --without-secrets` left out on purpose.
+    #[serde(default)]
+    pub left_out: Vec<String>,
     pub notes: Vec<String>,
 }
 
@@ -240,9 +243,7 @@ pub fn activate(root: &Path) -> Result<Report> {
     let mut total = 0;
     for (name, entry) in &manifest.secrets {
         if entry.absent {
-            report
-                .missing
-                .insert(name.clone(), "left out by `archix switch --without-secrets`".into());
+            report.left_out.push(name.clone());
             continue;
         }
         let ciphertext = match fs::read(deploy.join(format!("{}.age", entry.sha256))) {
@@ -373,6 +374,11 @@ pub fn run(root: &Path) -> Result<()> {
         .map(|line| format!("{line}\n"))
         .collect();
     let mut said = report.notes.clone();
+    for name in &report.left_out {
+        said.push(format!(
+            "secret {name} is left out by `archix switch --without-secrets`, so what uses it fails"
+        ));
+    }
     for (name, why) in &report.missing {
         said.push(format!(
             "secret {name} wasn't decrypted at this boot, so what uses it fails: {why}"

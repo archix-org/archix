@@ -170,7 +170,7 @@ thread_local! {
     static WRITTEN: std::cell::RefCell<Vec<ConfigWrite>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// From here on, config writes wait in memory until the switch commits its deployment.
+/// From here on, config writes wait in memory until the switch has applied.
 pub fn defer_config_writes() {
     DEFERRED.with(|deferred| *deferred.borrow_mut() = Some(Vec::new()));
 }
@@ -417,7 +417,7 @@ pub(super) fn pending(
     Ok((lines, warned, kept))
 }
 
-/// Warnings for an fstab or crypttab in the current deployment's /etc that differs from what archix wrote there.
+/// Warnings for an fstab or crypttab in /etc that differs from what archix wrote there.
 fn fstab_drift(target: &Target) -> Result<Vec<String>> {
     let paths = Paths::system();
     let store = Store::new(&paths);
@@ -436,7 +436,7 @@ fn fstab_drift(target: &Target) -> Result<Vec<String>> {
     ))
 }
 
-/// What this machine carries into every deployment that the config doesn't declare, as `archix {command}` reports it.
+/// What this machine carries that the config doesn't declare, as `archix {command}` reports it.
 fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str) -> Result<Vec<String>> {
     let paths = Paths::system();
     let installed = archix::capture::read_installed(&super::switch::installed_db(&paths))?;

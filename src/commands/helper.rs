@@ -248,7 +248,7 @@ fn hits(target: &Target, terms: &[String]) -> Result<Vec<Hit>> {
     Ok(hits)
 }
 
-/// `archix -Syu`: moves the lock to the newest archive snapshot and AUR packages to their newest recipes, then switches; pacman can't upgrade a deployment in place.
+/// `archix -Syu`: moves the lock to the newest archive snapshot and AUR packages to their newest recipes, then switches.
 pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
     require_root("upgrade")?;
     check_pacman_free(&Paths::system())?;

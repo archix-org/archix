@@ -104,9 +104,8 @@ impl LocalRepo {
     }
 }
 
-/// Uninstalls a package from the current deployment and deletes every cached copy, so the next switch has to find it somewhere.
+/// Uninstalls a package from the machine and deletes every cached copy, so the next switch has to find it somewhere.
 fn forget(setup: &Setup, name: &str) {
-    setup.machine.reboot(None);
     setup.machine.pacman(&["-R", name]);
     for dir in [Path::new("/var/cache/archix/pkg"), Path::new("/var/cache/pacman/pkg")] {
         for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -238,8 +237,7 @@ fn a_package_signed_by_an_expired_key_is_refused_at_prepare() {
         "prepare names the package and the expired key: {text}"
     );
     assert!(!text.contains("in the staging root"), "{text}");
-    assert!(setup.machine.deployments().is_empty(), "{text}");
-    assert_eq!(setup.machine.current(), None);
+    assert_eq!(setup.machine.current(), None, "{text}");
     assert!(installed("archix-test-expired").is_none());
 }
 
@@ -255,7 +253,7 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
     );
     let _ = fs::remove_file("/var/lib/pacman/sync/archix-third.db");
     let setup = Setup::new(&[], &body);
-    setup.lay_out();
+    setup.first_switch();
     let query = Command::new("pacman")
         .arg("--config")
         .arg(system_path("/etc/pacman.conf"))
@@ -269,7 +267,7 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
         fs::read_to_string(system_path("/etc/pacman.conf"))
             .unwrap()
             .contains("[archix-third]"),
-        "the deployment's pacman.conf has the repo"
+        "the machine's pacman.conf has the repo"
     );
     assert!(
         !warnings.contains("database file for 'archix-third' does not exist"),
@@ -279,22 +277,21 @@ fn plain_pacman_finds_the_database_of_a_repo_a_switch_declared() {
 
 #[test]
 #[ignore]
-fn a_rollback_that_rebuilds_never_takes_a_keyring_back() {
+fn a_rollback_never_takes_a_keyring_back() {
     let _system = lock_system();
     let repo = LocalRepo::new("archix-third");
     let keyring = "install -Dm644 /dev/null \"$pkgdir/usr/share/pacman/keyrings/archix-test.gpg\"";
     repo.publish_with("archix-test-keyring", "1.0", keyring);
     let body = format!(
-        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}, deployments = {{ keep = 1 }}",
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
         repo.server()
     );
     let setup = Setup::new(&["archix-test-keyring"], &body);
-    setup.lay_out();
+    setup.first_switch();
     repo.publish_with("archix-test-keyring", "2.0", keyring);
     setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed("archix-test-keyring").as_deref(), Some("2.0-1"));
-    setup.machine.reboot(None);
     setup.ok(&["gc"]);
 
     let out = setup.ok(&["rollback", "--noconfirm"]);
@@ -329,19 +326,15 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
         None,
     );
     let body = format!(
-        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}, deployments = {{ keep = 6 }}",
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }}, sig_level = \"Optional TrustAll\" }} }}",
         repo.server()
     );
     let setup = Setup::new(&[name], &body);
-    setup.lay_out();
+    setup.first_switch();
     let machine = &setup.machine;
-    let file = |number: u32| machine.deployment(number).join(&path[1..]);
+    let file = machine.system_file(&path[1..]);
     let packaged = machine.current().unwrap();
-    assert_eq!(
-        getcap(&file(packaged)),
-        "cap_ipc_lock=ep",
-        "as its install script left it"
-    );
+    assert_eq!(getcap(&file), "cap_ipc_lock=ep", "as its install script left it");
 
     setup.set_body(
         &[name],
@@ -349,8 +342,7 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
     );
     setup.ok(&["switch", "--noconfirm"]);
     let declared = machine.current().unwrap();
-    assert_eq!(getcap(&file(declared)), "cap_sys_nice=ep");
-    assert_eq!(getcap(&file(packaged)), "cap_ipc_lock=ep");
+    assert_eq!(getcap(&file), "cap_sys_nice=ep");
 
     setup.set_body(&[name], &body);
     let diff = setup.ok(&["diff"]);
@@ -359,39 +351,19 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
         "{diff}"
     );
     setup.ok(&["switch", "--noconfirm"]);
-    let restored = machine.current().unwrap();
     assert_eq!(
-        getcap(&file(restored)),
+        getcap(&file),
         "cap_ipc_lock=ep",
         "dropping the declaration gives back what the package set, rather than stripping it"
     );
+    setup.ok(&["rollback", &declared.to_string(), "--noconfirm"]);
     assert_eq!(
-        getcap(&file(declared)),
+        getcap(&file),
         "cap_sys_nice=ep",
-        "older deployments keep theirs"
+        "a rollback applies the declared one again"
     );
-    assert_eq!(getcap(&file(packaged)), "cap_ipc_lock=ep");
-    setup.ok(&["verify"]);
-
-    machine.store_writable(true);
-    archix::deploy::xattr::remove(&file(restored), c"security.capability").unwrap();
-    machine.store_writable(false);
-    let output = setup.run(&["verify"]);
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        !output.status.success()
-            && text.contains(&format!(
-                "deployment {restored}: {path} lacks its capabilities cap_ipc_lock=ep as its package left it"
-            )),
-        "{text}"
-    );
-    setup.ok(&["verify", "--repair"]);
-    assert_eq!(
-        getcap(&file(restored)),
-        "cap_ipc_lock=ep",
-        "repaired to what the package set"
-    );
-    assert_eq!(getcap(&file(declared)), "cap_sys_nice=ep");
+    setup.ok(&["rollback", &packaged.to_string(), "--noconfirm"]);
+    assert_eq!(getcap(&file), "cap_ipc_lock=ep", "and back to the package's");
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
 }
@@ -407,7 +379,7 @@ fn a_rollback_finds_a_third_party_package_archix_adopted_after_the_repo_drops_it
         repo.server()
     );
     let setup = Setup::new(&[], &body);
-    setup.lay_out();
+    setup.first_switch();
     // Installed with plain pacman, the way `archix init` finds packages on a machine.
     setup.machine.pacman(&["-Sy", "archix-test-adopted"]);
     setup.set_body(&["archix-test-adopted"], &body);

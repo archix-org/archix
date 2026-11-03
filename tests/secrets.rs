@@ -38,7 +38,7 @@ impl Lab {
             outputs: RefCell::new(Vec::new()),
             markers: RefCell::new(Vec::new()),
         };
-        lab.setup.lay_out();
+        lab.setup.first_switch();
         lab
     }
 
@@ -124,10 +124,8 @@ impl Lab {
         &self.setup.machine.root
     }
 
-    /// Restarts into the current deployment and runs its boot's decrypt step; /run starts empty, as at a boot.
+    /// Empties /run and runs the boot's decrypt step, as a restart does.
     fn boot(&self) -> (bool, String) {
-        let current = self.machine().current().unwrap();
-        self.machine().reboot(Some(&format!("archix-{current}.conf")));
         let nm = self
             .root()
             .join("run/NetworkManager/system-connections/home.nmconnection");
@@ -301,36 +299,41 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
         format!("diff names the secrets, not their files:\n{diff}"),
     );
     let out = lab.ok(&["switch", "--noconfirm"]);
-    let number = lab.machine().current().unwrap();
-    let deployment = lab.machine().deployment(number);
+    let root_dir = lab.root().to_path_buf();
     c.eq(
-        fs::read_link(deployment.join("etc/wireguard/wg0.conf")).ok(),
+        fs::read_link(root_dir.join("etc/wireguard/wg0.conf")).ok(),
         Some(PathBuf::from("/run/archix/secrets/wg0")),
-        format!("a secret file is a link in the deployment:\n{out}"),
+        format!("a secret file is a link:\n{out}"),
     );
     let template = archix::secrets::template_id("/etc/netbird/env");
     c.eq(
-        fs::read_link(deployment.join("etc/netbird/env")).ok(),
+        fs::read_link(root_dir.join("etc/netbird/env")).ok(),
         Some(PathBuf::from(format!("/run/archix/secrets/files/{template}"))),
         "a template is a link too",
     );
     c.check(
-        fs::read_to_string(deployment.join("etc/systemd/system/archix-test-cred.service"))
+        fs::read_to_string(root_dir.join("etc/systemd/system/archix-test-cred.service"))
             .unwrap_or_default()
             .contains("LoadCredential=api:/run/archix/secrets/api"),
         "units read secret_path",
     );
     c.check(
-        deployment.join("usr/lib/archix/secrets/manifest.json").is_file()
-            && deployment.join("etc/systemd/system/archix-secrets.service").is_file()
-            && deployment
+        root_dir.join("usr/lib/archix/secrets/manifest.json").is_file()
+            && root_dir.join("etc/systemd/system/archix-secrets.service").is_file()
+            && root_dir
                 .join("etc/systemd/system/sysinit.target.wants/archix-secrets.service")
                 .is_symlink(),
-        "the deployment has its manifest and the boot unit",
+        "the root has the manifest and the boot unit",
     );
-    c.check(
-        !shadow_hash(&deployment.join("etc"), "alice").starts_with("$6$"),
-        "the switch sets no secret hash: the boot does",
+    c.eq(
+        shadow_hash(&root_dir.join("etc"), "alice"),
+        pw_hash.clone(),
+        "the switch's own decrypt step sets the secret hash",
+    );
+    c.eq(
+        fs::read_to_string(lab.run_secret("wg0")).ok(),
+        Some(wg0.clone()),
+        "and writes the values, with no reboot",
     );
 
     let (activated, said) = lab.boot();
@@ -408,7 +411,6 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
     );
     let _ = fs::remove_dir_all("/tmp/archix-secrets-cache");
 
-    lab.machine().power_off();
     let root = lab.root().display().to_string();
     let esp = lab.machine().esp().display().to_string();
     let rescued = lab.setup.answering(
@@ -453,7 +455,7 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
     c.eq(
         shadow_hash(&etc, "alice"),
         new_hash,
-        "the new deployment's boot sets the new hash",
+        "the new hash, set by the switch and kept by the boot",
     );
     lab.sweep(
         &c,
@@ -469,7 +471,7 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
 
 #[test]
 #[ignore]
-fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_for_no_login() {
+fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_a_left_out_one_doesnt_fail_the_boot() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -490,7 +492,7 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_fo
     let other = lab.marker("other", 16);
     let ciphertext = archix::secrets::crypto::encrypt(&[lab.admin_recipient()], other.as_bytes()).unwrap();
     fs::write(lab.setup.config.join("secrets/other.age"), ciphertext).unwrap();
-    let before = (lab.machine().current(), lab.machine().deployments());
+    let before = lab.machine().current();
     let refused = lab.fails(&["switch", "--noconfirm"]);
     c.check(
         refused.contains("secret other isn't encrypted to this machine")
@@ -498,12 +500,7 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_fo
             && refused.contains("nothing was changed"),
         refused.to_string(),
     );
-    c.eq(
-        (lab.machine().current(), lab.machine().deployments()),
-        before.clone(),
-        "nothing changed",
-    );
-    c.eq(lab.machine().leftovers(), Vec::<String>::new(), "no staging left");
+    c.eq(lab.machine().current(), before, "nothing changed");
     let machine_key = archix::secrets::crypto::machine(&lab.setup.paths.state)
         .unwrap()
         .recipient;
@@ -515,16 +512,12 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_fo
         !out.contains("no account can log in"),
         format!("bob is locked and alice has no password yet, but her checked secret hash, set at the boot, is a login:\n{out}"),
     );
-    let pending = (lab.machine().current(), lab.machine().deployments());
-    let refused = lab.fails(&["switch", "--noconfirm", "--without-secrets"]);
+    let (_, warned) = lab.run(&["switch", "--noconfirm", "--without-secrets"], &[], None);
     c.check(
-        refused.contains("leaves no account that can log in with a password"),
-        format!("without the secrets, alice's secret hash counts for no login: {refused}"),
-    );
-    c.eq(
-        (lab.machine().current(), lab.machine().deployments()),
-        pending,
-        "nothing changed",
+        !warned.contains("no account can log in with a password"),
+        format!(
+            "the hash an earlier switch set from the secret stays in /etc/shadow, so alice can still log in: {warned}"
+        ),
     );
     fs::write(lab.setup.config.join("secrets/other.age"), &for_admin).unwrap();
     lab.setup.set_body(
@@ -536,21 +529,20 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_fo
         out.contains("--without-secrets: this secret can't be decrypted on this machine") && out.contains("other"),
         out.to_string(),
     );
-    let number = lab.machine().current().unwrap();
-    let manifest = archix::secrets::Manifest::read(&lab.machine().deployment(number)).unwrap();
+    let manifest = archix::secrets::Manifest::read(lab.root()).unwrap();
     c.check(
         manifest.secrets["other"].absent && !manifest.secrets["pw"].absent,
         "only the unopenable one is left out",
     );
     let (activated, said) = lab.boot();
     c.check(
-        !activated && said.contains("secret other wasn't decrypted"),
+        activated && said.contains("secret other is left out by `archix switch --without-secrets`"),
         said.to_string(),
     );
     c.check(!lab.run_secret("other").exists(), "nothing was written for it");
     let status = lab.ok(&["status"]);
     c.check(
-        status.contains("secret other is missing at this boot") && status.contains("--without-secrets"),
+        status.contains("secret other is left out of the current generation") && status.contains("--without-secrets"),
         format!("status:\n{status}"),
     );
     lab.setup.set_body(&[], &secrets_body(&lab, items, consumers));
@@ -573,7 +565,7 @@ fn a_secret_this_machine_cant_open_is_refused_unless_left_out_and_then_counts_fo
 
 #[test]
 #[ignore]
-fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and_a_rotated_key_retires_until_gc() {
+fn each_generation_activates_its_own_values_on_switch_and_rollback_and_a_rotated_key_retires_until_gc() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -612,45 +604,22 @@ fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and
         format!("the switch decrypts and scans with every page locked: VmLck {locked} kB\n{out}"),
     );
     let second = lab.machine().current().unwrap();
-    lab.boot();
     c.eq(
         fs::read_to_string(lab.run_secret("wg0")).ok(),
         Some(v2.clone()),
-        "deployment 2's value",
+        "the switch activates generation 2's value",
     );
     lab.ok(&["rollback", &first.to_string(), "--noconfirm"]);
-    lab.boot();
     c.eq(
         fs::read_to_string(lab.run_secret("wg0")).ok(),
         Some(v1.clone()),
-        "a kept rollback boots its own value",
-    );
-    lab.ok(&["rollback", &second.to_string(), "--noconfirm"]);
-    lab.boot();
-    lab.setup.set_body(
-        &[],
-        &secrets_body(&lab, items, &format!("{}, deployments = {{ keep = 1 }}", files(3))),
-    );
-    lab.ok(&["switch", "--noconfirm"]);
-    lab.boot();
-    c.check(
-        !lab.machine().deployments().contains(&first),
-        "keep = 1 dropped the first deployment",
-    );
-    let identity = archix::secrets::crypto::identity_path(&lab.setup.paths.state);
-    let away = identity.with_extension("away");
-    fs::rename(&identity, &away).unwrap();
-    let rolled = lab.run(&["rollback", &first.to_string(), "--noconfirm"], &[], None);
-    fs::rename(&away, &identity).unwrap();
-    c.check(
-        rolled.0,
-        format!("rebuilding a dropped generation needs no identity:\n{}", rolled.1),
+        "a rollback activates its own value",
     );
     lab.boot();
     c.eq(
         fs::read_to_string(lab.run_secret("wg0")).ok(),
         Some(v1.clone()),
-        "a rebuilt rollback boots its own value",
+        "and the boot after it",
     );
     lab.sweep(&c, "rollbacks", &|_, _| false, &[]);
 
@@ -665,18 +634,18 @@ fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and
         .recipient;
     c.check(new != old && rotated.contains(&new), rotated.to_string());
     let (activated, _) = lab.activate();
-    c.check(activated, "the retired key still opens the booted deployment's secrets");
-    lab.setup.set_body(
-        &[],
-        &secrets_body(&lab, items, &format!("{}, deployments = {{ keep = 2 }}", files(4))),
+    c.check(
+        activated,
+        "the retired key still opens the current generation's secrets",
     );
+    lab.setup.set_body(&[], &secrets_body(&lab, items, &files(4)));
     lab.ok(&["secrets", "rekey", "--machine"]);
     lab.ok(&["switch", "--noconfirm"]);
     let gc = lab.ok(&["gc"]);
     c.check(
         !gc.contains("deleted the retired secrets identity")
             && !archix::secrets::crypto::retired(&lab.setup.paths.state).is_empty(),
-        format!("a kept deployment still needs the retired key:\n{gc}"),
+        format!("a kept generation still needs the retired key:\n{gc}"),
     );
     lab.boot();
     c.eq(
@@ -689,10 +658,7 @@ fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and
         &secrets_body(
             &lab,
             items,
-            &format!(
-                "{}, deployments = {{ keep = 1 }}, generations = {{ keep = 1, keep_days = 0 }}",
-                files(5)
-            ),
+            &format!("{}, generations = {{ keep = 1, keep_days = 0 }}", files(5)),
         ),
     );
     let out = lab.ok(&["switch", "--noconfirm"]);
@@ -710,7 +676,7 @@ fn each_deployment_boots_its_own_values_a_rebuilt_rollback_needs_no_identity_and
 
 #[test]
 #[ignore]
-fn a_plaintext_file_at_a_secrets_path_goes_only_when_it_holds_the_value_and_eject_drops_or_materializes() {
+fn a_plaintext_file_at_a_secrets_path_goes_only_when_it_holds_the_value() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -729,16 +695,17 @@ fn a_plaintext_file_at_a_secrets_path_goes_only_when_it_holds_the_value_and_ejec
         ),
     );
     lab.set("wg0", wg0.as_bytes());
-    let before = (lab.machine().current(), lab.machine().deployments());
+    let before = lab.machine().current();
     let refused = lab.fails(&["switch", "--noconfirm"]);
     c.check(
         refused.contains("holds something other than secret wg0") && refused.contains("nothing was changed"),
         refused.to_string(),
     );
+    c.eq(lab.machine().current(), before, "nothing changed");
     c.eq(
-        (lab.machine().current(), lab.machine().deployments()),
-        before.clone(),
-        "nothing changed",
+        fs::read_to_string(&live).ok(),
+        Some(other.clone()),
+        "the file is as it was",
     );
     fs::write(&live, &wg0).unwrap();
     let out = lab.ok(&["switch", "--noconfirm"]);
@@ -750,14 +717,7 @@ fn a_plaintext_file_at_a_secrets_path_goes_only_when_it_holds_the_value_and_ejec
         !Path::new("/var/lib/archix/backups/etc/wireguard/wg0.conf").exists(),
         "no backup of what held the value",
     );
-    let replaced = before.0.unwrap();
-    lab.boot();
-    lab.sweep(
-        &c,
-        "an existing file",
-        &|marker, place| marker == "wg0" && place.ends_with(&format!("/deploy/{replaced}/etc/wireguard/wg0.conf")),
-        &[],
-    );
+    lab.sweep(&c, "an existing file", &|_, _| false, &[]);
 
     fs::remove_file(&live).unwrap();
     fs::write(&live, &wg0).unwrap();
@@ -771,37 +731,12 @@ fn a_plaintext_file_at_a_secrets_path_goes_only_when_it_holds_the_value_and_ejec
         refused.contains("should be a link to secret wg0 but is a file") && refused.contains("nothing was changed"),
         refused.to_string(),
     );
-    fs::remove_file(&live).unwrap();
-    std::os::unix::fs::symlink("/run/archix/secrets/wg0", &live).unwrap();
-
-    let refused = lab.fails(&["eject", "--noconfirm"]);
-    c.check(
-        refused.contains("--secrets drop") && refused.contains("--secrets materialize"),
-        format!("eject asks what becomes of the secrets: {refused}"),
-    );
-    let out = lab.ok(&["eject", "--noconfirm", "--secrets", "materialize"]);
-    c.eq(
-        fs::read_to_string(&live).ok(),
-        Some(wg0.clone()),
-        format!("materialized as a real file:\n{out}"),
-    );
-    c.eq(mode_of(&live), Some((0o600, 0)), "with the secret's mode and owner");
-    c.check(
-        archix::secrets::crypto::identity_path(&lab.setup.paths.state).exists(),
-        "the identity stays",
-    );
-    lab.sweep(
-        &c,
-        "eject materialize",
-        &|marker, place| marker == "wg0" && place == lab.root().join("etc/wireguard/wg0.conf").display().to_string(),
-        &[],
-    );
     c.finish();
 }
 
 #[test]
 #[ignore]
-fn eject_drops_the_links_and_editing_never_leaves_plain_text_or_a_torn_age_file() {
+fn editing_never_leaves_plain_text_or_a_torn_age_file() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -934,23 +869,13 @@ fn eject_drops_the_links_and_editing_never_leaves_plain_text_or_a_torn_age_file(
         Some(v3.clone()),
         "the edited value",
     );
-    let out = lab.ok(&["eject", "--noconfirm", "--secrets", "drop"]);
-    let live = lab.root().join("etc/wireguard/wg0.conf");
-    c.check(
-        live.symlink_metadata().is_err() && out.contains("plain Arch now"),
-        format!("the link is gone:\n{out}"),
-    );
-    c.check(
-        !lab.root().join("etc/systemd/system/archix-secrets.service").exists(),
-        "the boot unit is gone",
-    );
-    lab.sweep(&c, "editing and eject drop", &|_, _| false, &[]);
+    lab.sweep(&c, "editing", &|_, _| false, &[]);
     c.finish();
 }
 
 #[test]
 #[ignore]
-fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_only_warns() {
+fn a_value_left_in_etc_fails_the_switch_after_it_applies_and_a_short_one_only_warns() {
     let _system = lock_system();
     let c = Checks::default();
     let lab = Lab::new(&[]);
@@ -958,13 +883,6 @@ fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_onl
     let pin = lab.marker("pin", 12);
     let copy = lab.root().join("etc/archix-test-pin");
     fs::write(&copy, format!("{pin}\n")).unwrap();
-    let mkinitcpio = lab.root().join("etc/mkinitcpio.conf");
-    let original = fs::read_to_string(&mkinitcpio).unwrap();
-    fs::write(
-        &mkinitcpio,
-        original.replace("FILES=()", "FILES=(/etc/archix-test-pin)"),
-    )
-    .unwrap();
     lab.setup.set_body(
         &[],
         &secrets_body(
@@ -974,19 +892,6 @@ fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_onl
         ),
     );
     lab.set("pin", pin.as_bytes());
-    let before = (lab.machine().current(), lab.machine().deployments());
-    let refused = lab.fails(&["switch", "--noconfirm"]);
-    c.check(
-        refused.contains("secret pin in /boot/") && refused.contains("nothing was changed") && !refused.contains(&pin),
-        format!("a short value in a UKI fails the switch:\n{refused}"),
-    );
-    c.eq(
-        (lab.machine().current(), lab.machine().deployments()),
-        before,
-        "nothing changed",
-    );
-    c.eq(lab.machine().leftovers(), Vec::<String>::new(), "no staging left");
-    fs::write(&mkinitcpio, &original).unwrap();
     let out = lab.ok(&["switch", "--noconfirm"]);
     c.check(
         out.contains("secret pin's value, under 16 bytes, also occurs in /etc/archix-test-pin"),
@@ -1023,155 +928,22 @@ fn a_value_copied_into_the_initramfs_fails_the_switch_and_a_short_one_in_etc_onl
     let refused = lab.fails(&["switch", "--noconfirm"]);
     c.check(
         refused.contains("secret pin in /etc/NetworkManager/system-connections/home.nmconnection")
-            && refused.contains("nothing was changed")
+            && refused.contains("is applied and current")
             && !refused.contains(&long),
-        format!("a profile NetworkManager saved to /etc with the value in it fails the next switch:\n{refused}"),
+        format!("a profile NetworkManager saved to /etc with the value in it fails the switch once it has applied:\n{refused}"),
     );
     fs::remove_file(&saved).unwrap();
     lab.ok(&["switch", "--noconfirm"]);
     fs::remove_file(&copy).unwrap();
     lab.sweep(
         &c,
-        "initramfs",
+        "values in /etc",
         &|marker, place| {
             (marker == "pin" && place.ends_with("/etc/archix-test-pin"))
                 || (marker == "long" && place.ends_with("init.lua"))
         },
         &[],
     );
-    c.finish();
-}
-
-#[test]
-#[ignore]
-fn the_etc_merge_never_carries_a_file_holding_a_value_into_the_pending_deployment_and_status_names_it_until_its_gone() {
-    use std::time::{Duration, Instant};
-    let _system = lock_system();
-    let c = Checks::default();
-    let lab = Lab::new(&[]);
-    lab.ok(&["secrets", "init"]);
-    let key = lab.marker("wg0", 32);
-    let body = |n: u32| {
-        secrets_body(
-            &lab,
-            r#"wg0 = { file = "secrets/wg0.age" }"#,
-            &format!(
-                r#"files = {{ ["/etc/wireguard/wg0.conf"] = {{ secret = "wg0" }}, ["/etc/archix-test-merge"] = {{ text = "{n}" }} }}"#
-            ),
-        )
-    };
-    lab.setup.set_body(&[], &body(0));
-    lab.set("wg0", key.as_bytes());
-    lab.ok(&["switch", "--noconfirm"]);
-    let booted = lab.machine().current().unwrap();
-    let (activated, said) = lab.boot();
-    assert!(activated, "the boot's decrypt step: {said}");
-    lab.setup.set_body(&[], &body(1));
-    let (switched, out) = lab.run(&["switch", "--noconfirm"], &[("ARCHIX_TEST_ETC_MERGE", "1")], None);
-    assert!(switched, "{out}");
-    let pending = lab.machine().current().unwrap();
-    assert_ne!(pending, booted);
-    let unit = archix::etcmerge::unit_name(lab.root());
-    let (live, theirs) = (lab.root().join("etc"), lab.machine().deployment(pending).join("etc"));
-    let wait = |what: &str, done: &dyn Fn() -> bool| {
-        let started = Instant::now();
-        while !done() {
-            if started.elapsed() > Duration::from_secs(20) {
-                let journal = Command::new("journalctl")
-                    .args(["-u", &unit, "--no-pager"])
-                    .output()
-                    .unwrap();
-                let _ = Command::new("systemctl").args(["stop", &unit]).status();
-                panic!("waited for {what}: {}", String::from_utf8_lossy(&journal.stdout));
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-    };
-    let carried = |rel: &str, text: &str| fs::read_to_string(theirs.join(rel)).ok().as_deref() == Some(text);
-    fs::write(live.join("archix-test-before"), "clean\n").unwrap();
-    wait("a clean file carried", &|| carried("archix-test-before", "clean\n"));
-    let profile = "NetworkManager/system-connections/wg0.nmconnection";
-    fs::create_dir_all(live.join(profile).parent().unwrap()).unwrap();
-    fs::write(live.join(profile), format!("[wireguard]\nprivate-key={key}\n")).unwrap();
-    fs::set_permissions(live.join(profile), fs::Permissions::from_mode(0o600)).unwrap();
-    fs::write(live.join("archix-test-before"), format!("clean\nkey={key}\n")).unwrap();
-    fs::write(live.join("archix-test-after"), "clean\n").unwrap();
-    wait("a clean file written after the profile carried", &|| {
-        carried("archix-test-after", "clean\n")
-    });
-    let notes = || fs::read_to_string(lab.root().join("var/lib/archix/notes")).unwrap_or_default();
-    wait("the login note", &|| notes().contains("archix-test-before"));
-    c.check(
-        !theirs.join(profile).exists(),
-        "a profile NetworkManager saved with the value isn't carried into the pending deployment",
-    );
-    c.eq(
-        fs::read_to_string(theirs.join("archix-test-before")).ok(),
-        Some("clean\n".to_string()),
-        "a file carried before keeps its clean version when the value is added to it",
-    );
-    let state = archix::etcmerge::load(&lab.setup.paths, pending).unwrap();
-    c.check(
-        !state.base.contains_key(profile) && !state.carried.contains(profile),
-        format!("the merge records no fingerprint of it: {:?}", state.base.get(profile)),
-    );
-    let notes = notes();
-    c.check(
-        notes.contains(&format!(
-            "/etc/{profile} holds secret wg0's value in plain text, so the /etc merge doesn't carry it into deployment {pending}"
-        )) && notes.contains("nmcli connection modify --temporary"),
-        format!("a login note names the file and the way out:\n{notes}"),
-    );
-    let status = lab.ok(&["status"]);
-    c.check(
-        status.contains(&format!(
-            "/etc/{profile} holds secret wg0 in plaintext on disk (deployment {booted})"
-        )) && status.contains("/etc/archix-test-before holds secret wg0 in plaintext on disk")
-            && status.contains(&format!("/etc/{profile} isn't carried: it holds secret wg0's value")),
-        format!("status warns:\n{status}"),
-    );
-    let nobody = Command::new("setpriv")
-        .args(["--reuid=65534", "--regid=65534", "--clear-groups", "--"])
-        .arg(env!("CARGO_BIN_EXE_archix"))
-        .args([
-            "--config",
-            lab.setup.config.to_str().unwrap(),
-            "--host",
-            "box",
-            "status",
-        ])
-        .envs(lab.machine().env())
-        .output()
-        .unwrap();
-    let as_nobody = lab.keep(&nobody);
-    c.check(
-        as_nobody.contains("takes root to check") && !as_nobody.contains("in plaintext on disk"),
-        format!("a user's status says the check needs root:\n{as_nobody}"),
-    );
-    lab.sweep(
-        &c,
-        "etc merge",
-        &|marker, place| {
-            marker == "wg0"
-                && (place.ends_with(&format!("/etc/{profile}")) || place.ends_with("/etc/archix-test-before"))
-                && !place.contains(&format!("/archix/deploy/{pending}/"))
-        },
-        &[],
-    );
-    fs::remove_file(live.join(profile)).unwrap();
-    fs::write(live.join("archix-test-before"), "clean\n").unwrap();
-    fs::write(live.join("archix-test-after"), "clean again\n").unwrap();
-    wait("the next pass", &|| carried("archix-test-after", "clean again\n"));
-    let status = lab.ok(&["status"]);
-    c.check(
-        !status.contains("in plaintext on disk") && !status.contains("isn't carried"),
-        format!("removing the file clears the warning:\n{status}"),
-    );
-    c.check(
-        !theirs.join(profile).exists() && carried("archix-test-before", "clean\n"),
-        "the pending deployment has neither",
-    );
-    let _ = Command::new("systemctl").args(["stop", &unit]).status();
     c.finish();
 }
 
@@ -1222,18 +994,14 @@ fn secrets_are_refused_where_they_cant_go_and_the_boot_names_what_it_couldnt_ope
     lab.set("a", a.as_bytes());
     lab.set("b", b.as_bytes());
     lab.ok(&["switch", "--noconfirm"]);
-    let number = lab.machine().current().unwrap();
-    let manifest = archix::secrets::Manifest::read(&lab.machine().deployment(number)).unwrap();
+    let manifest = archix::secrets::Manifest::read(lab.root()).unwrap();
     let damaged = lab
-        .machine()
-        .deployment(number)
+        .root()
         .join(format!("usr/lib/archix/secrets/{}.age", manifest.secrets["b"].sha256));
-    lab.machine().store_writable(true);
     let mut bytes = fs::read(&damaged).unwrap();
     let at = bytes.len() - 40;
     bytes[at] ^= 0x20;
     fs::write(&damaged, bytes).unwrap();
-    lab.machine().store_writable(false);
     let (ok, said) = lab.boot();
     c.check(
         !ok && said.contains("secret b wasn't decrypted") && !said.contains(&b),
@@ -1353,13 +1121,10 @@ fn aur_and_recipe_builds_see_no_secret_no_identity_and_nothing_of_either_in_thei
         &fs::read_to_string(system_path("/usr/share/archix-test-peek/peek")).unwrap_or_default(),
     );
     look(
-        "the AUR package built on the host before the layout (makepkg as the build user)",
+        "the AUR package built on the host (makepkg as the build user)",
         &fs::read_to_string(system_path("/usr/share/archix-test-aurpeek/peek")).unwrap_or_default(),
     );
     outputs.push(out);
-    setup
-        .machine
-        .reboot(Some(&format!("archix-{}.conf", setup.machine.current().unwrap())));
     fs::write(
         setup.config.join("pkgbuilds/archix-test-peek/PKGBUILD"),
         peek_recipe("archix-test-peek", "2.0"),

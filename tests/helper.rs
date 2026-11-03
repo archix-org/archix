@@ -44,7 +44,7 @@ fn current(setup: &Setup) -> Option<u32> {
 
 #[test]
 #[ignore]
-fn declining_or_a_crash_before_or_inside_a_switch_leaves_the_lock_and_config_until_its_deployment_is_committed() {
+fn declining_or_a_crash_before_or_inside_a_switch_leaves_the_lock_and_config_until_its_generation_is_recorded() {
     let _system = lock_system();
     let checks = Checks::default();
     let setup = Setup::new(&[], "");
@@ -134,32 +134,35 @@ fn declining_or_a_crash_before_or_inside_a_switch_leaves_the_lock_and_config_unt
     );
 
     let before = setup.read("archix.lock").unwrap();
-    let deployments = setup.machine.deployments();
     let crashed = setup.run_env(
-        &[("ARCHIX_TEST_CRASH", "deploy-transact")],
+        &[("ARCHIX_TEST_CRASH", "generation-save")],
         &["install", "tree", "--noconfirm"],
     );
-    assert_eq!(crashed.status.signal(), Some(9), "archix should die while staging");
+    assert_eq!(
+        crashed.status.signal(),
+        Some(9),
+        "archix should die saving the generation"
+    );
     let after = setup.read("archix.lock").unwrap();
     checks.check(
         after == before,
         format_args!(
-            "the deployment wasn't committed, yet archix.lock changed:\n{}",
+            "the generation wasn't recorded, yet archix.lock changed:\n{}",
             line_diff(&before, &after)
         ),
     );
     checks.check(
         installed_lua(&setup).is_none(),
-        "the deployment wasn't committed, yet installed.lua was written",
+        "the generation wasn't recorded, yet installed.lua was written",
     );
     checks.eq(
-        setup.machine.deployments(),
-        deployments,
-        "a kill while staging commits no deployment",
+        current(&setup),
+        generation,
+        "a kill before the record keeps the current generation",
     );
     checks.check(
-        installed("tree").is_none(),
-        "the deployment wasn't committed, yet tree is installed",
+        installed("tree").is_some(),
+        "the apply ran in place before the kill, so tree is installed",
     );
 
     setup.ok(&["install", "tree", "--noconfirm"]);
@@ -170,13 +173,6 @@ fn declining_or_a_crash_before_or_inside_a_switch_leaves_the_lock_and_config_unt
         "a committed switch writes installed.lua",
     );
     checks.check(installed("tree").is_some(), "a committed switch installs tree");
-    checks.check(
-        setup.machine.leftovers().is_empty(),
-        format_args!(
-            "neither kill leaves anything the committed switch keeps: {:?}",
-            setup.machine.leftovers()
-        ),
-    );
     checks.finish();
 }
 
@@ -244,21 +240,6 @@ fn installing_a_package_the_config_already_declares_adds_no_duplicate() {
     assert!(installed("tree").is_some());
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
-fn temporary_installs_last_until_the_next_switch() {
-    let _system = lock_system();
-    let setup = Setup::new(&[], "");
-    setup.ok(&["switch", "--noconfirm"]);
-    let out = setup.ok(&["install", "--temp", "tree", "--noconfirm"]);
-    assert!(out.contains("without declaring it"), "{out}");
-    assert!(installed("tree").is_some());
-    assert!(installed_lua(&setup).is_none(), "--temp doesn't touch the config");
-    assert!(setup.ok(&["diff"]).contains("remove     tree"));
-    setup.ok(&["switch", "--noconfirm"]);
-    assert!(installed("tree").is_none());
 }
 
 #[test]

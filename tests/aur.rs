@@ -121,7 +121,7 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
     aur.publish(TestPkg::new("archix-test-lib", "1.3"));
     // As after a devtools upgrade that bumps CHROOT_VERSION: arch-nspawn would refuse the old chroot.
     fs::write("/var/lib/archix/chroot/root/.arch-chroot", "v1\n").unwrap();
-    // As a deployment's pacman guard: a host hook that needs /bin/sh, which the new chroot doesn't have yet.
+    // A host hook that needs /bin/sh, which the new chroot doesn't have yet.
     fs::create_dir_all("/etc/pacman.d/hooks").unwrap();
     fs::write(
         GUARD_HOOK,
@@ -171,7 +171,7 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
 
 #[test]
 #[ignore]
-fn a_build_on_the_host_gets_its_build_dependencies_only_in_a_throwaway_view() {
+fn a_build_on_the_host_gets_its_build_dependencies_only_for_the_build() {
     let _system = lock_system();
     let mut aur = LocalAur::new();
     aur.publish(TestPkg {
@@ -185,22 +185,16 @@ fn a_build_on_the_host_gets_its_build_dependencies_only_in_a_throwaway_view() {
         aur.url()
     );
     let setup = Setup::new(&[], &body);
-    setup.lay_out();
-    let machine = &setup.machine;
-    let base = machine.current().unwrap();
-    let tree = |dir: &str| {
-        let out = Command::new("sh")
-            .arg("-c")
-            .arg(format!(
-                "cd {} && find . -printf '%p %i %m %s %T@\\n' | sort",
-                machine.deployment(base).join(dir).display()
-            ))
+    setup.first_switch();
+    let host_has_lemon = || {
+        Command::new("pacman")
+            .args(["-Q", "lemon"])
             .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).into_owned()
+            .unwrap()
+            .status
+            .success()
     };
-    let (db, usr) = (tree("pacman"), tree("usr"));
-    let host_log = fs::read_to_string("/var/log/pacman.log").unwrap_or_default();
+    assert!(!host_has_lemon(), "the container starts without lemon");
 
     setup.set_body(&["archix-test-hostbuilt"], &body);
     let out = setup.ok(&["switch", "--noconfirm"]);
@@ -210,23 +204,8 @@ fn a_build_on_the_host_gets_its_build_dependencies_only_in_a_throwaway_view() {
         marker.ends_with("bin/lemon"),
         "the build lacked its build dependency: {marker:?}"
     );
-    assert_eq!(
-        installed("lemon"),
-        None,
-        "build dependencies stay out of the new deployment"
-    );
-    assert_eq!(machine.installed_in(base, "lemon"), None);
-    assert!(
-        tree("pacman") == db,
-        "the build changed deployment {base}'s pacman database"
-    );
-    assert!(tree("usr") == usr, "the build changed deployment {base}'s /usr");
-    let host_log = fs::read_to_string("/var/log/pacman.log").unwrap_or_default()[host_log.len()..].to_string();
-    assert!(
-        !host_log.contains("lemon"),
-        "pacman ran on the running system:\n{host_log}"
-    );
-    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
+    assert_eq!(installed("lemon"), None, "build dependencies don't stay on the machine");
+    assert!(!host_has_lemon(), "nor where pacman installed them for the build");
 }
 
 #[test]
@@ -652,52 +631,4 @@ fn an_aur_package_standing_in_for_a_repo_package_is_used_only_when_declared() {
     assert!(lock.packages.contains_key("archix-test-libc") && lock.packages.contains_key("archix-test-needs-libc9"));
     fs::write(setup.dir.path().join("init.lua"), init).unwrap();
     fs::write(setup.dir.path().join("archix.lock"), before).unwrap();
-}
-
-#[test]
-#[ignore]
-fn a_package_that_installs_or_writes_into_usr_local_is_refused_naming_its_files() {
-    let _system = lock_system();
-    let mut aur = LocalAur::new();
-    aur.publish(TestPkg {
-        package: "install -Dm755 /dev/null \"$pkgdir/usr/local/bin/archix-test-local\"",
-        ..TestPkg::new("archix-test-local", "1.0")
-    });
-    // A package's own pacman hook, run in the staging root as an install script is, writes what the package file doesn't ship.
-    aur.publish(TestPkg {
-        package: "install -d \"$pkgdir/usr/share/libalpm/hooks\"\n  printf '[Trigger]\\nOperation = Install\\nType = Package\\nTarget = archix-test-sneaky\\n\\n[Action]\\nWhen = PostTransaction\\nExec = /usr/bin/sh -c \"mkdir -p /usr/local/lib/sneaky && echo x > /usr/local/lib/sneaky/file\"\\n' > \"$pkgdir/usr/share/libalpm/hooks/archix-test-sneaky.hook\"",
-        ..TestPkg::new("archix-test-sneaky", "1.0")
-    });
-    let body = format!("aur = {{ url = {:?} }}", aur.url());
-    let setup = Setup::new(&[], &body);
-    setup.lay_out();
-    let machine = &setup.machine;
-    let before = (machine.current(), machine.deployments());
-
-    setup.set_body(&["archix-test-local"], &body);
-    let out = setup.fails(&["switch", "--noconfirm"]);
-    assert!(
-        out.contains("install files into /usr/local")
-            && out.contains("archix-test-local /usr/local/bin/archix-test-local"),
-        "{out}"
-    );
-    assert_eq!(
-        (machine.current(), machine.deployments()),
-        before,
-        "nothing was changed"
-    );
-
-    setup.set_body(&["archix-test-sneaky"], &body);
-    let out = setup.fails(&["switch", "--noconfirm"]);
-    assert!(
-        out.contains("put files into /usr/local") && out.contains("/usr/local/lib/sneaky/file"),
-        "{out}"
-    );
-    assert_eq!(
-        (machine.current(), machine.deployments()),
-        before,
-        "nothing was changed"
-    );
-    assert!(machine.leftovers().is_empty(), "{:?}", machine.leftovers());
-    assert!(!machine.root.join("var/usrlocal/lib/sneaky").exists());
 }

@@ -558,7 +558,9 @@ impl Builder<'_> {
             .lines()
             .map(str::to_string)
             .collect();
-        let installed_before = crate::pacman::read_local_db(&self.paths.local_db())?;
+        // makepkg runs on the host, whichever root archix applies to.
+        let host_db = Path::new("/var/lib/pacman/local");
+        let installed_before = crate::pacman::read_local_db(host_db)?;
         let files = self.build_inputs(&missing, &installed_before, date, repos, inputs)?;
         if !files.is_empty() {
             let mut cmd = Command::new("pacman");
@@ -578,7 +580,7 @@ impl Builder<'_> {
             .current_dir(dir);
         crate::secrets::hide_from(&mut makepkg);
         let built = run(&mut makepkg, "makepkg");
-        let installed_after = crate::pacman::read_local_db(&self.paths.local_db())?;
+        let installed_after = crate::pacman::read_local_db(host_db)?;
         let added: Vec<&String> = installed_after
             .keys()
             .filter(|name| !installed_before.contains_key(*name))

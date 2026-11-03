@@ -365,7 +365,12 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
             lines.push(format!("setcap     {path} {}", super::capabilities::to_text(&want)));
         }
     }
-    let left_by_packages = crate::generations::read(root)
+    let records = crate::generations::Store::new(&Paths::under(root));
+    let left_by_packages = records
+        .current()
+        .ok()
+        .flatten()
+        .and_then(|current| records.get(current).ok())
         .map(|current| current.package_capabilities)
         .unwrap_or_default();
     for (path, text) in &change.from.capabilities {
@@ -494,7 +499,7 @@ pub fn create_homes(
         chown_tree(&home, uid, gid)?;
         match with_password.contains(name) {
             true => eprintln!("created user {name}, with the password the config sets"),
-            false => eprintln!("created user {name}; set a password with `passwd {name}` after the reboot"),
+            false => eprintln!("created user {name}; set a password with `passwd {name}`"),
         }
     }
     Ok(())

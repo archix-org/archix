@@ -216,12 +216,7 @@ fn init_rebuilds_a_picked_package_no_repo_has_and_keeps_its_files_out_of_the_con
         .map(|m| m.permissions().mode() & 0o777)
         .unwrap_or(0);
     let shipped_conf = fs::read_to_string(system_path(&conf)).unwrap_or_default();
-    // The scriptlet ran in the new deployment, whose /var changes wait in var-upper for its first boot.
-    let scriptlet_ran = setup
-        .machine
-        .deployment(setup.machine.current().unwrap_or_default())
-        .join(format!("var-upper/tmp/{HANDMADE}-installed"))
-        .exists();
+    let scriptlet_ran = system_path(&format!("/var/tmp/{HANDMADE}-installed")).exists();
     let push = work.path().join("push");
     let pushed = Command::new(env!("CARGO_BIN_EXE_archix"))
         .args(["cache", "push", push.to_str().unwrap()])

@@ -685,7 +685,7 @@ fn keep_third_party_copies(
     }
 }
 
-/// The third-party repos in the current deployment's pacman.conf, which archix keeps in step with the config, for rollbacks that don't evaluate it.
+/// The third-party repos in the root's pacman.conf, which archix keeps in step with the config, for rollbacks that don't evaluate it.
 fn third_party_repos(paths: &Paths) -> Vec<Repo> {
     let conf = switch::current_root(paths).join("etc/pacman.conf");
     let text = std::fs::read_to_string(conf).unwrap_or_default();

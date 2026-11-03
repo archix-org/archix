@@ -227,7 +227,7 @@ pub fn validate(capabilities: &BTreeMap<String, String>) -> Result<()> {
         let inside = ["/usr/", "/opt/"].iter().any(|tree| path.starts_with(tree)) && !path.starts_with("/usr/local/");
         if !inside || path.ends_with('/') || path.split('/').any(|part| part == ".." || part == ".") {
             bail!(
-                "capabilities: {path:?} must be a file in a deployment's /usr or /opt, which archix builds; /usr/local is shared and setcap works there by hand"
+                "capabilities: {path:?} must be a file in /usr or /opt that a package or the config puts there; setcap works by hand in /usr/local"
             );
         }
         parse(text).with_context(|| format!("capabilities.{path}"))?;
@@ -309,20 +309,20 @@ pub fn apply(
         let caps = parse(text).with_context(|| format!("capabilities.{path}"))?;
         let file = tree.join(path.trim_start_matches('/'));
         match fs::symlink_metadata(&file) {
-            Err(_) => refused.push(format!("{path} isn't in the new deployment")),
+            Err(_) => refused.push(format!("{path} doesn't exist")),
             Ok(meta) if meta.file_type().is_symlink() => refused.push(format!(
                 "{path} is a symlink (to {}); give the file it points at",
                 fs::read_link(&file).unwrap_or_default().display()
             )),
             Ok(meta) if !meta.is_file() => refused.push(format!("{path} isn't a regular file")),
             Ok(_) if !owned.contains(path.trim_start_matches('/')) && !declared.contains(path) => refused.push(format!(
-                "{path} isn't a package's or a file the config declares, so nothing would put it back the same in another deployment"
+                "{path} isn't a package's or a file the config declares, so nothing would put it back the same after a rollback"
             )),
             Ok(_) => wanted.push((path, file, caps)),
         }
     }
     if !refused.is_empty() {
-        bail!("capabilities: {}; nothing was changed", refused.join("; "));
+        bail!("capabilities: {}", refused.join("; "));
     }
     // A file still carrying the base's declared capabilities is the base's file, whose package state the base recorded; any other is as its package left it now.
     let left_by_package =
@@ -528,10 +528,7 @@ mod tests {
             "/home/x",
         ] {
             let err = format!("{:#}", one(bad, "cap_sys_nice+ep").unwrap_err());
-            assert!(
-                err.contains("must be a file in a deployment's /usr or /opt"),
-                "{bad}: {err}"
-            );
+            assert!(err.contains("must be a file in /usr or /opt"), "{bad}: {err}");
         }
         let err = format!("{:#}", one("/usr/bin/x", "cap_bogus+ep").unwrap_err());
         assert!(err.starts_with("capabilities./usr/bin/x: "), "{err}");

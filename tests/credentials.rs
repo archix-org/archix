@@ -26,21 +26,15 @@ fn users(alice: &str, extra: &str) -> String {
     )
 }
 
-/// `user`'s hash in deployment `number`'s /etc/shadow.
-fn hash(machine: &Machine, number: u32, user: &str) -> String {
-    let shadow = fs::read_to_string(machine.deployment(number).join("etc/shadow")).unwrap();
+/// `user`'s hash in the machine's /etc/shadow.
+fn hash(machine: &Machine, user: &str) -> String {
+    let shadow = fs::read_to_string(machine.root.join("etc/shadow")).unwrap();
     shadow
         .lines()
         .find_map(|line| line.strip_prefix(&format!("{user}:")))
         .and_then(|rest| rest.split(':').next())
         .unwrap_or_default()
         .to_string()
-}
-
-/// Boots the current deployment, as a plain restart does.
-fn boot(setup: &Setup) {
-    let current = setup.machine.current().unwrap();
-    setup.machine.reboot(Some(&format!("archix-{current}.conf")));
 }
 
 fn no_hash_in(c: &Checks, out: &str, what: &str) {
@@ -57,27 +51,22 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
     let c = Checks::default();
     let setup = Setup::new(&[], &users(ALICE, ""));
     let machine = &setup.machine;
-    let out = setup.lay_out();
+    let out = setup.first_switch();
     c.check(
         out.contains("password   alice gets the declared password")
             && out.contains("password   bob gets its initial password"),
         format!("the first switch says what it sets:\n{out}"),
     );
     no_hash_in(&c, &out, "the switch");
-    let first = machine.current().unwrap();
+    c.eq(hash(machine, "alice"), ALICE.to_string(), "alice's declared hash");
+    c.eq(hash(machine, "bob"), BOB.to_string(), "bob's initial hash");
     c.eq(
-        hash(machine, first, "alice"),
-        ALICE.to_string(),
-        "alice's declared hash",
-    );
-    c.eq(hash(machine, first, "bob"), BOB.to_string(), "bob's initial hash");
-    c.eq(
-        password::verify(b"hunter2", &hash(machine, first, "alice")),
+        password::verify(b"hunter2", &hash(machine, "alice")),
         Some(true),
         "alice logs in with the declared password",
     );
     c.check(
-        archix::system::rescue_auth::accounts(&machine.deployment(first).join("etc"))
+        archix::system::rescue_auth::accounts(&machine.root.join("etc"))
             .unwrap()
             .iter()
             .any(|account| account.user == "alice"),
@@ -97,16 +86,15 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
     c.check(out.contains("resetting alice's password"), out.to_string());
     let second = machine.current().unwrap();
     c.eq(
-        hash(machine, second, "alice"),
+        hash(machine, "alice"),
         ALICE.to_string(),
         "passwd's change goes back to the declared hash",
     );
     c.eq(
-        hash(machine, second, "bob"),
+        hash(machine, "bob"),
         OTHER.to_string(),
         "an initial password is bob's own once set",
     );
-    boot(&setup);
 
     password::set(&live, "alice", &format!("!{ALICE}")).unwrap();
     setup.set_body(&[], &users(ALICE2, ""));
@@ -115,13 +103,11 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
         out.contains("alice's account is locked or expired, so archix keeps it that way"),
         format!("the switch says it keeps the lock:\n{out}"),
     );
-    let third = machine.current().unwrap();
     c.eq(
-        hash(machine, third, "alice"),
+        hash(machine, "alice"),
         format!("!{ALICE}"),
         "a lock made with passwd -l stays",
     );
-    boot(&setup);
     let expiry = fs::read_to_string(live.join("shadow"))
         .unwrap()
         .replace(&format!("alice:!{ALICE}"), &format!("alice:{ALICE}"));
@@ -140,11 +126,10 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
     fs::write(live.join("shadow"), expired).unwrap();
     setup.ok(&["switch", "--noconfirm"]);
     c.eq(
-        hash(machine, machine.current().unwrap(), "alice"),
+        hash(machine, "alice"),
         ALICE.to_string(),
         "an expired account isn't given the declared password either",
     );
-    boot(&setup);
 
     password::set(&live, "alice", ALICE).unwrap();
     let unexpired = fs::read_to_string(live.join("shadow"))
@@ -162,57 +147,37 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_rollback_keeps_th
         .collect::<String>();
     fs::write(live.join("shadow"), unexpired).unwrap();
     setup.ok(&["switch", "--noconfirm"]);
-    let unlocked = machine.current().unwrap();
     c.eq(
-        hash(machine, unlocked, "alice"),
+        hash(machine, "alice"),
         ALICE2.to_string(),
         "once unlocked, the next switch applies it",
     );
-    boot(&setup);
 
     let rolled = setup.ok(&["rollback", &second.to_string(), "--noconfirm"]);
     c.eq(
-        hash(machine, second, "alice"),
+        hash(machine, "alice"),
         ALICE2.to_string(),
-        format!("a rollback carries the running password, not the older deployment's declared one:\n{rolled}"),
+        format!("a rollback sets no password, so the running one stays:\n{rolled}"),
     );
     no_hash_in(&c, &rolled, "the rollback");
 
-    let before = machine.deployments();
     setup.set_body(
         &[],
         &format!(r#"users = {{ alice = {{ groups = {{}}, hashed_password = "{ALICE2}" }}, bob = {{ initial_hashed_password = "{BOB}" }} }}"#),
     );
-    let refused = setup.fails(&["switch", "--noconfirm"]);
+    let warned = setup.ok(&["switch", "--noconfirm"]);
     c.check(
-        refused.contains("leaves no account that can log in with a password"),
-        format!("taking the last password holder out of wheel, with root locked, is refused:\n{refused}"),
+        warned.contains("no account can log in with a password"),
+        format!("taking the last password holder out of wheel, with root locked, warns:\n{warned}"),
     );
-    c.eq(
-        machine.current(),
-        Some(second),
-        "nothing changed after the wheel removal: current",
-    );
-    c.eq(
-        machine.deployments(),
-        before.clone(),
-        "nothing changed after the wheel removal: deployments",
-    );
-
-    setup.set_body(&[], &users("!", ""));
-    let refused = setup.fails(&["switch", "--noconfirm"]);
-    c.check(
-        refused.contains("leaves no account that can log in with a password")
-            && refused.contains("allow_no_password_login"),
-        format!("locking the last login is refused:\n{refused}"),
-    );
-    c.eq(machine.current(), Some(second), "nothing changed: current");
-    c.eq(machine.deployments(), before, "nothing changed: deployments");
-    c.eq(machine.leftovers(), Vec::<String>::new(), "nothing changed: staging");
     setup.set_body(&[], &users("!", ", allow_no_password_login = true"));
-    setup.ok(&["switch", "--noconfirm"]);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    c.check(
+        !out.contains("no account can log in with a password"),
+        format!("acknowledged, the switch doesn't warn:\n{out}"),
+    );
     c.eq(
-        hash(machine, machine.current().unwrap(), "alice"),
+        hash(machine, "alice"),
         "!".to_string(),
         "acknowledged, the lock is declared",
     );
@@ -246,8 +211,7 @@ fn a_password_set_in_the_rescue_holds_until_the_declared_hash_changes() {
     let c = Checks::default();
     let setup = Setup::new(&[], &users(ALICE, ""));
     let machine = &setup.machine;
-    setup.lay_out();
-    machine.power_off();
+    setup.first_switch();
     let out = rescue_password(&setup, "alice", "rescued pass");
     c.check(
         out.contains("switches keep it over users.alice.hashed_password"),
@@ -258,7 +222,6 @@ fn a_password_set_in_the_rescue_holds_until_the_declared_hash_changes() {
         notes.contains("alice's password was set in the rescue entry"),
         format!("a login note:\n{notes}"),
     );
-    boot(&setup);
 
     setup.set_body(
         &[],
@@ -269,17 +232,10 @@ fn a_password_set_in_the_rescue_holds_until_the_declared_hash_changes() {
         out.contains("keeping alice's password set in the rescue entry") && !out.contains("resetting alice's"),
         out.to_string(),
     );
-    let kept = machine.current().unwrap();
     c.eq(
-        password::verify(b"rescued pass", &hash(machine, kept, "alice")),
+        password::verify(b"rescued pass", &hash(machine, "alice")),
         Some(true),
         "the rescue password survives a switch",
-    );
-    boot(&setup);
-    c.eq(
-        password::verify(b"rescued pass", &hash(machine, kept, "alice")),
-        Some(true),
-        "and the boot after it",
     );
 
     setup.set_body(&[], &users(ALICE2, ""));
@@ -289,7 +245,7 @@ fn a_password_set_in_the_rescue_holds_until_the_declared_hash_changes() {
         out.to_string(),
     );
     c.eq(
-        hash(machine, machine.current().unwrap(), "alice"),
+        hash(machine, "alice"),
         ALICE2.to_string(),
         "a changed declared hash replaces it",
     );
@@ -310,7 +266,7 @@ fn sh(script: &str) -> String {
     text
 }
 
-/// sshd from the machine's running deployment, in a chroot of its root on `port`.
+/// sshd from the machine, in a chroot of its root on `port`.
 fn sshd(root: &Path, port: u16) -> Child {
     let r = root.display();
     sh(&format!(
@@ -372,7 +328,7 @@ fn new_key(dir: &Path, name: &str) -> String {
 
 #[test]
 #[ignore]
-fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothing() {
+fn keys_sudo_rules_and_tmpfiles_go_into_etc_and_bad_ones_change_nothing() {
     let _system = lock_system();
     let c = Checks::default();
     let keys = tempfile::tempdir().unwrap();
@@ -391,9 +347,9 @@ fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothi
     );
     let setup = Setup::new(&["sudo", "openssh"], &good);
     let machine = &setup.machine;
-    setup.lay_out();
-    let deployment = machine.deployment(machine.current().unwrap());
-    let mode = |path: &str| fs::symlink_metadata(deployment.join(path)).map(|meta| (meta.mode() & 0o7777, meta.uid()));
+    setup.first_switch();
+    let root_dir = machine.root.clone();
+    let mode = |path: &str| fs::symlink_metadata(root_dir.join(path)).map(|meta| (meta.mode() & 0o7777, meta.uid()));
     c.eq(
         mode("etc/ssh/authorized_keys.d/alice").ok(),
         Some((0o644, 0)),
@@ -405,7 +361,7 @@ fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothi
         "the sudoers drop-in is root's, 0440",
     );
     c.check(
-        fs::read_to_string(deployment.join("etc/sudoers.d/archix"))
+        fs::read_to_string(root_dir.join("etc/sudoers.d/archix"))
             .unwrap_or_default()
             .contains("bob ALL=(ALL) NOPASSWD: /usr/bin/systemctl"),
         "the extra rule",
@@ -462,7 +418,7 @@ fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothi
         "systemd-tmpfiles --root={} --create archix.conf",
         root.display()
     ));
-    let alice_uid: u32 = fs::read_to_string(deployment.join("etc/passwd"))
+    let alice_uid: u32 = fs::read_to_string(root_dir.join("etc/passwd"))
         .unwrap()
         .lines()
         .find_map(|line| line.strip_prefix("alice:x:")?.split(':').next()?.parse().ok())
@@ -473,7 +429,8 @@ fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothi
         "the boot's tmpfiles run makes the directory, alice's and 0750",
     );
 
-    let before = (machine.current(), machine.deployments());
+    let sudoers = || fs::read_to_string(root_dir.join("etc/sudoers.d/archix")).unwrap_or_default();
+    let before = (machine.current(), sudoers());
     for (rule, tmpfiles, says) in [
         (
             "bob ALL=(ALL) NOPASSWD /usr/bin/systemctl",
@@ -493,14 +450,9 @@ fn keys_sudo_rules_and_tmpfiles_go_into_the_deployment_and_bad_ones_change_nothi
             refused.to_string(),
         );
         c.eq(
-            (machine.current(), machine.deployments()),
+            (machine.current(), sudoers()),
             before.clone(),
-            format!("{says}: nothing changed"),
-        );
-        c.eq(
-            machine.leftovers(),
-            Vec::<String>::new(),
-            format!("{says}: no staging left"),
+            format!("{says}: nothing changed, the sudoers drop-in included"),
         );
     }
     c.finish();

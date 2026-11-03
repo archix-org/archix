@@ -55,8 +55,7 @@ fn fetched_files_and_appimages_are_locked_by_hash_and_roll_back() {
         "fetched = yes\n"
     );
     let machine = &setup.machine;
-    let with_app = machine.current().unwrap();
-    let tree = machine.deployment(with_app);
+    let tree = machine.root.clone();
     let command = fs::read_link(tree.join("usr/bin/hello")).unwrap();
     assert_eq!(command, Path::new("/opt/archix/appimages/hello.AppImage"));
     let hello = Command::new("sh")
@@ -68,19 +67,18 @@ fn fetched_files_and_appimages_are_locked_by_hash_and_roll_back() {
         fs::read_to_string(tree.join("usr/share/applications/archix-hello.desktop"))
             .unwrap()
             .contains("Categories=Utility;"),
-        "the menu entry is in the deployment, beside the AppImage in its /opt"
+        "the menu entry is in /usr, beside the AppImage in its /opt"
     );
-    let shared = archix::system::usr_local::dir(&machine.root);
     assert!(
-        !shared.join("bin/hello").exists() && !shared.join("share/applications/archix-hello.desktop").exists(),
-        "nothing of an AppImage goes into the shared /usr/local, which no rollback undoes"
+        !tree.join("usr/local/bin/hello").exists(),
+        "nothing of an AppImage goes into /usr/local"
     );
     assert!(installed("fuse2").is_some(), "appimages declare fuse2");
 
     fs::remove_dir_all("/var/tmp/archix-fetch-src").unwrap();
     setup.set_body(&[], "");
     setup.ok(&["switch", "--noconfirm"]);
-    let without = machine.deployment(machine.current().unwrap());
+    let without = machine.root.clone();
     assert!(
         !without.join("usr/bin/hello").exists()
             && !without.join("usr/share/applications/archix-hello.desktop").exists(),
@@ -90,7 +88,7 @@ fn fetched_files_and_appimages_are_locked_by_hash_and_roll_back() {
     assert_eq!(
         fs::read_to_string(system_path("/etc/archix-fetched.conf")).unwrap(),
         "fetched = yes\n",
-        "rolling back boots the deployment with the fetched files, without the source"
+        "rolling back applies the fetched files again, without the source"
     );
     assert!(system_path("/opt/archix/appimages/hello.AppImage").exists());
     assert!(

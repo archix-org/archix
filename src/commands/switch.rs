@@ -612,9 +612,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         &mut lock,
         &store,
         number,
-        &system_change,
         &previous_flatpak,
-        applied.users,
         soft_failures,
     )
 }
@@ -692,7 +690,7 @@ fn record_applied(target: &Target, paths: &Paths, store: &Store, number: u32) ->
 
 static WITHOUT_SECRETS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `switch --without-secrets`: secrets that don't decrypt here are left out of the deployment instead of refusing it.
+/// `switch --without-secrets`: secrets that don't decrypt here are left out instead of refusing the switch.
 pub fn without_secrets() {
     WITHOUT_SECRETS.store(true, std::sync::atomic::Ordering::Relaxed);
 }
@@ -758,9 +756,7 @@ fn after_apply(
     lock: &mut HostLock,
     store: &Store,
     number: u32,
-    system_change: &SystemChange,
     previous_flatpak: &BTreeMap<String, LockedApp>,
-    users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
     super::lock::write_deferred()?;
@@ -773,12 +769,6 @@ fn after_apply(
         soft_failures.push(format!(
             "recording generation {number}'s config in root's repository: {e:#}"
         ));
-    }
-    let etc = paths.root.join("etc");
-    let accounts = Accounts::read(&etc);
-    let with_password = system::credentials::with_password(&system_change.to.users);
-    if let Err(e) = system::apply::create_homes(&users, &accounts, &etc.join("skel"), &paths.root, &with_password) {
-        soft_failures.push(format!("creating home directories: {e:#}"));
     }
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
@@ -1310,7 +1300,7 @@ fn fallback_source(declared: &Declared, archive: &Archive, date: Date, repo: &Re
 
 fn print_gc(report: &gc::Report, always: bool) {
     for recipient in &report.retired {
-        println!("deleted the retired secrets identity {recipient}, which no kept deployment needs");
+        println!("deleted the retired secrets identity {recipient}, which no kept generation needs");
     }
     if !report.generations.is_empty() {
         let numbers: Vec<String> = report.generations.iter().map(u32::to_string).collect();
@@ -1492,16 +1482,6 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     store.set_current(number)?;
     for warning in rollbacks.after(&paths, &generation.packages) {
         eprintln!("warning: {warning}");
-    }
-    let etc = paths.root.join("etc");
-    if let Err(e) = system::apply::create_homes(
-        &applied.users,
-        &Accounts::read(&etc),
-        &etc.join("skel"),
-        &paths.root,
-        &BTreeSet::new(),
-    ) {
-        soft_failures.push(format!("creating home directories: {e:#}"));
     }
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));

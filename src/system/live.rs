@@ -86,8 +86,12 @@ impl RunsPacman for Root {
                 .arg(at("var/lib/pacman"))
                 .arg("--config")
                 .arg(at("etc/pacman.conf"))
-                .arg("--hookdir")
-                .arg(at("etc/pacman.d/hooks"));
+                .arg("--gpgdir")
+                .arg(at("etc/pacman.d/gnupg"));
+            // pacman refuses a --hookdir that doesn't exist.
+            if at("etc/pacman.d/hooks").is_dir() {
+                pacman.arg("--hookdir").arg(at("etc/pacman.d/hooks"));
+            }
         }
         Ok(pacman)
     }
@@ -133,8 +137,6 @@ pub struct Plan<'a> {
 /// What an apply did besides failing.
 #[derive(Debug, Default)]
 pub struct Applied {
-    /// Regular users it created, whose homes come next.
-    pub users: Vec<String>,
     pub package_capabilities: BTreeMap<String, String>,
     /// What went wrong without stopping it: units, hooks, secrets.
     pub failures: Vec<String>,
@@ -174,10 +176,15 @@ pub fn check_files(system: &SystemChange, content: &dyn Fn(&str) -> Option<Vec<u
             .context("running systemd-tmpfiles")?;
         let shown = copy.display().to_string();
         let errors = String::from_utf8_lossy(&output.stderr);
-        // Users and groups the switch creates don't exist yet.
+        // Users and groups the switch creates don't exist yet, so only theirs may fail to resolve.
+        let created = |line: &str| {
+            line.split('\'')
+                .nth(1)
+                .is_some_and(|name| system.to.users.contains_key(name) || system.to.groups.contains_key(name))
+        };
         let unparsed: Vec<String> = errors
             .lines()
-            .filter(|line| line.contains(&shown) && !line.contains("Failed to resolve"))
+            .filter(|line| line.contains(&shown) && !(line.contains("Failed to resolve") && created(line)))
             .map(|line| line.replace(&shown, credentials::TMPFILES))
             .collect();
         if !unparsed.is_empty() {
@@ -300,6 +307,14 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
         }
     }
     let accounts = Accounts::read(&etc);
+    let with_password = match &plan.credentials {
+        Some(_) => credentials::with_password(&plan.system.to.users),
+        None => BTreeSet::new(),
+    };
+    progress.step(
+        "home directories",
+        apply::create_homes(&users, &accounts, &etc.join("skel"), root.path(), &with_password),
+    )?;
     let mut failures = apply::disable_services(plan.system, &run);
     let on_root = |path: &str| Some(root.path().join(path.trim_start_matches('/')));
     progress.step("files", apply::files(paths, plan.system, &on_root, &accounts))?;
@@ -353,7 +368,6 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
     }
     failures.extend(super::hooks::run(root.path(), &due, &plan.system.to.hooks));
     Ok(Applied {
-        users,
         package_capabilities,
         failures,
     })
