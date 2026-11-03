@@ -1,3 +1,4 @@
+pub mod hooks;
 mod vercmp;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -29,6 +30,8 @@ pub struct SyncPkg {
     pub base: String,
     /// `%CSIZE%`: the package file's size, 0 when the entry has none.
     pub size: u64,
+    /// `%ISIZE%`: what its files take installed, 0 when the entry has none.
+    pub installed_size: u64,
 }
 
 /// A package installed on the system, from pacman's local database.
@@ -118,6 +121,7 @@ pub fn read_sync_db(path: &Path) -> Result<BTreeMap<String, SyncPkg>> {
                 conflicts: fields.get("CONFLICTS").cloned().unwrap_or_default(),
                 base: first(&fields, "BASE").unwrap_or_else(|| name.clone()),
                 size: first(&fields, "CSIZE").and_then(|size| size.parse().ok()).unwrap_or(0),
+                installed_size: first(&fields, "ISIZE").and_then(|size| size.parse().ok()).unwrap_or(0),
                 name,
             },
         );
@@ -194,7 +198,7 @@ mod tests {
     use flate2::write::GzEncoder;
 
     const DESC: &str = "%FILENAME%\nacl-2.3.2-1-x86_64.pkg.tar.zst\n\n%NAME%\nacl\n\n%VERSION%\n2.3.2-1\n\n\
-                        %DEPENDS%\nglibc\nlibattr\n\n%SHA256SUM%\nabc123\n\n%CSIZE%\n137000\n\n";
+                        %DEPENDS%\nglibc\nlibattr\n\n%SHA256SUM%\nabc123\n\n%CSIZE%\n137000\n\n%ISIZE%\n420000\n\n";
 
     #[test]
     fn parses_multi_value_fields() {
@@ -237,6 +241,7 @@ mod tests {
                 conflicts: Vec::new(),
                 base: "acl".into(),
                 size: 137000,
+                installed_size: 420000,
             }
         );
     }

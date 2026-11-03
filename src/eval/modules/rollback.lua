@@ -23,6 +23,11 @@ return {
         default = 10,
         description = "Below this percentage of free space on the root, archix warns and drops the oldest snapshots it may, never manual ones, ones with a boot entry or the newest.",
       },
+      low_space = archix.option {
+        type = t.enum { "abort", "prune", "skip" },
+        default = "prune",
+        description = "What the snapshot before a plain pacman transaction does when the transaction and its snapshot would leave the root below min_free and nobody can be asked (no terminal, --noconfirm, pamac): abort the transaction; prune the oldest snapshots it may, but only while a safe recovery point stays (a snapshot of a system that booted fine, with its boot entry), else abort; or skip the snapshot and let the transaction run. On a terminal it asks instead: abort, prune, or still try.",
+      },
       entries = archix.option {
         type = t.int,
         default = 5,

@@ -391,6 +391,8 @@ impl Applied {
     pub fn store_tree(&self, captured: &Captured) -> Result<String> {
         self.ensure()?;
         let index = captured.private.join("applied-index");
+        // An index left by a store into another repository (before setup made @archix's) names blobs this one lacks.
+        let _ = fs::remove_file(&index);
         let mut add = self.git(&["add", "-A", "-f"]);
         add.env("GIT_INDEX_FILE", &index)
             .env("GIT_WORK_TREE", &captured.dir)
@@ -627,7 +629,11 @@ fn redact_ids(text: &str) -> String {
 /// Writes `bytes` to `path` in a directory its owner controls, as that owner: no symlink followed, a temp file renamed over it, so root never opens a path in the owner's tree.
 pub fn write_as_owner(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("a file to write needs a directory")?;
-    let owner = Owner::of(dir)?;
+    let existing = dir
+        .ancestors()
+        .find(|ancestor| fs::metadata(ancestor).is_ok())
+        .context("a file to write needs a directory")?;
+    let owner = Owner::of(existing)?;
     let name = path.file_name().context("a file to write needs a name")?;
     let mut command = owner.command(crate::testhooks::own_exe().context("finding archix's own binary")?);
     command
@@ -651,9 +657,33 @@ pub fn write_as_owner(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// `archix write-file DIR NAME`, already running as DIR's owner: stdin into a temp file in DIR opened with O_NOFOLLOW and O_EXCL, then renamed over NAME; refuses a NAME that's a symlink or a DIR that is one.
+/// A config file's text, refusing to follow a symlink there; none when it's missing.
+pub fn read_no_follow(path: &Path) -> Result<Option<String>> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            bail!(
+                "{} is a symlink, which archix doesn't follow; make it a file",
+                path.display()
+            )
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Some(text))
+}
+
+/// `archix write-file DIR NAME`, already running as DIR's owner: makes DIR if it's missing, then stdin into a temp file in DIR opened with O_NOFOLLOW and O_EXCL, renamed over NAME; refuses a NAME that's a symlink or a DIR that is one.
 pub fn write_file_here(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
+    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     if fs::symlink_metadata(dir)?.file_type().is_symlink() {
         bail!("{} is a symlink; nothing was written", dir.display());
     }

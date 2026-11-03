@@ -155,7 +155,8 @@ struct Answers {
     read_only: bool,
     fallback: usize,
     keep_orphans: bool,
-    strict: bool,
+    /// What the next switch does with packages installed outside archix: ask, add or keep untracked.
+    drift: usize,
     aur_review: bool,
     missing_versions: usize,
     files: BTreeSet<usize>,
@@ -200,7 +201,7 @@ impl Answers {
             read_only: false,
             fallback: 0,
             keep_orphans: true,
-            strict: true,
+            drift: 0,
             aur_review: true,
             missing_versions: 0,
             files: (0..facts.files.len()).filter(|i| facts.files[*i].recommended).collect(),
@@ -895,8 +896,10 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
             config.set("third_party_fallback", Lua::str(FALLBACK[answers.fallback].0));
         }
     }
-    if !answers.strict {
-        config.set("undeclared_packages", Lua::str("warn"));
+    match answers.drift {
+        1 => config.set("drift", Lua::str("add")),
+        2 => config.set("drift", Lua::str("keep")),
+        _ => {}
     }
     let mut ignored: Vec<String> = facts
         .unknown

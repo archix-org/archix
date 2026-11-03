@@ -96,6 +96,9 @@ pub struct Policy {
     /// Below this percentage of free space, prune drops the oldest snapshots it may until there's more.
     pub min_free: u32,
     pub entries: u32,
+    /// What the pacman hook does short of space with nobody to ask.
+    #[serde(default)]
+    pub low_space: crate::pacman::hooks::LowSpace,
 }
 
 impl Default for Policy {
@@ -105,6 +108,7 @@ impl Default for Policy {
             keep_pacman: 10,
             min_free: 10,
             entries: 5,
+            low_space: crate::pacman::hooks::LowSpace::Prune,
         }
     }
 }
@@ -131,6 +135,11 @@ impl Policy {
             keep_pacman: number("keep_pacman", defaults.keep_pacman, 1000)?,
             min_free: number("min_free", defaults.min_free, 90)?,
             entries: number("entries", defaults.entries, 100)?,
+            low_space: match rollback.get("low_space") {
+                Some(Value::Str(text)) => crate::pacman::hooks::LowSpace::parse(text)
+                    .with_context(|| format!("rollback.low_space is {text:?}, not \"abort\", \"prune\" or \"skip\""))?,
+                _ => defaults.low_space,
+            },
         }))
     }
 }

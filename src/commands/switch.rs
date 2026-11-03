@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,7 +33,7 @@ use archix::system::{self, SystemState, live};
 use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::snapshot::Rollbacks;
 use super::{
-    Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
+    Declared, Drift, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
     confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies,
     print_missing_ignored, print_warned, recipes, require_root, select_changes, settle_flatpak, third_party_repos,
     transaction_for, user_cache,
@@ -188,31 +187,47 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         }
     }
 
-    if declared.remove_undeclared {
-        let outside: BTreeSet<String> = integration::outside_changes(&paths)?
-            .into_iter()
-            .flat_map(|change| change.packages)
-            .collect();
-        let added: Vec<String> = installed
-            .values()
-            .filter(|pkg| {
-                pkg.explicit
-                    && outside.contains(&pkg.name)
-                    && !lock.packages.contains_key(&pkg.name)
-                    && !declared.ignored.contains(&pkg.name)
-            })
-            .map(|pkg| pkg.name.clone())
-            .collect();
-        if !added.is_empty() {
+    let mut untracked = archix::revert::kept_untracked(&paths.state);
+    untracked.retain(|name| installed.contains_key(name) && !lock.packages.contains_key(name));
+    let outside: BTreeSet<String> = integration::outside_changes(&paths)?
+        .into_iter()
+        .flat_map(|change| change.packages)
+        .collect();
+    let added: Vec<String> = installed
+        .values()
+        .filter(|pkg| {
+            pkg.explicit
+                && outside.contains(&pkg.name)
+                && !lock.packages.contains_key(&pkg.name)
+                && !declared.ignored.contains(&pkg.name)
+                && !untracked.contains(&pkg.name)
+        })
+        .map(|pkg| pkg.name.clone())
+        .collect();
+    if !added.is_empty() {
+        println!(
+            "installed with pacman or an AUR helper since the last switch, not declared: {}",
+            added.join(" ")
+        );
+        let add = match declared.drift {
+            Drift::Add => true,
+            Drift::Keep => false,
+            Drift::Ask => noconfirm || confirm("add them to installed.lua? (no keeps them installed, untracked)")?,
+        };
+        if add {
             println!(
-                "installed with pacman or an AUR helper but not declared: {}",
-                added.join(" ")
+                "adding them to installed.lua, as drift = \"{}\" says",
+                match declared.drift {
+                    Drift::Add => "add",
+                    _ => "ask",
+                }
             );
-            if noconfirm || confirm("declare them in installed.lua? (no removes them)")? {
-                return switch_after_declaring(target, &added, noconfirm, accept_nearest, allow_unsafe);
-            }
+            return switch_after_declaring(target, &added, noconfirm, accept_nearest, allow_unsafe);
         }
+        println!("keeping them installed and untracked: no switch removes them or what they need");
+        untracked.extend(added);
     }
+    archix::revert::save_untracked(&paths.state, &untracked)?;
 
     let unresolved_flatpak = settle_flatpak(target, &declared, &mut lock, true, false)?;
     let commit = config_commit(target.config_dir);
@@ -386,6 +401,11 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         let current = current.expect("unchanged needs a current generation");
         super::lock::write_deferred()?;
         integration::clear_outside_changes(&paths)?;
+        set_strict(target, &declared, &paths)?;
+        let root = paths.root.clone();
+        integration::write_all(&paths, &integration::own_path()?, &|path: &Path| {
+            Ok(root.join(path.strip_prefix("/").unwrap_or(path)))
+        })?;
         println!(
             "nothing to do: the system matches generation {} (snapshot {})",
             current.number, lock.date
@@ -619,6 +639,20 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     )
 }
 
+/// Turns strict mode's flag on, naming the config as pacman's hooks see it, or off.
+fn set_strict(target: &Target, declared: &Declared, paths: &Paths) -> Result<()> {
+    let flag = paths.state.join(archix::pacman::hooks::STRICT_FLAG);
+    if !declared.strict {
+        return match fs::remove_file(&flag) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e).context("removing strict mode's flag"),
+            _ => Ok(()),
+        };
+    }
+    let config = std::path::absolute(target.config_dir)?;
+    let config = archix::pacman::hooks::config_in_root(&paths.root, &config);
+    archix::durable::write(&flag, config.as_os_str().as_encoded_bytes())
+}
+
 /// Refuses `what` on a try boot, whose changes the next boot drops, and on a root archix didn't produce, whose records describe another one.
 fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
     if let Some(trying) = system::initrd::trying() {
@@ -630,7 +664,27 @@ fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
     if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         bail!("{why}; nothing was changed");
     }
+    let pending = paths
+        .root
+        .join(archix::pacman::hooks::KEEP_PENDING.trim_start_matches('/'));
+    if let Ok(number) = fs::read_to_string(pending) {
+        bail!(
+            "rollback to snapshot {} is pending; reboot, or `archix rollback --cancel`; nothing was changed",
+            number.trim()
+        );
+    }
     Ok(())
+}
+
+/// What's wrong with archix's pacman hooks, once a switch has written them: masked, shadowed, missing or changed.
+pub(super) fn hook_warnings(paths: &Paths) -> Vec<String> {
+    if Store::new(paths).current().ok().flatten().is_none() {
+        return Vec::new();
+    }
+    let Ok(archix) = integration::own_path() else {
+        return Vec::new();
+    };
+    archix::pacman::hooks::trouble(&paths.root, &integration::files(paths, &archix))
 }
 
 /// After an apply: builds the boot images of the root as it is now, prunes snapshots (keeping those with entries), then writes the menu, the rescue entry and the unblessed timeout; returns what failed, which leaves the applied system as it is.
@@ -860,6 +914,9 @@ fn after_apply(
         ));
     }
     integration::clear_outside_changes(paths)?;
+    if let Err(e) = set_strict(target, declared, paths) {
+        soft_failures.push(format!("setting strict mode: {e:#}"));
+    }
     let _ = fs::remove_file(paths.notes());
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
@@ -1689,24 +1746,6 @@ pub fn gc() -> Result<()> {
     Ok(())
 }
 
-/// Run by archix's pacman hook after every transaction; never fails, so it can't break a pacman run.
-pub fn hook_record() {
-    let paths = Paths::system();
-    let packages: Vec<String> = io::stdin()
-        .lines()
-        .map_while(Result::ok)
-        .filter(|l| !l.trim().is_empty())
-        .collect();
-    match integration::record(&paths, packages) {
-        Ok(Some(change)) => println!(
-            "archix: recorded {} changed outside archix; `archix switch` will offer to adopt them",
-            count(change.packages.len(), "package", "packages")
-        ),
-        Ok(None) => {}
-        Err(e) => println!("archix: could not record this transaction: {e:#}"),
-    }
-}
-
 /// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
 pub fn boot_check() -> Result<()> {
     let paths = Paths::system();
@@ -1740,6 +1779,7 @@ pub fn boot_check() -> Result<()> {
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         notices.push(format!("archix: {why}"));
     }
+    notices.extend(hook_warnings(&paths).into_iter().map(|line| format!("archix: {line}")));
     for (dir, file) in [("/run/motd.d", "archix.motd"), ("/run/issue.d", "archix.issue")] {
         let path = Path::new(dir).join(file);
         match notices.is_empty() {

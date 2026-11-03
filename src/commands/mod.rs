@@ -1,6 +1,7 @@
 mod helper;
 mod init;
 mod lock;
+pub mod pacman_hook;
 pub mod rescue;
 pub mod snapshot;
 mod switch;
@@ -74,8 +75,7 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     missing == 0
 }
 pub use switch::{
-    allow_partial, boot_check, cache_push, declare_and_switch, gc, generations, hook_record, rollback, switch,
-    without_secrets,
+    allow_partial, boot_check, cache_push, declare_and_switch, gc, generations, rollback, switch, without_secrets,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
@@ -148,6 +148,10 @@ struct Declared {
     repos: Vec<Repo>,
     third_party_fallback: ThirdPartyFallback,
     remove_undeclared: bool,
+    /// What a switch does with packages installed outside archix since the last one.
+    drift: Drift,
+    /// Strict mode: plain pacman refuses while archix and this config are there.
+    strict: bool,
     ignored: BTreeSet<String>,
     keep: u32,
     keep_days: u32,
@@ -185,6 +189,13 @@ struct BootSettings {
     health_check: Option<archix::system::health::HealthCheck>,
     rescue_entry: bool,
     unblessed_timeout: u32,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Drift {
+    Ask,
+    Add,
+    Keep,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -289,18 +300,23 @@ fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::
 
 /// `archix notice`: the try boot's notice on stdout, or with `desktop` as a desktop notification, which the session's autostart entry sends; nothing outside a try boot.
 pub fn notice(desktop: bool) {
-    let Some(trying) = archix::system::initrd::trying() else {
-        return;
-    };
-    let text = archix::system::initrd::notice(&trying);
-    match desktop {
-        true => {
-            let _ = std::process::Command::new("notify-send")
-                .args(["--urgency=critical", "--app-name=archix", "archix: try mode"])
-                .arg(text.trim_start_matches("archix: "))
-                .status();
+    let mut notices: Vec<(&str, String)> = Vec::new();
+    if let Some(trying) = archix::system::initrd::trying() {
+        notices.push(("archix: try mode", archix::system::initrd::notice(&trying)));
+    }
+    for line in switch::hook_warnings(&Paths::system()) {
+        notices.push(("archix: pacman hooks", format!("archix: {line}")));
+    }
+    for (title, text) in notices {
+        match desktop {
+            true => {
+                let _ = std::process::Command::new("notify-send")
+                    .args(["--urgency=critical", "--app-name=archix", title])
+                    .arg(text.trim_start_matches("archix: "))
+                    .status();
+            }
+            false => println!("{text}"),
         }
-        false => println!("{text}"),
     }
 }
 
@@ -391,6 +407,12 @@ fn declared(config: &Value) -> Result<Declared> {
             _ => ThirdPartyFallback::Ask,
         },
         remove_undeclared: map.get("undeclared_packages") != Some(&Value::Str("warn".into())),
+        drift: match map.get("drift") {
+            Some(Value::Str(policy)) if policy == "add" => Drift::Add,
+            Some(Value::Str(policy)) if policy == "keep" => Drift::Keep,
+            _ => Drift::Ask,
+        },
+        strict: map.get("strict") == Some(&Value::Bool(true)),
         ignored: strings("ignored_packages").into_iter().collect(),
         keep: generation_limit("keep", 10),
         keep_days: generation_limit("keep_days", 30),
@@ -606,12 +628,13 @@ fn select_changes(
     ignored: &BTreeSet<String>,
 ) -> (Vec<Change>, Vec<String>, Vec<String>) {
     let keyrings = archix::pacman::keyring_packages(db);
+    let untracked = archix::revert::closure(db, &archix::revert::kept_untracked(&Paths::system().state));
     let mut warned = Vec::new();
     let mut kept = Vec::new();
     let changes = plan(packages, installed)
         .into_iter()
         .filter(|change| match change {
-            Change::Remove { name, .. } if ignored.contains(name) => false,
+            Change::Remove { name, .. } if ignored.contains(name) || untracked.contains(name) => false,
             Change::Remove { name, .. } if !remove_undeclared => {
                 warned.push(name.clone());
                 false

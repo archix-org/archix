@@ -38,7 +38,10 @@ pub fn edit_installed(
         None => installed::default_dir(config_dir, host),
     };
     let file = dir.join(FILE);
-    let current = super::lock::deferred_text(&file).or_else(|| fs::read_to_string(&file).ok());
+    let current = match super::lock::deferred_text(&file) {
+        Some(text) => Some(text),
+        None => archix::captured::read_no_follow(&file)?,
+    };
     let mut packages = match &current {
         Some(text) => installed::parse(text, &file)?,
         None => Vec::new(),

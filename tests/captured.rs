@@ -182,6 +182,20 @@ fn the_captured_copy_is_roots_so_changing_the_config_after_the_capture_changes_n
     let stored = applied.verified(1, &generation.commit, Some(&tree)).unwrap();
     assert_eq!((stored.tree, stored.lock), (captured.tree.clone(), b"lock".to_vec()));
     assert_eq!(isolated::read_plan(&stored.plan).unwrap(), config);
+    // Files older than the index aren't hashed again by git add, so an index another repository filled would name blobs this one lacks, as when setup makes @archix's repository mid-switch.
+    sh(&format!(
+        "find {} -type f -exec touch -d '2 days ago' {{}} +",
+        captured.dir.display()
+    ));
+    applied.store_tree(&captured).unwrap();
+    let other = Applied {
+        git_dir: work.dir.join("other.git"),
+    };
+    assert_eq!(
+        other.store_tree(&captured).unwrap(),
+        captured.tree,
+        "a second repository gets every blob"
+    );
 }
 
 #[test]
@@ -370,6 +384,16 @@ fn root_writes_into_the_owners_directory_only_as_the_owner_and_never_through_a_s
     assert!(captured::write_as_owner(&linked.join("archix-planted"), b"x").is_err());
     assert!(!Path::new("/etc/archix-planted").exists());
     fs::remove_file(dir.join("installed.lua")).unwrap();
+    let nested = dir.join("lua/hosts/box/installed.lua");
+    captured::write_as_owner(&nested, b"return {}\n").unwrap();
+    for made in [dir.join("lua"), dir.join("lua/hosts/box"), nested] {
+        assert_eq!(
+            fs::metadata(&made).unwrap().uid(),
+            owner.uid,
+            "{} is the owner's",
+            made.display()
+        );
+    }
     captured::write_as_owner(&dir.join("installed.lua"), b"return {}\n").unwrap();
     let meta = fs::metadata(dir.join("installed.lua")).unwrap();
     assert_eq!(

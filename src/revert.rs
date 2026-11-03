@@ -104,6 +104,55 @@ pub fn dependency_breaks(local_db: &Path, untracked: &[String], target: &BTreeMa
     breaks
 }
 
+/// The packages the drift policy keeps installed but untracked, in archix's state.
+pub const UNTRACKED: &str = "untracked.json";
+
+pub fn kept_untracked(state: &Path) -> BTreeSet<String> {
+    fs::read_to_string(state.join(UNTRACKED))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Saves the untracked packages kept, writing only when they changed.
+pub fn save_untracked(state: &Path, names: &BTreeSet<String>) -> anyhow::Result<()> {
+    if *names == kept_untracked(state) {
+        return Ok(());
+    }
+    crate::durable::write(&state.join(UNTRACKED), serde_json::to_string_pretty(names)?.as_bytes())
+}
+
+/// `roots` and every installed package they need, by name or by what it provides, from the local database.
+pub fn closure(local_db: &Path, roots: &BTreeSet<String>) -> BTreeSet<String> {
+    let installed = read(local_db);
+    let mut by_provide: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, entry) in &installed {
+        by_provide.entry(name).or_default().push(name);
+        for provide in &entry.provides {
+            by_provide.entry(dep_name(provide)).or_default().push(name);
+        }
+    }
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<&str> = roots
+        .iter()
+        .map(String::as_str)
+        .filter(|name| installed.contains_key(*name))
+        .collect();
+    while let Some(name) = queue.pop() {
+        if !found.insert(name.to_string()) {
+            continue;
+        }
+        for dep in &installed[name].depends {
+            for provider in by_provide.get(dep_name(dep)).into_iter().flatten() {
+                if !found.contains(*provider) {
+                    queue.push(provider);
+                }
+            }
+        }
+    }
+    found
+}
+
 /// The installed packages neither the lock nor the switch's removals cover, which stay as they are.
 pub fn untracked(installed: &BTreeSet<String>, locked: &BTreeSet<String>, removed: &BTreeSet<String>) -> Vec<String> {
     installed

@@ -67,3 +67,7 @@ src/system/running.rs	test:switch
 src/system/esp.rs	test:boot
 src/system/accounts.rs	test:credentials test:system
 src/system/xattr.rs	test:system test:repos
+src/pacman/hooks.rs	test:pacman_hooks test:switch
+src/commands/pacman_hook.rs	test:pacman_hooks
+src/integration.rs	test:pacman_hooks test:switch
+src/revert.rs	test:switch

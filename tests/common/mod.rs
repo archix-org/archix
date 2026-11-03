@@ -181,7 +181,7 @@ fn sh_out(script: &str) -> String {
 /// What a machine leaves in the container's archix state, which its next machine and tests on the container itself must not see.
 const FORGET: &str = "cd /var/lib/archix && rm -rf generations boot backups edited users id-map.json config.git outside-changes.json notes kernels secrets";
 
-/// A whole Arch root in a directory, which archix switches through ARCHIX_TEST_ROOT: its /usr is hardlinked from the template (or, on btrfs, the template bound read-only), /etc and pacman's database are copies of the container's, and the container's package caches and archix state are bound in.
+/// A whole Arch root in a directory, which archix switches through ARCHIX_TEST_ROOT: its /usr is hardlinked from the template (or, on btrfs, an overlay of it), its own path inside it leads back to it so paths archix recorded outside resolve in pacman's hooks, chrooted there, /etc and pacman's database are copies of the container's, and the container's package caches and archix state are bound in.
 pub struct Machine {
     dir: Option<TempDir>,
     pub root: PathBuf,
@@ -206,10 +206,15 @@ impl Machine {
         }
     }
 
-    /// A machine whose root is `@` on a loop btrfs; its /usr is the template's, read-only, so switches there may change files and accounts but not packages.
+    /// A machine whose root is `@` on a loop btrfs; its /usr is an overlay of the template's whose changes land in `@`.
     pub fn on_btrfs() -> Machine {
+        Machine::on_btrfs_of("2G")
+    }
+
+    /// Like `on_btrfs`, on a disk of `size`.
+    pub fn on_btrfs_of(size: &str) -> Machine {
         let template = template();
-        let btrfs = Btrfs::new("2G");
+        let btrfs = Btrfs::new(size);
         let root = btrfs.root.clone();
         Machine::populate(&root, &template, true);
         Machine {
@@ -223,7 +228,9 @@ impl Machine {
         let usr = match bound {
             false => r#"cp -al "$t/usr" "$r/usr"; cp -al "$t/target" "$r/target""#,
             true => {
-                r#"mkdir -p "$r/usr" "$r/target"; mount --bind -o ro "$t/usr" "$r/usr"; mount --bind -o ro "$t/target" "$r/target""#
+                r#"mkdir -p "$r/usr" "$r/target" "$r/.usr-upper" "$r/.usr-work"
+                mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work" "$r/usr"
+                mount --bind -o ro "$t/target" "$r/target""#
             }
         };
         sh(&format!(
@@ -243,6 +250,7 @@ impl Machine {
             mkdir -p /var/cache/archix /var/cache/pacman/pkg /var/lib/archix
             for d in var/cache/archix var/cache/pacman/pkg var/lib/archix; do mount --bind "/$d" "$r/$d"; done
             mount -t proc proc "$r/proc"; mount --rbind /dev "$r/dev"
+            mkdir -p "$r$(dirname "$r")"; ln -sfn / "$r$r"
             {FORGET}"#,
             root = root.display(),
             template = template.display(),
@@ -320,6 +328,7 @@ impl Machine {
 
     /// Runs plain pacman against the machine, as `pacman -U` or yay would there.
     pub fn pacman(&self, args: &[&str]) {
+        fs::create_dir_all(self.root.join("etc/pacman.d/hooks")).unwrap();
         let status = Command::new("pacman")
             .arg("--root")
             .arg(&self.root)

@@ -90,6 +90,16 @@ return {
       default = "remove",
       description = "What switch does with installed packages that aren't in the lock: remove them, or only list them.",
     },
+    drift = archix.option {
+      type = t.enum { "ask", "add", "keep" },
+      default = "ask",
+      description = "What the next switch does with packages installed explicitly with pacman or an AUR helper since the last one: ask whether to add them to the host's installed.lua (with --noconfirm, add), add them without asking, or keep them installed but untracked, so no switch removes them or what they depend on. installed.lua is a generated data file the config imports; archix writes it as the config directory's owner, never through a symlink.",
+    },
+    strict = archix.option {
+      type = t.bool,
+      default = false,
+      description = "Strict mode, a guardrail rather than enforcement: plain pacman and the front ends on libalpm (AUR helpers, pamac) refuse every transaction archix doesn't run, through a pacman hook running a small shell script. It lets everything through again once strict is turned off and switched, archix is removed (pacman -R archix works while it's on), or archix's binary, its state or this config is gone, so it never wedges pacman. archix's own transactions are recognised by an environment variable anyone can set.",
+    },
     ignored_packages = archix.option {
       type = t.list_of(t.str),
       default = {},

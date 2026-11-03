@@ -155,6 +155,7 @@ fn prune_keeps_each_kinds_newest_and_never_drops_manual_pinned_or_the_newest_sna
         keep_pacman: 2,
         min_free: 10,
         entries: 5,
+        ..Policy::default()
     };
     let plenty = |percent: f64| {
         Some(Space {
@@ -202,6 +203,7 @@ fn the_keep_reserve_prunes_a_big_disk_whose_percentage_is_fine_but_whose_bytes_a
         keep_pacman: 10,
         min_free: 10,
         entries: 5,
+        ..Policy::default()
     };
     let calls = std::cell::Cell::new(0u64);
     let pruned = store

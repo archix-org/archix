@@ -225,7 +225,7 @@ fn manual_upgrades_are_recorded_and_adopted_as_pins() {
     setup.first_switch();
     assert_eq!(installed("lemon").as_deref(), Some("3.53.4-1"));
     assert!(
-        system_path("/etc/pacman.d/hooks/archix.hook").is_file(),
+        system_path("/usr/share/libalpm/hooks/95-archix-post.hook").is_file(),
         "the machine has the pacman hook"
     );
     upgrade_lemon_behind_archix(&setup.machine);
@@ -362,30 +362,101 @@ fn declining_adoption_reverts_to_the_lock() {
 
 #[test]
 #[ignore]
-fn packages_installed_with_pacman_are_offered_for_declaring() {
+fn the_drift_policy_asks_adds_or_keeps_packages_installed_with_pacman_untracked() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
     setup.first_switch();
+    let checks = Checks::default();
     let installed_lua = setup.dir.path().join("lua/hosts/box/installed.lua");
     upgrade_lemon_behind_archix(&setup.machine);
     let out = setup.answering("n\ny\n", &["switch"]);
-    assert!(
-        out.contains("installed with pacman or an AUR helper but not declared: lemon"),
-        "{out}"
+    checks.check(
+        out.contains("installed with pacman or an AUR helper since the last switch, not declared: lemon"),
+        format!("ask names the package: {out}"),
     );
-    assert!(installed("lemon").is_none(), "declining removes it");
-    assert!(!installed_lua.exists());
-
-    upgrade_lemon_behind_archix(&setup.machine);
-    let out = setup.ok(&["switch", "--noconfirm"]);
-    assert!(out.contains("not declared: lemon"), "{out}");
-    assert_eq!(archix::installed::read(&installed_lua).unwrap(), ["lemon"]);
-    assert_eq!(
+    checks.eq(
         installed("lemon").as_deref(),
         Some("3.54.0-1"),
-        "declaring keeps the installed version"
+        "declining keeps it, untracked",
     );
-    assert_eq!(setup.lock().pinned, ["lemon"]);
+    checks.check(!installed_lua.exists(), "and declares nothing");
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    checks.check(
+        !out.contains("not declared: lemon"),
+        format!("an untracked package isn't asked about again: {out}"),
+    );
+    checks.eq(
+        installed("lemon").as_deref(),
+        Some("3.54.0-1"),
+        "no later switch removes it",
+    );
+
+    setup.machine.pacman(&["-R", "lemon"]);
+    setup.ok(&["switch", "--noconfirm"]);
+    upgrade_lemon_behind_archix(&setup.machine);
+    let out = setup.ok(&["switch", "--noconfirm"]);
+    checks.check(
+        out.contains("not declared: lemon"),
+        format!("once removed it's drift again: {out}"),
+    );
+    checks.eq(
+        archix::installed::read(&installed_lua).unwrap(),
+        vec!["lemon".to_string()],
+        "ask with --noconfirm adds it to installed.lua",
+    );
+    checks.eq(
+        installed("lemon").as_deref(),
+        Some("3.54.0-1"),
+        "declaring keeps the installed version",
+    );
+    checks.eq(setup.lock().pinned, vec!["lemon".to_string()], "and pins it");
+
+    fs::remove_file(&installed_lua).unwrap();
+    setup.set_body(&[], "drift = \"keep\"");
+    setup.ok(&["switch", "--noconfirm"]);
+    upgrade_lemon_behind_archix(&setup.machine);
+    let out = setup.answering("", &["switch"]);
+    checks.check(
+        out.contains("keeping them installed and untracked"),
+        format!("keep doesn't ask: {out}"),
+    );
+    checks.check(!installed_lua.exists(), "keep declares nothing");
+    checks.eq(installed("lemon").as_deref(), Some("3.54.0-1"), "keep keeps it");
+
+    setup.machine.pacman(&["-R", "lemon"]);
+    setup.set_body(&[], "drift = \"add\"");
+    setup.ok(&["switch", "--noconfirm"]);
+    upgrade_lemon_behind_archix(&setup.machine);
+    fs::create_dir_all(installed_lua.parent().unwrap()).unwrap();
+    let elsewhere = setup.dir.path().join("lua/hosts/box/elsewhere.lua");
+    fs::write(&elsewhere, "return { packages = {} }\n").unwrap();
+    std::os::unix::fs::symlink("elsewhere.lua", &installed_lua).unwrap();
+    let refused = setup.answering_raw("", &["switch"]);
+    let said = String::from_utf8_lossy(&refused.stderr);
+    checks.check(
+        !refused.status.success() && said.contains("is a symlink, which archix doesn't follow"),
+        format!("add refuses an installed.lua that's a symlink: {said}"),
+    );
+    checks.eq(
+        fs::read_to_string(&elsewhere).unwrap(),
+        "return { packages = {} }\n".to_string(),
+        "and writes nothing through it",
+    );
+    fs::remove_file(&installed_lua).unwrap();
+    fs::remove_file(&elsewhere).unwrap();
+    let out = setup.answering("y\ny\n", &["switch"]);
+    checks.check(
+        out.contains("adding them to installed.lua, as drift = \"add\" says")
+            && !out.contains("add them to installed.lua?"),
+        format!("add doesn't ask: {out}"),
+    );
+    checks.eq(
+        archix::installed::read(&installed_lua).unwrap(),
+        vec!["lemon".to_string()],
+        "add declares it",
+    );
+    checks.finish();
+    setup.machine.pacman(&["-R", "lemon"]);
 }
 
 #[test]

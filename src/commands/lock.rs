@@ -294,13 +294,14 @@ pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
     }
 }
 
-/// Whether root is about to write into a directory another account owns, which it then does as that account.
+/// Whether root is about to write into a directory another account owns, the nearest one that exists when the file's is still to be made, which it then does as that account.
 fn owned_by_someone_else(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     (unsafe { libc::geteuid() }) == 0
         && path
-            .parent()
-            .and_then(|dir| std::fs::metadata(dir).ok())
+            .ancestors()
+            .skip(1)
+            .find_map(|dir| std::fs::metadata(dir).ok())
             .is_some_and(|meta| meta.uid() != 0)
 }
 
@@ -526,6 +527,24 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
         println!("{}", archix::system::initrd::notice(&trying));
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         println!("warning: {why}");
+    }
+    for line in super::switch::hook_warnings(&paths) {
+        println!("warning: {line}");
+    }
+    for event in archix::pacman::hooks::events(&paths.state).iter().rev().take(3) {
+        println!(
+            "pacman hook, {}: {}",
+            archix::date::Date::from_unix(event.at),
+            event.text
+        );
+    }
+    let untracked = archix::revert::kept_untracked(&paths.state);
+    if !untracked.is_empty() {
+        println!(
+            "{} installed outside archix kept untracked (drift): {}",
+            count(untracked.len(), "package", "packages"),
+            untracked.iter().map(String::as_str).collect::<Vec<_>>().join(" ")
+        );
     }
     match store.current()? {
         Some(number) => {

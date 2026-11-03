@@ -57,7 +57,7 @@ fn root_device(root: &Path) -> Result<(String, String)> {
 }
 
 /// Whether @archix is mounted at `root`/.archix, as setup's fstab line does from the boot after setup on.
-fn archix_mounted(root: &Path) -> bool {
+pub(super) fn archix_mounted(root: &Path) -> bool {
     layout::subvolume_of(&root.join(snapshot::MOUNT)).is_some_and(|path| path == format!("/{}", layout::ARCHIX))
 }
 
@@ -76,7 +76,7 @@ fn store() -> Result<Store> {
 }
 
 /// What a snapshot of the system as `current` left it records: that generation's tree, commit and lock, all none before the first switch.
-fn contents(current: Option<&Generation>, label: String, note: Option<String>) -> Meta {
+pub(super) fn contents(current: Option<&Generation>, label: String, note: Option<String>) -> Meta {
     Meta {
         tree: current.and_then(|g| g.applied.as_ref()).map(|a| a.tree.clone()),
         commit: current.and_then(|g| g.applied.as_ref()).map(|a| a.commit.clone()),

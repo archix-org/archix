@@ -194,9 +194,12 @@ enum Command {
     /// Run by archix-health-check.service before boot-complete.target: check a counted boot, and mark its entry bad if it fails
     #[command(hide = true)]
     HealthCheck,
-    /// Called by archix's pacman hook to record transactions archix didn't run
+    /// Run by archix's pacman hooks around a transaction archix didn't start: `pre` snapshots the root, `post` rebuilds the boot image if the kernel or initramfs changed, resets boot counting and records the packages
     #[command(hide = true)]
-    HookRecord,
+    PacmanHook {
+        #[arg(value_enum)]
+        when: commands::pacman_hook::When,
+    },
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
@@ -577,6 +580,9 @@ fn run() -> Result<ExitCode> {
             archix::system::initrd::mount(&root, &archix::testhooks::run_dir(), &cmdline)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::PacmanHook { when } => {
+            return Ok(commands::pacman_hook::run(when));
+        }
         Command::Notice { desktop } => {
             commands::notice(desktop);
             return Ok(ExitCode::SUCCESS);
@@ -613,10 +619,6 @@ fn run() -> Result<ExitCode> {
         hold_exclusive()?;
     }
     match command {
-        Command::HookRecord => {
-            commands::hook_record();
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Rollback {
             generation,
             noconfirm,
@@ -887,7 +889,7 @@ fn run() -> Result<ExitCode> {
         Command::Status { all } => commands::status(&target, all)?,
         Command::Recover { .. }
         | Command::Init { .. }
-        | Command::HookRecord
+        | Command::PacmanHook { .. }
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc

@@ -79,7 +79,7 @@ enum Control {
     ReadOnly,
     Fallback,
     Orphans,
-    Strict,
+    Drift,
     AurReview,
     MissingVersions,
     Files,
@@ -131,9 +131,10 @@ const ROLLBACKS: [&str; 2] = [
     "on: a btrfs snapshot before every switch and pacman run, to roll back to or boot (recommended)",
     "off",
 ];
-const STRICT: [&str; 2] = [
-    "switch offers to declare it, and removes it if you say no (recommended)",
-    "switch leaves it installed and only lists it",
+const DRIFT: [&str; 3] = [
+    "the next switch asks whether to add it to installed.lua or keep it untracked (recommended)",
+    "the next switch adds it to installed.lua without asking",
+    "the next switch keeps it installed, untracked: never removed, never declared",
 ];
 
 pub(super) struct App<'a> {
@@ -353,7 +354,7 @@ impl<'a> App<'a> {
                 if !facts.orphans.is_empty() {
                     controls.push(Control::Orphans);
                 }
-                controls.push(Control::Strict);
+                controls.push(Control::Drift);
                 if !facts.repack_candidates.is_empty() {
                     controls.push(Control::Repack);
                 }
@@ -405,7 +406,7 @@ impl<'a> App<'a> {
             Control::Fallback => FALLBACK.iter().map(|(_, label)| label.to_string()).collect(),
             Control::MissingVersions => MISSING_VERSIONS.iter().map(|(_, label)| label.to_string()).collect(),
             Control::Orphans => ORPHANS.map(str::to_string).to_vec(),
-            Control::Strict => STRICT.map(str::to_string).to_vec(),
+            Control::Drift => DRIFT.map(str::to_string).to_vec(),
             Control::Rollbacks => ROLLBACKS.map(str::to_string).to_vec(),
             Control::DotUser => self.users().into_iter().cloned().collect(),
             _ => Vec::new(),
@@ -418,7 +419,7 @@ impl<'a> App<'a> {
             Control::Fallback => answers.fallback,
             Control::MissingVersions => answers.missing_versions,
             Control::Orphans => usize::from(!answers.keep_orphans),
-            Control::Strict => usize::from(!answers.strict),
+            Control::Drift => answers.drift,
             Control::Rollbacks => usize::from(!answers.rollbacks),
             Control::DotUser => answers.dotfiles_user,
             _ => 0,
@@ -535,7 +536,7 @@ impl<'a> App<'a> {
                 Control::Fallback => answers.fallback = i,
                 Control::MissingVersions => answers.missing_versions = i,
                 Control::Orphans => answers.keep_orphans = i == 0,
-                Control::Strict => answers.strict = i == 0,
+                Control::Drift => answers.drift = i,
                 Control::Rollbacks => answers.rollbacks = i == 0,
                 Control::DotUser if answers.dotfiles_user != i => {
                     answers.dotfiles_user = i;
@@ -1045,10 +1046,10 @@ impl<'a> App<'a> {
         ));
         lines.push(row(
             "Undeclared",
-            if answers.strict {
-                "switch offers to declare them, else removes them".into()
-            } else {
-                "switch only lists them".into()
+            match answers.drift {
+                0 => "switch asks: add to installed.lua, or keep untracked".into(),
+                1 => "switch adds them to installed.lua".into(),
+                _ => "switch keeps them untracked".into(),
             },
         ));
         if !facts.orphans.is_empty() {
@@ -1247,7 +1248,7 @@ impl<'a> App<'a> {
                 let title = match control {
                     Control::Fallback => "If a locked package disappears from a third-party repo",
                     Control::Orphans => "Dependencies nothing needs any more",
-                    Control::Strict => "Later, when you install something with plain pacman or yay",
+                    Control::Drift => "Later, when you install something with plain pacman or yay",
                     Control::Rollbacks => "Rollbacks",
                     Control::MissingVersions => "If a locked AUR version can't be built any more",
                     _ => "Whose dotfiles",
@@ -1415,10 +1416,12 @@ pub(super) mod tests {
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
-        assert_eq!(app.focused(), Row::Pick(Control::Strict, 1));
-        assert!(app.answers.strict, "moving onto an option doesn't pick it");
+        assert_eq!(app.focused(), Row::Pick(Control::Drift, 1));
+        assert_eq!(app.answers.drift, 0, "moving onto an option doesn't pick it");
         press(&mut app, KeyCode::Enter);
-        assert!(!app.answers.strict);
+        assert_eq!(app.answers.drift, 1);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.focused(), Row::Pick(Control::Drift, 2));
         press(&mut app, KeyCode::Down);
         assert_eq!(app.focused(), Row::Flip(Control::AurReview));
         press(&mut app, KeyCode::Enter);
@@ -1433,7 +1436,7 @@ pub(super) mod tests {
         assert_eq!(app.current(), Step::Config, "number keys don't jump");
         press(&mut app, KeyCode::Right);
         assert_eq!(app.current(), Step::Packages, "→ is the next step");
-        assert!(!app.answers.strict && !app.answers.aur_review, "answers survive");
+        assert!(app.answers.drift == 1 && !app.answers.aur_review, "answers survive");
         press(&mut app, KeyCode::Left);
         assert_eq!(app.current(), Step::Config, "← is the previous step");
         press(&mut app, KeyCode::Right);

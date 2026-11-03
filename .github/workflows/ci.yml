@@ -176,7 +176,7 @@ jobs:
       fail-fast: false
       matrix:
         # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; the snapshot boot tests need btrfs, the ext4 lane comes back with stage 5.
-        tests: ["counting try", "guard unattended"]
+        tests: ["counting try pacman", "guard unattended"]
         fs: [btrfs]
     name: boot (${{ matrix.tests }}, ${{ matrix.fs }})
     env:

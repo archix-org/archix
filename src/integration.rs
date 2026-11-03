@@ -25,23 +25,18 @@ pub struct OutsideChange {
 pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
     let notes = paths.notes();
     let notes = notes.display();
-    let hook = format!(
-        "[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Package\nTarget = *\n\n\
-         [Action]\nDescription = Recording package changes for archix...\nWhen = PostTransaction\n\
-         Exec = {} hook-record\nNeedsTargets\n",
-        archix.display()
-    );
     let profile = format!("if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n");
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
          Exec=sh -c 'command -v notify-send >/dev/null || exit 0; \
          [ -s {notes} ] && notify-send -u critical archix \"$(cat {notes})\"; exit 0'\n"
     );
-    vec![
-        (PathBuf::from("/etc/pacman.d/hooks/archix.hook"), hook),
+    let mut files = crate::pacman::hooks::files(archix, &paths.state);
+    files.extend([
         (PathBuf::from("/etc/profile.d/archix.sh"), profile),
         (PathBuf::from("/etc/xdg/autostart/archix-status.desktop"), autostart),
-    ]
+    ]);
+    files
 }
 
 /// The statically linked archix the initramfs hook copies; the package installs it.
@@ -177,6 +172,9 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
         }
         if let Some(dir) = target.parent() {
             fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            fs::remove_file(&target).with_context(|| format!("removing the link {}", target.display()))?;
         }
         let mode = if content.starts_with("#!") { 0o755 } else { 0o644 };
         fs::write(&target, &content).with_context(|| format!("writing {}", target.display()))?;
@@ -393,10 +391,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = temp_paths(dir.path());
         let files = files(&paths, Path::new("/opt/archix/bin/archix"));
+        let post = files
+            .iter()
+            .find(|(path, _)| path.ends_with("95-archix-post.hook"))
+            .unwrap();
         assert!(
-            files[0]
-                .1
-                .contains("Exec = /opt/archix/bin/archix hook-record\nNeedsTargets")
+            post.1.contains("exec /opt/archix/bin/archix pacman-hook post;"),
+            "{}",
+            post.1
         );
         assert!(
             !files
@@ -404,6 +406,7 @@ mod tests {
                 .any(|(path, _)| path.ends_with("00-archix-deployment.hook")),
             "plain pacman isn't guarded any more"
         );
-        assert!(files[1].1.contains("state/notes"));
+        let profile = files.iter().find(|(path, _)| path.ends_with("archix.sh")).unwrap();
+        assert!(profile.1.contains("state/notes"));
     }
 }
