@@ -292,7 +292,7 @@ fn room_for(ours: usize, adding: usize) -> Result<Option<String>> {
 }
 
 /// Sets or clears a file's immutable flag, returning whether it was set.
-fn set_immutable(path: &Path, on: bool) -> Result<bool> {
+pub(crate) fn set_immutable(path: &Path, on: bool) -> Result<bool> {
     use std::os::fd::AsRawFd;
     const IMMUTABLE: libc::c_int = 0x10;
     let file = match fs::File::open(path) {

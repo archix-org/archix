@@ -30,7 +30,7 @@ def problems(tests, ci, results):
     if not limit or not groups:
         return found + ["ci.yml has no boot `tests: [...]` matrix line or boot-results.sh no MAX="]
     limit = int(limit.group(1))
-    groups = [group.split() for group in json.loads(groups.group(1))]
+    groups = [group.split() for group in json.loads(groups.group(1))] + [line.split() for line in re.findall(r"^\s*- tests: ([\w ]+)$", ci, re.M)]
     found += [f"ci.yml's boot group {' '.join(g)!r} has {len(g)} tests, more than boot-results.sh's MAX={limit}" for g in groups if len(g) > limit]
     placed = Counter(name for group in groups for name in group)
     found += [f"ci.yml's boot groups run {name} {placed[name]} times, not once" for name in tests if placed[name] != 1]

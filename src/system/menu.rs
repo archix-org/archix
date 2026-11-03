@@ -383,14 +383,17 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
             existing.get(&id) == Some(&name) && fs::read_to_string(entries.join(&name)).is_ok_and(|old| old == text);
         if !unchanged {
             crate::durable::write(&entries.join(&name), text.as_bytes())?;
+            crate::testhooks::mark("menu-entry-written");
         }
         if let Some(old) = existing.get(&id)
             && *old != name
         {
             fs::remove_file(entries.join(old)).with_context(|| format!("removing {old}"))?;
+            crate::testhooks::mark("menu-entry-replaced");
         }
     }
     crate::durable::sync_esp(esp)?;
+    crate::testhooks::mark("menu-synced");
     remove_unused_images(esp, planned)?;
     if planned.is_empty() {
         return Ok(());
@@ -503,6 +506,9 @@ pub fn precheck(paths: &Paths, plan: &BootPlan) -> Result<()> {
 pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) -> Result<()> {
     let dir = dir(paths);
     let mut state = load(&dir)?;
+    if reset && let Some(failed) = super::health::failed_while_good() {
+        state.blessed_failed_units = failed;
+    }
     let records = match cap {
         Some(_) => crate::snapshot::Store::open(&paths.root).list()?,
         None => Vec::new(),
@@ -544,6 +550,7 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
         }
         crate::testhooks::mark("boot-image-copy");
         crate::durable::copy(&built, &esp.join(IMAGES).join(name))?;
+        crate::testhooks::mark("boot-image-copied");
     }
     crate::durable::sync_esp(esp)?;
     let counted = plan.tries > 0 && boot::loader_counts_boots(crate::testhooks::loader_features());

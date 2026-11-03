@@ -392,9 +392,23 @@ fn esp(paths: &Paths) -> Option<PathBuf> {
     Some(PathBuf::from(text.trim()))
 }
 
+/// The archix entry systemd-boot started and is counting when the ESP holding it isn't mounted, as after a power cut that took the running kernel's vfat module away.
+fn unreachable_counted_entry(paths: &Paths) -> Option<String> {
+    let selected = crate::testhooks::selected_entry()?;
+    super::menu::Entry::parse(&super::boot::entry_id(&selected))?;
+    let reachable = esp(paths).is_some_and(|esp| super::boot::entry_file(&esp, &selected).is_some());
+    (crate::testhooks::counted_boot() && !reachable).then_some(selected)
+}
+
 /// archix-health-check.service: checks a boot systemd-boot is still counting, and on failure marks its entry bad, records why, and reboots if asked to.
 pub fn run_boot(paths: &Paths) -> Result<bool> {
     let Some(entry) = super::boot::booted() else {
+        if let Some(selected) = unreachable_counted_entry(paths) {
+            println!(
+                "archix: {selected} is a counted boot try, but its entry isn't on a mounted ESP, so this boot can't count as good; it fails its check, and boot.unblessed_timeout reboots it so the boot counter can fall back"
+            );
+            return Ok(false);
+        }
         println!("archix: this boot isn't from an archix entry; nothing to check");
         return Ok(true);
     };
@@ -446,6 +460,22 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
         let _ = Command::new("systemctl").args(["--no-block", "reboot"]).status();
     }
     Ok(false)
+}
+
+/// The units failed right now, but archix's own, when this boot is the current system's and already counts as good, so the counted boot a switch or a transaction is about to give tries doesn't fail its check for a unit that was failing before; None otherwise.
+pub fn failed_while_good() -> Option<Vec<String>> {
+    if crate::testhooks::counted_boot()
+        || super::initrd::trying().is_some()
+        || super::boot::booted() != Some(super::menu::Entry::Current)
+    {
+        return None;
+    }
+    Some(
+        failed_units()
+            .into_iter()
+            .filter(|unit| !OWN_UNITS.contains(&unit.as_str()))
+            .collect(),
+    )
 }
 
 /// archix-boot-complete.service, after systemd-bless-boot: a good boot of the current system arms the slot, so the next snapshot takes it, and its failed units become the ones the next check allows; a good try boot changes nothing.

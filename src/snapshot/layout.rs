@@ -152,8 +152,9 @@ pub fn split_var_lib(root: &Path, var_lib: &Path) -> Result<()> {
             );
         }
         crate::durable::sync_filesystems_checked(&[var_lib])?;
-        crate::testhooks::crash_at("split-entry-copied");
+        crate::testhooks::mark("split-entry-copied");
         remove(&from)?;
+        crate::testhooks::mark("split-entry-removed");
     }
     for name in ROLLED {
         for dir in [var_lib.join(name), old.join(name)] {
@@ -161,6 +162,7 @@ pub fn split_var_lib(root: &Path, var_lib: &Path) -> Result<()> {
         }
     }
     crate::durable::sync_filesystems_checked(&[var_lib, root])?;
+    crate::testhooks::mark("split-binds-ready");
     match fs::remove_file(rolled.join(PENDING)) {
         Ok(()) => crate::durable::sync_dir(&rolled),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

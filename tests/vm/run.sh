@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
-# Boots archix in QEMU with OVMF; `run.sh` (`run.sh boot [TEST...]`) runs the snapshot boot tests side by side on the Python driver from one base (the first switch on a booted system sets rollbacks up and writes the menu, and the boot after counts as good; then counting: a kernel that panics falls back to the slot in try mode; try: an older snapshot picked by hand boots read-only with a throwaway layer; guard: an entry whose snapshot is gone boots the newest survivor, else the rescue entry; unattended: a boot stuck in emergency mode reboots itself until it falls back; pacman: a plain pacman transaction that breaks the boot falls back to the hook's snapshot, the slot, with nobody there; keep: `archix rollback N` boots N as @ after the reboot with accounts made since, refusals while pending, and --cancel), which need FS=btrfs; the other suites below date from deployments and are rewritten in stage 5: `run.sh rollback` the rollback torture test, `run.sh nvidia` NVIDIA DKMS drivers (TO_DATE: the newer snapshot, 2026-10-10 by default), `run.sh cachyos` the rollback torture test on CachyOS's real repos, `run.sh health` boot.health_check's fallbacks, `run.sh pcr` signed PCR policies unlocking a LUKS volume with swtpm, `run.sh dkms2` DKMS with two kernels, `run.sh selfupgrade` archix upgrading itself from ARCHIX_OLD (HEAD~1 by default), `run.sh firewall` the firewall over ssh, `run.sh churn` a year of weekly switches, `run.sh recovery` a live-USB recovery, `run.sh rescue` repairs through the rescue entry, `run.sh secrets` declared secrets on real boots, `run.sh powercut` the dm-log-writes power-cut replay (tests/vm/powercut/run.sh), `run.sh nic-control` the NIC no-carrier control (NIC_ARMS, NIC_REBOOTS, NIC_RESETS, NIC_HANG; never cached).
+# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `--interactive` a REPL on one test; the suites from the deployment era wait to be ported.
 set -euo pipefail
 suite=${1:-boot}
-case $suite in upgrade | atomic) echo "the $suite suite tests the in-place model; tests/vm/run.sh selfupgrade replaces it" >&2; exit 2 ;; esac
+case $suite in
+  nvidia | dkms2 | cachyos | churn | pcr | firewall | selfupgrade | rescue | recovery | secrets) echo "the $suite suite still drives deployments, which are gone; it waits to be ported to the in-place model on the driver" >&2; exit 2 ;;
+esac
 root=$(cd "$(dirname "$0")/../.." && pwd)
-[ "$suite" != powercut ] || exec "$root/tests/vm/powercut/run.sh"
 # The driver's suites (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache or ARCHIX_VM_CACHE=0.
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
-case $suite in boot | secrets | nic-control) driver=$suite ;; esac
-boot_tests=(counting try guard unattended pacman keep)
+case $suite in boot | powercut) driver=$suite ;; *) echo "unknown suite $suite; run.sh takes boot or powercut" >&2; exit 2 ;; esac
+boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ext4)
+powercut_tests=(pacman keep varlib rootmove)
+# The split suites, boot and powercut, run their tests side by side from one base.
+split=
+case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; esac
 for arg in "${@:2}"; do
   case $arg in
     --interactive) interactive=1 ;;
     --no-cache) cache= ;;
     -*) echo "unknown option $arg" >&2; exit 2 ;;
-    *) [ "$suite" = boot ] && [[ " ${boot_tests[*]} base " == *" $arg "* ]] || { echo "unknown argument $arg; run.sh boot takes tests of: ${boot_tests[*]}" >&2; exit 2; }
+    *) [ -n "$split" ] && [[ " ${split[*]} base " == *" $arg "* ]] || { echo "unknown argument $arg; run.sh $suite takes tests of: ${split[*]}" >&2; exit 2; }
       names+=("$arg") ;;
   esac
 done
-[ -n "$driver" ] && [ "$suite" != nic-control ] || [ -z "$interactive" ] || { echo "--interactive needs a driver suite (boot, secrets)" >&2; exit 2; }
-[ "$suite" != boot ] || [ -z "$interactive" ] || [ ${#names[@]} = 1 ] || { echo "run.sh boot --interactive takes one test, or base" >&2; exit 2; }
-[ "$suite" != boot ] || [ ${#names[@]} -gt 0 ] || names=("${boot_tests[@]}")
+[ -z "$split" ] || [ -z "$interactive" ] || [ ${#names[@]} = 1 ] || { echo "run.sh $suite --interactive takes one test, or base" >&2; exit 2; }
+[ -z "$split" ] || [ ${#names[@]} -gt 0 ] || names=("${split[@]}")
 "$root/tests/arch/image.sh"
 cache_py=$root/tests/vm/driver/cache.py
 # On GitHub each test's outcome is a row of the job's summary, and a failure an annotation naming the test, as one job runs several.
@@ -29,21 +33,18 @@ cache_py=$root/tests/vm/driver/cache.py
 summary() {
   local result=$2 why=
   [ "$2" != failed ] || [ -z "${4:-}" ] || why=$(grep -aE '^(NOT )?ATTRIBUTED: ' "$4" 2> /dev/null | tail -1 || true)
-  [ -z "$why" ] || { result="failed; $why"; echo "${1#boot-}: $why"; }
+  [ -z "$why" ] || { result="failed; $why"; echo "${1#"$suite"-}: $why"; }
   [ -n "${GITHUB_STEP_SUMMARY:-}" ] || return 0
   [ -s "$GITHUB_STEP_SUMMARY" ] || printf '| Test | FS | Result | Took |\n| --- | --- | --- | --- |\n' >> "$GITHUB_STEP_SUMMARY"
-  echo "| ${1#boot-} | ${FS:-ext4} | $result | ${3:-} |" >> "$GITHUB_STEP_SUMMARY"
-  [ "$2" != failed ] || echo "::error title=${1#boot-} failed on ${FS:-ext4}::${1#boot-} failed after $3${why:+ (${why})}; its console and timeline are in this job's logs artifact"
+  echo "| ${1#"$suite"-} | ${FS:-ext4} | $result | ${3:-} |" >> "$GITHUB_STEP_SUMMARY"
+  [ "$2" != failed ] || echo "::error title=${1#"$suite"-} failed on ${FS:-ext4}::${1#"$suite"-} failed after $3${why:+ (${why})}; its console and timeline are in this job's logs artifact"
 }
 # Each driver test by its result-cache name, those still to run and their keys.
 declare -A keys=()
 pending=()
-if [ "$suite" = boot ]; then
+if [ -n "$split" ]; then
   [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
-  for name in "${names[@]}"; do [ "$name" = base ] || pending+=("boot-$name"); done
-elif [ -n "$driver" ] && [ "$suite" != nic-control ]; then
-  pending=("$suite")
-  [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
+  for name in "${names[@]}"; do [ "$name" = base ] || pending+=("$suite-$name"); done
 fi
 if [ ${#pending[@]} -gt 0 ] && [ -z "$interactive" ]; then
   while read -r name key; do keys[$name]=$key; done < <(python3 "$cache_py" keys "${pending[@]}")
@@ -65,8 +66,12 @@ started=$(date +%s)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
-# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them.
-if [ -n "${ARCHIX_PREBUILT:-}" ]; then
+# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut suite builds its own, with the test hooks' debug assertions.
+if [ "$suite" = powercut ]; then
+  docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
+    cargo build --locked --release && cp /target/powercut/release/archix /work/archix
+    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/powercut/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+elif [ -n "${ARCHIX_PREBUILT:-}" ]; then
   docker run --rm -v "$ARCHIX_PREBUILT":/prebuilt:ro -v "$work":/work archix-arch-test bash -c 'set -e
     tar -I zstd -xf /prebuilt/target.tar.zst -C /tmp target/release/archix target/x86_64-unknown-linux-musl/release/archix
     cp /tmp/target/release/archix /work/archix && cp /tmp/target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
@@ -75,45 +80,18 @@ else
     cargo build --locked --release && cp /target/release/archix /work/archix
     cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
 fi
-if [ "$suite" = selfupgrade ]; then
-  old=${ARCHIX_OLD:-HEAD~1}
-  rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old"
-  git -C "$root" archive "$old" | tar -x -C "$work/old-src"
-  git -C "$root" rev-parse --short "$old" > "$work/old/commit"
-  # git archive dates every file at its commit, so one target dir shared by two old commits would keep the first one's build.
-  old_target=/target/old-$(cat "$work/old/commit")
-  docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR="$old_target" archix-arch-test bash -c 'set -e
-    cargo build --locked --release --target x86_64-unknown-linux-musl && cp "$CARGO_TARGET_DIR"/x86_64-unknown-linux-musl/release/archix /work/old/archix-static'
-fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
-live_disk=
-[[ " ${pending[*]} " != *" boot-eject-chroot "* ]] || live_disk=1
-docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e LIVE_DISK="$live_disk" archix-arch-test /vm/build-image.sh
-case $suite in
-  rollback | nvidia | cachyos | atomic | dkms2 | churn) mounts+=(-e VM_TIMEOUT="${VM_TIMEOUT:-14400}" -e VM_MEM="${VM_MEM:-8192}" -e VM_CPUS="${VM_CPUS:-6}") ;;
-  selfupgrade | pcr | firewall) mounts+=(-e VM_TIMEOUT="${VM_TIMEOUT:-7200}" -e VM_MEM="${VM_MEM:-4096}" -e VM_CPUS="${VM_CPUS:-4}") ;;
-  health) mounts+=(-e VM_TIMEOUT=5400) ;;
-  rescue) mounts+=(-e VM_TIMEOUT=7200) ;;
-  secrets) mounts+=(-e VM_TIMEOUT="${VM_TIMEOUT:-5400}") ;;
-esac
-if [ -z "$driver" ]; then
-  if [ "$suite" = firewall ]; then
-    # The probe side of the VM's second NIC: a tap in a network namespace of its own, so the host's network is untouched.
-    rm -f "$work/reach.sock"
-    l2=$(docker run -d --rm --network none --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-      --sysctl net.ipv6.conf.default.disable_ipv6=0 -v "$work":/work -v "$root/tests/vm":/vm:ro archix-arch-test \
-      sh -c 'exec python -u /vm/firewall/l2.py /work/l2.sock /work/reach.sock > /work/l2.log 2>&1')
-  fi
-  # No EXIT trap of its own: work-dir.sh's frees the heavy slot and the work dir.
-  status=0
-  docker run --rm --network host --device /dev/kvm "${mounts[@]}" archix-arch-test /vm/boot.sh || status=$?
-  [ -z "${l2:-}" ] || docker rm -f "$l2" > /dev/null 2>&1 || true
-  exit "$status"
+docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" archix-arch-test /vm/build-image.sh
+# The power-cut tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
+if [ "$suite" = powercut ]; then
+  [[ " ${pending[*]} " != *" powercut-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
+  [[ " ${pending[*]} " != *" powercut-rootmove "* ]] || docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e IMG=/work/top.img -e ROOT_AT_TOP=1 archix-arch-test /vm/build-image.sh
 fi
+[ "$suite" != powercut ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
 tty=() args=()
 [ -z "$interactive" ] || tty=(-it) args=(--interactive)
-vm=(docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS -e NIC_REBOOTS -e NIC_RESETS -e NIC_HANG archix-arch-test)
+vm=(docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS archix-arch-test)
 # Records each pass whose inputs didn't change while it ran, as a file edited meanwhile may not be what it tested, with its logs.
 record() {
   local name=$1 seconds=$2 dir=$3 now
@@ -139,76 +117,18 @@ take_slot() {
     sleep 2
   done
 }
-if [ "$suite" = nic-control ]; then
-  # Each arm boots a qcow2 overlay of the same image in a slot of its own, side by side so both meet the same host: plain as built, deployed after base.py's first switch.
-  declare -A running=()
-  for arm in ${NIC_ARMS:-plain deployed}; do
-    case $arm in plain | deployed) ;; *) echo "unknown arm $arm in NIC_ARMS; the arms are plain and deployed" >&2; exit 2 ;; esac
-    mkdir -p "$work/$arm"
-    cmd="qemu-img create -q -f qcow2 -b /work/disk.img -F raw /work/$arm/disk.qcow2"
-    [ "$arm" = plain ] || cmd+=" && python -m driver /vm/boot/base.py --work /work/$arm"
-    cmd+=" && NIC_ARM=$arm exec python -m driver /vm/nic-control/test.py --work /work/$arm"
-    (
-      take_slot
-      began=$(date +%s)
-      status=0
-      "${vm[@]}" bash -c "$cmd" > "$work/$arm/output.log" 2>&1 || status=$?
-      echo "$status $(($(date +%s) - began))" > "$work/$arm/status"
-    ) &
-    running[$!]=$arm
-    sleep "${BOOT_STAGGER:-2}"
-  done
-  failed=()
-  while [ ${#running[@]} -gt 0 ]; do
-    wait -n -p done_pid || true
-    arm=${running[$done_pid]}
-    unset "running[$done_pid]"
-    read -r status seconds < "$work/$arm/status" 2> /dev/null || { status=died seconds=?; }
-    counts=$(grep -o 'NIC-CONTROL arm=[a-z]* boots=.*' "$work/$arm/output.log" | tail -1)
-    # The hangs' phases go in the job's log whatever the arm's result, as a passing job keeps no logs artifact.
-    grep -ao 'NIC-CONTROL arm=[a-z]* boot=[0-9]* how=[a-z]* HANG phase=.*' "$work/$arm/output.log" || true
-    if [ "$status" = 0 ]; then
-      echo "== $arm passed: $seconds s; ${counts:-no counts}"
-      summary "nic-$arm" passed "$seconds s"
-    else
-      failed+=("$arm")
-      summary "nic-$arm" failed "$seconds s" "$work/$arm/output.log"
-      echo "== $arm FAILED (exit $status) after $seconds s; ${counts:-no counts}; from its last step:"
-      awk '/step begins$/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }' "$work/$arm/output.log" | tail -n 400
-    fi
-  done
-  echo "nic-control: ${NIC_ARMS:-plain deployed} in $(($(date +%s) - started)) s on ${FS:-ext4}${failed[*]:+; failed: ${failed[*]}}"
-  [ ${#failed[@]} = 0 ]
-  exit
-fi
-if [ "$suite" != boot ]; then
-  test=/vm/$suite/test.py
-  if [ -n "$interactive" ]; then
-    "${vm[@]}" python -m driver "$test" "${args[@]}"
-    exit
-  fi
-  status=0
-  "${vm[@]}" python -m driver "$test" 2>&1 | tee "$work/output.log" || status=$?
-  if [ "$status" = 0 ]; then
-    record "$suite" "$(($(date +%s) - started))" "$work"
-    summary "$suite" passed "$(($(date +%s) - started)) s"
-  else
-    summary "$suite" failed "$(($(date +%s) - started)) s" "$work/output.log"
-  fi
-  exit "$status"
-fi
-# The split boot tests: the base lays the image out with this run's archix and powers off; each test then boots a qcow2 overlay of that disk with its own copy of the vars, in a heavy slot of its own.
+# The split suites: the base lays the image out with this run's archix and powers off; each test then boots a qcow2 overlay of that disk with its own copy of the vars, in a heavy slot of its own.
 if [ "${names[*]}" = base ]; then
   "${vm[@]}" python -m driver /vm/boot/base.py "${args[@]}"
   exit
 fi
 if ! "${vm[@]}" python -m driver /vm/boot/base.py; then
   for name in "${pending[@]}"; do summary "$name" failed "the base, which it needs, failed"; done
-  echo "boot: the base failed, so none of ${pending[*]#boot-} ran on ${FS:-ext4}"
+  echo "$suite: the base failed, so none of ${pending[*]#boot-} ran on ${FS:-ext4}"
   exit 1
 fi
 echo "base: laid out in $(($(date +%s) - started)) s from the start"
-overlay() { echo "qemu-img create -q -f qcow2 -b /work/disk.img -F raw /work/$1/disk.qcow2 && cp /work/vars.fd /work/$1/vars.fd && exec python -m driver /vm/boot/$1/test.py --work /work/$1 ${args[*]}"; }
+overlay() { echo "qemu-img create -q -f qcow2 -b /work/disk.img -F raw /work/$1/disk.qcow2 && cp /work/vars.fd /work/$1/vars.fd && exec python -m driver /vm/$suite/$1/test.py --work /work/$1 ${args[*]}"; }
 if [ -n "$interactive" ]; then
   mkdir -p "$work/${names[0]}"
   "${vm[@]}" bash -c "$(overlay "${names[0]}")"
@@ -216,7 +136,7 @@ if [ -n "$interactive" ]; then
 fi
 declare -A running=()
 for name in "${pending[@]}"; do
-  test=${name#boot-}
+  test=${name#"$suite"-}
   mkdir -p "$work/$test"
   (
     take_slot
@@ -238,7 +158,7 @@ while [ ${#running[@]} -gt 0 ]; do
   if [ "$status" = 0 ]; then
     echo "== $test passed: $seconds s, started at +$offset s"
     sed -n '/^steps passed/,$p' "$work/$test/output.log"
-    record "boot-$test" "$seconds" "$work/$test" || echo "warning: recording $test's pass failed"
+    record "$suite-$test" "$seconds" "$work/$test" || echo "warning: recording $test's pass failed"
     summary "$test" passed "$seconds s"
   else
     failed+=("$test")
@@ -247,5 +167,5 @@ while [ ${#running[@]} -gt 0 ]; do
     tail -n 60 "$work/$test/output.log" || true
   fi
 done
-echo "boot: ${#pending[@]} test(s) in $(($(date +%s) - started)) s on ${FS:-ext4}${failed[*]:+; failed: ${failed[*]}}"
+echo "$suite: ${#pending[@]} test(s) in $(($(date +%s) - started)) s on ${FS:-ext4}${failed[*]:+; failed: ${failed[*]}}"
 [ ${#failed[@]} = 0 ]

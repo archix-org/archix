@@ -718,8 +718,7 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .filter(|name| name.ends_with(".hook"))
         .collect();
     let timeshift_btrfs = machine.local.contains_key("timeshift")
-        && fs::read_to_string("/etc/timeshift/timeshift.json")
-            .is_ok_and(|text| text.contains("\"btrfs_mode\" : \"true\"") || text.contains("\"btrfs_mode\": \"true\""));
+        && fs::read_to_string("/etc/timeshift/timeshift.json").is_ok_and(|text| timeshift_btrfs_mode(&text));
 
     let mut flatpak_apps = flatpak::installed()?;
     let remotes = flatpak::remotes()?;
@@ -796,6 +795,14 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
 }
 
 /// The files the installed package `name` owns, relative to the root, from pacman's database at `local_db`.
+/// Whether Timeshift's settings put it in btrfs mode, where it snapshots the root's subvolumes too.
+fn timeshift_btrfs_mode(settings: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(settings)
+        .ok()
+        .and_then(|value| value.get("btrfs_mode").cloned())
+        .is_some_and(|mode| mode == "true" || mode == true)
+}
+
 fn package_files(local_db: &Path, name: &str) -> Vec<String> {
     let Some(entry) = fs::read_dir(local_db)
         .into_iter()
@@ -2029,6 +2036,25 @@ mod tests {
             host.contains("authorized_keys.d"),
             "an undeclared user's keys stay a file:\n{host}"
         );
+    }
+
+    #[test]
+    fn timeshift_in_btrfs_mode_gets_a_warning_that_two_tools_manage_snapshots() {
+        assert!(timeshift_btrfs_mode(
+            r#"{"backup_device_uuid" : "x", "btrfs_mode" : "true", "include_btrfs_home_for_backup" : "false"}"#
+        ));
+        assert!(timeshift_btrfs_mode(r#"{"btrfs_mode": true}"#));
+        assert!(!timeshift_btrfs_mode(r#"{"btrfs_mode" : "false"}"#));
+        assert!(!timeshift_btrfs_mode("not json"));
+        let mut facts = super::tui::tests::facts();
+        let warned = |facts: &Facts| {
+            boot_lines(facts)
+                .iter()
+                .any(|(_, line)| line.contains("Timeshift takes btrfs snapshots too"))
+        };
+        assert!(!warned(&facts));
+        facts.timeshift_btrfs = true;
+        assert!(warned(&facts));
     }
 
     #[test]

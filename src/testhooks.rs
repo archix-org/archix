@@ -7,14 +7,54 @@ pub fn crash_at(point: &str) {
     }
 }
 
-/// A named step of a switch: in a debug build, runs ARCHIX_TEST_MARK with the name, as the power-cut harness logs steps, then crashes there if ARCHIX_TEST_CRASH names it.
+/// A named step: in a debug build, runs ARCHIX_TEST_MARK with the name, cuts the power there if CUT_VARIABLE names it, then crashes there if ARCHIX_TEST_CRASH names it.
 pub fn mark(step: &str) {
-    if cfg!(debug_assertions)
-        && let Some(program) = std::env::var_os("ARCHIX_TEST_MARK")
-    {
-        let _ = std::process::Command::new(program).arg(step).status();
+    if cfg!(debug_assertions) {
+        if let Some(program) = std::env::var_os("ARCHIX_TEST_MARK") {
+            let _ = std::process::Command::new(program).arg(step).status();
+        }
+        cut_if_armed(step);
     }
     crash_at(step);
+}
+
+/// The EFI variable that arms a power cut for the VM tests, also in the initramfs: its data (after the attributes) is STEP, or STEP#K for the Kth time one process reaches it.
+pub const CUT_VARIABLE: &str = "ArchixTestCut-0b9c7b5e-5f43-4f0e-9a4e-6a2d7c1e3f21";
+
+/// The step and the hit CUT_VARIABLE's data names.
+pub fn armed_cut(data: &[u8]) -> Option<(String, u32)> {
+    let text = String::from_utf8_lossy(data.get(4..)?);
+    let text = text.trim_matches(|c: char| c == '\0' || c.is_whitespace());
+    let (step, nth) = match text.split_once('#') {
+        Some((step, nth)) => (step, nth.parse().ok()?),
+        None => (text, 1),
+    };
+    (!step.is_empty() && nth > 0).then(|| (step.to_string(), nth))
+}
+
+static CUT_HITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Disarms CUT_VARIABLE at the hit it names, says so on the console for the host to reset the VM, and resets the machine by SysRq if nobody has within 30 s.
+fn cut_if_armed(step: &str) {
+    let path = std::path::Path::new("/sys/firmware/efi/efivars").join(CUT_VARIABLE);
+    let Some((armed, nth)) = std::fs::read(&path).ok().and_then(|data| armed_cut(&data)) else {
+        return;
+    };
+    if armed != step || CUT_HITS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 != nth {
+        return;
+    }
+    let _ = crate::system::revoke::set_immutable(&path, false);
+    let _ = std::fs::remove_file(&path);
+    let line = format!("archix-test: power cut at {step}#{nth}\n");
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/console")
+        .and_then(|mut console| std::io::Write::write_all(&mut console, line.as_bytes()));
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    let _ = std::fs::write("/proc/sysrq-trigger", "b");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
 }
 
 /// Runs ARCHIX_TEST_AFTER_CAPTURE in a shell in a debug build, right after a root command captured the config, as the config's owner racing the command would.
@@ -189,4 +229,24 @@ pub fn run_dir() -> std::path::PathBuf {
         return dir.into();
     }
     std::path::PathBuf::from(crate::system::initrd::RUN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::armed_cut;
+
+    #[test]
+    fn the_cut_variable_names_a_step_and_which_hit_of_it() {
+        assert_eq!(
+            armed_cut(b"\x07\0\0\0keep-exchanged"),
+            Some(("keep-exchanged".to_string(), 1))
+        );
+        assert_eq!(
+            armed_cut(b"\x07\0\0\0split-entry-copied#3\n"),
+            Some(("split-entry-copied".to_string(), 3))
+        );
+        assert_eq!(armed_cut(b"\x07\0\0\0step#0"), None);
+        assert_eq!(armed_cut(b"\x07\0\0\0"), None);
+        assert_eq!(armed_cut(b"\x07\0"), None);
+    }
 }

@@ -265,7 +265,7 @@ impl Store {
                 .arg(dir.join(SNAPSHOT)),
             &format!("snapshot {} to {}", source.display(), dir.join(SNAPSHOT).display()),
         )?;
-        crate::testhooks::crash_at("snapshot-before-record");
+        crate::testhooks::mark("snapshot-before-record");
         let record = Record {
             format: FORMAT,
             number,
@@ -372,6 +372,17 @@ impl Store {
                 root.display()
             );
         }
+        // The journal comes first, so the boot after a crash at any later step finds the clone to finish or drop.
+        let next = self.numbers()?.last().map_or(1, |last| last + 1);
+        let journal = Keeping {
+            from: number,
+            replaced: next,
+            meta: replaced.into(),
+        };
+        crate::durable::write(
+            &self.dir.join(KEEP_JOURNAL),
+            serde_json::to_string_pretty(&journal)?.as_bytes(),
+        )?;
         btrfs(
             Command::new("btrfs")
                 .args(["-q", "subvolume", "snapshot"])
@@ -389,20 +400,11 @@ impl Store {
         prepare(&clone)?;
         crate::durable::write(&clone.join(KEEP_MARK), b"")?;
         crate::durable::sync_filesystems_checked(&[&clone])?;
-        let next = self.numbers()?.last().map_or(1, |last| last + 1);
-        let journal = Keeping {
-            from: number,
-            replaced: next,
-            meta: replaced.into(),
-        };
-        crate::durable::write(
-            &self.dir.join(KEEP_JOURNAL),
-            serde_json::to_string_pretty(&journal)?.as_bytes(),
-        )?;
-        crate::testhooks::crash_at("keep-before-exchange");
+        crate::testhooks::mark("keep-cloned");
+        crate::testhooks::mark("keep-before-exchange");
         exchange(&clone, &root)?;
-        crate::durable::sync_dir(top)?;
-        crate::testhooks::crash_at("keep-exchanged");
+        crate::durable::sync_filesystems_checked(&[top])?;
+        crate::testhooks::mark("keep-exchanged");
         self.finish_keep(top, journal)
     }
 
@@ -453,9 +455,9 @@ impl Store {
             fs::rename(&clone, in_top.join(SNAPSHOT))
                 .with_context(|| format!("moving the replaced root to {}", in_top.join(SNAPSHOT).display()))?;
             crate::durable::sync_dir(&in_top)?;
-            crate::durable::sync_dir(top)?;
+            crate::durable::sync_filesystems_checked(&[top])?;
         }
-        crate::testhooks::crash_at("keep-replaced-moved");
+        crate::testhooks::mark("keep-replaced-moved");
         if !dir.join(RECORD).exists() {
             let record = Record {
                 format: FORMAT,
@@ -471,6 +473,7 @@ impl Store {
             };
             crate::durable::write(&dir.join(RECORD), serde_json::to_string_pretty(&record)?.as_bytes())?;
         }
+        crate::testhooks::mark("keep-recorded");
         match fs::remove_file(root.join(KEEP_MARK)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                 return Err(e).context("removing the keep mark from the new root");
@@ -482,6 +485,37 @@ impl Store {
         fs::remove_file(self.dir.join(KEEP_JOURNAL)).context("removing the keep journal")?;
         crate::durable::sync_dir(&self.dir)?;
         Ok(journal.replaced)
+    }
+
+    /// The root a keep cut short by a crash would have replaced, from its journal; None when no keep was cut short.
+    pub fn cut_keep(&self) -> Option<u32> {
+        let text = fs::read_to_string(self.dir.join(KEEP_JOURNAL)).ok()?;
+        serde_json::from_str::<Keeping>(&text)
+            .ok()
+            .map(|journal| journal.replaced)
+    }
+
+    /// Where a `--cancel` a crash cut short stopped, for the keep that filed its root as snapshot `replaced`.
+    pub fn cut_cancel(&self, top: &Path, replaced: u32) -> CutCancel {
+        let filed = top
+            .join(layout::ARCHIX)
+            .join("snapshots")
+            .join(replaced.to_string())
+            .join(SNAPSHOT);
+        if filed.join(CANCEL_MARK).exists() {
+            CutCancel::Swapped
+        } else if top.join(ROOT).join(CANCEL_MARK).exists() {
+            CutCancel::NotSwapped
+        } else {
+            CutCancel::None
+        }
+    }
+
+    /// Drops the mark of a `--cancel` cut short before its swap, so the keep stands.
+    pub fn drop_cancel_mark(&self, top: &Path) -> Result<()> {
+        let root = top.join(ROOT);
+        fs::remove_file(root.join(CANCEL_MARK)).context("removing the cancel's mark")?;
+        crate::durable::sync_dir(&root.join(CANCEL_MARK))
     }
 
     /// Undoes the keep that filed the running root as snapshot `replaced`, before its reboot: swaps that root back into `@` and deletes the clone and the record; safe to run again after a crash.
@@ -498,10 +532,10 @@ impl Store {
             }
             crate::durable::write(&root.join(CANCEL_MARK), b"")?;
             crate::durable::sync_dir(&root)?;
-            crate::testhooks::crash_at("cancel-before-exchange");
+            crate::testhooks::mark("cancel-before-exchange");
             exchange(&root, &filed)?;
-            crate::durable::sync_dir(top)?;
-            crate::testhooks::crash_at("cancel-exchanged");
+            crate::durable::sync_filesystems_checked(&[top])?;
+            crate::testhooks::mark("cancel-exchanged");
         }
         let _ = fs::remove_file(root.join(CANCEL_MARK));
         crate::durable::sync_dir(&root)?;
@@ -509,6 +543,14 @@ impl Store {
         record_root(self.dir.parent().unwrap_or(&self.dir), top)?;
         Ok(())
     }
+}
+
+/// How far a `--cancel` got before a crash.
+#[derive(Debug, PartialEq)]
+pub enum CutCancel {
+    None,
+    NotSwapped,
+    Swapped,
 }
 
 /// The root's subvolume name, which keep preserves so fstab and the command line need no change.

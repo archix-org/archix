@@ -175,9 +175,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; the snapshot boot tests need btrfs, the ext4 lane comes back with stage 5.
-        tests: ["counting try pacman", "guard unattended keep"]
+        # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; the snapshot tests need btrfs, and ext4 is the lane with rollbacks off.
+        tests: ["counting try pacman unattended", "guard keep hang glibc", "order health hook layer", "records strict"]
         fs: [btrfs]
+        include:
+          - tests: ext4
+            fs: ext4
     name: boot (${{ matrix.tests }}, ${{ matrix.fs }})
     env:
       FS: ${{ matrix.fs }}
@@ -246,35 +249,4 @@ jobs:
         with:
           group: boot
           name: boot-${{ steps.keys.outputs.test1 || strategy.job-index }}-${{ matrix.fs }}
-          status: ${{ job.status }}
-
-  deploy-boot:
-    needs: [image, build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        initramfs: [systemd, busybox]
-        fs: [ext4, btrfs]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: deploy-boot
-          need-gb: "15"
-      - uses: actions/download-artifact@v4
-        with:
-          name: archix-build
-          path: ${{ runner.temp }}/build
-      - run: tests/vm/deploy-boot/run.sh
-        env:
-          FS: ${{ matrix.fs }}
-          INITRAMFS: ${{ matrix.initramfs }}
-          ARCHIX_PREBUILT: ${{ runner.temp }}/build
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: deploy-boot
-          name: deploy-boot-${{ matrix.initramfs }}-${{ matrix.fs }}
           status: ${{ job.status }}

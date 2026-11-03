@@ -75,6 +75,22 @@ def switch(what="a switch"):
     m.succeed(f"{HOST} switch --noconfirm", what=what)
 
 
+def add_unit(name, body, enable=True):
+    """Declares unit name with body in the config, enabled by default; the next switch installs it."""
+    text = body.replace("\n", "\\\\n").replace("\"", "\\\\\"")
+    edit_config(f"'s|  units = {{|  units = {{\\n    [\"{name}\"] = \"{text}\",|'")
+    if enable:
+        edit_config(f"'s|  services = {{|  services = {{\\n    [\"{name}\"] = true,|'")
+
+
+def wait_fallback(began, timeout=2400):
+    """Waits, with nobody touching the machine, for the boots after a bad one to fall back: a boot in try mode; returns its seconds since began."""
+    m.wait_for_console_text(r"archix: this boot is snapshot", timeout=timeout)
+    m.connected = False
+    m.wait_for_shell(timeout=900)
+    return time.monotonic() - began
+
+
 def bump(n):
     """Changes the managed file /etc/archix-vmtest, so a switch has something to apply and takes a snapshot first."""
     edit_config(f"'s|\\[\"/etc/archix-vmtest\"\\] = {{ text = \"[0-9]*\" }}|[\"/etc/archix-vmtest\"] = {{ text = \"{n}\" }}|'")
@@ -115,19 +131,19 @@ def network(wait=True):
     t.require(False, "networkd didn't configure the NIC's link within 90 s of this stage starting")
 
 
-def boot():
-    """Judges a boot by the guest itself: multi-user.target reached, no failed unit but the backdoor's own, the NIC up; returns the entry systemd-boot started."""
+def boot(allowed=()):
+    """Judges a boot by the guest itself: multi-user.target reached, no failed unit but the backdoor's own and allowed, the NIC up; returns the entry systemd-boot started."""
     m.execute("systemctl is-system-running --wait > /dev/null", 900)
     started = selected()
     t.log(f"booted entry {started}, try {trying()}, entries {entries()}")
-    settled()
+    settled(allowed)
     return started
 
 
-def settled():
-    """multi-user.target reached, no failed unit but the backdoor's own and the NIC configured, as boot() and tests/vm/nic-control judge a boot."""
+def settled(allowed=()):
+    """multi-user.target reached, no failed unit but the backdoor's own and allowed, and the NIC configured, as boot() and tests/vm/nic-control judge a boot."""
     t.require(ok("systemctl is-active -q multi-user.target"), f"the boot didn't reach multi-user.target: {out('systemctl list-jobs --no-pager 2>&1 | tail -10')}")
-    failed = [unit for unit in out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split() if unit != BACKDOOR]
+    failed = [unit for unit in out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split() if unit != BACKDOOR and unit not in allowed]
     if failed:
         for unit in failed:
             t.log(f"{unit}: " + out(f"journalctl -b -u {unit} --no-pager | tail -20"))

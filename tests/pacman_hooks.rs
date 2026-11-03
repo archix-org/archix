@@ -584,6 +584,64 @@ fn after_a_plain_transaction_the_current_entry_gets_its_tries_again_and_a_change
     checks.finish();
 }
 
+#[test]
+#[ignore]
+fn a_transaction_cut_off_before_the_step_after_it_leaves_the_current_entry_counted_and_the_slot_bootable() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let packages = Packages::new();
+    let cut = packages.build_scripted(
+        "archix-test-cut",
+        "1",
+        "",
+        Some("pre_install() {\n  kill -9 $PPID\n}\n"),
+    );
+    let setup = on_btrfs("3G", "rollback = { enable = true }, drift = \"keep\"");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    bless(&setup);
+    let entries = machine.esp().join("loader/entries");
+    fs::rename(
+        entries.join("archix-current+2.conf"),
+        entries.join("archix-current.conf"),
+    )
+    .unwrap();
+    let out = pacman(
+        machine,
+        &[COUNTING],
+        &["-U", "--noconfirm", cut.to_str().unwrap()],
+        None,
+    );
+    checks.check(
+        !out.status.success() && !text(&out).contains("tries again"),
+        format!(
+            "the scriptlet kills pacman mid-transaction, before the step after it: {}",
+            text(&out)
+        ),
+    );
+    checks.check(
+        machine.entries().contains(&"archix-current+2.conf".to_string()),
+        format!(
+            "the current entry already has its two tries from before the transaction, so a boot it broke falls back: {:?}; {}",
+            machine.entries(),
+            text(&out)
+        ),
+    );
+    let slot = snapshots(machine).last().unwrap().number;
+    checks.check(
+        machine.entries().contains(&format!("archix-snapshot-{slot}+1.conf")),
+        format!(
+            "and the snapshot before it, the slot, already has its entry: {:?}",
+            machine.entries()
+        ),
+    );
+    for lock in ["var/lib/pacman/db.lck", "var/rollback/pacman/db.lck"] {
+        let _ = fs::remove_file(machine.root.join(lock));
+    }
+    pacman(machine, &[OWN], &["-R", "--noconfirm", "archix-test-cut"], None);
+    checks.finish();
+}
+
 /// archix as a package owning the test binary, as the AUR package owns /usr/bin/archix.
 fn archix_package(packages: &Packages) -> PathBuf {
     let binary = env!("CARGO_BIN_EXE_archix");

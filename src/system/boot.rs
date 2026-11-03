@@ -460,7 +460,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
             text.push(format!("PRETTY_NAME=\"Arch Linux ({title})\""));
             text.push("IMAGE_ID=archix".to_string());
             let release_text = text.join("\n") + "\n";
-            let cmdline = format!("{}{extra_cmdline}", plan.cmdline.trim());
+            let cmdline = with_panic_reboot(&format!("{}{extra_cmdline}", plan.cmdline.trim()), plan.tries);
             let key = payload_key(
                 &root.read_path(&vmlinuz)?,
                 &microcode_files,
@@ -507,6 +507,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
                     Some(_) => in_tx(true, &argv, "ukify build")?,
                     None => in_view(&argv, "ukify build")?,
                 };
+                crate::testhooks::mark("boot-image-built");
                 if secure_boot {
                     crate::testhooks::mark("boot-image-sign");
                     let file = root.read_path(Path::new(&output))?;
@@ -546,6 +547,17 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
     }
     refuse_unsigned(plan, &made)?;
     Ok(images)
+}
+
+/// Seconds a kernel panic waits before it reboots, which archix's images set unless the command line already does: a boot whose init can't start (a broken glibc or systemd) panics, and without a reboot it would never use up its tries and fall back.
+pub const PANIC_REBOOT: u32 = 10;
+
+/// `cmdline` with panic=PANIC_REBOOT when boot counting is on and it sets no panic= of its own.
+pub fn with_panic_reboot(cmdline: &str, tries: u32) -> String {
+    if tries == 0 || cmdline.split_whitespace().any(|word| word.starts_with("panic=")) {
+        return cmdline.to_string();
+    }
+    format!("{cmdline} panic={PANIC_REBOOT}").trim_start().to_string()
 }
 
 /// Signs a loader on the ESP as a copy that replaces it by rename, so a crash never leaves it half written.
@@ -1130,6 +1142,14 @@ pub fn mount_efivars() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn counted_images_reboot_after_a_panic_unless_the_command_line_says_otherwise() {
+        assert_eq!(with_panic_reboot("root=UUID=x rw", 2), "root=UUID=x rw panic=10");
+        assert_eq!(with_panic_reboot("root=UUID=x panic=0 rw", 2), "root=UUID=x panic=0 rw");
+        assert_eq!(with_panic_reboot("root=UUID=x rw", 0), "root=UUID=x rw");
+        assert_eq!(with_panic_reboot("", 2), "panic=10");
+    }
     use super::*;
 
     fn esp_with(entries: &[&str], loader: &str) -> tempfile::TempDir {

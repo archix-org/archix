@@ -718,11 +718,20 @@ impl Packages {
 
     /// Like `build`, at version `version`, which `package` can read as $pkgver.
     pub fn build_version(&self, name: &str, version: &str, package: &str) -> PathBuf {
+        self.build_scripted(name, version, package, None)
+    }
+
+    /// Like `build_version`, with `install` as the package's install scriptlet.
+    pub fn build_scripted(&self, name: &str, version: &str, package: &str, install: Option<&str>) -> PathBuf {
         let work = TempDir::new().unwrap();
+        if let Some(script) = install {
+            fs::write(work.path().join(format!("{name}.install")), script).unwrap();
+        }
+        let scriptlet = install.map_or(String::new(), |_| format!("install={name}.install\n"));
         fs::write(
             work.path().join("PKGBUILD"),
             format!(
-                "pkgname={name}\npkgver={version}\npkgrel=1\narch=('any')\nlicense=('MIT')\noptions=('!strip' '!debug')\n\
+                "pkgname={name}\npkgver={version}\npkgrel=1\narch=('any')\nlicense=('MIT')\noptions=('!strip' '!debug')\n{scriptlet}\
                  package() {{\n  install -d \"$pkgdir/usr/share/{name}\"\n  echo {version} > \"$pkgdir/usr/share/{name}/version\"\n  {package}\n}}\n"
             ),
         )

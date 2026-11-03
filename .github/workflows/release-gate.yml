@@ -5,13 +5,10 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Suites to run, comma-separated (boot2, rollback, nvidia, cachyos, health, pcr, dkms2, selfupgrade, firewall, churn, recovery, rescue, secrets, powercut; boot and deploy-boot, which CI runs, and the nic-control experiment only when named); empty runs all but boot and deploy-boot
-        default: ""
-      fs:
-        description: Filesystems, comma-separated (ext4, btrfs); empty runs both
+        description: Tests to run, comma-separated, as suite-test (powercut-pacman, powercut-keep, powercut-varlib, powercut-rootmove, boot-counting, ...); empty runs the power-cut tests, which CI doesn't
         default: ""
       repeat:
-        description: How many times to run each suite job, side by side, to catch an intermittent failure
+        description: How many times to run each test job, side by side, to catch an intermittent failure
         default: "1"
   schedule:
     - cron: "17 1 * * *"
@@ -27,236 +24,52 @@ jobs:
     if: github.event_name != 'schedule' || github.repository == 'archix-org/archix'
     runs-on: ubuntu-latest
     outputs:
-      suites: ${{ steps.plan.outputs.suites }}
-      fs: ${{ steps.plan.outputs.fs }}
-      powercut: ${{ steps.plan.outputs.powercut }}
+      tests: ${{ steps.plan.outputs.tests }}
       runs: ${{ steps.plan.outputs.runs }}
     steps:
+      - uses: actions/checkout@v5
       - id: plan
         env:
           SUITES: ${{ inputs.suites }}
-          FS: ${{ inputs.fs }}
           REPEAT: ${{ inputs.repeat }}
         run: |
-          all=boot2,rollback,nvidia,cachyos,health,pcr,dkms2,selfupgrade,firewall,churn,recovery,rescue,secrets,powercut
-          # $1 as named, else $2, keeping only names in $3.
-          pick() { tr -d ' ' <<< "${1:-$2}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$3" '[inputs | select(. as $s | $keep | split(",") | index($s))]'; }
-          echo "suites=$(pick "$SUITES" "$all" "$all,boot,deploy-boot,nic-control" | jq -c 'map(select(. != "powercut"))')" >> "$GITHUB_OUTPUT"
-          echo "fs=$(pick "$FS" ext4,btrfs ext4,btrfs)" >> "$GITHUB_OUTPUT"
-          echo "powercut=$(pick "$SUITES" "$all" "$all" | jq 'index("powercut") != null')" >> "$GITHUB_OUTPUT"
+          list() { sed -n "s/^$1_tests=(\(.*\))$/\1/p" tests/vm/run.sh | tr ' ' '\n' | sed "s/^/$1-/"; }
+          known=$( { list boot; list powercut; } | paste -sd,)
+          default=$(list powercut | paste -sd,)
+          echo "tests=$(tr -d ' ' <<< "${SUITES:-$default}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$known" '[inputs | select(. as $s | $keep | split(",") | index($s))]')" >> "$GITHUB_OUTPUT"
           echo "runs=$(jq -nc --argjson n "${REPEAT:-1}" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
-  image:
+  # Each test in a job of its own, on btrfs but the ext4 lane's; the power-cut suite builds archix itself, with the test hooks' debug assertions.
+  tests:
     needs: plan
+    if: needs.plan.outputs.tests != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: base
-          kvm: "false"
-          need-gb: "5"
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: base
-          name: gate-image
-          status: ${{ job.status }}
-
-  build:
-    needs: plan
-    if: needs.plan.outputs.suites != '[]'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: base
-          kvm: "false"
-          need-gb: "10"
-      - uses: ./.github/actions/build
-        with:
-          name: archix-build-gate
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: base
-          name: gate-build
-          status: ${{ job.status }}
-
-  suites:
-    needs: [plan, image, build]
-    if: needs.plan.outputs.suites != '[]'
-    runs-on: ubuntu-latest
-    # VM_TIMEOUT leaves room under the 6 h job limit for the image build before and the log upload after.
+    # VM_TIMEOUT leaves room under the 6 h job limit for the build and the image before and the log upload after.
     timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
-        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
+        test: ${{ fromJSON(needs.plan.outputs.tests) }}
         run: ${{ fromJSON(needs.plan.outputs.runs) }}
     steps:
       - uses: actions/checkout@v5
-        with:
-          # selfupgrade builds ARCHIX_OLD from history, which a shallow clone lacks.
-          fetch-depth: ${{ matrix.suite != 'selfupgrade' && 1 || 0 }}
       - uses: ./.github/actions/vm-setup
         with:
-          group: ${{ matrix.suite }}
+          group: ${{ matrix.test }}
           need-gb: "40"
-      - uses: actions/download-artifact@v4
-        with:
-          name: archix-build-gate
-          path: ${{ runner.temp }}/build
       - run: |
-          if [ "$SUITE" = deploy-boot ]; then
-            for initramfs in systemd busybox; do INITRAMFS=$initramfs tests/vm/deploy-boot/run.sh; done
-          else
-            tests/vm/run.sh "$SUITE"
-          fi
+          suite=${TEST%%-*}
+          fs=btrfs
+          [ "$TEST" != boot-ext4 ] || fs=ext4
+          FS=$fs tests/vm/run.sh "$suite" "${TEST#*-}"
         env:
-          SUITE: ${{ matrix.suite }}
-          FS: ${{ matrix.fs }}
-          VM_TIMEOUT: "14400"
-          ARCHIX_PREBUILT: ${{ runner.temp }}/build
+          TEST: ${{ matrix.test }}
+          VM_TIMEOUT: "18000"
           # A gate proves this commit, never a pass recorded for the same inputs earlier.
           ARCHIX_VM_CACHE: "0"
-          # The oldest commit whose binary can stage a deployment with the chroot /etc-merge fix; HEAD~1 is often a test-only commit with the same binary.
-          ARCHIX_OLD: 3a99d0c
-          # nic-control's boots per arm after the first: about 80 min at GitHub's 13 s a boot.
-          NIC_REBOOTS: "300"
-          NIC_RESETS: "60"
       - if: always()
         uses: ./.github/actions/vm-finish
         with:
-          group: ${{ matrix.suite }}
-          name: ${{ matrix.suite }}-${{ matrix.fs }}${{ matrix.run > 1 && format('-{0}', matrix.run) || '' }}
+          group: ${{ matrix.test }}
+          name: ${{ matrix.test }}${{ matrix.run > 1 && format('-{0}', matrix.run) || '' }}
           status: ${{ job.status }}
-
-  # One logged run per filesystem, which every shard replays, so the shards' points are one set and add up; a failure reproduces from this artifact and the printed seed.
-  powercut-log:
-    needs: [plan, image]
-    if: needs.plan.outputs.powercut == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix:
-        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: powercut
-          need-gb: "60"
-      - run: tests/vm/run.sh powercut
-        env:
-          FS: ${{ matrix.fs }}
-          RECORD_ONLY: "1"
-          SAVE_LOG: ${{ runner.temp }}/powercut-log
-      # The target and log images are sparse; tar keeps them so, and the replay recomputes the point table from the log.
-      - run: |
-          mkdir -p "$RUNNER_TEMP/out" "$RUNNER_TEMP/logged"
-          tar -S -I 'zstd -T0 -6' -cf "$RUNNER_TEMP/out/powercut-log-$FS.tar.zst" -C "$RUNNER_TEMP/powercut-log" .
-          cp "$RUNNER_TEMP/powercut-log/logged" "$RUNNER_TEMP/logged/logged-$FS"
-          ls -l "$RUNNER_TEMP/out"
-        env:
-          FS: ${{ matrix.fs }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: powercut-log-${{ matrix.fs }}
-          path: ${{ runner.temp }}/out
-          compression-level: 0
-          # A failure in the UKI-copy windows reproduces only from this log, not the seed alone, so it outlives a release cycle.
-          retention-days: 90
-      - uses: actions/upload-artifact@v4
-        with:
-          name: powercut-logged-${{ matrix.fs }}
-          path: ${{ runner.temp }}/logged
-          retention-days: 90
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: powercut
-          name: powercut-log-${{ matrix.fs }}
-          status: ${{ job.status }}
-
-  powercut:
-    needs: [plan, powercut-log]
-    runs-on: ubuntu-latest
-    timeout-minutes: 340
-    strategy:
-      fail-fast: false
-      matrix:
-        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
-        # Each shard replays the same logged run and checks every sixth point of it by index; GitHub's nested boots are about ten times slower than a desktop's, which put three shards at up to 5.4 h each.
-        shard: [1, 2, 3, 4, 5, 6]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
-        with:
-          group: powercut
-          need-gb: "60"
-      - uses: actions/download-artifact@v4
-        with:
-          name: powercut-log-${{ matrix.fs }}
-          path: ${{ runner.temp }}/powercut-log
-      - run: tests/vm/run.sh powercut
-        env:
-          FS: ${{ matrix.fs }}
-          LOG: ${{ runner.temp }}/powercut-log/powercut-log-${{ matrix.fs }}.tar.zst
-          SHARD: ${{ matrix.shard }}/6
-          # Under the job's 340 min, so a shard that runs long still ends in time to upload its serial log.
-          VM_TIMEOUT: "18600"
-          LOG_ARTIFACT: "powercut-log-${{ matrix.fs }} of run ${{ github.run_id }} (gh run download ${{ github.run_id }} -n powercut-log-${{ matrix.fs }})"
-          SUMMARY: ${{ runner.temp }}/summary/powercut-${{ matrix.fs }}-${{ matrix.shard }}.json
-          OUT: ${{ runner.temp }}/powercut-out
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: powercut-summary-${{ matrix.fs }}-${{ matrix.shard }}
-          path: ${{ runner.temp }}/summary
-          if-no-files-found: ignore
-          retention-days: 14
-      # Uploaded when the shard passed too, so every boot made again keeps its first console.
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: powercut-out-${{ matrix.fs }}-${{ matrix.shard }}
-          path: ${{ runner.temp }}/powercut-out
-          if-no-files-found: ignore
-          retention-days: 14
-      - if: always()
-        uses: ./.github/actions/vm-finish
-        with:
-          group: powercut
-          name: powercut-${{ matrix.fs }}-${{ matrix.shard }}
-          status: ${{ job.status }}
-
-  # The shards of one log must between them check each of its points once and boot each ESP point for real.
-  powercut-sum:
-    needs: [plan, powercut]
-    if: always() && needs.powercut.result != 'skipped'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        fs: ${{ fromJSON(needs.plan.outputs.fs) }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: powercut-summary-${{ matrix.fs }}-*
-          path: ${{ runner.temp }}/summary
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: powercut-logged-${{ matrix.fs }}
-          path: ${{ runner.temp }}/log
-      - run: tests/vm/powercut/sum-shards "$RUNNER_TEMP/log/logged-$FS" "$RUNNER_TEMP"/summary/powercut-"$FS"-*.json
-        env:
-          FS: ${{ matrix.fs }}

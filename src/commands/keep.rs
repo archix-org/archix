@@ -373,6 +373,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
             Err(e) => warnings.push(format!("putting /var/lib in step with snapshot {number}: {e:#}")),
         }
     }
+    archix::testhooks::mark("keep-var-lib");
     if let Some(plan) = &plan
         && let Some(images) = images
     {
@@ -401,6 +402,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
         images: previous.current,
         moved,
     };
+    archix::testhooks::mark("keep-menu");
     archix::durable::write(&store.dir().join(DONE), serde_json::to_string_pretty(&done)?.as_bytes())?;
     archix::durable::write(&pending_path(&root), number.to_string().as_bytes())?;
     if let Some(parent) = motd_path(&root).parent() {
@@ -428,30 +430,9 @@ pub fn cancel() -> Result<()> {
     let done: Done = serde_json::from_str(&text).context("parsing what the keep did")?;
     let (uuid, _) = root_device(&root.join(snapshot::MOUNT))?;
     let top = Top::mount(&uuid)?;
-    store.cancel_keep(&top.dir, done.replaced)?;
-    let mut warnings = Vec::new();
-    let var_lib = top.dir.join(layout::VAR_LIB);
-    if let Some(dir) = &done.moved
-        && let Err(e) = varlib::undo(&var_lib, &var_lib.join(dir))
-    {
-        warnings.push(format!("putting /var/lib back as it was: {e:#}"));
-    }
-    if let Some(generation) = current_generation(&paths)?
-        && let Some(plan) = &generation.settings.boot
-    {
-        let dir = menu::dir(&paths);
-        let restored = menu::load(&dir).and_then(|mut state| {
-            state.current = done.images;
-            state.snapshots.remove(&done.replaced);
-            menu::save(&dir, &state)?;
-            let cap = generation.settings.rollback.as_ref().map_or(0, |p| p.entries);
-            menu::refresh(&paths, plan, Some(cap), false)
-        });
-        if let Err(e) = restored {
-            warnings.push(format!("the boot menu wasn't put back: {e:#}"));
-        }
-    }
-    let _ = fs::remove_file(store.dir().join(DONE));
+    let replaced = done.replaced;
+    store.cancel_keep(&top.dir, replaced)?;
+    let warnings = undo_keep(&paths, &top, done);
     fs::remove_file(pending_path(&root)).context("removing the pending rollback's mark")?;
     let _ = fs::remove_file(motd_path(&root));
     for warning in &warnings {
@@ -459,9 +440,90 @@ pub fn cancel() -> Result<()> {
     }
     println!(
         "the rollback to snapshot {number} is cancelled: the running system stays the root, and snapshot {} is gone again",
-        done.replaced
+        replaced
     );
     Ok(())
+}
+
+/// What's left of a cancel once its swap is done: /var/lib and the boot menu as they were before the keep; returns warnings.
+fn undo_keep(paths: &Paths, top: &Top, done: Done) -> Vec<String> {
+    let store = snapshot::Store::open(&paths.root);
+    let mut warnings = Vec::new();
+    let var_lib = top.dir.join(layout::VAR_LIB);
+    if let Some(dir) = &done.moved
+        && let Err(e) = varlib::undo(&var_lib, &var_lib.join(dir))
+    {
+        warnings.push(format!("putting /var/lib back as it was: {e:#}"));
+    }
+    if let Ok(Some(generation)) = current_generation(paths)
+        && let Some(plan) = &generation.settings.boot
+    {
+        let dir = menu::dir(paths);
+        let restored = menu::load(&dir).and_then(|mut state| {
+            state.current = done.images;
+            state.snapshots.remove(&done.replaced);
+            menu::save(&dir, &state)?;
+            let cap = generation.settings.rollback.as_ref().map_or(0, |p| p.entries);
+            menu::refresh(paths, plan, Some(cap), false)
+        });
+        if let Err(e) = restored {
+            warnings.push(format!("the boot menu wasn't put back: {e:#}"));
+        }
+    }
+    let _ = fs::remove_file(store.dir().join(DONE));
+    warnings
+}
+
+/// At boot, before anything reads the records: finishes or drops a keep a power cut stopped half way, and finishes or drops a `--cancel` likewise, so the records describe the root that booted; returns what to tell the user.
+pub fn recover_after_cut(paths: &Paths) -> Result<Vec<String>> {
+    if system::initrd::trying().is_some() || snapshot::keep_pending(&paths.root).is_some() {
+        return Ok(Vec::new());
+    }
+    let store = snapshot::Store::open(&paths.root);
+    let done: Option<Done> = fs::read_to_string(store.dir().join(DONE))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    let cut = store.cut_keep();
+    if cut.is_none() && done.is_none() {
+        return Ok(Vec::new());
+    }
+    let (uuid, _) = root_device(&paths.root.join(snapshot::MOUNT))?;
+    let top = Top::mount(&uuid)?;
+    let mut said = Vec::new();
+    if let Some(replaced) = cut {
+        store.recover_keep(&top.dir)?;
+        said.push(match store.get(replaced)?.is_some() {
+            true => format!(
+                "archix: a power cut stopped `archix rollback` after the swap, so it was finished at this boot: the root it replaced is snapshot {replaced}; package-owned files under /var/lib weren't put back to the kept snapshot's versions, and the boot menu may start the replaced root's kernel until the next switch"
+            ),
+            false => "archix: a power cut stopped `archix rollback` before the swap, so nothing changed and the running system stays the root".to_string(),
+        });
+    }
+    if let Some(done) = done {
+        match store.cut_cancel(&top.dir, done.replaced) {
+            snapshot::CutCancel::Swapped => {
+                let replaced = done.replaced;
+                store.cancel_keep(&top.dir, replaced)?;
+                said.extend(
+                    undo_keep(paths, &top, done)
+                        .into_iter()
+                        .map(|w| format!("archix: warning: {w}")),
+                );
+                said.push(format!(
+                    "archix: a power cut stopped `archix rollback --cancel` after its swap, so it was finished at this boot: snapshot {replaced} is gone again"
+                ));
+            }
+            snapshot::CutCancel::NotSwapped => {
+                store.drop_cancel_mark(&top.dir)?;
+                said.push(format!(
+                    "archix: a power cut stopped `archix rollback --cancel` before its swap, so the rollback stands: snapshot {} is the root, and the root it replaced is snapshot {}",
+                    done.from, done.replaced
+                ));
+            }
+            snapshot::CutCancel::None => {}
+        }
+    }
+    Ok(said)
 }
 
 /// `archix user unlock NAME`: enables an account a keep brought back as a placeholder, when the current config declares it.
@@ -543,5 +605,22 @@ pub fn limine_after_good_boot(paths: &Paths) {
             }
         }
         Err(e) => println!("archix: finishing the move from Limine to systemd-boot: {e:#}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_notes_snap_pac_once_while_it_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::under(dir.path());
+        fs::create_dir_all(paths.local_db()).unwrap();
+        fs::create_dir_all(&paths.state).unwrap();
+        assert_eq!(snap_pac_note(&paths), None, "not installed");
+        fs::create_dir_all(paths.local_db().join("snap-pac-3.0.1-1")).unwrap();
+        assert!(snap_pac_note(&paths).is_some_and(|note| note.contains("snap-pac")));
+        assert_eq!(snap_pac_note(&paths), None, "only once");
     }
 }

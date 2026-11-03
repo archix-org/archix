@@ -172,7 +172,23 @@ fn pre(paths: &Paths, pacman: u32, targets: &[String]) -> ExitCode {
     if take {
         snapshot_before(paths, &current);
     }
+    count_before(paths, &current, &policy);
     ExitCode::SUCCESS
+}
+
+/// Gives the current entry its tries and the slot its entry before the transaction changes anything, so a boot that a transaction cut off half way breaks still falls back.
+fn count_before(paths: &Paths, current: &Generation, policy: &Policy) {
+    let Some(plan) = current.settings.boot.as_ref() else {
+        return;
+    };
+    if plan.loader == system::boot::Loader::Limine {
+        return;
+    }
+    if let Err(e) = system::menu::refresh(paths, plan, Some(policy.entries), true) {
+        println!(
+            "archix: warning: the boot menu wasn't written before this transaction, so a boot it breaks may not fall back: {e:#}"
+        );
+    }
 }
 
 fn abort(paths: &Paths, why: &str) -> ExitCode {
@@ -240,6 +256,8 @@ fn snapshot_before(paths: &Paths, current: &Generation) {
 }
 
 fn post(paths: &Paths, pacman: u32, targets: &[String]) {
+    // pacman doesn't flush what it extracted, so a power cut while the images build would lose it.
+    archix::durable::sync_filesystems(&[&paths.root]);
     match archix::integration::record(paths, targets.to_vec()) {
         Ok(Some(change)) => println!(
             "archix: recorded {} changed outside archix; `archix switch` handles them as the config's drift policy says",
@@ -270,7 +288,9 @@ fn post(paths: &Paths, pacman: u32, targets: &[String]) {
             let dir = system::menu::dir(paths);
             let mut state = system::menu::load(&dir)?;
             state.current = images;
-            system::menu::save(&dir, &state)
+            system::menu::save(&dir, &state)?;
+            archix::testhooks::mark("boot-image-recorded");
+            Ok(())
         });
         if let Err(e) = result {
             built = false;

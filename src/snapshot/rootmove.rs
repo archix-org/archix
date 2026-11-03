@@ -46,6 +46,20 @@ fn btrfs(args: &[&str], path: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// The UUID of the btrfs filesystem mounted at `path`, from `btrfs filesystem show`.
+fn filesystem_uuid(path: &Path) -> Option<String> {
+    let output = Command::new("btrfs")
+        .args(["filesystem", "show"])
+        .arg(path)
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .split_whitespace()
+        .skip_while(|word| *word != "uuid:")
+        .nth(1)
+        .map(str::to_string)
+}
+
 /// A btrfs subvolume's root directory has inode 256.
 fn is_subvolume(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && meta.ino() == 256)
@@ -64,8 +78,8 @@ fn top_level_children(listing: &str) -> Vec<String> {
         .collect()
 }
 
-/// `fstab` for the root in `@`: `/` mounted as subvol=/@, `subvol=/X` of a subvolume moved into `@` as `/@/X`, and a line for each top-level subvolume in `mount` (name) that nothing mounts yet, at /name.
-pub fn moved_fstab(fstab: &str, moved: &[String], mount: &[String]) -> String {
+/// `fstab` for the root in `@`: `/` mounted as subvol=/@, `subvol=/X` of a subvolume moved into `@` as `/@/X`, and a line for each top-level subvolume in `mount` (name) that nothing mounts yet, at /name, on the root's device from fstab or else `device`.
+pub fn moved_fstab(fstab: &str, moved: &[String], mount: &[String], device: Option<&str>) -> String {
     let mut text = String::new();
     for line in fstab.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
@@ -99,7 +113,8 @@ pub fn moved_fstab(fstab: &str, moved: &[String], mount: &[String]) -> String {
         .lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>())
         .find(|fields| fields.len() > 3 && fields[1] == "/")
-        .map(|fields| fields[0].to_string());
+        .map(|fields| fields[0].to_string())
+        .or_else(|| device.map(str::to_string));
     if let Some(device) = root_device {
         for name in mount {
             let point = format!("/{name}");
@@ -178,9 +193,9 @@ pub fn finish(top: &Path) -> Result<Finished> {
         }
         crate::durable::sync_filesystems_checked(&[top])?;
         fs::rename(&new, &at).with_context(|| format!("renaming {} to {}", new.display(), at.display()))?;
-        crate::durable::sync_dir(top)?;
+        crate::durable::sync_filesystems_checked(&[top])?;
     }
-    crate::testhooks::crash_at("move-root-snapshotted");
+    crate::testhooks::mark("move-root-snapshotted");
     let listing = Command::new("btrfs")
         .args(["subvolume", "list"])
         .arg(top)
@@ -197,8 +212,13 @@ pub fn finish(top: &Path) -> Result<Finished> {
     if let Ok(text) = fs::read_to_string(&fstab)
         && !top.join(FSTAB_DONE).exists()
     {
-        crate::durable::write(&fstab, moved_fstab(&text, &nested, &siblings).as_bytes())?;
+        let device = filesystem_uuid(top).map(|uuid| format!("UUID={uuid}"));
+        crate::durable::write(
+            &fstab,
+            moved_fstab(&text, &nested, &siblings, device.as_deref()).as_bytes(),
+        )?;
         crate::durable::write(&top.join(FSTAB_DONE), b"")?;
+        crate::testhooks::mark("move-root-fstab");
     }
     for name in [MARK, MOVED, FSTAB_DONE, NEW] {
         let _ = fs::remove_file(at.join(name));
@@ -223,8 +243,8 @@ pub fn finish(top: &Path) -> Result<Finished> {
         }
         fs::rename(&from, &to).with_context(|| format!("moving subvolume {} into @", from.display()))?;
     }
-    crate::durable::sync_dir(top)?;
-    crate::testhooks::crash_at("move-root-nested-moved");
+    crate::durable::sync_filesystems_checked(&[top])?;
+    crate::testhooks::mark("move-root-nested-moved");
     let mut kept = Vec::new();
     for entry in fs::read_dir(top).with_context(|| format!("reading {}", top.display()))? {
         let path = entry?.path();
@@ -234,10 +254,29 @@ pub fn finish(top: &Path) -> Result<Finished> {
         }
         remove_keeping_subvolumes(&path, &mut kept)?;
     }
-    crate::testhooks::crash_at("move-root-cleaned");
+    crate::testhooks::mark("move-root-cleaned");
     crate::durable::write(&top.join(MOVED), b"")?;
     let _ = fs::remove_file(top.join(FSTAB_DONE));
     fs::remove_file(top.join(MARK)).context("removing the move's mark")?;
-    crate::durable::sync_dir(top)?;
+    crate::durable::sync_filesystems_checked(&[top])?;
     Ok(Finished::InAt { kept })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moved_fstab;
+
+    #[test]
+    fn a_subvolume_beside_the_root_gets_a_line_also_when_fstab_has_no_root_line() {
+        let fstab = "UUID=AB-CD /efi vfat defaults 0 2\n";
+        let text = moved_fstab(fstab, &[], &["beside".to_string()], Some("UUID=1234"));
+        assert!(text.contains("UUID=1234 /beside btrfs subvol=/beside 0 0"), "{text}");
+        let with_root = "UUID=1234 / btrfs rw 0 0\n";
+        let text = moved_fstab(with_root, &[], &["beside".to_string()], None);
+        assert!(
+            text.contains("UUID=1234 / btrfs rw,subvol=/@ 0 0")
+                && text.contains("UUID=1234 /beside btrfs subvol=/beside 0 0"),
+            "{text}"
+        );
+    }
 }

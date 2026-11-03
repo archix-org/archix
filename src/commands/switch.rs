@@ -1763,6 +1763,14 @@ pub fn gc() -> Result<()> {
 /// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
 pub fn boot_check() -> Result<()> {
     let paths = Paths::system();
+    let recovered = super::keep::recover_after_cut(&paths).unwrap_or_else(|e| {
+        vec![format!(
+            "archix: couldn't finish a rollback a power cut stopped half way: {e:#}"
+        )]
+    });
+    for line in &recovered {
+        println!("{line}");
+    }
     super::keep::after_boot(&paths);
     if let Err(e) = system::sleep::sync(&paths.root) {
         println!("archix: couldn't update the hibernation guard: {e:#}");
@@ -1782,7 +1790,7 @@ pub fn boot_check() -> Result<()> {
     if let Err(e) = record_failed_entries(&paths) {
         println!("archix: couldn't record which snapshot entries failed: {e:#}");
     }
-    let mut notices = Vec::new();
+    let mut notices = recovered;
     if let Some(trying) = system::initrd::trying() {
         notices.push(system::initrd::notice(&trying));
         if let Some(failure) = system::health::read_failure(&paths) {

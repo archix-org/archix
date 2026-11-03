@@ -429,6 +429,60 @@ fn a_keep_cut_short_before_the_swap_is_undone_and_after_it_finished() {
     }
 }
 
+/// Runs `--cancel`'s swap of a finished keep in a copy of this test binary that ARCHIX_TEST_CRASH kills at `point`.
+fn cancel_killed_at(disk: &Disk, point: &str) {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--include-ignored", "--exact", "cancel_in_a_child", "--nocapture"])
+        .env("ARCHIX_TEST_CRASH", point)
+        .env("ARCHIX_TEST_KEEP_ROOT", &disk.root)
+        .env("ARCHIX_TEST_KEEP_TOP", &disk.top)
+        .status()
+        .unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "cancel should have been killed at {point}: {status}"
+    );
+}
+
+/// Not a test of its own: what cancel_killed_at runs.
+#[test]
+#[ignore]
+fn cancel_in_a_child() {
+    let (Some(root), Some(top)) = (
+        std::env::var_os("ARCHIX_TEST_KEEP_ROOT"),
+        std::env::var_os("ARCHIX_TEST_KEEP_TOP"),
+    ) else {
+        return;
+    };
+    let _ = Store::open(Path::new(&root)).cancel_keep(Path::new(&top), 2);
+}
+
+#[test]
+#[ignore]
+fn a_cancel_cut_short_is_seen_and_finished_after_its_swap_or_dropped_before_it() {
+    use archix::snapshot::CutCancel;
+    let (disk, store) = kept_disk();
+    store.keep(1, &disk.top, replaced(), |_| Ok(())).unwrap();
+    assert_eq!(store.cut_cancel(&disk.top, 2), CutCancel::None);
+    cancel_killed_at(&disk, "cancel-before-exchange");
+    assert_eq!(store.cut_cancel(&disk.top, 2), CutCancel::NotSwapped);
+    store.drop_cancel_mark(&disk.top).unwrap();
+    assert_eq!(store.cut_cancel(&disk.top, 2), CutCancel::None, "the keep stands");
+    assert_eq!(fs::read_to_string(disk.top.join("@/marker")).unwrap(), "old");
+    cancel_killed_at(&disk, "cancel-exchanged");
+    assert_eq!(store.cut_cancel(&disk.top, 2), CutCancel::Swapped);
+    store.cancel_keep(&disk.top, 2).unwrap();
+    assert_eq!(store.cut_cancel(&disk.top, 2), CutCancel::None);
+    assert_eq!(
+        fs::read_to_string(disk.top.join("@/marker")).unwrap(),
+        "broken",
+        "swapped back"
+    );
+    assert_eq!(numbers(&store), [1]);
+}
+
 #[test]
 #[ignore]
 fn rollbacks_are_refused_on_ext4_and_on_btrfs_whose_root_is_the_top_level() {

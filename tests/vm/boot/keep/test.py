@@ -1,13 +1,11 @@
 # Keep: `archix rollback N` makes snapshot N the root from the next boot under the name @, carries accounts made since (from @, also in a try boot), refuses pacman and switches until the reboot, and `--cancel` swaps the running system back.
 from boot.common import HOST, bind, boot, bump, entries, entry, ok, out, snapshots, switch, trying
+from boot.hook.test import BUILD, PKG
 
 
 def refused_pacman():
-    """Whether a reinstall of an installed package from pacman's cache is refused; None when the cache holds none."""
-    package = out("for f in /var/cache/pacman/pkg/git-*.pkg.tar.zst; do [ -f \"$f\" ] && echo $f && break; done").strip()
-    if not package:
-        return None
-    return not ok(f"pacman -U --noconfirm {package} > /tmp/pacman.log 2>&1") and ok("grep -q 'is pending' /tmp/pacman.log")
+    """Whether plain pacman installing a package is refused, naming the pending keep."""
+    return ok(BUILD) and not ok(f"pacman -U --noconfirm {PKG} > /tmp/pacman.log 2>&1") and ok("grep -q 'is pending' /tmp/pacman.log")
 
 
 def run(m, t):
@@ -25,11 +23,7 @@ def run(m, t):
         t.check(f"the running system is snapshot {replaced}" in said and "are lost" in said, f"keep names the replaced root and what's lost: {said}")
         t.check(ok("grep -q 'is pending' /run/motd.d/archix-keep.motd"), "the pending notice is in the motd")
         t.check(not ok(f"{HOST} switch --noconfirm > /tmp/switch.log 2>&1") and ok("grep -q 'is pending' /tmp/switch.log"), f"a switch refuses: {out('cat /tmp/switch.log')}")
-        pacman = refused_pacman()
-        if pacman is None:
-            t.log("pacman's cache holds no git package, so the pacman refusal isn't checked here")
-        else:
-            t.check(pacman, f"pacman refuses while the keep is pending: {out('cat /tmp/pacman.log')}")
+        t.check(refused_pacman(), f"pacman refuses while the keep is pending: {out('cat /tmp/pacman.log')}")
         m.succeed(f"{HOST} rollback --cancel", what="cancelling the keep")
         t.check(replaced not in snapshots(), f"--cancel drops the replaced snapshot: {snapshots()}")
         t.check(not ok("[ -e /run/archix/keep-pending ]"), "nothing is pending after --cancel")

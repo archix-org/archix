@@ -341,7 +341,7 @@ class Machine:
         self.new_boot("rebooting")
 
     def crash(self):
-        """A reset, QEMU's system_reset: what the guest hadn't written is lost, but it is no power cut, which tests/vm/powercut replays from a write log."""
+        """A reset, QEMU's system_reset: what the guest hadn't written is lost, and what reached the virtual disk stays, as on a disk without a volatile write cache."""
         self.qmp("system_reset")
         self.new_boot("reset (system_reset)")
 
