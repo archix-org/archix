@@ -778,7 +778,7 @@ fn run() -> Result<ExitCode> {
             noconfirm,
             allow_unsafe_downgrade,
         } => {
-            commands::rollback(&cli.config, generation, noconfirm, allow_unsafe_downgrade)?;
+            commands::rollback(generation, noconfirm, allow_unsafe_downgrade)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Generations => {

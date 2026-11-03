@@ -14,8 +14,6 @@ const BEFORE_END: &str = "# END archix custom repos (before the official repos)"
 const AFTER_BEGIN: &str = "# BEGIN archix custom repos (after the official repos)";
 const AFTER_END: &str = "# END archix custom repos (after the official repos)";
 
-/// The PreTransaction hook that stops plain pacman on a deployment; named to sort before every other hook.
-const GUARD_HOOK: &str = "00-archix-deployment.hook";
 /// What a deployment's pacman.conf has instead of CheckSpace, whose check fails on the read-only /usr before any PreTransaction hook runs.
 const CHECK_SPACE_OFF: &str =
     "#CheckSpace   # off on archix deployments: pacman can't install here, and archix checks space itself";
@@ -90,24 +88,16 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
          Exec = {} hook-record\nNeedsTargets\n",
         archix.display()
     );
-    let guard = format!(
-        "[Trigger]\nOperation = Install\nOperation = Upgrade\nOperation = Remove\nType = Package\nTarget = *\n\n\
-         [Action]\nDescription = Checking that pacman can change this system...\nWhen = PreTransaction\n\
-         Exec = /bin/sh -c 'test -n \"$ARCHIX_TRANSACTION\" || test ! -d /archix/deploy || test -w /usr || exec {} pacman-guard'\nAbortOnFail\n",
-        archix.display()
-    );
     let profile = format!("if [ -s {notes} ]; then\n  cat {notes} >&2\nfi\n");
     let autostart = format!(
         "[Desktop Entry]\nType=Application\nName=archix status\nNoDisplay=true\n\
          Exec=sh -c 'command -v notify-send >/dev/null || exit 0; \
          [ -s {notes} ] && notify-send -u critical archix \"$(cat {notes})\"; exit 0'\n"
     );
-    let system = Paths::system();
     vec![
-        (system.pacman_hooks.join("archix.hook"), hook),
-        (system.pacman_hooks.join(GUARD_HOOK), guard),
-        (system.profile_d.join("archix.sh"), profile),
-        (system.autostart.join("archix-status.desktop"), autostart),
+        (PathBuf::from("/etc/pacman.d/hooks/archix.hook"), hook),
+        (PathBuf::from("/etc/profile.d/archix.sh"), profile),
+        (PathBuf::from("/etc/xdg/autostart/archix-status.desktop"), autostart),
     ]
 }
 
@@ -120,11 +110,11 @@ pub const SECRETS_UNIT: &str = "archix-secrets.service";
 /// The unit whose failure keeps a counted boot from being blessed; boot-complete.target, and so this unit, is only part of boots systemd-boot counts.
 pub const HEALTH_UNIT: &str = "archix-health-check.service";
 
-/// Files for managed booting at their absolute paths: the early-boot generation check, the boot-complete promotion, and the deployment activation unit and initramfs hook.
+/// Files for managed booting at their absolute paths: the early-boot check, the boot-complete promotion, the health check and the secrets' decrypt step.
 pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     let unit = format!(
-        "[Unit]\nDescription=archix: match the booted generation\nDefaultDependencies=no\nAfter=local-fs.target\n\
-         Before=sysinit.target archix-deploy-activate.service\n\n\
+        "[Unit]\nDescription=archix: check this boot\nDefaultDependencies=no\nAfter=local-fs.target\n\
+         Before=sysinit.target\n\n\
          [Service]\nType=oneshot\nExecStart={} boot-check\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
         archix.display()
     );
@@ -133,39 +123,17 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
          [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
         archix.display()
     );
-    let flatpak = format!(
-        "[Unit]\nDescription=archix: install the Flatpak apps left for this deployment's first boot\n\
-         After=network-online.target\nConditionDirectoryNotEmpty={}\n\n\
-         [Service]\nType=oneshot\nExecStart={} deploy-flatpak\nStandardOutput=journal+console\n\n[Install]\nWantedBy=multi-user.target\n",
-        crate::flatpak::PENDING_DIR,
-        archix.display()
-    );
     let health = format!(
-        "[Unit]\nDescription=archix: check a new deployment before its boot counts as good\nAfter=local-fs.target archix-boot.service\n\
+        "[Unit]\nDescription=archix: check this boot before it counts as good\nAfter=local-fs.target archix-boot.service\n\
          Before=boot-complete.target\n\n\
          [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={} health-check\nStandardOutput=journal+console\n\n\
          [Install]\nRequiredBy=boot-complete.target\n",
         archix.display()
     );
-    let etc_merge = format!(
-        "[Unit]\nDescription=archix: carry /etc changes into the deployment that boots next\n{}\n\n\
-         [Service]\nExecStart={} etc-merge\n{}\nStandardOutput=journal\n\n[Install]\nWantedBy=basic.target\n",
-        crate::etcmerge::UNIT_ORDER.join("\n"),
-        archix.display(),
-        crate::etcmerge::STOP_TIMEOUT
-    );
-    let etc_merge_boot = format!(
-        "[Unit]\nDescription=archix: carry what a power cut kept from the /etc merge\nDefaultDependencies=no\n\
-         After=systemd-remount-fs.service\nBefore=systemd-sysusers.service archix-deploy-activate.service sysinit.target shutdown.target\n\
-         Conflicts=shutdown.target\nConditionDirectoryNotEmpty={}/etc-merge\n\n\
-         [Service]\nType=oneshot\nExecStart={} etc-merge --boot\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
-        Paths::system().state.display(),
-        archix.display()
-    );
     let secrets = format!(
-        "[Unit]\nDescription=archix: decrypt this deployment's secrets into /run/archix/secrets\nDefaultDependencies=no\n\
+        "[Unit]\nDescription=archix: decrypt the config's secrets into /run/archix/secrets\nDefaultDependencies=no\n\
          After=local-fs.target swap.target systemd-sysusers.service archix-boot.service\n\
-         Before=sysinit.target archix-deploy-activate.service systemd-user-sessions.service shutdown.target\n\
+         Before=sysinit.target systemd-user-sessions.service shutdown.target\n\
          Conflicts=shutdown.target\nConditionPathExists={}\n\n\
          [Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart={} secrets activate\nStandardOutput=journal+console\n\n[Install]\nWantedBy=sysinit.target\n",
         crate::secrets::MANIFEST,
@@ -173,37 +141,25 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     );
     let bless = format!("[Service]\nExecStartPre=-{} bless\n", archix.display());
     let root = Path::new("/");
-    let mut files = vec![
+    vec![
         (
             root.join("etc/systemd/system/systemd-bless-boot.service.d/archix.conf"),
             bless,
         ),
-        (root.join("etc/systemd/system/archix-etc-merge.service"), etc_merge),
-        (
-            root.join("etc/systemd/system/archix-etc-merge-boot.service"),
-            etc_merge_boot,
-        ),
         (root.join("etc/systemd/system/archix-boot.service"), unit),
         (root.join(format!("etc/systemd/system/{SECRETS_UNIT}")), secrets),
         (root.join("etc/systemd/system/archix-boot-complete.service"), complete),
-        (root.join("etc/systemd/system/archix-flatpak.service"), flatpak),
         (root.join(format!("etc/systemd/system/{HEALTH_UNIT}")), health),
-    ];
-    files.push(crate::system::deploy_boot::activate_file(root, archix));
-    files.extend(crate::system::deploy_boot::hook_files(root));
-    files
+    ]
 }
 
 /// The links that start archix's boot units, and the units they name.
 pub fn boot_wants() -> Vec<(PathBuf, String)> {
-    let mut wants: Vec<(PathBuf, String)> = [
+    [
         ("sysinit.target.wants", "archix-boot.service"),
         ("sysinit.target.wants", SECRETS_UNIT),
         ("multi-user.target.wants", "archix-boot-complete.service"),
-        ("multi-user.target.wants", "archix-flatpak.service"),
         ("boot-complete.target.requires", HEALTH_UNIT),
-        ("basic.target.wants", "archix-etc-merge.service"),
-        ("sysinit.target.wants", "archix-etc-merge-boot.service"),
     ]
     .map(|(dir, unit)| {
         (
@@ -211,9 +167,7 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
             format!("/etc/systemd/system/{unit}"),
         )
     })
-    .into();
-    wants.push(crate::system::deploy_boot::activate_wants(Path::new("/")));
-    wants
+    .into()
 }
 
 /// Where this archix was started from, also after a switch had pacman replace it, when Linux appends " (deleted)".
@@ -231,7 +185,7 @@ pub fn own_path() -> Result<PathBuf> {
     Ok(OWN.get_or_init(|| path).clone())
 }
 
-/// Writes every integration file and boot link that's missing or out of date where `place` puts each absolute path: into a staging root, or onto the live root before its first layout.
+/// Writes every integration file and boot link that's missing or out of date where `place` puts each absolute path.
 pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<PathBuf>) -> Result<()> {
     for (path, content) in files(paths, archix).into_iter().chain(boot_files(archix)) {
         let target = place(&path)?;
@@ -255,7 +209,7 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
             std::os::unix::fs::symlink(unit, &target).with_context(|| format!("linking {}", target.display()))?;
         }
     }
-    edit_pacman_conf(&place(&Paths::system().pacman_conf)?, without_check_space)
+    Ok(())
 }
 
 /// Where a staging view gets the running archix when the deployment has none that writes its own integration.

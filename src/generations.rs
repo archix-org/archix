@@ -86,11 +86,10 @@ impl Generation {
     }
 }
 
-/// The generation records; the current generation is the deployment /archix/current names.
+/// The generation records, and which one the system was last brought to.
 pub struct Store {
     dir: PathBuf,
     current: PathBuf,
-    deploy: PathBuf,
 }
 
 /// Writes a deployment's own copy of its record into its tree before the commit, which the store takes back if a crash came between the commit and saving the record.
@@ -103,10 +102,10 @@ pub fn write_into(deployment: &Path, generation: &Generation) -> Result<()> {
 
 impl Store {
     pub fn new(paths: &Paths) -> Store {
+        let dir = paths.state.join("generations");
         Store {
-            dir: paths.state.join("generations"),
-            current: paths.root.join("archix/current"),
-            deploy: paths.root.join("archix/deploy"),
+            current: dir.join("current"),
+            dir,
         }
     }
 
@@ -117,19 +116,6 @@ impl Store {
     /// Whether the store itself holds generation `number`'s record.
     pub fn has(&self, number: u32) -> bool {
         self.path(number).is_dir()
-    }
-
-    /// The record committed deployment `number` holds of itself, saved to the store when the store lacks it.
-    fn recovered(&self, number: u32) -> Option<Generation> {
-        let deployment = self.deploy.join(number.to_string());
-        if !deployment.join(GENERATION_FILE).is_file() || self.path(number).exists() {
-            return None;
-        }
-        let generation = read(&deployment).ok().filter(|g| g.number == number)?;
-        if let Err(e) = self.save(&generation) {
-            eprintln!("warning: couldn't save generation {number}'s record from its deployment: {e:#}");
-        }
-        Some(generation)
     }
 
     pub fn list(&self) -> Result<Vec<Generation>> {
@@ -148,13 +134,6 @@ impl Store {
                 }
             }
         }
-        for entry in fs::read_dir(&self.deploy).into_iter().flatten().flatten() {
-            if let Some(number) = entry.file_name().to_str().and_then(|name| name.parse::<u32>().ok())
-                && let Some(generation) = self.recovered(number)
-            {
-                generations.push(generation);
-            }
-        }
         generations.sort_by_key(|generation| generation.number);
         Ok(generations)
     }
@@ -162,27 +141,32 @@ impl Store {
     pub fn get(&self, number: u32) -> Result<Generation> {
         let path = self.path(number);
         if !path.is_dir() {
-            if let Some(generation) = self.recovered(number) {
-                return Ok(generation);
-            }
             bail!("generation {number} does not exist; `archix generations` lists them");
         }
         read(&path)
     }
 
-    /// The generation of the current deployment, which boots when no boot entry picks another.
+    /// The generation the system was last switched or rolled back to.
     pub fn current(&self) -> Result<Option<u32>> {
-        match fs::read_link(&self.current) {
-            Ok(target) => crate::deploy::store::parse_current(&target).map(Some).with_context(|| {
+        match fs::read_to_string(&self.current) {
+            Ok(text) => text.trim().parse().map(Some).with_context(|| {
                 format!(
-                    "{} points at {}, not deploy/<number>",
+                    "{} holds {:?}, not a generation number",
                     self.current.display(),
-                    target.display()
+                    text.trim()
                 )
             }),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e).with_context(|| format!("reading {}", self.current.display())),
         }
+    }
+
+    /// Makes generation `number` current, durably.
+    pub fn set_current(&self, number: u32) -> Result<()> {
+        if !self.has(number) {
+            bail!("generation {number} has no record, so it can't be current");
+        }
+        crate::durable::write(&self.current, format!("{number}\n").as_bytes())
     }
 
     /// One past the newest generation.

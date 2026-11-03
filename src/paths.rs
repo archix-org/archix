@@ -16,24 +16,27 @@ pub struct Paths {
 }
 
 impl Paths {
+    /// The running system's, or with ARCHIX_TEST_ROOT a test root's: its pacman database and /etc, with archix's state and the caches where they are.
     pub fn system() -> Paths {
+        let root = crate::testhooks::root();
+        let inside = |path: &str| root.join(path);
         Paths {
-            root: crate::testhooks::root(),
-            pacman_db: PathBuf::from("/var/lib/pacman"),
+            pacman_db: inside("var/lib/pacman"),
             pacman_cache: PathBuf::from("/var/cache/pacman/pkg"),
             state: PathBuf::from("/var/lib/archix"),
             cache: PathBuf::from("/var/cache/archix"),
-            pacman_conf: PathBuf::from("/etc/pacman.conf"),
-            pacman_hooks: PathBuf::from("/etc/pacman.d/hooks"),
-            profile_d: PathBuf::from("/etc/profile.d"),
-            autostart: PathBuf::from("/etc/xdg/autostart"),
+            pacman_conf: inside("etc/pacman.conf"),
+            pacman_hooks: inside("etc/pacman.d/hooks"),
+            profile_d: inside("etc/profile.d"),
+            autostart: inside("etc/xdg/autostart"),
+            root,
         }
     }
 
     /// The same layout inside another root, such as a mounted system.
     pub fn under(root: &std::path::Path) -> Paths {
         let inside = |path: PathBuf| root.join(path.strip_prefix("/").unwrap_or(&path));
-        let system = Paths::system();
+        let system = Paths::live();
         Paths {
             root: root.to_path_buf(),
             pacman_db: inside(system.pacman_db),
@@ -44,6 +47,20 @@ impl Paths {
             pacman_hooks: inside(system.pacman_hooks),
             profile_d: inside(system.profile_d),
             autostart: inside(system.autostart),
+        }
+    }
+
+    fn live() -> Paths {
+        Paths {
+            pacman_db: PathBuf::from("/var/lib/pacman"),
+            pacman_cache: PathBuf::from("/var/cache/pacman/pkg"),
+            state: PathBuf::from("/var/lib/archix"),
+            cache: PathBuf::from("/var/cache/archix"),
+            pacman_conf: PathBuf::from("/etc/pacman.conf"),
+            pacman_hooks: PathBuf::from("/etc/pacman.d/hooks"),
+            profile_d: PathBuf::from("/etc/profile.d"),
+            autostart: PathBuf::from("/etc/xdg/autostart"),
+            root: PathBuf::from("/"),
         }
     }
 

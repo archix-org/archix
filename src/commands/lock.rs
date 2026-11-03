@@ -277,17 +277,6 @@ pub(super) fn write_deferred() -> Result<()> {
     Ok(())
 }
 
-/// Writes the deferred config files that live in the running /etc into `etc`, a staged deployment's, before it's committed.
-pub(super) fn stage_deferred(paths: &Paths, etc: &Path) -> Result<()> {
-    let writes = DEFERRED.with(|deferred| deferred.borrow().clone().unwrap_or_default());
-    for write in writes {
-        if let Some(staged) = in_etc(paths, &write.path, etc) {
-            archix::durable::write_config(&staged, write.text.as_bytes())?;
-        }
-    }
-    Ok(())
-}
-
 /// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, so it's there before the /etc merge carries it.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
     WRITTEN.with(|written| {

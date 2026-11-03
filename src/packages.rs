@@ -7,7 +7,6 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::deploy::Transaction;
 use crate::pacman::{LocalPkg, read_local_db};
 use crate::paths::Paths;
 
@@ -61,22 +60,24 @@ fn held_open(path: &Path) -> bool {
     })
 }
 
-/// Runs the package changes in a staging root whose pacman database is `db`, then checks the result; pacman sees the package files at the same paths, under /var.
-pub fn transact(tx: &Transaction, packages: &Packages, db: &Path) -> Result<()> {
-    for file in &packages.install {
-        if !file.starts_with("/var/") {
-            bail!("{} is outside /var, so the staging root can't reach it", file.display());
-        }
-    }
+/// Something that runs pacman against the root a transaction changes.
+pub trait RunsPacman {
+    fn pacman(&self) -> Result<Command>;
+    /// The place pacman runs in, as errors name it.
+    fn place(&self) -> String;
+}
+
+/// Runs the package changes against the root `runner` stands for, whose pacman database is `db`, then checks the result.
+pub fn transact(runner: &dyn RunsPacman, packages: &Packages, db: &Path) -> Result<()> {
     let pacman = |args: &[&OsStr]| -> Result<()> {
-        let status = tx
+        let status = runner
             .pacman()?
             .args(args)
             .env(TRANSACTION_ENV, "1")
             .status()
-            .context("running pacman in the staging root")?;
+            .with_context(|| format!("running pacman in {}", runner.place()))?;
         if !status.success() {
-            bail!("pacman exited with {status} in the staging root");
+            bail!("pacman exited with {status} in {}", runner.place());
         }
         Ok(())
     };
@@ -137,7 +138,7 @@ pub fn transact(tx: &Transaction, packages: &Packages, db: &Path) -> Result<()> 
     let problems = mismatches(db, packages)?;
     if !problems.is_empty() {
         bail!(
-            "the staged deployment doesn't match the target:\n  {}",
+            "after pacman, the installed packages don't match the target:\n  {}",
             problems.join("\n  ")
         );
     }

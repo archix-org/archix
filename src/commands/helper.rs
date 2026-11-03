@@ -111,7 +111,9 @@ pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -
     let paths = Paths::system();
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
-    let boot = declared.boot_plan()?;
+    let boot = declared
+        .boot_plan()?
+        .context("a temporary install builds a deployment, which needs boot.*")?;
     if !layout::laid_out(&paths.root) {
         bail!(
             "a temporary install builds on the current deployment, and this system isn't laid out as deployments yet; run `archix switch` first"

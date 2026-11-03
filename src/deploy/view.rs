@@ -125,6 +125,16 @@ impl Transaction {
     }
 }
 
+impl crate::packages::RunsPacman for Transaction {
+    fn pacman(&self) -> Result<Command> {
+        Transaction::pacman(self)
+    }
+
+    fn place(&self) -> String {
+        "the staging root".to_string()
+    }
+}
+
 /// The likely cause when the view can't be entered from a chroot: pivot_root refuses a root whose parent mount is shared.
 fn chroot_hint(error: io::Error) -> anyhow::Error {
     let invalid = error.raw_os_error() == Some(libc::EINVAL);

@@ -14,7 +14,7 @@ use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
-use archix::deploy::{self, Keep, build::Plan, layout};
+use archix::deploy::{self, layout};
 use archix::downgrade::{merged, unsafe_downgrades};
 use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
@@ -29,9 +29,8 @@ use archix::paths::Paths;
 use archix::plan::{Change, rebuilds, swapped_builds};
 use archix::repos::{Repo, fetch_db};
 use archix::resolve::snapshot_conf;
-use archix::system::apply::{Accounts, SystemChange, deployment_tree};
-use archix::system::boot::{self, BootPlan};
-use archix::system::{self, SystemState};
+use archix::system::apply::{Accounts, SystemChange};
+use archix::system::{self, SystemState, live};
 
 use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::{
@@ -41,15 +40,12 @@ use super::{
     transaction_for, user_cache,
 };
 
-/// The current deployment's directory, which holds etc/ and usr/ like a root, or the live root before the first layout.
+/// The root a switch applies to.
 pub(super) fn current_root(paths: &Paths) -> PathBuf {
-    match Store::new(paths).current() {
-        Ok(Some(number)) => paths.root.join("archix/deploy").join(number.to_string()),
-        _ => paths.root.clone(),
-    }
+    paths.root.clone()
 }
 
-/// The /etc/crypttab the next deployment gets: the one the config renders, the original archix kept when it stops managing one, or else the running system's.
+/// The /etc/crypttab the switch leaves: the one the config renders, the original archix kept when it stops managing one, or else the running system's.
 pub(super) fn next_crypttab(
     paths: &Paths,
     here: &Path,
@@ -76,35 +72,15 @@ pub(super) fn next_crypttab(
     }
 }
 
-/// The pacman database of the current deployment, which the next one is staged from.
+/// The root's pacman database.
 pub(super) fn installed_db(paths: &Paths) -> PathBuf {
-    let here = current_root(paths);
-    match here == paths.root {
-        true => paths.root.join("var/lib/pacman/local"),
-        false => here.join("pacman"),
-    }
+    paths.local_db()
 }
 
-/// Where a managed path is now: in the current deployment for its trees, else on the live system.
+/// Where a managed path is on the root.
 fn place_in(paths: &Paths) -> impl Fn(&str) -> Option<PathBuf> {
-    let here = current_root(paths);
     let root = paths.root.clone();
-    move |path: &str| {
-        Some(match deployment_tree(path) {
-            Some(_) => here.join(path.trim_start_matches('/')),
-            None => system::usr_local::on_disk(&root, path),
-        })
-    }
-}
-
-/// Where the live pass writes a managed path outside the deployment trees, /usr/local's in the shared /var/usrlocal.
-fn live_place(paths: &Paths) -> impl Fn(&str) -> Option<PathBuf> {
-    let root = paths.root.clone();
-    move |path: &str| {
-        deployment_tree(path)
-            .is_none()
-            .then(|| system::usr_local::on_disk(&root, path))
-    }
+    move |path: &str| Some(root.join(path.trim_start_matches('/')))
 }
 
 /// Declares packages in the host's installed.lua and switches; installed.lua is written only if the switch commits.
@@ -143,18 +119,11 @@ fn switch_after_declaring(
 
 pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>, allow_unsafe: bool) -> Result<()> {
     require_root("switch")?;
+    let started = now();
     let paths = Paths::system();
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
     let boot = declared.boot_plan()?;
-    system::boot::require_esp(Path::new(&boot.esp))?;
-    let laid_out = layout::laid_out(&paths.root);
-    if !laid_out && let Some(why) = layout::unsupported(&paths.root, Path::new(&boot.esp)) {
-        bail!("{why}; nothing was changed");
-    }
-    if let Some(why) = layout::separate_var(&paths.root) {
-        bail!("{why}; nothing was changed");
-    }
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     if let Some(warning) = super::lock_age_warning(&lock, declared.lock_warn_after_days) {
         eprintln!("{warning}");
@@ -264,7 +233,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             keep: declared.keep,
             keep_days: declared.keep_days,
             deployments_keep: declared.deployments_keep,
-            boot: Some(boot.clone()),
+            boot: boot.clone(),
         },
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
@@ -307,14 +276,23 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             system_change.from.secrets.as_ref(),
             &prepared,
             &place,
-            system::boot::booted_deployment(&paths.root),
+            None,
         )?);
     }
     system_lines.extend(system::credentials::describe(&passwords, &here.join("etc")));
-    for kept in system::credentials::kept_locks(&passwords, &[&here.join("etc"), &paths.root.join("etc")]) {
+    for kept in system::credentials::kept_locks(&passwords, &[&here.join("etc")]) {
         eprintln!("warning: {kept}");
     }
     system::apply::check(&paths, &system_change, &place)?;
+    system::live::check_files(&system_change, &|path: &str| {
+        rendered
+            .state
+            .files
+            .get(path)
+            .and_then(|file| rendered.blobs.get(&file.sha256).cloned())
+    })?;
+    system::live::refuse_packaged_usr_files(&system_change, &db)
+        .map_err(|e| anyhow::anyhow!("{e:#}; nothing was changed"))?;
     system_lines.extend(system::fstab::describe_at(&here, target.config, &rendered.state.fstab));
     let new_text = |path: &str| match rendered.state.files.get(path) {
         Some(file) => rendered
@@ -363,7 +341,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         flatpak_lines = declared
             .flatpak_apps
             .iter()
-            .map(|(_, id)| format!("flatpak    install {id} at the new deployment's first boot, which brings flatpak"))
+            .map(|(_, id)| format!("flatpak    install {id} once the switch has installed flatpak"))
             .collect();
     }
 
@@ -402,25 +380,10 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     if repos_stale {
         println!("update     /etc/pacman.conf (custom repos)");
     }
-    if current
-        .as_ref()
-        .and_then(|current| current.settings.boot.as_ref())
-        .is_some_and(|before| before.pcr_key != boot.pcr_key)
-    {
-        println!(
-            "update     the PCR policy key: the new deployment's UKIs carry policies signed with the one in /etc/systemd"
-        );
-    }
     let nothing_changes = changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() && !repos_stale;
-    if laid_out && nothing_changes && unchanged {
+    if nothing_changes && unchanged {
         let current = current.expect("unchanged needs a current generation");
-        ensure_entry(&paths, &boot, current.number)?;
         super::lock::write_deferred()?;
-        carry_config(
-            target.config_dir,
-            &paths,
-            &paths.root.join("archix/deploy").join(current.number.to_string()),
-        )?;
         integration::clear_outside_changes(&paths)?;
         println!(
             "nothing to do: the system matches generation {} (snapshot {})",
@@ -438,42 +401,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     for line in system_lines.iter().chain(&flatpak_lines) {
         println!("{line}");
     }
-    if !laid_out {
-        println!(
-            "lay out   the system as deployment 1: /usr, /etc, /opt, /boot and pacman's database move into {}, with a boot entry of its own, and /usr/local into {}, which every deployment shares",
-            paths.root.join("archix/deploy/1").display(),
-            system::usr_local::dir(&paths.root).display()
-        );
-    }
-    if !(nothing_changes && !laid_out) {
-        println!("a new deployment with its own boot entry; it boots at the next restart");
-    }
     print_hooks(&system_change);
-    system::boot::check_signing(boot.secure_boot)?;
-    let esp = PathBuf::from(&boot.esp);
-    let pinned: BTreeSet<u32> = match laid_out {
-        true => {
-            let pins = Keep::read(
-                declared.deployments_keep as usize,
-                &deploy::Store::open(&paths.root)?,
-                &esp,
-            )?;
-            [pins.booted, pins.current, pins.boot_default]
-                .into_iter()
-                .flatten()
-                .collect()
-        }
-        false => BTreeSet::new(),
-    };
-    let kernel = boot::owned_version(&db, &boot.kernel)
-        .map(|version| here.join("usr/lib/modules").join(version).join("vmlinuz"));
-    system::boot::check_space(
-        &esp,
-        &pinned,
-        kernel.as_deref(),
-        boot::uki_count(&boot, &db),
-        boot.rescue,
-    )?;
     guard_downgrades(
         &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
         noconfirm,
@@ -622,98 +550,43 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     keep_third_party_copies(&archive, &paths, lock.date, &lock.packages, &declared.repos);
 
     let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
-    let mut soft_failures = Vec::new();
-    if !laid_out {
-        let first = if nothing_changes {
-            system::apply::keep_originals(&paths, &system_change, &place, &accounts)?;
-            Generation {
-                number: 1,
-                ..generation.clone()
-            }
-        } else {
-            before_archix(&generation, &installed)
-        };
-        first_layout(&paths, &boot, &first)?;
-        if nothing_changes {
-            let (live, at_boot) =
-                system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
-            if let Err(e) = system::hooks::defer(&paths.state, 1, &at_boot, &system_change.to.hooks) {
-                soft_failures.push(format!("recording the hooks for deployment 1's boot: {e:#}"));
-            }
-            return after_commit(
-                target,
-                &declared,
-                &paths,
-                &mut lock,
-                &store,
-                1,
-                &system_change,
-                &previous_flatpak,
-                live,
-                Vec::new(),
-                soft_failures,
-            );
-        }
-    }
-    let deployments = deploy::Store::open(&paths.root)?;
-    let base = deployments
-        .current()?
-        .context("there's no current deployment to build the next one from")?;
-    ensure_entry(&paths, &boot, base)?;
-    let number = store.next_number()?.max(deployments.next_number()?);
+    let number = store.next_number()?;
     generation.number = number;
-    let system_change = SystemChange {
-        from: store.get(base)?.system,
-        to: generation.system.clone(),
-    };
-    let mut due = BTreeMap::new();
-    if system::boot::booted_deployment(&paths.root) != Some(base) {
-        due.extend(system::hooks::pending(&paths.state, base).on_change);
-    }
-    let (live, at_boot) = system::hooks::split_live(system::hooks::due(&system_change, &rewritten), &paths.root);
-    due.extend(at_boot);
-    system::hooks::defer(&paths.state, number, &due, &system_change.to.hooks)?;
-    let paused = archix::etcmerge::pause(&paths)?;
-    if let Err(e) = archix::etcmerge::prepare(&paths, number) {
-        eprintln!(
-            "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
-        );
-    }
-    let scan = |dir: &Path| scan_staged(&prepared, dir, &paths.root);
-    eprintln!(":: building deployment {number} from deployment {base}");
-    let made = deploy::build::build(
-        &deployments,
-        &Plan {
-            paths: &paths,
-            number,
-            base,
-            packages: &package_changes,
-            system: &system_change,
-            boot: &boot,
-            repos: &declared.repos,
-            record: &generation,
-            keep: declared.deployments_keep as usize,
-            config: &|staged: &Path| {
-                carry_config(target.config_dir, &paths, staged)?;
-                super::lock::stage_deferred(&paths, &staged.join("etc"))
-            },
-            credentials: Some(deploy::build::Credentials {
-                passwords: &passwords,
-                allow_no_password_login: system::allows_no_password_login(target.config),
-                logins: &prepared.logins,
-            }),
-            scan: if prepared.values.is_empty() { None } else { Some(&scan) },
-        },
-    )
-    .inspect_err(|_| {
-        let _ = fs::remove_file(system::hooks::pending_path(&paths.state, number));
-        archix::etcmerge::discard(&paths, number);
-        resume_etc_merge(&paths, paused);
+    let root = live::Root::new(&paths.root);
+    eprintln!(":: applying generation {number}");
+    let applied = live::apply(&live::Plan {
+        paths: &paths,
+        root: &root,
+        packages: &package_changes,
+        system: &system_change,
+        repos: &declared.repos,
+        esp: boot.as_ref().map(|boot| boot.esp.as_str()),
+        credentials: Some(live::Credentials {
+            passwords: &passwords,
+            allow_no_password_login: system::allows_no_password_login(target.config),
+            logins: &prepared.logins,
+        }),
+        package_capabilities: current.as_ref().map_or(&BTreeMap::new(), |g| &g.package_capabilities),
+        rewritten: &rewritten,
+        started,
+    })
+    .map_err(|e| {
+        e.context(format!(
+            "generation {number} wasn't recorded, and generation {} stays current",
+            current.as_ref().map_or("none".to_string(), |g| g.number.to_string())
+        ))
     })?;
-    soft_failures.extend(made.failures);
-    resume_etc_merge(&paths, paused);
     system::credentials::forget_overrides(&paths.state, &passwords);
-    after_commit(
+    let mut soft_failures = applied.failures;
+    if !prepared.values.is_empty()
+        && let Err(e) = scan_live(&prepared, &paths.root)
+    {
+        soft_failures.push(format!("{e:#}"));
+    }
+    generation.package_capabilities = applied.package_capabilities;
+    store.save(&generation)?;
+    store.set_current(number)?;
+    after_apply(
         target,
         &declared,
         &paths,
@@ -722,8 +595,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         number,
         &system_change,
         &previous_flatpak,
-        live,
-        made.users,
+        applied.users,
         soft_failures,
     )
 }
@@ -836,26 +708,12 @@ fn prepare_secrets(paths: &Paths, rendered: &mut system::Rendered) -> Result<arc
     Ok(prepared)
 }
 
-/// The last check before a deployment with secrets commits: no value in its /etc or the running one the /etc merge would carry into it (a short one only warns there), or, opened up, its UKIs and initramfs images.
-fn scan_staged(prepared: &archix::secrets::prepare::Prepared, dir: &Path, live: &Path) -> Result<()> {
+/// After the apply, with secrets: no value in /etc (a short one only warns), reported as a soft failure since the files are written by now.
+fn scan_live(prepared: &archix::secrets::prepare::Prepared, root: &Path) -> Result<()> {
     use archix::secrets::{Kind, scan};
     let files = prepared.needles(&[Kind::File]);
-    let mut hits = scan::tree(&dir.join("etc"), "/etc", &files, false);
-    // A running file the new deployment makes a secret's link is one the switch replaces only when it holds exactly the value.
-    let replaced = |hit: &scan::Hit| dir.join(hit.path.trim_start_matches('/')).is_symlink();
-    for hit in scan::tree(&live.join("etc"), "/etc", &files, false) {
-        if !replaced(&hit)
-            && !hits
-                .iter()
-                .any(|seen| seen.secret == hit.secret && seen.path == hit.path)
-        {
-            hits.push(hit);
-        }
-    }
-    let warnings = scan::judge(&hits, false)?;
-    let all = prepared.needles(&[Kind::File, Kind::CryptHash]);
-    scan::judge(&scan::tree(&dir.join("boot"), "/boot", &all, true), true)?;
-    for warning in warnings {
+    let hits = scan::tree(&root.join("etc"), "/etc", &files, false);
+    for warning in scan::judge(&hits, false)? {
         eprintln!("warning: {warning}");
     }
     Ok(())
@@ -868,33 +726,9 @@ pub(super) fn resume_etc_merge(paths: &Paths, paused: bool) {
     }
 }
 
-/// Writes the managed files outside the deployment trees, then runs the on_change scripts of those that changed; when the write fails, the scripts wait for the deployment's boot instead.
-fn write_live_files(
-    paths: &Paths,
-    number: u32,
-    change: &SystemChange,
-    accounts: &Accounts,
-    on_change: &BTreeMap<String, system::Hook>,
-    soft_failures: &mut Vec<String>,
-) {
-    if let Err(e) = system::apply::files(paths, change, &live_place(paths), accounts) {
-        soft_failures.push(format!("writing files outside the deployment: {e:#}"));
-        if let Err(e) = system::hooks::defer(&paths.state, number, on_change, &change.to.hooks) {
-            soft_failures.push(format!(
-                "recording on_change scripts for deployment {number}'s boot: {e:#}"
-            ));
-        }
-        return;
-    }
-    if !on_change.is_empty() {
-        eprintln!(":: running the on_change scripts of files written now");
-    }
-    soft_failures.extend(system::hooks::run(&paths.root, on_change, &BTreeMap::new()));
-}
-
-/// Everything a switch does once its deployment is committed: config writes, files outside the deployment, homes, Flatpak apps, hooks and gc; failures here are soft.
+/// Everything a switch does once its generation is applied and current: config writes, root's copy of the config, homes, Flatpak apps and gc; failures here are soft.
 #[allow(clippy::too_many_arguments)]
-fn after_commit(
+fn after_apply(
     target: &Target,
     declared: &Declared,
     paths: &Paths,
@@ -903,11 +737,9 @@ fn after_commit(
     number: u32,
     system_change: &SystemChange,
     previous_flatpak: &BTreeMap<String, LockedApp>,
-    live_on_change: BTreeMap<String, system::Hook>,
     users: Vec<String>,
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
-    // A config outside /etc gets this switch's writes only here, so a crash right after the commit leaves it as it was.
     super::lock::write_deferred()?;
     for pkg in lock.packages.values().filter(|pkg| !pkg.file.is_empty()) {
         if let Err(e) = archix::gc::keep_copy(paths, &pkg.file) {
@@ -919,34 +751,14 @@ fn after_commit(
             "recording generation {number}'s config in root's repository: {e:#}"
         ));
     }
-    let deployment = paths.root.join("archix/deploy").join(number.to_string());
-    let accounts = Accounts::read(&deployment.join("etc"));
+    let etc = paths.root.join("etc");
+    let accounts = Accounts::read(&etc);
     let with_password = system::credentials::with_password(&system_change.to.users);
-    if let Err(e) = system::apply::create_homes(
-        &users,
-        &accounts,
-        &deployment.join("etc/skel"),
-        &paths.root,
-        &with_password,
-    ) {
+    if let Err(e) = system::apply::create_homes(&users, &accounts, &etc.join("skel"), &paths.root, &with_password) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
-    write_live_files(
-        paths,
-        number,
-        system_change,
-        &accounts,
-        &live_on_change,
-        &mut soft_failures,
-    );
     integration::clear_outside_changes(paths)?;
     let _ = fs::remove_file(paths.notes());
-    system::reboot::refresh_note(&paths.root);
-    system::sleep::after_commit(&paths.root);
-    let merging = archix::etcmerge::start(paths).unwrap_or_else(|e| {
-        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-        false
-    });
     // Otherwise pacman warns on every run about a repo in pacman.conf whose database it never downloaded.
     let archive = archix::archive::for_system(&paths.state);
     let sync = paths.root.join("var/lib/pacman/sync");
@@ -960,88 +772,15 @@ fn after_commit(
             eprintln!("warning: couldn't download {}.db for pacman: {e:#}", repo.name);
         }
     }
-    soft_failures.extend(finish_flatpak(
-        target,
-        declared,
-        lock,
-        store,
-        &deployment,
-        number,
-        previous_flatpak,
-    )?);
+    soft_failures.extend(finish_flatpak(target, declared, lock, store, number, previous_flatpak)?);
     super::lock::write_deferred()?;
-    if let Err(e) = carry_config(target.config_dir, paths, &deployment) {
-        soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
+    match gc::collect(paths, &user_cache()?) {
+        Ok(report) => print_gc(&report, false),
+        Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
     }
-    collect_and_revoke(
-        paths,
-        declared.boot.as_ref().map(|boot| boot.plan()).as_ref(),
-        &mut soft_failures,
-    )?;
-    println!(
-        "switched to generation {number} (snapshot {}); its deployment boots at the next restart",
-        lock.date
-    );
-    if super::lock::pending_etc(paths).is_some() {
-        println!("{}", super::lock::pending_note(number, merging));
-    }
+    println!("switched to generation {number} (snapshot {})", lock.date);
     push_to_cache(declared);
-    report_soft_failures(
-        &soft_failures,
-        &format!("generation {number} is committed and boots at the next restart"),
-    )
-}
-
-/// The record of the system as the first switch found it, which deployment 1 holds when the switch changes something.
-fn before_archix(target: &Generation, installed: &BTreeMap<String, archix::pacman::LocalPkg>) -> Generation {
-    let packages = installed
-        .values()
-        .map(|pkg| {
-            let locked = Locked {
-                version: pkg.version.clone(),
-                explicit: pkg.explicit,
-                ..Default::default()
-            };
-            (pkg.name.clone(), locked)
-        })
-        .collect();
-    Generation {
-        number: 1,
-        packages,
-        system: SystemState::default(),
-        flatpak: BTreeMap::new(),
-        config_commit: None,
-        config_dirty: false,
-        applied: None,
-        before_archix: true,
-        package_capabilities: BTreeMap::new(),
-        ..target.clone()
-    }
-}
-
-/// Lays the live system out as deployment 1 with its own boot entry: archix's integration and the initramfs hook first, then the layout, the entry and the live binds; what they hide is pruned at the next boot, once no service still uses it.
-fn first_layout(paths: &Paths, boot: &BootPlan, record: &Generation) -> Result<()> {
-    eprintln!(":: laying the system out as deployment 1");
-    let archix = integration::own_path()?;
-    let root = paths.root.clone();
-    integration::write_all(paths, &archix, &|path: &Path| {
-        Ok(root.join(path.strip_prefix("/").unwrap_or(path)))
-    })?;
-    let store = Store::new(paths);
-    match store.get(1) {
-        Ok(_) => store.update(record)?,
-        Err(_) => store.save(record)?,
-    }
-    for warning in system::boot::firmware_warnings(&paths.root.join("sys/firmware/efi/efivars"), Path::new(&boot.esp)) {
-        eprintln!("warning: {warning}");
-    }
-    let deployments = layout::lay_out(&paths.root)?;
-    deploy::build::entry_for(&deployments, paths, boot, 1)?;
-    layout::bind_live(&paths.root, &deployments, 1)?;
-    println!(
-        "laid the system out as deployment 1, which boots from its own entry; changes from now on take effect at the next boot"
-    );
-    Ok(())
+    report_soft_failures(&soft_failures, &format!("generation {number} is applied and current"))
 }
 
 fn identity(path: &Path) -> Option<(u64, u64)> {
@@ -1101,11 +840,6 @@ pub(super) fn carry_config(config_dir: &Path, paths: &Paths, deployment: &Path) 
     fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))
 }
 
-/// Carries the running system's users, groups and passwords into the /etc of a deployment a rollback makes current, so none reverts or vanishes while their files keep the number.
-fn carry_accounts(paths: &Paths, etc: &Path, soft_failures: &mut Vec<String>) {
-    carry_accounts_from(paths, &paths.root.join("etc"), etc, soft_failures);
-}
-
 fn carry_accounts_from(paths: &Paths, live: &Path, etc: &Path, soft_failures: &mut Vec<String>) {
     match archix::etcmerge::carry_accounts(paths, live, etc) {
         Ok(skipped) if skipped.is_empty() => {}
@@ -1116,18 +850,6 @@ fn carry_accounts_from(paths: &Paths, live: &Path, etc: &Path, soft_failures: &m
         )),
         Err(e) => soft_failures.push(format!("carrying users and groups into {}: {e:#}", etc.display())),
     }
-}
-
-/// Writes the boot entry of deployment `number` when the ESP has none, as after a first layout cut off before its entry.
-fn ensure_entry(paths: &Paths, boot: &BootPlan, number: u32) -> Result<()> {
-    if system::boot::entries(Path::new(&boot.esp))
-        .iter()
-        .any(|(n, extra, _)| *n == number && !extra)
-    {
-        return Ok(());
-    }
-    eprintln!(":: deployment {number} has no boot entry on {}; writing it", boot.esp);
-    deploy::build::entry_for(&deploy::Store::open(&paths.root)?, paths, boot, number)
 }
 
 /// Lists unsafe downgrades and asks, defaulting to no; `--noconfirm` refuses them unless `allow` is set.
@@ -1153,36 +875,13 @@ pub(super) fn guard_downgrades(risky: &[String], noconfirm: bool, allow: bool) -
     Ok(())
 }
 
-/// The preview line naming the hooks a switch or rollback runs, in order, at the boot of the deployment it makes current.
+/// The preview line naming the hooks a switch or rollback runs, in order, once it has applied.
 fn print_hooks(change: &SystemChange) {
     if let Ok(names) = system::hooks::order(&change.to.hooks)
         && !names.is_empty()
     {
-        println!("run hooks  {}, when the deployment boots", names.join(", "));
+        println!("run hooks  {}", names.join(", "));
     }
-}
-
-/// gc, the rescue entry's refresh, then revoking the boot images no entry uses (a replaced rescue UKI among them), after every switch or rollback that commits a deployment.
-fn collect_and_revoke(paths: &Paths, boot: Option<&BootPlan>, soft_failures: &mut Vec<String>) -> Result<()> {
-    match gc::collect(paths, &user_cache()?) {
-        Ok(report) => print_gc(&report, false),
-        Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
-    }
-    if let Some(plan) = boot
-        && layout::laid_out(&paths.root)
-    {
-        match deploy::Store::open(&paths.root).and_then(|store| system::rescue::refresh(paths, plan, &store)) {
-            Ok(done) if !done.is_empty() => println!("{done}"),
-            Ok(_) => {}
-            Err(e) => soft_failures.push(format!("refreshing the rescue entry: {e:#}")),
-        }
-    }
-    if boot.is_some_and(|plan| plan.revoke_unused)
-        && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true))
-    {
-        soft_failures.push(format!("revoking boot images no entry uses: {e:#}"));
-    }
-    Ok(())
 }
 
 /// Which of `packages` lose a library they link when `changing` move to `lock`'s versions; only those libraries' owners are downloaded to check.
@@ -1339,45 +1038,18 @@ fn broken_builds(
         .collect())
 }
 
-/// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them; when flatpak comes only with the new deployment, leaves that to its first boot.
+/// Locks Flatpak apps that couldn't be locked before flatpak was installed, then installs and pins them.
 fn finish_flatpak(
     target: &Target,
     declared: &Declared,
     lock: &mut HostLock,
     store: &Store,
-    deployment: &Path,
     number: u32,
     previous: &BTreeMap<String, LockedApp>,
 ) -> Result<Vec<String>> {
-    let state = &Paths::system().state;
     if declared.flatpak_apps.is_empty() && previous.is_empty() {
-        flatpak::drop_pending(state, None);
         return Ok(Vec::new());
     }
-    if !flatpak::available() && deployment.join("usr/bin/flatpak").exists() {
-        let remotes = declared
-            .flatpak_remotes
-            .iter()
-            .filter(|(name, _)| declared.flatpak_apps.iter().any(|(remote, _)| remote == *name))
-            .map(|(name, remote)| (name.clone(), remote.clone()))
-            .collect();
-        let pending = flatpak::Pending {
-            config_dir: std::path::absolute(target.config_dir)?,
-            host: target.host.to_string(),
-            apps: declared.flatpak_apps.clone(),
-            remotes,
-            locked: lock.flatpak.clone(),
-            previous: previous.clone(),
-        };
-        flatpak::defer(state, number, &pending)?;
-        let ids: Vec<&str> = declared.flatpak_apps.iter().map(|(_, id)| id.as_str()).collect();
-        println!(
-            "flatpak comes with deployment {number}, so deployment {number}'s first boot installs them once the network is up: {}",
-            ids.join(", ")
-        );
-        return Ok(Vec::new());
-    }
-    flatpak::drop_pending(state, None);
     ensure_flatpak_remotes(declared)?;
     let mut failures = settle_flatpak(target, declared, lock, true, false)?;
     let mut generation = store.get(number)?;
@@ -1704,17 +1376,10 @@ fn print_gc(report: &gc::Report, always: bool) {
     }
 }
 
-/// The kept deployment nearest generation `number`, which a rollback to it rebuilds from.
-fn nearest_deployment(committed: &[u32], number: u32) -> Option<u32> {
-    committed
-        .iter()
-        .copied()
-        .min_by_key(|n| (n.abs_diff(number), *n < number))
-}
-
-/// Makes an earlier generation current: by repointing when its deployment is kept, else by rebuilding that deployment from the nearest kept one and the package cache; archix.lock stays as it is.
-pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()> {
+/// Applies an earlier generation's record in place, its packages from archix's cache and the archive, and makes it current without a new record; archix.lock and the config stay as they are.
+pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()> {
     require_root("rollback")?;
+    let started = now();
     let paths = Paths::system();
     check_pacman_free(&paths)?;
     let store = Store::new(&paths);
@@ -1732,276 +1397,157 @@ pub fn rollback(config_dir: &Path, to: Option<u32>, noconfirm: bool, allow_unsaf
             .context("there is no generation older than the current one")?,
     };
     if number == current {
-        if layout::laid_out(&paths.root) {
-            let deployments = deploy::Store::open(&paths.root)?;
-            // As after the ESP was lost or wiped: current's entry, default and fallback come back from its deployment.
-            if let Some(boot) = store.get(number)?.settings.boot
-                && deployments.deployments()?.contains(&number)
-                && !system::boot::entries(Path::new(&boot.esp))
-                    .iter()
-                    .any(|(n, extra, _)| *n == number && !extra)
-            {
-                system::boot::require_esp(Path::new(&boot.esp))?;
-                deploy::verify::ensure_intact(&paths, &deployments, number)?;
-                ensure_entry(&paths, &boot, number)?;
-            }
-            deployments.choose(number)?;
-        }
-        println!("generation {number} is current already; it stays, and gc may now drop newer deployments");
+        println!("generation {number} is current already");
         return Ok(());
     }
     let generation = store.get(number)?;
+    if let Some(why) = generation.too_new() {
+        bail!("{why}; nothing was changed");
+    }
+    if let Some(applied) = &generation.applied {
+        let stored = archix::captured::Applied::at(&paths.root, &paths.state)
+            .verified(number, &applied.commit, Some(&applied.tree))
+            .with_context(|| {
+                format!("generation {number} can't be read back from root's repository; nothing was changed")
+            })?;
+        archix::eval::isolated::read_plan(&stored.plan)
+            .with_context(|| format!("generation {number}'s stored plan doesn't parse; nothing was changed"))?;
+    }
     let current_generation = store.get(current)?;
-    let boot = generation
-        .settings
-        .boot
-        .clone()
-        .with_context(|| format!("generation {number} has no boot settings, so it can't boot"))?;
-    system::boot::require_esp(Path::new(&boot.esp))?;
-    let deployments = deploy::Store::open(&paths.root)?;
-    let committed = deployments.deployments()?;
-    let kept = committed.contains(&number);
-    let base = match kept {
-        true => number,
-        false => {
-            if let Some(why) = generation.too_new() {
-                bail!("{why}; its deployment was dropped, so rolling back would rebuild it; nothing was changed");
-            }
-            if generation.before_archix {
-                bail!(
-                    "generation {number} is the system as archix found it, and its deployment was dropped, so it can't be rebuilt; nothing was changed"
-                );
-            }
-            nearest_deployment(&committed, number).context("there's no deployment to rebuild from")?
-        }
-    };
-    let base_db = deployments.path(base).join("pacman");
-    let installed = read_local_db(&base_db)?;
+    let db = paths.local_db();
+    let installed = read_local_db(&db)?;
     let ignored = generation.settings.ignored.iter().cloned().collect();
-    let base_generation = store.get(base)?;
     let (mut changes, warned, kept_lines) = select_changes(
         &generation.packages,
         &installed,
-        &base_db,
+        &db,
         generation.settings.remove_undeclared,
         &ignored,
     );
     changes.extend(rebuilds(
         &generation.packages,
         &installed,
-        Some(&base_generation.packages),
+        Some(&current_generation.packages),
     ));
     let swapped = swapped_builds(
         &generation.packages,
         &installed,
-        Some(&base_generation.packages),
+        Some(&current_generation.packages),
         &changes,
     );
     changes.extend(swapped);
     let name = format!("generation {number} (snapshot {})", generation.date);
-    let current_change = SystemChange {
+    let system_change = SystemChange {
         from: current_generation.system.clone(),
         to: generation.system.clone(),
     };
-    let current_db = deployments.path(current).join("pacman");
-    // A kept deployment boots as it is, which plain pacman may have changed since its generation was recorded.
-    let target = match kept {
-        true => read_local_db(&base_db)?
-            .into_values()
-            .map(|pkg| {
-                let locked = Locked {
-                    version: pkg.version,
-                    explicit: pkg.explicit,
-                    ..Default::default()
-                };
-                (pkg.name, locked)
-            })
-            .collect(),
-        false => generation.packages.clone(),
-    };
-    let (versus_current, _, _) = select_changes(&target, &read_local_db(&current_db)?, &current_db, true, &ignored);
     let configured = merged(
-        &current_change.from.unsafe_downgrades,
+        &current_generation.system.unsafe_downgrades,
         &generation.system.unsafe_downgrades,
     );
-    let risky = unsafe_downgrades(&versus_current, &configured);
+    let risky = unsafe_downgrades(&changes, &configured);
     let previous_flatpak = current_generation.flatpak.clone();
     let (flatpak_lines, _) = flatpak::describe(&generation.flatpak, &previous_flatpak, &flatpak::installed()?);
-    if kept {
-        println!(
-            "{name} still has its deployment: rolling back points current and the boot default at it, nothing is reinstalled"
-        );
-        for change in &versus_current {
-            println!("{change}");
-        }
-    } else {
-        println!("{name}'s deployment was dropped: rebuilding it from deployment {base} and the package cache");
-        print_warned(&warned);
-        for line in &kept_lines {
-            println!("{line}");
-        }
-        for change in &changes {
-            println!("{change}");
-        }
-    }
-    for line in &flatpak_lines {
+    let place = place_in(&paths);
+    let accounts = Accounts::read(&paths.root.join("etc"));
+    let system_lines = system::apply::describe(&system_change, &place, &accounts, &paths.root)?;
+    println!("rolling back to {name}, applying its record in place");
+    print_warned(&warned);
+    for line in &kept_lines {
         println!("{line}");
     }
-    print_hooks(&current_change);
-    let target_fstab = match kept {
-        true => fs::read_to_string(deployments.path(number).join("etc/fstab")).unwrap_or_default(),
-        false => generation.system.fstab.iter().map(|line| line.line() + "\n").collect(),
-    };
-    for warning in system::fstab::rollback_warnings(
-        &paths.root,
-        &fs::read_to_string(current_root(&paths).join("etc/fstab")).unwrap_or_default(),
-        &target_fstab,
-        &boot.esp,
-    ) {
-        eprintln!("{warning}");
+    for change in &changes {
+        println!("{change}");
     }
-    if !kept {
-        let esp = PathBuf::from(&boot.esp);
-        let pins = Keep::read(generation.settings.deployments_keep as usize, &deployments, &esp)?;
-        let pinned: BTreeSet<u32> = [pins.booted, pins.current, pins.boot_default]
-            .into_iter()
-            .flatten()
-            .collect();
-        let kernel = boot::owned_version(&base_db, &boot.kernel).map(|version| {
-            deployments
-                .path(base)
-                .join("usr/lib/modules")
-                .join(version)
-                .join("vmlinuz")
-        });
-        system::boot::check_space(
-            &esp,
-            &pinned,
-            kernel.as_deref(),
-            boot::uki_count(&boot, &base_db),
-            boot.rescue,
-        )?;
+    for line in system_lines.iter().chain(&flatpak_lines) {
+        println!("{line}");
     }
+    print_hooks(&system_change);
+    if let Some(boot) = &generation.settings.boot {
+        let target_fstab: String = generation.system.fstab.iter().map(|line| line.line() + "\n").collect();
+        for warning in system::fstab::rollback_warnings(
+            &paths.root,
+            &fs::read_to_string(paths.root.join("etc/fstab")).unwrap_or_default(),
+            &target_fstab,
+            &boot.esp,
+        ) {
+            eprintln!("{warning}");
+        }
+    }
+    system::apply::check(&paths, &system_change, &place)?;
+    system::live::check_files(&system_change, &|path: &str| {
+        let file = generation.system.files.get(path)?;
+        system::blobs::read(&paths, &file.sha256).ok()
+    })?;
+    system::live::refuse_packaged_usr_files(&system_change, &db)
+        .map_err(|e| anyhow::anyhow!("{e:#}; nothing was changed"))?;
     guard_downgrades(&risky, noconfirm, allow_unsafe)?;
     if !noconfirm && !confirm(&format!("roll back to {name}?"))? {
         bail!("aborted; nothing was changed");
     }
-    let mut soft_failures = Vec::new();
-    let mut users = Vec::new();
-    let esp = PathBuf::from(&boot.esp);
-    if kept {
-        deploy::verify::ensure_intact(&paths, &deployments, number)?;
-        ensure_entry(&paths, &boot, number)?;
-        if system::boot::retry_entry(&esp, number)? {
-            println!("deployment {number}'s entry had used up its boot tries; it gets them again");
-        }
-        carry_accounts(&paths, &deployments.path(number).join("etc"), &mut soft_failures);
-        boot::repoint(&paths, &esp, &deployments, number, &|| {
-            deploy::build::entry_for(&deployments, &paths, &boot, number)
-        })?;
-    } else {
-        let archive = archix::archive::for_system(&paths.state);
-        let repos = third_party_repos(&paths);
-        let mut packages: Packages = transaction_for(
-            &archive,
-            &paths,
-            generation.date,
-            &generation.packages,
-            &changes,
-            &BTreeMap::new(),
-            &repos,
-        )?;
-        packages.install = without_signatures(&paths, &packages.install)?;
-        archix::conflicts::check(&packages.install, &packages.remove, &base_db, &deployments.path(base))?;
-        check_packages(&packages)?;
-        let system_change = SystemChange {
-            from: base_generation.system.clone(),
-            to: generation.system.clone(),
-        };
-        let paused = archix::etcmerge::pause(&paths)?;
-        eprintln!(":: rebuilding deployment {number} from deployment {base}");
-        let made = deploy::build::build(
-            &deployments,
-            &Plan {
-                paths: &paths,
-                number,
-                base,
-                packages: &packages,
-                system: &system_change,
-                boot: &boot,
-                repos: &repos,
-                record: &generation,
-                keep: generation.settings.deployments_keep as usize,
-                config: &|staged: &Path| {
-                    let mut skipped = Vec::new();
-                    carry_accounts(&paths, &staged.join("etc"), &mut skipped);
-                    skipped.iter().for_each(|line| eprintln!("warning: {line}"));
-                    carry_config(config_dir, &paths, staged)
-                },
-                credentials: None,
-                scan: None,
-            },
-        )
-        .inspect_err(|_| resume_etc_merge(&paths, paused))?;
-        soft_failures.extend(made.failures);
-        users = made.users;
+    let archive = archix::archive::for_system(&paths.state);
+    let repos = third_party_repos(&paths);
+    let mut packages: Packages = transaction_for(
+        &archive,
+        &paths,
+        generation.date,
+        &generation.packages,
+        &changes,
+        &BTreeMap::new(),
+        &repos,
+    )?;
+    packages.install = without_signatures(&paths, &packages.install)?;
+    archix::conflicts::check(&packages.install, &packages.remove, &db, &paths.root)?;
+    check_packages(&packages)?;
+    let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
+    let root = live::Root::new(&paths.root);
+    eprintln!(":: applying {name}");
+    let applied = live::apply(&live::Plan {
+        paths: &paths,
+        root: &root,
+        packages: &packages,
+        system: &system_change,
+        repos: &repos,
+        esp: generation.settings.boot.as_ref().map(|boot| boot.esp.as_str()),
+        credentials: None,
+        package_capabilities: &current_generation.package_capabilities,
+        rewritten: &rewritten,
+        started,
+    })
+    .map_err(|e| e.context(format!("generation {current} stays current")))?;
+    let mut soft_failures = applied.failures;
+    if applied.package_capabilities != generation.package_capabilities {
+        let mut updated = generation.clone();
+        updated.package_capabilities = applied.package_capabilities;
+        store.update(&updated)?;
     }
-    let (live, at_boot) = system::hooks::split_live(system::hooks::due(&current_change, &BTreeSet::new()), &paths.root);
-    let hooks = system::hooks::defer(&paths.state, number, &at_boot, &generation.system.hooks);
-    if let Err(e) = hooks {
-        soft_failures.push(format!("recording the hooks for deployment {number}'s boot: {e:#}"));
-    }
-    let deployment = deployments.path(number);
-    if let Err(e) = carry_config(config_dir, &paths, &deployment) {
-        soft_failures.push(format!("copying the config into deployment {number}: {e:#}"));
-    }
-    let accounts = Accounts::read(&deployment.join("etc"));
-    let with_password = BTreeSet::new();
+    store.set_current(number)?;
+    let etc = paths.root.join("etc");
     if let Err(e) = system::apply::create_homes(
-        &users,
-        &accounts,
-        &deployment.join("etc/skel"),
+        &applied.users,
+        &Accounts::read(&etc),
+        &etc.join("skel"),
         &paths.root,
-        &with_password,
+        &BTreeSet::new(),
     ) {
         soft_failures.push(format!("creating home directories: {e:#}"));
     }
-    write_live_files(&paths, number, &current_change, &accounts, &live, &mut soft_failures);
     if (!generation.flatpak.is_empty() || !previous_flatpak.is_empty()) && generation.flatpak != previous_flatpak {
-        flatpak::drop_pending(&paths.state, None);
         soft_failures.extend(flatpak::sync(&generation.flatpak, &previous_flatpak));
     }
     let _ = fs::remove_file(paths.notes());
-    system::reboot::refresh_note(&paths.root);
-    system::sleep::after_commit(&paths.root);
-    let merging = archix::etcmerge::start(&paths).unwrap_or_else(|e| {
-        soft_failures.push(format!("starting the /etc merge into deployment {number}: {e:#}"));
-        false
-    });
-    if !kept {
-        collect_and_revoke(&paths, Some(&boot), &mut soft_failures)?;
+    match gc::collect(&paths, &user_cache()?) {
+        Ok(report) => print_gc(&report, false),
+        Err(e) => soft_failures.push(format!("garbage collection: {e:#}")),
     }
-    println!(
-        "rolled back to {name}; it boots at the next restart. archix.lock is unchanged, so the next `archix switch` returns to the config"
-    );
-    if super::lock::pending_etc(&paths).is_some() {
-        println!("{}", super::lock::pending_note(number, merging));
-    }
-    report_soft_failures(
-        &soft_failures,
-        &format!("{name} is current and boots at the next restart"),
-    )
+    println!("rolled back to {name}. archix.lock is unchanged, so the next `archix switch` returns to the config");
+    report_soft_failures(&soft_failures, &format!("{name} is applied and current"))
 }
 
 pub fn generations() -> Result<()> {
     let paths = Paths::system();
     let store = Store::new(&paths);
     let current = store.current()?;
-    let booted = boot::booted_deployment(&paths.root);
-    let deployed: BTreeSet<u32> = match layout::laid_out(&paths.root) {
-        true => deploy::Store::open(&paths.root)?.deployments()?.into_iter().collect(),
-        false => BTreeSet::new(),
-    };
     let list = store.list()?;
     if list.is_empty() {
         println!("no generations yet; `archix switch` creates the first one");
@@ -2017,13 +1563,8 @@ pub fn generations() -> Result<()> {
             }
             None => String::new(),
         };
-        let state = match (deployed.contains(&generation.number), booted == Some(generation.number)) {
-            (true, true) => "  deployment, booted",
-            (true, false) => "  deployment",
-            (false, _) => "  record",
-        };
         println!(
-            "{marker} {:>4}  {created} {:02}:{:02} UTC  snapshot {}  {}{commit}{state}",
+            "{marker} {:>4}  {created} {:02}:{:02} UTC  snapshot {}  {}{commit}",
             generation.number,
             minutes / 60,
             minutes % 60,
@@ -2376,17 +1917,4 @@ fn check_booted(cmdline: Option<String>) -> Result<()> {
         let _ = fs::write(paths.notes(), notes);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_dropped_generation_is_rebuilt_from_the_nearest_kept_deployment() {
-        assert_eq!(nearest_deployment(&[2, 7, 9], 6), Some(7));
-        assert_eq!(nearest_deployment(&[2, 7, 9], 3), Some(2));
-        assert_eq!(nearest_deployment(&[4, 8], 6), Some(8), "a tie goes to the newer one");
-        assert_eq!(nearest_deployment(&[], 6), None);
-    }
 }

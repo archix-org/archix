@@ -216,16 +216,13 @@ impl BootSettings {
 }
 
 impl Declared {
-    /// How deployments boot, which every switch needs.
-    fn boot_plan(&self) -> Result<archix::system::boot::BootPlan> {
+    /// The boot.* settings a generation records; boot entries come with stage 3, so nothing acts on them yet.
+    fn boot_plan(&self) -> Result<Option<archix::system::boot::BootPlan>> {
         match &self.boot {
             Some(boot) if boot.health_check.is_some() && boot.tries == 0 => bail!(
                 "boot.health_check needs boot.tries > 0: a failed check falls back by systemd-boot's boot counting; nothing was changed"
             ),
-            Some(boot) => Ok(boot.plan()),
-            None => bail!(
-                "archix boots every generation as its own deployment from a systemd-boot entry, so it needs boot.loader = \"systemd-boot\" (with boot.esp and kernel_params); nothing was changed"
-            ),
+            boot => Ok(boot.as_ref().map(BootSettings::plan)),
         }
     }
 
@@ -1024,11 +1021,12 @@ mod tests {
             ))
             .boot_plan()
         };
-        assert_eq!(with("", 3).unwrap().health_check, None, "off by default");
+        assert_eq!(with("", 3).unwrap().unwrap().health_check, None, "off by default");
         let plan = with(
             r#"units = { "sshd.service" }, listening = { 22 }, reachable = { "gateway", "example.org:443" }, reboot_on_failure = true"#,
             3,
         )
+        .unwrap()
         .unwrap();
         let check = plan.health_check.unwrap();
         assert_eq!(check.units, ["sshd.service"]);
