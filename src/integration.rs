@@ -63,7 +63,7 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
     );
     let complete = format!(
         "[Unit]\nDescription=archix: note a boot that counted as good\nAfter=systemd-bless-boot.service\n\n\
-         [Service]\nType=oneshot\nExecStart={} boot-complete\n\n[Install]\nWantedBy=multi-user.target\n",
+         [Service]\nType=oneshot\nExecStart={} boot-complete\n",
         archix.display()
     );
     let health = format!(
@@ -82,7 +82,11 @@ pub fn boot_files(archix: &Path) -> Vec<(PathBuf, String)> {
         crate::secrets::MANIFEST,
         archix.display()
     );
-    let bless = format!("[Service]\nExecStartPre=-{} bless\n", archix.display());
+    // Pulled in by the blessing, never by a target: multi-user.target would be ordered after it, and it comes after the default target.
+    let bless = format!(
+        "[Unit]\nWants=archix-boot-complete.service\n\n[Service]\nExecStartPre=-{} bless\n",
+        archix.display()
+    );
     let unblessed = format!(
         "[Unit]\nDescription=archix: reboot a counted boot that's stuck, so it can fall back\nDefaultDependencies=no\n\n\
          [Service]\nType=oneshot\nExecStart={} unblessed\nStandardOutput=journal+console\n",
@@ -133,7 +137,6 @@ pub fn boot_wants() -> Vec<(PathBuf, String)> {
     [
         ("sysinit.target.wants", "archix-boot.service"),
         ("sysinit.target.wants", SECRETS_UNIT),
-        ("multi-user.target.wants", "archix-boot-complete.service"),
         ("boot-complete.target.requires", HEALTH_UNIT),
         ("sysinit.target.wants", UNBLESSED_TIMER),
     ]

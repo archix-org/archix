@@ -498,9 +498,10 @@ fn services(change: &SystemChange) -> Vec<String> {
                 || path.starts_with(&format!("/etc/systemd/system/{unit}.d/"))
         });
         let newly = change.from.services.get(unit) != Some(&true);
+        let never = change.to.restart_if_changed.get(unit) == Some(&false);
         if newly && !active(unit) {
             systemctl(&["start", unit], &mut failures);
-        } else if rewritten {
+        } else if rewritten && !never {
             systemctl(&["try-restart", unit], &mut failures);
         }
     }

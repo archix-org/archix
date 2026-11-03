@@ -3,7 +3,7 @@
 set -euo pipefail
 suite=${SUITE:-boot}
 archive=${ARCHIVE:-https://archive.archlinux.org}
-dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl) archix=/work/archix
+dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl git e2fsprogs) archix=/work/archix
 # The rollback suite starts at an older snapshot and rolls glibc back, so archix itself must not need the build host's glibc.
 if [ "$suite" = rollback ]; then
   dir=/vm/rollback date=2026-06-01 size=16G packages=(base linux mkinitcpio systemd-ukify devtools) archix=/work/archix-static

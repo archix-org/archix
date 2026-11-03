@@ -1713,6 +1713,9 @@ pub fn boot_check() -> Result<()> {
     if let Err(e) = system::sleep::sync(&paths.root) {
         println!("archix: couldn't update the hibernation guard: {e:#}");
     }
+    if let Err(e) = system::menu::adopt(&paths) {
+        println!("archix: couldn't move the boot menu's state into @archix: {e:#}");
+    }
     if let Some(entry) = system::boot::tampered_selected_entry() {
         system::boot::add_login_note(
             &paths,
@@ -1721,9 +1724,6 @@ pub fn boot_check() -> Result<()> {
                 system::boot::entry_record(&paths, &entry).display()
             ),
         );
-    }
-    if let Err(e) = system::menu::adopt(&paths) {
-        println!("archix: couldn't move the boot menu's state into @archix: {e:#}");
     }
     if let Err(e) = record_failed_entries(&paths) {
         println!("archix: couldn't record which snapshot entries failed: {e:#}");

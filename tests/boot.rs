@@ -498,6 +498,7 @@ fn the_boot_units_verify_without_ordering_cycles() {
             "/etc/systemd/system/archix-boot.service",
             "/etc/systemd/system/archix-health-check.service",
             "/etc/systemd/system/archix-boot-complete.service",
+            "/usr/lib/systemd/system/systemd-bless-boot.service",
             "/usr/lib/systemd/system/boot-complete.target",
             "/usr/lib/systemd/system/multi-user.target",
             "/usr/lib/systemd/system/graphical.target",
