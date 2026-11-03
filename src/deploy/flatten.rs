@@ -173,22 +173,7 @@ fn copy_dir_meta(meta: &Path, times: &fs::Metadata, dir: &Path) -> Result<()> {
     set_times(dir, times)
 }
 
-/// Gives `path` the access and modification times of `like`.
-pub fn set_times(path: &Path, like: &fs::Metadata) -> Result<()> {
-    let spec = |sec: i64, nsec: i64| libc::timespec {
-        tv_sec: sec as libc::time_t,
-        tv_nsec: nsec as _,
-    };
-    let times = [
-        spec(like.atime(), like.atime_nsec()),
-        spec(like.mtime(), like.mtime_nsec()),
-    ];
-    let c = c_path(path)?;
-    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("setting {}'s times", path.display()));
-    }
-    Ok(())
-}
+pub use crate::system::capabilities::set_times;
 
 #[cfg(test)]
 mod tests {

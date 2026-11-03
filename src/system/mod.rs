@@ -1,3 +1,4 @@
+pub mod accounts;
 pub mod activate;
 pub mod apply;
 pub mod authenticode;
@@ -21,6 +22,7 @@ pub mod revoke;
 pub mod secureboot;
 pub mod sleep;
 pub mod usr_local;
+pub mod xattr;
 
 use std::collections::BTreeMap;
 use std::fs;

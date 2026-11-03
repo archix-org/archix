@@ -1,6 +1,6 @@
 //! Carries /etc changes made between a switch's commit and the reboot into the deployment that boots next, three ways against the /etc both started from.
 
-pub mod accounts;
+pub use crate::system::accounts;
 pub mod ids;
 pub mod tree;
 pub mod watch;

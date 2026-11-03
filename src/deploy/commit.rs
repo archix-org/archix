@@ -1,10 +1,8 @@
-use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use super::{Staged, Store};
 use crate::durable;
@@ -170,27 +168,7 @@ impl Staged {
     }
 }
 
-pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
-    let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).context("path has a NUL byte");
-    let (c_from, c_to) = (c(from)?, c(to)?);
-    let done = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            c_from.as_ptr(),
-            libc::AT_FDCWD,
-            c_to.as_ptr(),
-            libc::RENAME_NOREPLACE,
-        )
-    };
-    if done != 0 {
-        let err = io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EEXIST) {
-            bail!("{} already exists", to.display());
-        }
-        return Err(err).with_context(|| format!("renaming {} to {}", from.display(), to.display()));
-    }
-    Ok(())
-}
+pub(crate) use crate::durable::rename_noreplace;
 
 #[cfg(test)]
 mod tests {

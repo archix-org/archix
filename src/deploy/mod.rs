@@ -10,7 +10,7 @@ pub mod stage;
 pub mod store;
 pub mod verify;
 pub mod view;
-pub mod xattr;
+pub use crate::system::xattr;
 
 pub use commit::{EspStep, SystemdBoot};
 pub use keep::Keep;

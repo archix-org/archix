@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::deploy::xattr;
+use crate::system::xattr;
 
 const XATTR: &CStr = c"security.capability";
 const REVISION_1: u32 = 0x0100_0000;
@@ -257,7 +257,7 @@ fn own_inode(path: &Path) -> Result<()> {
                 xattr::set(&tmp, &attr, &value)?;
             }
         }
-        crate::deploy::flatten::set_times(&tmp, &meta)?;
+        set_times(&tmp, &meta)?;
         fs::rename(&tmp, path)?;
         Ok(())
     })();
@@ -408,6 +408,24 @@ pub fn repair(
         if fs::symlink_metadata(&file).is_ok_and(|meta| meta.is_file()) {
             put(&file, want)?;
         }
+    }
+    Ok(())
+}
+
+/// Gives `path` the access and modification times of `like`.
+pub fn set_times(path: &Path, like: &fs::Metadata) -> Result<()> {
+    let spec = |sec: i64, nsec: i64| libc::timespec {
+        tv_sec: sec as libc::time_t,
+        tv_nsec: nsec as _,
+    };
+    let times = [
+        spec(like.atime(), like.atime_nsec()),
+        spec(like.mtime(), like.mtime_nsec()),
+    ];
+    let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .with_context(|| format!("{} has a NUL byte", path.display()))?;
+    if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err(std::io::Error::last_os_error()).with_context(|| format!("setting {}'s times", path.display()));
     }
     Ok(())
 }

@@ -210,7 +210,7 @@ impl Store {
             &tmp.join(GENERATION_FILE),
             serde_json::to_string_pretty(generation)?.as_bytes(),
         )?;
-        if let Err(e) = crate::deploy::commit::rename_noreplace(&tmp, &path) {
+        if let Err(e) = crate::durable::rename_noreplace(&tmp, &path) {
             let _ = fs::remove_dir_all(&tmp);
             if path.exists() {
                 return self.stored_already(generation);

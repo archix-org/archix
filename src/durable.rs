@@ -242,6 +242,29 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Renames `from` to `to`, failing if `to` exists.
+pub fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
+    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).context("path has a NUL byte");
+    let (c_from, c_to) = (c(from)?, c(to)?);
+    let done = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            c_from.as_ptr(),
+            libc::AT_FDCWD,
+            c_to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if done != 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EEXIST) {
+            anyhow::bail!("{} already exists", to.display());
+        }
+        return Err(err).with_context(|| format!("renaming {} to {}", from.display(), to.display()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
