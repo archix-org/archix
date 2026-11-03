@@ -135,9 +135,7 @@ pub fn forget(paths: &Paths, generation: u32) {
 pub fn run(paths: &Paths, rescue_entry: bool) {
     let read = |file: &str| fs::read_to_string(paths.root.join("etc").join(file)).unwrap_or_default();
     let found = unmounted(&paths.root, &read("fstab"), &read("crypttab"));
-    let counted = crate::testhooks::counted_boot()
-        .then(|| super::boot::booted_deployment(&paths.root))
-        .flatten();
+    let counted = crate::testhooks::counted_boot().then(super::boot::booted).flatten();
     println!();
     for line in hint(&found, counted, rescue_entry) {
         println!("{line}");

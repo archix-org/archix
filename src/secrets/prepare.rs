@@ -157,7 +157,6 @@ pub fn existing(
     previous: Option<&Manifest>,
     prepared: &Prepared,
     place: &dyn Fn(&str) -> Option<PathBuf>,
-    deployment: Option<u32>,
 ) -> Result<Vec<String>> {
     let had = previous.map(Manifest::links).unwrap_or_default();
     let mut lines = Vec::new();
@@ -172,8 +171,7 @@ pub fn existing(
         let what = secret_of(want, &path);
         if had.get(&path).is_some_and(|before| *before == target) {
             bail!(
-                "{path} should be a link to {what} but is a file{}; it holds plain text on disk. Move it away (archix keeps no copy of it) and switch again; nothing was changed",
-                deployment.map_or(String::new(), |n| format!(" in deployment {n}"))
+                "{path} should be a link to {what} but is a file; it holds plain text on disk. Move it away (archix keeps no copy of it) and switch again; nothing was changed"
             );
         }
         let wanted = wanted_value(want, &path, prepared)?;
@@ -427,31 +425,26 @@ mod tests {
             SecretBuf::from_slice(b"value-of-a-123456").unwrap(),
         ));
         fs::write(dir.path().join("etc/x"), "value-of-a-123456").unwrap();
-        let said = existing(&manifest, None, &prepared, &place, Some(3)).unwrap();
+        let said = existing(&manifest, None, &prepared, &place).unwrap();
         assert!(
             said[0].contains("replacing  /etc/x") && !said[0].contains("value-of"),
             "{said:?}"
         );
         fs::write(dir.path().join("etc/x"), "something else").unwrap();
-        let error = existing(&manifest, None, &prepared, &place, Some(3))
-            .unwrap_err()
-            .to_string();
+        let error = existing(&manifest, None, &prepared, &place).unwrap_err().to_string();
         assert!(error.contains("holds something other than secret a"), "{error}");
-        let error = existing(&manifest, Some(&manifest), &prepared, &place, Some(3))
+        let error = existing(&manifest, Some(&manifest), &prepared, &place)
             .unwrap_err()
             .to_string();
-        assert!(
-            error.contains("should be a link to secret a but is a file in deployment 3"),
-            "{error}"
-        );
-        let error = existing(&manifest, None, &Prepared::default(), &place, None)
+        assert!(error.contains("should be a link to secret a but is a file;"), "{error}");
+        let error = existing(&manifest, None, &Prepared::default(), &place)
             .unwrap_err()
             .to_string();
         assert!(error.contains("can't compare them here"), "{error}");
         fs::remove_file(dir.path().join("etc/x")).unwrap();
         std::os::unix::fs::symlink("/run/archix/secrets/a", dir.path().join("etc/x")).unwrap();
         assert!(
-            existing(&manifest, Some(&manifest), &Prepared::default(), &place, None)
+            existing(&manifest, Some(&manifest), &Prepared::default(), &place)
                 .unwrap()
                 .is_empty()
         );

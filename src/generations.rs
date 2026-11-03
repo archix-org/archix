@@ -38,10 +38,7 @@ pub struct Generation {
     /// Flatpak apps this generation pinned, by id.
     #[serde(default)]
     pub flatpak: BTreeMap<String, crate::flatpak::LockedApp>,
-    /// The system as the first switch found it, laid out as deployment 1; its packages have no locked files, so it can't be rebuilt once dropped.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub before_archix: bool,
-    /// The capabilities each file whose capabilities this deployment declares or gave back had as its package left it, as getcap prints them, empty for none; written by the build, so not part of the system it describes.
+    /// The capabilities each file whose capabilities this generation declares or gave back had as its package left it, as getcap prints them, empty for none; written by the apply, so not part of the system it describes.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub package_capabilities: BTreeMap<String, String>,
 }
@@ -53,19 +50,12 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
-    /// How many deployments gc keeps besides the booted, current and boot-default ones.
-    #[serde(default = "default_deployments_keep")]
-    pub deployments_keep: u32,
-    /// How the generation's boot entry is built, so changing it makes a new generation and a rebuild builds the same entry.
+    /// The boot.* settings, recorded for stage 3's entries; nothing acts on them yet.
     #[serde(default)]
     pub boot: Option<crate::system::boot::BootPlan>,
     /// The config's `rollback` table, which a rollback away from this generation snapshots and prunes by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback: Option<crate::snapshot::Policy>,
-}
-
-fn default_deployments_keep() -> u32 {
-    2
 }
 
 impl Generation {
@@ -93,14 +83,6 @@ impl Generation {
 pub struct Store {
     dir: PathBuf,
     current: PathBuf,
-}
-
-/// Writes a deployment's own copy of its record into its tree before the commit, which the store takes back if a crash came between the commit and saving the record.
-pub fn write_into(deployment: &Path, generation: &Generation) -> Result<()> {
-    crate::durable::write(
-        &deployment.join(GENERATION_FILE),
-        serde_json::to_string_pretty(generation)?.as_bytes(),
-    )
 }
 
 impl Store {
@@ -297,7 +279,6 @@ pub fn config_commit(config_dir: &Path) -> Option<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::symlink;
 
     fn generation(number: u32, created: u64) -> Generation {
         Generation {
@@ -312,7 +293,6 @@ mod tests {
                 ignored: vec![],
                 keep: 10,
                 keep_days: 30,
-                deployments_keep: 2,
                 boot: None,
                 rollback: None,
             },
@@ -321,32 +301,12 @@ mod tests {
             applied: None,
             system: SystemState::default(),
             flatpak: BTreeMap::new(),
-            before_archix: false,
             package_capabilities: BTreeMap::new(),
         }
     }
 
     #[test]
-    fn a_record_lost_after_its_deployment_was_committed_comes_back_from_the_deployment() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Store::new(&Paths::under(dir.path()));
-        store.save(&generation(1, 1)).unwrap();
-        let deployment = dir.path().join("archix/deploy/2");
-        fs::create_dir_all(&deployment).unwrap();
-        write_into(&deployment, &generation(2, 2)).unwrap();
-        let staged = dir.path().join("archix/deploy/.staging-3");
-        fs::create_dir_all(&staged).unwrap();
-        write_into(&staged, &generation(3, 3)).unwrap();
-        let numbers: Vec<u32> = store.list().unwrap().iter().map(|g| g.number).collect();
-        assert_eq!(numbers, [1, 2], "an uncommitted staging tree's record isn't taken");
-        assert!(store.path(2).is_dir(), "the store keeps it from now on");
-        fs::remove_dir_all(store.path(2)).unwrap();
-        assert_eq!(store.get(2).unwrap().number, 2);
-        assert!(store.get(3).is_err());
-    }
-
-    #[test]
-    fn the_current_generation_is_the_current_deployment() {
+    fn the_current_generation_is_the_number_in_its_file_and_needs_a_record() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(&Paths::under(dir.path()));
         assert_eq!(store.current().unwrap(), None);
@@ -360,14 +320,17 @@ mod tests {
         assert!(!dir.path().join("var/lib/archix/generations/.new-5-999999999").exists());
         store.delete(5).unwrap();
         assert_eq!(store.next_number().unwrap(), 5);
-        fs::create_dir_all(dir.path().join("archix")).unwrap();
-        symlink("deploy/4", dir.path().join("archix/current")).unwrap();
+        assert!(
+            store.set_current(5).is_err(),
+            "a generation without a record can't be current"
+        );
+        store.set_current(4).unwrap();
         assert_eq!(store.current().unwrap(), Some(4));
+        assert_eq!(store.list().unwrap().len(), 2, "the current file isn't a record");
         assert!(store.delete(4).is_err(), "the current generation is protected");
         store.delete(1).unwrap();
         assert_eq!(store.list().unwrap().len(), 1);
-        fs::remove_file(dir.path().join("archix/current")).unwrap();
-        symlink("generations/4", dir.path().join("archix/current")).unwrap();
+        fs::write(dir.path().join("var/lib/archix/generations/current"), "deploy/4\n").unwrap();
         assert!(store.current().is_err());
     }
 

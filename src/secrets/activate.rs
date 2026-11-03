@@ -19,7 +19,6 @@ use crate::system::apply::Accounts;
 /// What the boot's step did, for `archix status`: in /run, so it lasts until shutdown.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Report {
-    pub deployment: Option<u32>,
     /// Secrets written, by name.
     pub written: Vec<String>,
     /// Secrets left out, with why.
@@ -203,13 +202,10 @@ fn ids(accounts: &Accounts, owner: &str, group: &str) -> Option<(u32, u32)> {
     Some((uid, gid))
 }
 
-/// Decrypts the secrets of the deployment booted at `root` into its ramfs and shadow, naming each one it couldn't; Err only when nothing could be done at all.
+/// Decrypts the secrets the root at `root` declares into its ramfs and shadow, naming each one it couldn't; Err only when nothing could be done at all.
 pub fn activate(root: &Path) -> Result<Report> {
     let paths = Paths::under(root);
-    let mut report = Report {
-        deployment: crate::system::boot::booted_deployment(root),
-        ..Report::default()
-    };
+    let mut report = Report::default();
     let Some(manifest) = Manifest::read(root) else {
         return Ok(report);
     };

@@ -7,11 +7,8 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
-use archix::deploy;
 use archix::paths::Paths;
 use archix::system::{boot, password, rescue, rescue_auth};
-
-use super::confirm;
 
 /// Where the rescue boot mounts the root, and the ESP when the root can't say where it goes.
 const ROOT_MOUNT: &str = "/run/archix-rescue/root";
@@ -20,9 +17,6 @@ const ESP_MOUNT: &str = "/run/archix-rescue/esp";
 const LOGIN_MOUNT: &str = "/run/archix-rescue/login";
 /// The name an encrypted root opens as when the kernel command line names none.
 const LUKS_NAME: &str = "rescue-root";
-
-/// Account files that hold the machine's users, which restoring the packaged copy would wipe.
-const ACCOUNTS: &[&str] = &["passwd", "shadow", "group", "gshadow"];
 
 #[derive(Args, Debug, Default, Clone)]
 pub struct Options {
@@ -45,51 +39,14 @@ pub struct Options {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Action {
-    /// List the deployments: which one is current and the boot default, and how each one's boot entry stands
-    List,
-    /// Make deployment N current and the boot default, restoring files that differ from its packages first, as `archix rollback N` does
-    Use { deployment: u32 },
     /// Check and repair the root filesystem and the ESP with fsck; unmounts them first
     Check {
         /// On btrfs, repair with `btrfs check --repair`, which can make some damage worse; by default btrfs is only checked
         #[arg(long)]
         repair_btrfs: bool,
     },
-    /// Check deployments' /usr, /opt and /boot against their packages, as `archix verify` does
-    Verify {
-        /// Restore what differs from the package cache
-        #[arg(long)]
-        repair: bool,
-        /// Only these deployments
-        deployments: Vec<u32>,
-    },
-    /// Set USER's password in a deployment's /etc (current's by default), read twice from the console
-    Password {
-        user: String,
-        #[arg(long, conflicts_with = "all")]
-        deployment: Option<u32>,
-        /// In every deployment
-        #[arg(long)]
-        all: bool,
-    },
-    /// Put a packaged /etc file, such as a PAM or sudo config, back as its package ships it
-    RestoreEtc {
-        /// Such as /etc/pam.d/system-auth or /etc/sudoers
-        path: String,
-        #[arg(long, conflicts_with = "all")]
-        deployment: Option<u32>,
-        /// In every deployment
-        #[arg(long)]
-        all: bool,
-    },
-    /// Make a deployment (current by default) the root's own trees, plain Arch without archix, as `archix eject` does
-    Eject {
-        #[arg(long)]
-        deployment: Option<u32>,
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-    },
+    /// Set USER's password in the root's /etc, read twice from the console
+    Password { user: String },
     /// Open a LUKS volume with its passphrase as /dev/mapper/NAME; never with a TPM, FIDO2 or PKCS#11 token
     Open {
         device: String,
@@ -115,15 +72,10 @@ struct Line {
 }
 
 const HELP: &str = "\
-  list                         the deployments, which one is current, how each boot entry stands
-  use N                        make deployment N current and the boot default, after checking its files
   check [--repair-btrfs]       check and repair the root filesystem and the ESP
-  verify [--repair] [N...]     check the deployments' files against their packages; --repair restores them
-  password USER [--all]        set USER's password in the current deployment's /etc (--deployment N, or all)
-  restore-etc PATH [--all]     put a packaged /etc file (PAM, sudoers) back as its package ships it
-  eject [--deployment N]       make the current deployment plain Arch, without archix
+  password USER                set USER's password in the root's /etc
   open DEVICE [NAME]           open a LUKS volume with its passphrase as /dev/mapper/NAME (never with a TPM)
-  shell                        a shell; each deployment's /etc is under /run/archix-rescue/root/archix/deploy/N/etc
+  shell                        a shell; the root is under /run/archix-rescue/root
   reboot, poweroff
   Before a command: --root DEVICE [--rootflags OPTIONS] for another root, such as /dev/mapper/NAME after `open`";
 
@@ -143,7 +95,7 @@ fn cmdline_value(key: &str) -> Option<String> {
 }
 
 fn mount_points() -> Vec<PathBuf> {
-    deploy::view::mount_points(&fs::read("/proc/self/mountinfo").unwrap_or_default())
+    archix::conflicts::mount_points()
 }
 
 fn is_mount_point(path: &Path) -> bool {
@@ -304,10 +256,11 @@ fn unmount(dir: &Path) -> Result<()> {
 
 /// Remounts the filesystem at `dir` read-write when it's mounted read-only, as the busybox initramfs mounts the root.
 fn writable(dir: &Path) -> Result<()> {
-    if !archix::system::deploy_boot::read_only(dir) {
+    let c_dir = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_dir.as_ptr(), &mut stat) } != 0 || stat.f_flag & libc::ST_RDONLY == 0 {
         return Ok(());
     }
-    let c_dir = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())?;
     if unsafe {
         libc::mount(
             std::ptr::null(),
@@ -420,25 +373,18 @@ impl Session {
                 dir
             }
         };
-        let found = (|| {
-            let store = deploy::Store::open(&mounted)?;
-            let current = store
-                .current()?
-                .context("there's no current deployment, so no /etc/shadow to check a login against")?;
-            let accounts = rescue_auth::accounts(&store.path(current).join("etc"))?;
-            Ok::<_, anyhow::Error>((current, accounts))
-        })();
+        let found = rescue_auth::accounts(&mounted.join("etc"));
         if self.options.root_dir.is_none() {
             let _ = unmount(Path::new(LOGIN_MOUNT));
         }
-        let (current, accounts) = found.map_err(|e| {
+        let accounts = found.map_err(|e| {
             e.context(format!(
                 "the rescue stays closed; recover from a live USB: {}",
                 rescue_auth::GUIDE
             ))
         })?;
         if accounts.is_empty() {
-            bail!("{}", rescue_auth::refusal(current));
+            bail!("{}", rescue_auth::refusal());
         }
         let user = rescue_auth::login(
             &accounts,
@@ -481,13 +427,12 @@ impl Session {
                 dir
             }
         };
-        if !dir.join("archix").is_dir() {
+        if !dir.join("etc/passwd").is_file() {
             bail!(
-                "{} has no /archix, so it isn't an archix root (on btrfs, is the subvolume in --rootflags, such as subvol=@?)",
+                "{} has no /etc/passwd, so it isn't a root (on btrfs, is the subvolume in --rootflags, such as subvol=@?)",
                 dir.display()
             );
         }
-        archix::system::deploy_boot::writable_store(&dir)?;
         Ok(dir)
     }
 
@@ -516,31 +461,6 @@ impl Session {
         }
     }
 
-    /// The ESP, mounted.
-    fn esp(&self) -> Result<PathBuf> {
-        if let Some(dir) = &self.options.esp_dir {
-            return Ok(dir.clone());
-        }
-        let target = self.esp_target();
-        if self.options.root_dir.is_some() && self.options.esp.is_none() {
-            if target.join("loader").is_dir() {
-                return Ok(target);
-            }
-            bail!("mount the ESP at {}, or pass --esp-dir", target.display());
-        }
-        if is_mount_point(&target) {
-            return Ok(target);
-        }
-        let device = self.esp_device()?;
-        run_mount(&device, &target, "vfat", "umask=0077").with_context(|| {
-            format!(
-                "the ESP on {} doesn't mount; `check` checks and repairs it",
-                device.display()
-            )
-        })?;
-        Ok(target)
-    }
-
     /// Unmounts what the rescue mounted, the ESP first.
     fn unmount_all(&self) -> Result<()> {
         if self.options.root_dir.is_some() {
@@ -554,21 +474,8 @@ impl Session {
 
     pub fn run(&mut self, action: Action) -> Result<()> {
         match action {
-            Action::List => self.list(),
-            Action::Use { deployment } => self.use_deployment(deployment),
             Action::Check { repair_btrfs } => self.check(repair_btrfs),
-            Action::Verify { repair, deployments } => {
-                let root = self.root()?;
-                super::deployments::verify_in(
-                    &Paths::under(&root),
-                    repair,
-                    &deployments,
-                    "archix rescue verify --repair",
-                )
-            }
-            Action::Password { user, deployment, all } => self.password(&user, deployment, all),
-            Action::RestoreEtc { path, deployment, all } => self.restore_etc(&path, deployment, all),
-            Action::Eject { deployment, noconfirm } => self.eject(deployment, noconfirm),
+            Action::Password { user } => self.password(&user),
             Action::Open { device, name } => {
                 let mapped = open_luks(&resolve(&device)?, &name)?;
                 println!("opened {device} as {}", mapped.display());
@@ -581,120 +488,6 @@ impl Session {
     }
 
     /// The deployments `deployment` and `all` pick, current's by default.
-    fn targets(&self, store: &deploy::Store, deployment: Option<u32>, all: bool) -> Result<Vec<u32>> {
-        let kept = store.deployments()?;
-        let picked = match (deployment, all) {
-            (_, true) => kept.clone(),
-            (Some(number), false) => vec![number],
-            (None, false) => vec![
-                store
-                    .current()?
-                    .context("there's no current deployment; name one with --deployment")?,
-            ],
-        };
-        if let Some(missing) = picked.iter().find(|n| !kept.contains(n)) {
-            bail!("there's no complete deployment {missing}; `list` shows them");
-        }
-        Ok(picked)
-    }
-
-    fn list(&self) -> Result<()> {
-        let root = self.root()?;
-        let paths = Paths::under(&root);
-        let store = deploy::Store::open(&root)?;
-        let esp = match self.esp() {
-            Ok(esp) => Some(esp),
-            Err(e) => {
-                println!("the ESP: {e:#}");
-                None
-            }
-        };
-        let conf = esp
-            .as_ref()
-            .and_then(|esp| fs::read_to_string(esp.join("loader/loader.conf")).ok())
-            .unwrap_or_default();
-        let default = deploy::keep::boot_default(&conf);
-        let current = store.current().unwrap_or_else(|e| {
-            println!("{e:#}");
-            None
-        });
-        let records = archix::generations::Store::new(&paths);
-        let committed = store.deployments()?;
-        println!(
-            "the root: {} ({})",
-            root.display(),
-            mount_source(&root).unwrap_or_else(|| "mounted".to_string())
-        );
-        if committed.is_empty() {
-            println!("no complete deployment is left; `shell` to look around");
-        }
-        for number in committed.iter().rev() {
-            let mut marks = Vec::new();
-            if current == Some(*number) {
-                marks.push("current");
-            }
-            if default == Some(*number) {
-                marks.push("boot default");
-            }
-            let entry = match esp.as_deref().map(|esp| rescue::entry_state(&paths, esp, *number)) {
-                None => "entry unknown".to_string(),
-                Some(rescue::EntryState::Missing) => "no boot entry".to_string(),
-                Some(rescue::EntryState::NotBooted) => "never booted".to_string(),
-                Some(rescue::EntryState::Good) => "booted fine".to_string(),
-                Some(rescue::EntryState::Counting(left)) => format!("new, {left} boot tries left"),
-                Some(rescue::EntryState::Bad) => "failed its boot tries".to_string(),
-            };
-            let generation = records.get(*number).ok();
-            let kernel = generation
-                .as_ref()
-                .and_then(|g| g.settings.boot.as_ref())
-                .and_then(|plan| boot::owned_version(&store.path(*number).join("pacman"), &plan.kernel))
-                .or_else(|| {
-                    boot::kernels_in(&store.path(*number).join("pacman"))
-                        .into_iter()
-                        .next()
-                        .map(|(_, version)| version)
-                })
-                .unwrap_or_else(|| "none".to_string());
-            let made = generation.map_or(String::new(), |g| {
-                format!(", made {}", archix::date::Date::from_unix(g.created))
-            });
-            println!(
-                "{} deployment {number:<4} {:<22} {entry}, kernel {kernel}{made}",
-                if current == Some(*number) { "*" } else { " " },
-                marks.join(", ")
-            );
-        }
-        if let Some(esp) = &esp {
-            println!("{}", rescue::describe(&paths, esp));
-        }
-        Ok(())
-    }
-
-    fn use_deployment(&self, number: u32) -> Result<()> {
-        let root = self.root()?;
-        let esp = self.esp()?;
-        let paths = Paths::under(&root);
-        let store = deploy::Store::open(&root)?;
-        if !store.deployments()?.contains(&number) {
-            bail!("there's no complete deployment {number}; `list` shows them");
-        }
-        if rescue::entry_state(&paths, &esp, number) == rescue::EntryState::Missing {
-            return rollback_in_chroot(&root, &esp, number);
-        }
-        let _lock = store.lock()?;
-        deploy::verify::ensure_intact(&paths, &store, number)
-            .with_context(|| format!("deployment {number} stays as it was; `verify {number}` shows what differs"))?;
-        if boot::retry_entry(&esp, number)? {
-            println!("deployment {number}'s entry had used up its boot tries; it gets them again");
-        }
-        boot::repoint(&paths, &esp, &store, number, &|| {
-            bail!("deployment {number}'s entry names no UKI on the ESP")
-        })?;
-        println!("deployment {number} is current and the boot default; `reboot` starts it");
-        Ok(())
-    }
-
     fn check(&self, repair_btrfs: bool) -> Result<()> {
         if self.options.root_dir.is_some() {
             bail!("check needs the root and the ESP unmounted; unmount them and pass --root DEVICE and --esp DEVICE");
@@ -730,10 +523,8 @@ impl Session {
         Ok(())
     }
 
-    fn password(&self, user: &str, deployment: Option<u32>, all: bool) -> Result<()> {
+    fn password(&self, user: &str) -> Result<()> {
         let root = self.root()?;
-        let store = deploy::Store::open(&root)?;
-        let targets = self.targets(&store, deployment, all)?;
         let first = read_password(&format!("new password for {user}: "))?;
         if first.is_empty() {
             bail!("the password is empty; nothing was changed");
@@ -742,14 +533,11 @@ impl Session {
             bail!("the passwords differ; nothing was changed");
         }
         let hash = password::sha512_crypt(first.as_bytes(), &password::salt()?);
-        for number in &targets {
-            password::set(&store.path(*number).join("etc"), user, &hash)
-                .with_context(|| format!("setting {user}'s password in deployment {number}"))?;
-            println!("set {user}'s password in deployment {number}");
-        }
+        password::set(&root.join("etc"), user, &hash).with_context(|| format!("setting {user}'s password"))?;
+        println!("set {user}'s password");
         let paths = Paths::under(&root);
         let records = archix::generations::Store::new(&paths);
-        let generation = store.current()?.and_then(|current| records.get(current).ok());
+        let generation = records.current()?.and_then(|current| records.get(current).ok());
         let declared = generation
             .as_ref()
             .and_then(|generation| generation.system.users.get(user)?.hashed_password.clone());
@@ -786,51 +574,6 @@ impl Session {
         Ok(())
     }
 
-    fn restore_etc(&self, path: &str, deployment: Option<u32>, all: bool) -> Result<()> {
-        let rel = path.trim_start_matches('/').trim_start_matches("etc/");
-        if ACCOUNTS.contains(&rel) {
-            bail!(
-                "/etc/{rel} holds this machine's users and groups, which the packaged copy would wipe; `password` resets a password"
-            );
-        }
-        let root = self.root()?;
-        let paths = Paths::under(&root);
-        let store = deploy::Store::open(&root)?;
-        for number in self.targets(&store, deployment, all)? {
-            let package = deploy::verify::restore_etc(&paths, &store.path(number), rel)
-                .with_context(|| format!("deployment {number}"))?;
-            println!("restored /etc/{rel} in deployment {number} as {package} ships it");
-        }
-        Ok(())
-    }
-
-    fn eject(&self, deployment: Option<u32>, noconfirm: bool) -> Result<()> {
-        let root = self.root()?;
-        let esp = self.esp()?;
-        let paths = Paths::under(&root);
-        let store = deploy::Store::open(&root)?;
-        let number = match deployment {
-            Some(number) => number,
-            None => store
-                .current()?
-                .context("there's no current deployment; name one with --deployment")?,
-        };
-        println!(
-            "eject: deployment {number} becomes the root's own /usr, /etc, /opt, /boot and pacman database, the ESP boots it through a plain UKI, and /archix with every deployment goes; packages, users, /var and homes stay"
-        );
-        if !noconfirm && !confirm("eject?")? {
-            bail!("aborted; nothing was changed");
-        }
-        let written = deploy::eject::offline(&paths, Some(number), &esp).map_err(|e| {
-            e.context("the eject stopped partway; the deployments still boot, and `eject` again finishes it")
-        })?;
-        for line in written {
-            println!("boot: {line}");
-        }
-        println!("the machine is plain Arch now; `reboot` starts it");
-        Ok(())
-    }
-
     fn shell(&self) -> Result<()> {
         let dir = match self.options.root_dir.clone() {
             Some(dir) => dir,
@@ -855,38 +598,6 @@ impl Session {
         unsafe { libc::reboot(how) };
         Err(io::Error::last_os_error()).context("restarting")
     }
-}
-
-/// For a deployment whose boot entry is gone, as after the ESP was wiped: binds it over `root` as `archix mount-deployment` does and runs its own `archix rollback` chrooted there, which builds its entry, default and fallback, as the live-USB recovery does.
-fn rollback_in_chroot(root: &Path, esp: &Path, number: u32) -> Result<()> {
-    if !esp.starts_with(root) {
-        bail!(
-            "deployment {number} has no boot entry, and building one needs the ESP mounted under the root, not at {}",
-            esp.display()
-        );
-    }
-    println!("deployment {number} has no boot entry; building it from the deployment, chrooted into it");
-    archix::system::deploy_boot::mount_for_chroot(root, Some(number))?;
-    archix::deploy::eject::mount_api_filesystems(root)?;
-    let c_root = std::ffi::CString::new(root.as_os_str().as_encoded_bytes())?;
-    let mut rollback = Command::new(archix::integration::STATIC_BINARY);
-    rollback
-        .args(["rollback", &number.to_string(), "--noconfirm"])
-        .env_remove("ARCHIX_TEST_ROOT");
-    unsafe {
-        std::os::unix::process::CommandExt::pre_exec(&mut rollback, move || {
-            if libc::chroot(c_root.as_ptr()) != 0 || libc::chdir(c"/".as_ptr()) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    let status = rollback.status().context("running archix rollback in the deployment")?;
-    if !status.success() {
-        bail!("`archix rollback {number}` in deployment {number} failed ({status}); its output is above");
-    }
-    println!("deployment {number} is current and the boot default with a new entry; `reboot` starts it");
-    Ok(())
 }
 
 /// Checks and repairs the filesystem on `device`, which must not be mounted.
@@ -986,10 +697,7 @@ pub fn run(options: Options, action: Option<Action>) -> Result<()> {
 fn prompt(session: &mut Session) -> Result<()> {
     // A handler, not SIG_IGN, which children would keep: Ctrl-C stops what runs, not the prompt.
     unsafe { libc::signal(libc::SIGINT, ignore as *const () as libc::sighandler_t) };
-    println!("\narchix rescue: this boot mounts no deployment. Commands:\n{HELP}\n");
-    if let Err(e) = session.list() {
-        println!("error: {e:#}");
-    }
+    println!("\narchix rescue: this boot doesn't mount the root. Commands:\n{HELP}\n");
     let stdin = io::stdin();
     loop {
         print!("rescue> ");
@@ -1032,20 +740,14 @@ mod tests {
 
     #[test]
     fn prompt_lines_parse_as_rescue_commands() {
-        let line = Line::try_parse_from(["use", "3"]).unwrap();
-        assert!(matches!(line.action, Some(Action::Use { deployment: 3 })));
-        let line = Line::try_parse_from(["--root", "/dev/mapper/root", "list"]).unwrap();
+        let line = Line::try_parse_from(["--root", "/dev/mapper/root", "check"]).unwrap();
         assert_eq!(line.options.root.as_deref(), Some("/dev/mapper/root"));
-        assert!(matches!(line.action, Some(Action::List)));
-        let line = Line::try_parse_from(["password", "alice", "--all"]).unwrap();
-        assert!(
-            matches!(line.action, Some(Action::Password { ref user, all: true, deployment: None }) if user == "alice")
-        );
-        assert!(Line::try_parse_from(["password", "alice", "--all", "--deployment", "2"]).is_err());
-        let line = Line::try_parse_from(["verify", "--repair", "1", "2"]).unwrap();
-        assert!(
-            matches!(line.action, Some(Action::Verify { repair: true, ref deployments }) if deployments == &[1, 2])
-        );
+        assert!(matches!(line.action, Some(Action::Check { repair_btrfs: false })));
+        let line = Line::try_parse_from(["password", "alice"]).unwrap();
+        assert!(matches!(line.action, Some(Action::Password { ref user }) if user == "alice"));
+        for gone in ["list", "use", "verify", "restore-etc", "eject"] {
+            assert!(Line::try_parse_from([gone]).is_err(), "{gone}");
+        }
         assert!(Line::try_parse_from(["frobnicate"]).is_err());
     }
 

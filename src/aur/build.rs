@@ -524,7 +524,7 @@ impl Builder<'_> {
         Ok(files)
     }
 
-    /// Builds with makepkg as the build user in a throwaway view staged from the current deployment, with the missing build dependencies installed only there; a system not laid out yet builds live.
+    /// Builds with makepkg as the build user on the root itself, with the missing build dependencies installed for the build and removed again.
     fn build_on_host(
         &self,
         dir: &Path,
@@ -536,129 +536,10 @@ impl Builder<'_> {
     ) -> Result<()> {
         let mut deps: BTreeSet<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
         deps.extend(info.packages.iter().flat_map(|pkg| pkg.depends.iter().cloned()));
-        if !crate::deploy::layout::laid_out(&self.paths.root) {
-            return self.build_live(dir, &deps, date, repos, inputs, nocheck);
-        }
-        let store = crate::deploy::Store::open(&self.paths.root)?;
-        let current = store.current()?.context("there's no current deployment to build on")?;
-        let staging = crate::deploy::Staging::scratch(&store, current)?;
-        let built = self.build_in_view(&staging, dir, &deps, date, repos, inputs, nocheck);
-        let discarded = staging.discard();
-        built.and(discarded)
+        self.build_live(dir, &deps, date, repos, inputs, nocheck)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn build_in_view(
-        &self,
-        staging: &crate::deploy::Staging,
-        dir: &Path,
-        deps: &BTreeSet<String>,
-        date: Date,
-        repos: &[String],
-        inputs: &[PathBuf],
-        nocheck: bool,
-    ) -> Result<()> {
-        let mut binds = vec![(dir.to_path_buf(), dir.to_path_buf())];
-        for live in [self.keyring(), PathBuf::from("/run/systemd/resolve")] {
-            if live.is_dir() {
-                binds.push((live.clone(), live));
-            }
-        }
-        let tx = staging.transaction_with(&binds)?;
-        let in_view = |argv: &[String]| -> Result<std::process::Output> {
-            tx.command(&argv[0])
-                .args(&argv[1..])
-                .env(TRANSACTION_ENV, "1")
-                .output()
-                .with_context(|| format!("running {} in the build view", argv[0]))
-        };
-        let succeeds = |argv: &[String]| -> Result<()> {
-            let output = in_view(argv)?;
-            if !output.status.success() {
-                bail!(
-                    "{} failed in the build view: {}",
-                    argv.join(" "),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-            Ok(())
-        };
-        let args = |parts: &[&str]| -> Vec<String> { parts.iter().map(|part| part.to_string()).collect() };
-        let dir_text = dir.to_str().context("the build directory isn't UTF-8")?;
-        if !in_view(&args(&["id", "-u", BUILD_USER]))?.status.success() {
-            let (uid, gid) = (live_id("-u")?, live_id("-g")?);
-            let _ = in_view(&args(&["groupadd", "--system", "--gid", &gid, BUILD_USER]))?;
-            let user = [
-                "useradd",
-                "--system",
-                "--no-create-home",
-                "--shell",
-                "/usr/bin/nologin",
-                "--gid",
-                BUILD_USER,
-            ];
-            if !in_view(&args(&[&user[..], &["--uid", &uid, BUILD_USER]].concat()))?
-                .status
-                .success()
-            {
-                succeeds(&args(&[&user[..], &[BUILD_USER]].concat()))?;
-            }
-        }
-        succeeds(&args(&["chown", "-R", &format!("{BUILD_USER}:"), dir_text]))?;
-        let mut test = args(&["pacman", "-T"]);
-        test.extend(deps.iter().cloned());
-        let missing: Vec<String> = String::from_utf8_lossy(&in_view(&test)?.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect();
-        let installed = crate::pacman::read_local_db(&staging.tree("pacman"))?;
-        let files = self.build_inputs(&missing, &installed, date, repos, inputs)?;
-        if !files.is_empty() {
-            let output = tx
-                .pacman()?
-                .args(["-U", "--noconfirm", "--needed", "--asdeps"])
-                .args(&files)
-                .env(TRANSACTION_ENV, "1")
-                .output()
-                .context("running pacman -U in the build view")?;
-            if !output.status.success() {
-                bail!(
-                    "pacman -U failed in the build view: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-        }
-        let mut makepkg = args(&[
-            "setpriv",
-            "--reuid",
-            BUILD_USER,
-            "--regid",
-            BUILD_USER,
-            "--init-groups",
-            "--",
-            "env",
-            "-C",
-            dir_text,
-        ]);
-        makepkg.push(format!("HOME={dir_text}"));
-        makepkg.push(format!("SRCDEST={dir_text}"));
-        makepkg.push(format!("GNUPGHOME={}", self.keyring().display()));
-        makepkg.extend(args(&["makepkg", "--noconfirm", "--clean"]));
-        if nocheck {
-            makepkg.push("--nocheck".to_string());
-        }
-        let status = tx
-            .command(&makepkg[0])
-            .args(&makepkg[1..])
-            .status()
-            .context("running makepkg in the build view")?;
-        if !status.success() {
-            bail!("makepkg failed ({status})");
-        }
-        Ok(())
-    }
-
-    /// For a system not laid out as deployments yet: installs missing build dependencies live, runs makepkg as the build user, then removes them again.
+    /// Installs missing build dependencies live, runs makepkg as the build user, then removes them again.
     fn build_live(
         &self,
         dir: &Path,
@@ -831,19 +712,6 @@ pub(crate) fn ensure_user() -> Result<()> {
         ]),
         "useradd",
     )
-}
-
-/// The build user's uid (`-u`) or gid (`-g`) on the running system.
-fn live_id(which: &str) -> Result<String> {
-    let output = Command::new("id")
-        .arg(which)
-        .arg(BUILD_USER)
-        .output()
-        .context("running id")?;
-    if !output.status.success() {
-        bail!("{BUILD_USER} doesn't exist");
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn chown(dir: &Path) -> Result<()> {

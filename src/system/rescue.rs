@@ -3,11 +3,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::boot::{self, BootPlan};
-use crate::deploy::{Staging, Store};
+use super::boot;
 use crate::paths::Paths;
 
 /// The rescue entry's file name, which no generation's entry parses as.
@@ -18,8 +17,6 @@ pub const DIR: &str = "EFI/archix-rescue";
 pub const FLAG: &str = "archix.rescue";
 /// Sorts after every deployment's entry (`archix`) and the fallback UKI's, so systemd-boot only starts it when picked, or when nothing else is left.
 pub const SORT_KEY: &str = "archix-rescue";
-/// Where the rescue build puts its initramfs and UKI inside the scratch staging root.
-const BUILT: &str = "/boot/archix-rescue";
 
 /// The rescue initramfs's mkinitcpio config: busybox's init, every storage, filesystem and keyboard module, no autodetect and no deployment hook.
 pub const MKINITCPIO_CONF: &str =
@@ -253,259 +250,6 @@ pub fn remove(paths: &Paths, esp: &Path) -> Result<bool> {
     Ok(removed)
 }
 
-/// Deletes the rescue UKIs the entry doesn't name, once the entry naming the new one is flushed.
-fn remove_unused(esp: &Path, keep: &str) -> Result<()> {
-    let mut removed = false;
-    for file in fs::read_dir(esp.join(DIR)).into_iter().flatten().flatten() {
-        if file.file_name().to_string_lossy() != keep {
-            fs::remove_file(file.path()).with_context(|| format!("removing {}", file.path().display()))?;
-            removed = true;
-        }
-    }
-    if removed {
-        crate::durable::sync_esp(esp)?;
-    }
-    Ok(())
-}
-
-/// What everything the rescue UKI is built from hashes to, so an unchanged one isn't built again.
-fn key(source_id: &str, kernel: &str, cmdline: &str, signed: bool) -> String {
-    let parts = [
-        source_id,
-        kernel,
-        cmdline,
-        if signed { "signed" } else { "unsigned" },
-        MKINITCPIO_CONF,
-        INSTALL_HOOK,
-        RUN_HOOK,
-    ];
-    crate::fetch::sha256_bytes(parts.join("\n").as_bytes())
-}
-
-fn in_view(tx: &crate::deploy::Transaction, argv: &[&str], what: &str) -> Result<String> {
-    let output = tx.output(argv)?;
-    if !output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).into_owned() + &String::from_utf8_lossy(&output.stderr);
-        let tail: Vec<&str> = text.lines().rev().take(12).collect();
-        bail!(
-            "{what} failed for the rescue entry:\n{}",
-            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Builds the rescue UKI in a scratch staging root of deployment `source` and returns where it is in there, signed when `signed`.
-fn build(
-    paths: &Paths,
-    esp: &Path,
-    staging: &Staging,
-    kernel: &str,
-    cmdline: &str,
-    name: &str,
-    signed: bool,
-) -> Result<PathBuf> {
-    let etc = staging.tree("etc");
-    for (path, text) in [
-        ("initcpio/install/archix-rescue", INSTALL_HOOK),
-        ("initcpio/hooks/archix-rescue", RUN_HOOK),
-        ("archix-rescue/mkinitcpio.conf", MKINITCPIO_CONF),
-    ] {
-        let target = etc.join(path);
-        fs::create_dir_all(target.parent().unwrap_or(&etc))?;
-        fs::write(&target, text).with_context(|| format!("writing {}", target.display()))?;
-    }
-    let tx = staging.transaction()?;
-    in_view(&tx, &["rm", "-rf", BUILT], "clearing /boot/archix-rescue")?;
-    in_view(&tx, &["mkdir", "-p", BUILT], "creating /boot/archix-rescue")?;
-    let initramfs = format!("{BUILT}/initramfs.img");
-    in_view(
-        &tx,
-        &[
-            "mkinitcpio",
-            "-k",
-            kernel,
-            "-c",
-            "/etc/archix-rescue/mkinitcpio.conf",
-            "-g",
-            &initramfs,
-        ],
-        "mkinitcpio",
-    )?;
-    let os_release = in_view(&tx, &["cat", "/etc/os-release"], "reading /etc/os-release")?;
-    let mut release: Vec<String> = os_release
-        .lines()
-        .filter(|line| {
-            !["PRETTY_NAME=", "IMAGE_ID=", "IMAGE_VERSION="]
-                .iter()
-                .any(|key| line.starts_with(key))
-        })
-        .map(str::to_string)
-        .collect();
-    release.push("PRETTY_NAME=\"archix rescue\"".to_string());
-    release.push(format!("IMAGE_ID={SORT_KEY}"));
-    let release = release.join("\n") + "\n";
-    let output = format!("{BUILT}/{name}");
-    let vmlinuz = format!("{}/{kernel}/vmlinuz", boot::MODULES);
-    let mut ukify = vec![
-        "ukify",
-        "build",
-        "--linux",
-        &vmlinuz,
-        "--initrd",
-        &initramfs,
-        "--cmdline",
-        cmdline,
-        "--uname",
-        kernel,
-        "--os-release",
-        &release,
-        "--output",
-        &output,
-    ];
-    // A signed PCR policy would let the rescue's root shell unseal TPM-bound volumes, so it never gets one.
-    let unique = format!("--section=.archix:{}", super::password::salt()?);
-    if super::revoke::any_revoked(paths) {
-        ukify.push(&unique);
-    }
-    in_view(&tx, &ukify, "ukify build")?;
-    drop(tx);
-    let file = staging.read_path(Path::new(&output))?;
-    if signed {
-        let status = std::process::Command::new("sbctl")
-            .env("ESP_PATH", esp)
-            .arg("sign")
-            .arg(&file)
-            .output()
-            .context("running sbctl; is it installed?")?;
-        if !status.status.success() {
-            bail!(
-                "sbctl sign failed for the rescue UKI: {}",
-                String::from_utf8_lossy(&status.stderr).trim()
-            );
-        }
-        super::revoke::record_signed(paths, &file, name)?;
-    }
-    Ok(file)
-}
-
-/// The tools a rescue boot needs to check this root that deployment `deployment` lacks, by package.
-fn missing_tools(root: &Path, deployment: &Path) -> Vec<&'static str> {
-    let has = |tool: &str| deployment.join("usr/bin").join(tool).is_file();
-    let mut missing = Vec::new();
-    match crate::deploy::Backend::detect(&root.join("archix")) {
-        Ok(crate::deploy::Backend::Snapshot) if !has("btrfs") => missing.push("btrfs-progs"),
-        Ok(crate::deploy::Backend::Overlay) if is_ext(root) && !has("e2fsck") => missing.push("e2fsprogs"),
-        _ => {}
-    }
-    if !has("fsck.fat") {
-        missing.push("dosfstools");
-    }
-    missing
-}
-
-fn is_ext(path: &Path) -> bool {
-    let Ok(c_path) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
-        return false;
-    };
-    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-    unsafe { libc::statfs(c_path.as_ptr(), &mut stat) == 0 && stat.f_type as u64 == 0xef53 }
-}
-
-/// Keeps the rescue entry in step after a switch: built again in a scratch staging root of the newest deployment that booted fine when that or anything it's built from changed, put on the ESP beside the old one, which goes once the entry names the new one; with `boot.rescue_entry = false`, taken off. Returns what it did.
-pub fn refresh(paths: &Paths, plan: &BootPlan, store: &Store) -> Result<String> {
-    let esp = Path::new(&plan.esp);
-    if !plan.rescue {
-        return Ok(match remove(paths, esp)? {
-            true => "rescue     took the rescue entry off the ESP, as boot.rescue_entry = false".to_string(),
-            false => String::new(),
-        });
-    }
-    let committed = store.deployments()?;
-    let Some(source) = source(
-        paths,
-        esp,
-        &committed,
-        boot::booted_deployment(store.root()),
-        store.current()?,
-    ) else {
-        return Ok(String::new());
-    };
-    let deployment = store.path(source);
-    let kernel = boot::owned_version(&deployment.join("pacman"), &plan.kernel)
-        .or_else(|| {
-            boot::kernels_in(&deployment.join("pacman"))
-                .into_iter()
-                .next()
-                .map(|(_, version)| version)
-        })
-        .with_context(|| format!("deployment {source} has no kernel for the rescue entry"))?;
-    let signed = plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys);
-    let enforcing = super::secureboot::Machine::new()
-        .state()
-        .is_some_and(|state| state.enabled && !state.setup_mode);
-    if enforcing && !signed && !super::secureboot::in_chroot() {
-        bail!(
-            "Secure Boot is on, but the rescue entry wouldn't be signed, so the firmware would refuse it; the rescue entry stays as it was"
-        );
-    }
-    let cmdline = rescue_cmdline(&plan.cmdline);
-    let key = key(
-        &super::activate::deployment_id(&deployment, source)?,
-        &kernel,
-        &cmdline,
-        signed,
-    );
-    let name = format!("rescue-{}.efi", &key[..12]);
-    let warn = match missing_tools(store.root(), &deployment).as_slice() {
-        [] => String::new(),
-        missing => format!(
-            "; deployment {source} lacks {}, so the rescue can't check this root and the ESP with it; declare it",
-            missing.join(" and ")
-        ),
-    };
-    if let Some(record) = read_record(paths)
-        && record.key == key
-        && uki(esp).is_some_and(|uki| uki == esp.join(DIR).join(&record.uki) && uki.is_file())
-    {
-        return Ok(String::new());
-    }
-    eprintln!(":: building the rescue entry from deployment {source}'s kernel {kernel}");
-    let staging = Staging::scratch(store, source)?;
-    let written = build(paths, esp, &staging, &kernel, &cmdline, &name, signed).and_then(|built| {
-        let size = fs::metadata(&built)?.len();
-        let free = boot::free_bytes(&esp.join("loader"))?;
-        if free < size + boot::MARGIN {
-            let mib = |bytes: u64| bytes / (1024 * 1024);
-            bail!(
-                "the ESP has {} MiB free, but the rescue UKI needs {} MiB; the rescue entry stays as it was",
-                mib(free),
-                mib(size + boot::MARGIN)
-            );
-        }
-        crate::durable::copy(&built, &esp.join(DIR).join(&name))?;
-        crate::durable::sync_esp(esp)
-    });
-    let discarded = staging.discard();
-    written?;
-    discarded?;
-    crate::testhooks::mark("rescue-uki");
-    crate::durable::write(&entry_path(esp), entry_text(&name, source, &kernel).as_bytes())?;
-    crate::durable::sync_esp(esp)?;
-    crate::testhooks::mark("rescue-entry");
-    remove_unused(esp, &name)?;
-    let record = Record {
-        source,
-        kernel: kernel.clone(),
-        key,
-        uki: name,
-    };
-    crate::durable::write(&record_path(paths), serde_json::to_string_pretty(&record)?.as_bytes())?;
-    Ok(format!(
-        "rescue     the rescue entry boots deployment {source}'s kernel {kernel} into `archix rescue`{warn}"
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,8 +281,7 @@ mod tests {
     #[test]
     fn the_rescue_entry_is_no_generations_entry_and_sorts_after_them() {
         assert_eq!(boot::parse_entry(ENTRY), None);
-        assert_eq!(crate::deploy::keep::entry_number(ENTRY), None);
-        assert_eq!(crate::system::deploy_boot::generation_of_entry(ENTRY), None);
+        assert_eq!(crate::system::esp::entry_number(ENTRY), None);
         assert!(boot::FALLBACK_SORT_KEY < "archix" && "archix" < SORT_KEY);
         let text = entry_text("rescue-abc.efi", 4, "7.1.2-arch1-1");
         assert!(
@@ -620,21 +363,6 @@ mod tests {
         assert!(esp.path().join("loader/entries/archix-2.conf").exists());
     }
 
-    #[test]
-    fn only_the_rescue_uki_the_entry_names_is_kept() {
-        let esp = esp_with(&[]);
-        fs::create_dir_all(esp.path().join(DIR)).unwrap();
-        for name in ["rescue-old.efi", "rescue-new.efi"] {
-            fs::write(esp.path().join(DIR).join(name), "uki").unwrap();
-        }
-        remove_unused(esp.path(), "rescue-new.efi").unwrap();
-        let left: Vec<String> = fs::read_dir(esp.path().join(DIR))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(left, ["rescue-new.efi"]);
-    }
-
     /// RUN_HOOK under sh with `archix` standing in for the rescue, mkinitcpio's shell and the reboot stubbed.
     fn run_hook_with(archix: &str, cmdline: &str) -> std::process::Output {
         let dir = tempfile::tempdir().unwrap();
@@ -678,19 +406,5 @@ mod tests {
             "root=UUID=x rw quiet initrd=x archix.rescue"
         );
         assert_eq!(rescue_cmdline("root=/dev/vda2 rw"), "root=/dev/vda2 rw archix.rescue");
-    }
-
-    #[test]
-    fn the_key_changes_with_whatever_the_uki_is_built_from() {
-        let base = key("4-1-2-abc", "7.1", "root=x archix.rescue", false);
-        assert_eq!(base, key("4-1-2-abc", "7.1", "root=x archix.rescue", false));
-        for other in [
-            key("5-1-2-abc", "7.1", "root=x archix.rescue", false),
-            key("4-1-2-abc", "7.2", "root=x archix.rescue", false),
-            key("4-1-2-abc", "7.1", "root=y archix.rescue", false),
-            key("4-1-2-abc", "7.1", "root=x archix.rescue", true),
-        ] {
-            assert_ne!(base, other);
-        }
     }
 }

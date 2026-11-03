@@ -26,15 +26,19 @@ pub fn check(path: &str, ty: &Type, def: Def) -> Result<Value, Vec<Diagnostic>> 
 const REMOVED: &[(&str, &str)] = &[
     (
         "boot.snapshots",
-        "every switch builds a new deployment beside the running one, so no snapshot is taken; deployments.keep sets how many stay bootable",
+        "archix takes its own btrfs snapshots: rollback.enable turns them on and rollback.keep_switch sets how many switches keep one",
     ),
     (
         "boot.entries",
-        "every kept deployment has one boot entry, so deployments.keep sets how many there are",
+        "rollback.entries sets how many snapshots get a boot entry",
     ),
     (
         "restart_if_changed",
-        "a switch takes effect at the next boot, so archix restarts nothing",
+        "a switch restarts the units whose files it replaced, except the session's and the network's, and has no per-unit override yet",
+    ),
+    (
+        "deployments.keep",
+        "deployments are gone: a switch applies in place, and rollback.keep_switch sets how many switch snapshots stay",
     ),
 ];
 
@@ -457,7 +461,11 @@ mod tests {
         );
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].path.as_deref(), Some("boot.snapshots"));
-        assert!(errors[0].message.contains("deployments.keep"), "{}", errors[0].message);
+        assert!(
+            errors[0].message.contains("rollback.keep_switch"),
+            "{}",
+            errors[0].message
+        );
     }
 
     #[test]

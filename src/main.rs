@@ -93,7 +93,7 @@ enum Command {
         #[arg(long)]
         all: bool,
     },
-    /// Make an earlier generation current (the previous one by default): its deployment if kept, else rebuilt from the package cache; it boots at the next restart
+    /// Apply an earlier generation's record in place (the previous one by default): its packages from archix's cache and the archive, its files, users and services; the config and archix.lock stay as they are
     Rollback {
         /// Generation number; `archix generations` lists them
         generation: Option<u32>,
@@ -104,35 +104,10 @@ enum Command {
         #[arg(long)]
         allow_unsafe_downgrade: bool,
     },
-    /// List generations; the current one is marked with *, and those with a deployment say so
+    /// List generations, the current one marked with *, then the snapshots by the state each holds
     Generations,
-    /// Delete the deployments deployments.keep leaves out, old generation records and cached files no kept generation needs
+    /// Delete old generation records and cached files no kept generation or snapshot needs
     Gc,
-    /// Stop managing this machine: systemd-boot starts the distro's kernels without archix, and archix's hooks and boot service come off
-    Eject {
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-        /// Put back the files archix replaced and delete the ones it created
-        #[arg(long)]
-        restore_originals: bool,
-        /// Also delete /var/lib/archix and /var/cache/archix
-        #[arg(long)]
-        purge: bool,
-        /// With --noconfirm, eject the running deployment though another is current (a switch waiting for its reboot), which goes with the rest
-        #[arg(long)]
-        discard_pending: bool,
-        /// What becomes of declared secrets, which plain Arch has nothing to decrypt: drop their links, or materialize them as real files from /run/archix/secrets (from a booted system only)
-        #[arg(long, value_enum)]
-        secrets: Option<archix::deploy::eject::SecretsMode>,
-    },
-    /// From a live USB: bind a deployment's trees over the archix root mounted at ROOT, so `arch-chroot ROOT` runs it and `archix rollback` there can repair booting; run it as /usr/lib/archix/archix-static from a deployment under ROOT/archix/deploy
-    MountDeployment {
-        /// Where the archix root is mounted, such as /mnt (on btrfs, its root subvolume)
-        root: PathBuf,
-        /// The deployment to bind; current's by default
-        deployment: Option<u32>,
-    },
     /// Declare packages in installed.lua and install them (pacman-style: archix -S <packages>)
     Install {
         #[arg(required = true)]
@@ -140,9 +115,6 @@ enum Command {
         /// Directory under the config's lua/ whose installed.lua to edit, instead of lua/hosts/<host>/
         #[arg(long)]
         path: Option<PathBuf>,
-        /// Install without declaring anything, in a new deployment; the next switch removes it again unless it gets declared
-        #[arg(long)]
-        temp: bool,
         /// Don't ask for confirmation
         #[arg(long)]
         noconfirm: bool,
@@ -196,7 +168,7 @@ enum Command {
         #[command(subcommand)]
         action: Option<commands::rescue::Action>,
     },
-    /// Run at boot by archix-boot.service: make the deployment whose boot entry was chosen current
+    /// Run at boot by archix-boot.service: the boot's own checks (the hibernation guard, notes)
     #[command(hide = true)]
     BootCheck {
         #[arg(long)]
@@ -208,65 +180,20 @@ enum Command {
     /// Run by systemd-bless-boot.service, before its own rename: count the booted entry as good, synced under its new name
     #[command(hide = true)]
     Bless,
-    /// Run by archix-health-check.service before boot-complete.target: check a new deployment's counted boot, and mark its entry bad if it fails
+    /// Run by archix-health-check.service before boot-complete.target: check a counted boot, and mark its entry bad if it fails
     #[command(hide = true)]
     HealthCheck,
     /// Called by archix's pacman hook to record transactions archix didn't run
     #[command(hide = true)]
     HookRecord,
-    /// Called by archix's PreTransaction pacman hook: fail, pointing to archix, when plain pacman would change a deployment
-    #[command(hide = true)]
-    PacmanGuard,
-    /// Run by archix-flatpak.service once the network is up: install the Flatpak apps a switch left for this deployment's first boot
-    #[command(hide = true)]
-    DeployFlatpak,
-    /// Run by the initramfs: mount the deployment this boot belongs to over the root
-    #[command(hide = true)]
-    DeployMount {
-        root: PathBuf,
-        #[arg(long, default_value = archix::system::boot::SELECTED_ENTRY_VAR)]
-        efivar: PathBuf,
-        #[arg(long, default_value = "/run/archix")]
-        run_dir: PathBuf,
-    },
-    /// Run early in every boot by archix-deploy-activate.service: apply a deployment's /var changes on its first boot
-    #[command(hide = true)]
-    DeployActivate {
-        #[arg(long, default_value = "/")]
-        root: PathBuf,
-    },
-    /// Run by archix-etc-merge.service from a commit until shutdown: carry /etc changes into the deployment that boots next; with --boot, check at boot that the last pass finished
-    #[command(hide = true)]
-    EtcMerge {
-        #[arg(long, default_value = "/")]
-        root: PathBuf,
-        #[arg(long)]
-        boot: bool,
-    },
-    /// Run by archix in a private mount namespace: delete what the root's own trees held before its first layout
-    #[command(hide = true)]
-    PruneHidden { root: PathBuf },
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
-    /// Run by emergency.service before sulogin in a deployment with required mounts: say which didn't mount and what to do
+    /// Run by emergency.service before sulogin where the config declares required mounts: say which didn't mount and what to do
     #[command(hide = true)]
     EmergencyHint {
         #[arg(long)]
         no_rescue_entry: bool,
-    },
-    /// Run by `archix eject` in a private mount namespace: lay the deployment out as the root's own trees and hand the ESP over
-    #[command(hide = true)]
-    EjectHere {
-        root: PathBuf,
-        #[arg(long)]
-        state: PathBuf,
-    },
-    /// Run by archix inside a new deployment's staging root: write archix's integration files there, with units that run `exec`
-    #[command(hide = true)]
-    DeployIntegrate {
-        #[arg(long)]
-        exec: PathBuf,
     },
     /// Set up and check Secure Boot
     #[command(subcommand)]
@@ -274,12 +201,6 @@ enum Command {
     /// Share package files and AUR builds with other machines through a package cache
     #[command(subcommand)]
     Cache(Cache),
-    /// Run again, or drop, the hooks of a deployment that failed at too many boots
-    #[command(subcommand)]
-    Hooks(Hooks),
-    /// Let boots bind the shared /usr/local again once a boot that left it out held it out
-    #[command(subcommand)]
-    UsrLocal(UsrLocal),
     /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
     #[command(subcommand)]
     Secrets(Secrets),
@@ -308,29 +229,9 @@ enum Command {
     /// Run by root as a directory's owner: write stdin to NAME in DIR without following a symlink
     #[command(hide = true)]
     WriteFile { dir: PathBuf, name: std::ffi::OsString },
-    /// Check each kept deployment's /usr, /opt and /boot against its packages (content, mode, owner), like pacman -Qkk
-    Verify {
-        /// Restore what differs from the package cache
-        #[arg(long)]
-        repair: bool,
-    },
     /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
     #[command(external_subcommand)]
     Pick(Vec<String>),
-}
-
-#[derive(Subcommand)]
-enum Hooks {
-    /// Run the waiting hooks now, on the running deployment
-    Retry {
-        /// The deployment whose hooks to run; the running one by default
-        deployment: Option<u32>,
-    },
-    /// Drop the waiting hooks without running them
-    Skip {
-        /// The deployment whose hooks to drop; the running one by default
-        deployment: Option<u32>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -377,14 +278,6 @@ enum Secrets {
         #[arg(long, default_value = "/")]
         root: PathBuf,
     },
-}
-
-#[derive(Subcommand)]
-enum UsrLocal {
-    /// Let the next boot bind /usr/local again, once; if it doesn't reach multi-user.target, the boot after leaves it out again
-    Release,
-    /// Move the files under /var/usrlocal that systemd, udev or the module loader read at boot to /var/usrlocal.quarantine, then release /usr/local
-    Quarantine,
 }
 
 #[derive(Subcommand)]
@@ -462,7 +355,6 @@ fn from_sync(command: Command) -> Result<Command> {
         (false, upgrade_first, false) => Command::Install {
             packages: targets,
             path: None,
-            temp: false,
             noconfirm,
             upgrade_first,
         },
@@ -544,8 +436,6 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
         Command::Gc => Some("gc"),
-        Command::Hooks(_) => Some("hooks"),
-        Command::UsrLocal(_) => Some("usr-local"),
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
         Command::Snapshot(SnapshotAction::Setup) => Some("snapshot setup"),
@@ -553,8 +443,6 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
         Command::Secrets(Secrets::Rekey { machine: true, .. }) => Some("secrets rekey --machine"),
-        Command::Verify { .. } => Some("verify"),
-        Command::Eject { .. } => Some("eject"),
         Command::Init { .. } => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
         Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
@@ -646,32 +534,11 @@ fn run() -> Result<ExitCode> {
             archix::captured::write_file_here(&dir, &name, &bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::DeployMount { root, efivar, run_dir } => {
-            if let Err(e) = archix::system::deploy_boot::mount(&root, &efivar, &run_dir) {
-                if efivar == std::path::Path::new(archix::system::boot::SELECTED_ENTRY_VAR) {
-                    archix::system::boot::mount_efivars();
-                }
-                archix::system::boot::reboot_counted_try("mounting this boot's deployment", &e, &root, true);
-                return Err(e);
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Secrets(Secrets::Activate { root }) => {
             if !is_root() {
                 anyhow::bail!("`archix secrets activate` runs at boot as root");
             }
             archix::secrets::activate::run(&root)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::DeployActivate { root } => {
-            if let Err(e) = archix::system::activate::activate(&root) {
-                archix::system::boot::reboot_counted_try("activating this boot's deployment", &e, &root, false);
-                return Err(e);
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::PruneHidden { root } => {
-            commands::prune_hidden(&root)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Swapfile { path, bytes } => {
@@ -693,43 +560,8 @@ fn run() -> Result<ExitCode> {
             archix::system::emergency::run(&archix::paths::Paths::system(), !no_rescue_entry);
             return Ok(ExitCode::SUCCESS);
         }
-        Command::MountDeployment { root, deployment } => {
-            commands::mount_deployment(&root, deployment)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::EjectHere { root, state } => {
-            let paths = archix::paths::Paths {
-                root: root.clone(),
-                state,
-                ..archix::paths::Paths::system()
-            };
-            for line in archix::deploy::eject::here(&root, &paths)? {
-                println!("{line}");
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::EtcMerge { root, boot: true } => {
-            archix::etcmerge::boot(&root)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::EtcMerge { root, boot: false } => {
-            archix::etcmerge::watch::run(&root)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::DeployIntegrate { exec } => {
-            let paths = archix::paths::Paths::system();
-            archix::integration::write_all(&paths, &exec, &|path| Ok(paths.root.join(path.strip_prefix("/")?)))?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::PacmanGuard => {
-            if archix::integration::pacman_allowed(std::path::Path::new("/")) {
-                return Ok(ExitCode::SUCCESS);
-            }
-            println!("{}", archix::integration::PACMAN_REFUSAL);
-            return Ok(ExitCode::FAILURE);
-        }
         Command::Recover { .. } => anyhow::bail!(
-            "`archix recover` is gone: a switch commits a whole new deployment or leaves nothing behind, so there's nothing to recover; run `archix switch` again"
+            "`archix recover` is gone: a switch that fails partway says what it applied, and with rollbacks on a snapshot holds the system as it was before; run `archix switch` again"
         ),
         Command::Rescue { options, action } => {
             if !is_root() {
@@ -751,22 +583,13 @@ fn run() -> Result<ExitCode> {
     let changes_things = needs_root(&command).is_some()
         || matches!(
             command,
-            Command::BootCheck { .. }
-                | Command::BootComplete
-                | Command::Bless
-                | Command::DeployFlatpak
-                | Command::HealthCheck
+            Command::BootCheck { .. } | Command::BootComplete | Command::Bless | Command::HealthCheck
         );
     if needs_root(&command).is_some() {
         leave_login_session();
     }
     if changes_things {
         hold_exclusive()?;
-    }
-    // An eject in a chroot works in the live system's namespace, so the binds it takes off are gone for the chroot's shell too.
-    let chroot_eject = matches!(command, Command::Eject { .. }) && archix::system::secureboot::in_chroot();
-    if is_root() && !chroot_eject {
-        archix::system::deploy_boot::writable_store(&archix::testhooks::root())?;
     }
     match command {
         Command::HookRecord => {
@@ -787,22 +610,6 @@ fn run() -> Result<ExitCode> {
         }
         Command::Gc => {
             commands::gc()?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Eject {
-            noconfirm,
-            restore_originals,
-            purge,
-            discard_pending,
-            secrets,
-        } => {
-            let how = commands::EjectHow {
-                noconfirm,
-                restore_originals,
-                purge,
-                discard_pending,
-            };
-            commands::eject(how, secrets)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Secrets(Secrets::Init { replace }) => {
@@ -830,14 +637,6 @@ fn run() -> Result<ExitCode> {
             commands::cache_push(&dir)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Hooks(Hooks::Retry { deployment }) => {
-            commands::hooks(true, deployment)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Hooks(Hooks::Skip { deployment }) => {
-            commands::hooks(false, deployment)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Snapshot(action) => {
             match action {
                 SnapshotAction::Create { note } => commands::snapshot::create(note)?,
@@ -845,19 +644,6 @@ fn run() -> Result<ExitCode> {
                 SnapshotAction::Delete { number } => commands::snapshot::delete(number)?,
                 SnapshotAction::Setup => commands::snapshot::setup()?,
             }
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::UsrLocal(action) => {
-            let paths = archix::paths::Paths::system();
-            let said = match action {
-                UsrLocal::Release => archix::system::usr_local::release(&paths)?,
-                UsrLocal::Quarantine => archix::system::usr_local::quarantine(&paths)?,
-            };
-            println!("{said}");
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Verify { repair } => {
-            commands::verify(repair)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Prefetch { url } => {
@@ -869,9 +655,6 @@ fn run() -> Result<ExitCode> {
             return Ok(ExitCode::SUCCESS);
         }
         Command::BootComplete => {
-            if let Err(e) = archix::system::usr_local::confirm(&archix::paths::Paths::system()) {
-                println!("archix: {e:#}");
-            }
             if let Some(booted) = archix::system::boot::booted() {
                 archix::system::emergency::forget(&archix::paths::Paths::system(), booted);
             }
@@ -880,10 +663,6 @@ fn run() -> Result<ExitCode> {
         }
         Command::Bless => {
             archix::system::boot::bless_booted(&archix::paths::Paths::system())?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::DeployFlatpak => {
-            commands::deploy_flatpak()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::HealthCheck => {
@@ -941,10 +720,10 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
-    // Nothing these commands change in the config is written until the switch commits its deployment.
+    // Nothing these commands change in the config is written until the switch has applied.
     if matches!(
         command,
-        Command::Install { temp: false, .. }
+        Command::Install { .. }
             | Command::Remove { .. }
             | Command::Switch { .. }
             | Command::Upgrade { .. }
@@ -953,12 +732,7 @@ fn run() -> Result<ExitCode> {
         commands::defer_config_writes();
     }
     match &command {
-        Command::Install {
-            packages,
-            path,
-            temp: false,
-            ..
-        } => {
+        Command::Install { packages, path, .. } => {
             commands::edit_installed(&cli.config, &hostname, path.as_deref(), packages, &[])?;
         }
         Command::Remove { packages, path, .. } => {
@@ -1003,12 +777,6 @@ fn run() -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
-        Command::Install {
-            packages,
-            temp: true,
-            noconfirm,
-            ..
-        } => commands::install_temporarily(&target, &packages, noconfirm)?,
         Command::Install {
             noconfirm,
             upgrade_first,
@@ -1090,38 +858,25 @@ fn run() -> Result<ExitCode> {
         Command::Recover { .. }
         | Command::Init { .. }
         | Command::HookRecord
-        | Command::PacmanGuard
-        | Command::DeployFlatpak
         | Command::Rollback { .. }
         | Command::Generations
         | Command::Gc
-        | Command::Eject { .. }
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck { .. }
         | Command::BootComplete
         | Command::Bless
         | Command::HealthCheck
-        | Command::DeployMount { .. }
-        | Command::DeployActivate { .. }
-        | Command::PruneHidden { .. }
         | Command::Swapfile { .. }
         | Command::EmergencyHint { .. }
-        | Command::MountDeployment { .. }
-        | Command::EjectHere { .. }
-        | Command::EtcMerge { .. }
-        | Command::DeployIntegrate { .. }
         | Command::SecureBoot(_)
         | Command::Cache(_)
-        | Command::Hooks(_)
-        | Command::UsrLocal(_)
         | Command::Snapshot(_)
         | Command::SplitVarLib
         | Command::EvaluateIsolated { .. }
         | Command::WriteFile { .. }
         | Command::Chroot { .. }
         | Command::Secrets(_)
-        | Command::Verify { .. }
         | Command::Sync { .. } => {
             unreachable!("handled before the config is evaluated")
         }

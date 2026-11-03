@@ -14,63 +14,6 @@ const BEFORE_END: &str = "# END archix custom repos (before the official repos)"
 const AFTER_BEGIN: &str = "# BEGIN archix custom repos (after the official repos)";
 const AFTER_END: &str = "# END archix custom repos (after the official repos)";
 
-/// What a deployment's pacman.conf has instead of CheckSpace, whose check fails on the read-only /usr before any PreTransaction hook runs.
-const CHECK_SPACE_OFF: &str =
-    "#CheckSpace   # off on archix deployments: pacman can't install here, and archix checks space itself";
-
-/// What plain pacman, or an AUR helper running it, gets on a system running from a deployment.
-pub const PACMAN_REFUSAL: &str = "archix: this system runs from a deployment whose /usr, /opt and /boot are read-only, so pacman, and AUR helpers like yay that run it, can't change its packages. Change them with archix, which builds a new deployment that boots at the next restart: `archix install <package>` (or `archix -S`) to add one, `archix remove <package>` (or `archix -R`) to take one out, `archix upgrade` (or `archix -Syu`) to update everything, and `archix switch` to apply your config. pacman -Q, -Ss, -Si, -F and -Sw work as before. See https://archix.dev/docs/concepts/pacman-and-yay/";
-
-/// For the PreTransaction hook, which alpm runs chrooted into pacman's root: plain pacman may change the system under `root` unless it runs from a deployment with a read-only /usr; archix's own transactions always may.
-pub fn pacman_allowed(root: &Path) -> bool {
-    std::env::var_os(TRANSACTION_ENV).is_some()
-        || !crate::system::deploy_boot::uses_deployments(root)
-        || !crate::system::deploy_boot::read_only(&root.join("usr"))
-}
-
-/// pacman.conf with an active CheckSpace turned off, so the guard hook gets to explain; None when there's none.
-pub fn without_check_space(conf: &str) -> Option<String> {
-    if !conf.lines().any(|line| line.trim() == "CheckSpace") {
-        return None;
-    }
-    let lines: Vec<&str> = conf
-        .lines()
-        .map(|line| {
-            if line.trim() == "CheckSpace" {
-                CHECK_SPACE_OFF
-            } else {
-                line
-            }
-        })
-        .collect();
-    Some(lines.join("\n") + "\n")
-}
-
-/// pacman.conf with the CheckSpace archix turned off back on, for a system without deployments.
-fn with_check_space(conf: &str) -> Option<String> {
-    if !conf.lines().any(|line| line == CHECK_SPACE_OFF) {
-        return None;
-    }
-    let lines: Vec<&str> = conf
-        .lines()
-        .map(|line| if line == CHECK_SPACE_OFF { "CheckSpace" } else { line })
-        .collect();
-    Some(lines.join("\n") + "\n")
-}
-
-/// Rewrites a pacman.conf through `edit` when it changes it.
-fn edit_pacman_conf(conf: &Path, edit: fn(&str) -> Option<String>) -> Result<()> {
-    let Ok(current) = fs::read_to_string(conf) else {
-        return Ok(());
-    };
-    if let Some(wanted) = edit(&current) {
-        let tmp = conf.with_extension("conf.archix");
-        fs::write(&tmp, wanted).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
-    }
-    Ok(())
-}
-
 /// Packages changed by one pacman or AUR-helper transaction that archix didn't run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutsideChange {
@@ -210,58 +153,6 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
         }
     }
     Ok(())
-}
-
-/// Where a staging view gets the running archix when the deployment has none that writes its own integration.
-const RUNNING_IN_VIEW: &str = "/run/archix-running";
-
-/// Writes the integration into a staging root through its view: by the staged static archix, so an archix the switch upgrades writes its own version, else by this one; the units run `archix`.
-pub fn write_staged(staging: &crate::deploy::Staging, archix: &Path) -> Result<()> {
-    let exec = archix.to_str().context("archix's path isn't UTF-8")?;
-    if staging.read_path(Path::new(STATIC_BINARY))?.is_file() {
-        let output = staging
-            .transaction()?
-            .output(&[STATIC_BINARY, "deploy-integrate", "--exec", exec])?;
-        if output.status.success() {
-            return Ok(());
-        }
-        eprintln!(
-            "warning: the new deployment's archix couldn't write its boot integration ({}), so this archix does",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    staging
-        .transaction_with(&[(archix.to_path_buf(), PathBuf::from(RUNNING_IN_VIEW))])?
-        .run(&[RUNNING_IN_VIEW, "deploy-integrate", "--exec", exec])
-}
-
-/// Takes every integration file off a system without deployments, for `archix eject`.
-pub fn remove(paths: &Paths) -> Result<()> {
-    crate::system::deploy_boot::refuse_without_hook(&paths.root, "taking archix's boot integration off")?;
-    remove_from(paths)
-}
-
-/// Takes every integration file off the trees under `paths.root`, whatever boots them, as eject does to the plain trees it lays out.
-pub fn remove_from(paths: &Paths) -> Result<()> {
-    let root = &paths.root;
-    let inside = |path: &Path| root.join(path.strip_prefix("/").unwrap_or(path));
-    let archix = Path::new("archix");
-    let gone: Vec<PathBuf> = files(paths, archix)
-        .into_iter()
-        .chain(boot_files(archix))
-        .map(|(path, _)| path)
-        .chain(boot_wants().into_iter().map(|(link, _)| link))
-        .map(|path| inside(&path))
-        .collect();
-    for path in gone {
-        match fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(e).with_context(|| format!("removing {}", path.display()));
-            }
-            _ => {}
-        }
-    }
-    edit_pacman_conf(&inside(&Paths::system().pacman_conf), with_check_space)
 }
 
 /// pacman.conf with archix's custom-repo blocks replaced by `repos`' custom ones, placed around the official repos.
@@ -447,38 +338,14 @@ mod tests {
     }
 
     #[test]
-    fn a_root_using_deployments_keeps_its_boot_integration() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::under(dir.path());
-        fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
-        let place = |path: &Path| Ok(dir.path().join(path.strip_prefix("/").unwrap()));
-        write_all(&paths, Path::new("/usr/bin/archix"), &place).unwrap();
-        let hook = dir.path().join("etc/initcpio/hooks/archix-deploy");
-        assert!(hook.exists());
-        assert!(dir.path().join("etc/mkinitcpio.conf.d/archix-deploy.conf").exists());
-        assert!(
-            dir.path()
-                .join("etc/systemd/system/sysinit.target.wants/archix-deploy-activate.service")
-                .is_symlink()
-        );
-        assert!(remove(&paths).is_err(), "eject can't take the hook off");
-        assert!(hook.exists());
-    }
-
-    #[test]
     fn no_boot_unit_pulls_in_the_network_wait_at_every_boot() {
         for (path, unit) in boot_files(Path::new("/usr/bin/archix")) {
             assert!(
                 !unit.contains("Wants=network-online.target"),
-                "{} is enabled in every deployment, so its Wants= would start the network wait at every boot, which fails offline: {unit}",
+                "{} is enabled at every boot, so its Wants= would start the network wait each time, which fails offline: {unit}",
                 path.display()
             );
         }
-        let flatpak = boot_files(Path::new("/usr/bin/archix"))
-            .into_iter()
-            .find(|(path, _)| path.ends_with("archix-flatpak.service"))
-            .unwrap();
-        assert!(flatpak.1.contains("After=network-online.target"), "{}", flatpak.1);
     }
 
     #[test]
@@ -492,49 +359,11 @@ mod tests {
                 .contains("Exec = /opt/archix/bin/archix hook-record\nNeedsTargets")
         );
         assert!(
-            files[1]
-                .1
-                .contains("test -w /usr || exec /opt/archix/bin/archix pacman-guard'\nAbortOnFail"),
-            "the shell lets archix's own and writable roots through without needing archix in them: {}",
-            files[1].1
+            !files
+                .iter()
+                .any(|(path, _)| path.ends_with("00-archix-deployment.hook")),
+            "plain pacman isn't guarded any more"
         );
-        assert!(files[1].0.ends_with("00-archix-deployment.hook"));
-        assert!(files[2].1.contains("state/notes"));
-    }
-
-    #[test]
-    fn a_deployments_pacman_conf_leaves_the_space_check_to_archix_and_eject_restores_it() {
-        let conf =
-            "[options]\nHoldPkg = pacman\nCheckSpace\n#VerbosePkgLists\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
-        let off = without_check_space(conf).unwrap();
-        assert!(!off.lines().any(|line| line.trim() == "CheckSpace"), "{off}");
-        assert!(off.contains("#VerbosePkgLists\n\n[core]\n"), "the rest is kept: {off}");
-        assert_eq!(without_check_space(&off), None, "turning it off is idempotent");
-        assert_eq!(with_check_space(&off).as_deref(), Some(conf));
-        assert_eq!(
-            without_check_space("[options]\n#CheckSpace\n"),
-            None,
-            "a commented one stays as it is"
-        );
-        assert_eq!(with_check_space("[options]\n#CheckSpace\n"), None);
-
-        let dir = tempfile::tempdir().unwrap();
-        let etc = dir.path().join("etc");
-        fs::create_dir_all(&etc).unwrap();
-        fs::write(etc.join("pacman.conf"), conf).unwrap();
-        let place = |path: &Path| Ok(dir.path().join(path.strip_prefix("/").unwrap()));
-        write_all(&Paths::under(dir.path()), Path::new("/usr/bin/archix"), &place).unwrap();
-        assert_eq!(fs::read_to_string(etc.join("pacman.conf")).unwrap(), off);
-        remove(&Paths::under(dir.path())).unwrap();
-        assert_eq!(fs::read_to_string(etc.join("pacman.conf")).unwrap(), conf);
-    }
-
-    #[test]
-    fn plain_pacman_may_change_a_root_without_deployments_or_with_a_writable_usr() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("usr")).unwrap();
-        assert!(pacman_allowed(dir.path()), "no deployments");
-        fs::create_dir_all(dir.path().join("archix/deploy/1")).unwrap();
-        assert!(pacman_allowed(dir.path()), "a writable /usr, as in a staging root");
+        assert!(files[1].1.contains("state/notes"));
     }
 }

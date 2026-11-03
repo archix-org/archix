@@ -1,16 +1,14 @@
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::deploy::Keep;
 use crate::generations::{Store, kept, now};
 use crate::paths::Paths;
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Report {
-    pub deployments: Vec<u32>,
     pub generations: Vec<u32>,
     pub files: usize,
     pub bytes: u64,
@@ -130,7 +128,7 @@ pub fn drop_refetchable(
     Ok(freed)
 }
 
-/// Drops the deployments `deployments.keep` leaves out (never the booted, current or boot-default one) with their boot entries, then generation records outside the generation limits that have no deployment, then cached files no kept generation needs.
+/// Drops generation records outside the generation limits that no snapshot holds, then cached files no kept generation or snapshot needs.
 pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     let store = Store::new(paths);
     let generations = store.list()?;
@@ -142,45 +140,9 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         return Ok(Report::default());
     };
     let mut report = Report::default();
-    let mut deployed = BTreeSet::new();
-    if crate::deploy::layout::laid_out(&paths.root) {
-        let deployments = crate::deploy::Store::open(&paths.root)?;
-        let _lock = deployments.lock()?;
-        let esp = settings.boot.as_ref().map(|boot| PathBuf::from(&boot.esp));
-        let keep = settings.deployments_keep.max(1) as usize;
-        if let Some(esp) = &esp {
-            crate::system::boot::require_esp(esp)?;
-        }
-        let pins = match &esp {
-            Some(esp) => Keep::read(keep, &deployments, esp)?,
-            None => Keep {
-                keep,
-                booted: crate::system::boot::booted_deployment(&paths.root),
-                current: deployments.current()?,
-                chosen: deployments.chosen()?,
-                ..Keep::default()
-            },
-        };
-        for number in pins.to_delete(&deployments.deployments()?) {
-            // The entries go first, so no entry is ever left naming a deployment that's gone.
-            if let Some(esp) = &esp {
-                crate::system::boot::drop_entries(paths, esp, number)?;
-            }
-            deployments.delete(number, &pins)?;
-            let _ = fs::remove_file(crate::system::hooks::pending_path(&paths.state, number));
-            crate::flatpak::drop_pending(&paths.state, Some(number));
-            report.deployments.push(number);
-        }
-        if let Some(esp) = &esp {
-            crate::system::boot::prune_records(paths, esp)?;
-        }
-        deployed.extend(deployments.deployments()?);
-    }
+    let snapshots = crate::snapshot::Store::open(&paths.root).list().unwrap_or_default();
     let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
-    // The running system came from the booted generation; it's what a broken switch falls back to.
-    let booted = crate::system::boot::booted_deployment(&paths.root);
-    keep.extend(booted.filter(|number| generations.iter().any(|g| g.number == *number)));
-    keep.extend(deployed);
+    keep.extend(snapshots.iter().filter_map(|record| record.generation));
     for generation in &generations {
         if !keep.contains(&generation.number) {
             store.delete(generation.number)?;
@@ -189,7 +151,8 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     }
 
     let kept_generations: Vec<_> = generations.iter().filter(|g| keep.contains(&g.number)).collect();
-    let locks: Vec<_> = kept_generations.iter().map(|g| (g.number, &g.packages)).collect();
+    let mut locks: Vec<_> = kept_generations.iter().map(|g| (g.number, &g.packages)).collect();
+    locks.extend(snapshots.iter().map(|record| (0, &record.packages)));
     let files = cached_files(&locks);
     for dir in [paths.packages(), paths.cache.join("verified")] {
         let Ok(entries) = fs::read_dir(&dir) else { continue };

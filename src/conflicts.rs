@@ -257,7 +257,7 @@ fn check_mounts(root: &Path, incoming: &[Contents]) -> Result<()> {
 }
 
 /// Mount points from /proc/self/mounts, longest first so the first prefix match is the one a path lives on.
-fn mount_points() -> Vec<PathBuf> {
+pub fn mount_points() -> Vec<PathBuf> {
     let mut mounts: Vec<PathBuf> = fs::read_to_string("/proc/self/mounts")
         .unwrap_or_default()
         .lines()

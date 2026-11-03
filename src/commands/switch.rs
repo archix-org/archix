@@ -14,7 +14,6 @@ use archix::aur::index::Index;
 use archix::aur::install::{BuildFailed, Installer, nearest, read_srcinfo};
 use archix::aur::review::review;
 use archix::date::Date;
-use archix::deploy::{self, layout};
 use archix::downgrade::{merged, unsafe_downgrades};
 use archix::eval;
 use archix::fetch::{Wanted, fetch_all, sha256};
@@ -235,7 +234,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             ignored: declared.ignored.iter().cloned().collect(),
             keep: declared.keep,
             keep_days: declared.keep_days,
-            deployments_keep: declared.deployments_keep,
             boot: boot.clone(),
             rollback: policy.clone(),
         },
@@ -244,7 +242,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         applied: None,
         system: SystemState::default(),
         flatpak: lock.flatpak.clone(),
-        before_archix: false,
         package_capabilities: BTreeMap::new(),
     };
     let mut rendered = system::render_linked(target.config, target.tree, target.config_dir)?;
@@ -280,7 +277,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             system_change.from.secrets.as_ref(),
             &prepared,
             &place,
-            None,
         )?);
     }
     system_lines.extend(system::credentials::describe(&passwords, &here.join("etc")));
@@ -753,13 +749,6 @@ fn scan_live(prepared: &archix::secrets::prepare::Prepared, root: &Path) -> Resu
     Ok(())
 }
 
-/// Starts the /etc merge `etcmerge::pause` stopped again once its build is committed or failed, against whichever deployment is pending then.
-pub(super) fn resume_etc_merge(paths: &Paths, paused: bool) {
-    if paused && let Err(e) = archix::etcmerge::start(paths) {
-        eprintln!("warning: starting the /etc merge again failed: {e:#}");
-    }
-}
-
 /// Everything a switch does once its generation is applied and current: config writes, root's copy of the config, homes, Flatpak apps and gc; failures here are soft.
 #[allow(clippy::too_many_arguments)]
 fn after_apply(
@@ -815,75 +804,6 @@ fn after_apply(
     println!("switched to generation {number} (snapshot {})", lock.date);
     push_to_cache(declared);
     report_soft_failures(&soft_failures, &format!("generation {number} is applied and current"))
-}
-
-fn identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
-}
-
-/// Copies the config directory as it is now into a deployment's /etc when it lives in /etc itself, so the deployment boots with the lock its switch wrote, not the copy it was staged with; one linked out of /etc is shared already.
-pub(super) fn carry_config(config_dir: &Path, paths: &Paths, deployment: &Path) -> Result<()> {
-    let (Ok(dir), Ok(etc)) = (fs::canonicalize(config_dir), fs::canonicalize(paths.root.join("etc"))) else {
-        return Ok(());
-    };
-    let Ok(rel) = dir.strip_prefix(&etc) else {
-        return Ok(());
-    };
-    let target = deployment.join("etc").join(rel);
-    if identity(&target).is_some() && identity(&target) == identity(&dir) {
-        return Ok(());
-    }
-    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
-        return Ok(());
-    };
-    fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let fresh = parent.join(format!(".{}.archix-new", name.to_string_lossy()));
-    if fresh.symlink_metadata().is_ok() {
-        fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))?;
-    }
-    let copied = Command::new("cp")
-        .args(["-a", "--no-target-directory"])
-        .arg(&dir)
-        .arg(&fresh)
-        .status()
-        .context("running cp")?;
-    if !copied.success() {
-        bail!("copying {} to {} failed", dir.display(), fresh.display());
-    }
-    if target.symlink_metadata().is_err() {
-        fs::rename(&fresh, &target).with_context(|| format!("renaming {}", fresh.display()))?;
-        return archix::durable::sync_dir(&target);
-    }
-    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).context("path has a NUL byte");
-    let (c_fresh, c_target) = (c(&fresh)?, c(&target)?);
-    // Swapped in one step, so a crash leaves the deployment one whole config or the other.
-    let swapped = unsafe {
-        libc::renameat2(
-            libc::AT_FDCWD,
-            c_fresh.as_ptr(),
-            libc::AT_FDCWD,
-            c_target.as_ptr(),
-            libc::RENAME_EXCHANGE,
-        )
-    };
-    if swapped != 0 {
-        return Err(io::Error::last_os_error()).with_context(|| format!("replacing {}", target.display()));
-    }
-    archix::durable::sync_dir(&target)?;
-    fs::remove_dir_all(&fresh).with_context(|| format!("removing {}", fresh.display()))
-}
-
-fn carry_accounts_from(paths: &Paths, live: &Path, etc: &Path, soft_failures: &mut Vec<String>) {
-    match archix::etcmerge::carry_accounts(paths, live, etc) {
-        Ok(skipped) if skipped.is_empty() => {}
-        Ok(skipped) => soft_failures.push(format!(
-            "these accounts weren't carried into {}, as their number is another account's there: {}",
-            etc.display(),
-            skipped.join(", ")
-        )),
-        Err(e) => soft_failures.push(format!("carrying users and groups into {}: {e:#}", etc.display())),
-    }
 }
 
 /// Lists unsafe downgrades and asks, defaulting to no; `--noconfirm` refuses them unless `allow` is set.
@@ -1392,10 +1312,6 @@ fn print_gc(report: &gc::Report, always: bool) {
     for recipient in &report.retired {
         println!("deleted the retired secrets identity {recipient}, which no kept deployment needs");
     }
-    if !report.deployments.is_empty() {
-        let numbers: Vec<String> = report.deployments.iter().map(u32::to_string).collect();
-        println!("deleted deployments {}", numbers.join(", "));
-    }
     if !report.generations.is_empty() {
         let numbers: Vec<String> = report.generations.iter().map(u32::to_string).collect();
         println!("deleted generation records {}", numbers.join(", "));
@@ -1718,270 +1634,26 @@ pub fn hook_record() {
     }
 }
 
-/// Run by archix-flatpak.service: once network-online.target is reached, installs the Flatpak apps left for the booted deployment, records their commits in its generation and in archix.lock, and keeps the record for the next boot if anything failed.
-pub fn deploy_flatpak() -> Result<()> {
-    let paths = Paths::system();
-    let Some(number) = system::boot::booted_deployment(&paths.root) else {
-        return Ok(());
-    };
-    let Some(mut pending) = flatpak::pending(&paths.state, number) else {
-        return Ok(());
-    };
-    let ids: Vec<&str> = pending.apps.iter().map(|(_, id)| id.as_str()).collect();
-    // The unit can't Want the network itself: its condition doesn't stop a Wants=, which would start the network wait at every boot.
-    if paths.root == Path::new("/") && Path::new("/run/systemd/system").is_dir() {
-        let _ = Command::new("systemctl")
-            .args(["start", "network-online.target"])
-            .status();
-    }
-    println!(
-        "archix: installing deployment {number}'s Flatpak apps: {}",
-        ids.join(", ")
-    );
-    let (locked, mut failures) = flatpak::install_pending(&pending);
-    let store = Store::new(&paths);
-    if let Ok(mut generation) = store.get(number)
-        && generation.flatpak != locked
-    {
-        generation.flatpak = locked.clone();
-        if let Err(e) = store.update(&generation) {
-            failures.push(format!("recording the commits in generation {number}: {e:#}"));
-        }
-    }
-    let lock_path = pending.config_dir.join(archix::lock::LOCK_FILE);
-    let newly: Vec<(&String, &LockedApp)> = locked
-        .iter()
-        .filter(|(id, _)| !pending.locked.contains_key(*id))
-        .collect();
-    if !newly.is_empty()
-        && let Err(e) = archix::lock::Lockfile::load(&lock_path).and_then(|mut lockfile| {
-            let Some(host) = lockfile.hosts.get_mut(&pending.host) else {
-                return Ok(());
-            };
-            for (id, app) in &newly {
-                host.flatpak.entry((*id).clone()).or_insert_with(|| (*app).clone());
-            }
-            super::lock::write_config(&lock_path, lockfile.render().as_bytes())
-        })
-    {
-        failures.push(format!("writing the commits to {}: {e:#}", lock_path.display()));
-    }
-    if failures.is_empty() {
-        flatpak::drop_pending(&paths.state, Some(number));
-        return Ok(());
-    }
-    pending.locked = locked;
-    let _ = flatpak::defer(&paths.state, number, &pending);
-    let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
-    for failure in &failures {
-        println!("archix: flatpak: {failure}; it's tried again at the next boot");
-        notes.push_str(&format!(
-            "archix: at boot, flatpak: {failure}; it's tried again at the next boot\n"
-        ));
-    }
-    let _ = archix::durable::write(&paths.notes(), notes.as_bytes());
-    bail!("installing deployment {number}'s Flatpak apps failed")
-}
-
-/// Run by `archix prune-hidden` in its own mount namespace.
-pub fn prune_hidden(root: &Path) -> Result<()> {
-    let removed = layout::prune_hidden_here(root)?;
-    if removed > 0 {
-        println!(
-            "removed {} from before the first layout",
-            count(removed, "entry", "entries")
-        );
-    }
-    Ok(())
-}
-
-/// Run early at boot by archix-boot.service: a boot of another deployment than the current one, picked in the menu or fallen back to after failed tries, makes that one current; nothing is reinstalled.
-/// A fallback from a deployment that didn't boot, which `archix status` repeats while the one it fell back to is current.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(super) struct Fallback {
-    pub from: u32,
-    pub to: u32,
-    pub note: String,
-}
-
-pub(super) fn fallback_path(paths: &Paths) -> PathBuf {
-    paths.state.join("boot").join("fallback.json")
-}
-
-pub(super) fn read_fallback(paths: &Paths) -> Option<Fallback> {
-    serde_json::from_str(&fs::read_to_string(fallback_path(paths)).ok()?).ok()
-}
-
-/// The unsafe downgrades between the packages deployment `from` booted with and those of `to`, which a fallback runs without asking.
-fn went_back(deployments: &deploy::Store, from: u32, to: u32) -> Vec<String> {
-    let db = |n: u32| deployments.path(n).join("pacman");
-    let (Ok(newer), Ok(older)) = (read_local_db(&db(from)), read_local_db(&db(to))) else {
-        return Vec::new();
-    };
-    let store = Store::new(&Paths::system());
-    let configured = |n: u32| store.get(n).map(|g| g.system.unsafe_downgrades).unwrap_or_default();
-    let configured = merged(&configured(from), &configured(to));
-    older
-        .values()
-        .filter_map(|pkg| {
-            let from = &newer.get(&pkg.name)?.version;
-            let why = archix::downgrade::crossing(&pkg.name, from, &pkg.version, &configured)?;
-            Some(format!("{} {from} -> {} {why}", pkg.name, pkg.version))
-        })
-        .collect()
-}
-
+/// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
 pub fn boot_check(cmdline: Option<String>) -> Result<()> {
-    let result = check_booted(cmdline);
-    if let Err(e) = system::sleep::sync(&Paths::system().root) {
-        println!("archix: couldn't update the hibernation guard: {e:#}");
-    }
-    result
-}
-
-fn check_booted(cmdline: Option<String>) -> Result<()> {
     let paths = Paths::system();
-    let laid_out = layout::laid_out(&paths.root);
-    if laid_out && !paths.state.join("layout-pruned").exists() {
-        match integration::own_path().and_then(|archix| layout::prune_hidden(&paths.root, &archix)) {
-            Ok(()) => {
-                let _ = archix::durable::write(&paths.state.join("layout-pruned"), b"");
-            }
-            Err(e) => println!("archix: {e:#}"),
-        }
-    }
-    if laid_out && let Err(e) = system::usr_local::at_boot(&paths) {
-        println!("archix: updating the /usr/local hold and its login note: {e:#}");
-    }
-    let refused = system::boot::refused_entry_note(&paths);
-    if let Some(note) = &refused {
-        system::boot::add_login_note(&paths, note);
+    if let Err(e) = system::sleep::sync(&paths.root) {
+        println!("archix: couldn't update the hibernation guard: {e:#}");
     }
     let booted = match cmdline {
         Some(cmdline) => system::boot::booted_generation(&cmdline),
         None => system::boot::booted(),
     };
-    let Some(booted) = booted else {
-        if refused.is_none()
-            && let Some(entry) = system::boot::tampered_selected_entry()
-        {
-            let running = system::boot::booted_deployment(&paths.root);
-            let started = match running.filter(|n| system::deploy_boot::generation_of_entry(&entry) == Some(*n)) {
-                Some(n) => format!(
-                    "it started the UKI and command line archix wrote it with, so deployment {n} booted from it, but "
-                ),
-                None => String::new(),
-            };
-            system::boot::add_login_note(
-                &paths,
-                &format!(
-                    "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it was changed on the ESP outside archix (archix's copy is {}); {started}current stays as it is",
-                    system::boot::entry_record(&paths, &entry).display()
-                ),
-            );
-        }
-        return Ok(());
-    };
-    if !laid_out {
-        return Ok(());
-    }
-    let deployments = deploy::Store::open(&paths.root)?;
-    if !deployments.deployments()?.contains(&booted) {
-        println!("archix: the boot entry names generation {booted}, which has no deployment; leaving current as it is");
-        return Ok(());
-    }
-    let current = deployments.current()?;
-    if current == Some(booted) {
-        return Ok(());
-    }
-    let esp = fs::read_to_string(paths.state.join("boot").join("esp")).map(|esp| PathBuf::from(esp.trim()));
-    if let Some(current) = current
-        && booted > current
-        && !esp.as_ref().is_ok_and(|esp| system::boot::loader_names(esp, booted))
+    if booted.is_none()
+        && let Some(entry) = system::boot::tampered_selected_entry()
     {
-        // Only loader.conf going missing or torn makes systemd-boot start the newest entry on its own, which would undo a rollback.
-        println!(
-            "archix: systemd-boot started generation {booted}, newer than the current {current}, though loader.conf doesn't name it; {current} stays current and the boot default (`archix rollback {booted}` makes {booted} current)"
-        );
-        if let Ok(esp) = &esp
-            && let Err(e) = system::boot::set_default_entry(esp, current)
-        {
-            println!("archix: couldn't make generation {current} the boot default again: {e:#}");
-        }
-        return Ok(());
-    }
-    let note = match current {
-        Some(current) if system::boot::failed_to_boot(&paths, current) => {
-            let health = system::health::read_failure(&paths, current);
-            let mounts = system::emergency::read(&paths, current);
-            system::emergency::forget(&paths, current);
-            let mut note = match (health, mounts) {
-                (health, Some(mounts)) if health.as_ref().is_none_or(|health| health.at < mounts.at) => {
-                    system::emergency::fallback_note(current, booted, &mounts)
-                }
-                (Some(failure), _) => system::health::fallback_note(current, booted, &failure),
-                (None, _) => format!(
-                    "archix: generation {current} didn't finish booting in the tries it had, so systemd-boot started generation {booted}, which is current now"
-                ),
-            };
-            let risky = went_back(&deployments, current, booted);
-            if !risky.is_empty() {
-                note.push_str(&format!(
-                    "\narchix: WARNING: generation {booted} runs older versions than {current} booted with, and their services may have migrated data during that boot, which these versions can't read safely: {}. Check them before relying on them",
-                    risky.join("; ")
-                ));
-            }
-            let fallback = Fallback {
-                from: current,
-                to: booted,
-                note: note.clone(),
-            };
-            if let Ok(text) = serde_json::to_string(&fallback) {
-                let _ = archix::durable::write(&fallback_path(&paths), text.as_bytes());
-            }
-            Some(note)
-        }
-        Some(current) => {
-            println!("archix: booted generation {booted}, but {current} was current; {booted} is current now");
-            None
-        }
-        None => None,
-    };
-    if let Some(current) = current {
-        let mut skipped = Vec::new();
-        carry_accounts_from(
+        system::boot::add_login_note(
             &paths,
-            &deployments.path(current).join("etc"),
-            &paths.root.join("etc"),
-            &mut skipped,
+            &format!(
+                "archix: the boot entry {entry} isn't the entry archix wrote for that generation, so it was changed on the ESP outside archix (archix's copy is {})",
+                system::boot::entry_record(&paths, &entry).display()
+            ),
         );
-        for line in skipped {
-            println!("archix: {line}");
-        }
-    }
-    if let Ok(esp) = &esp {
-        let unwritten = |what: String, e: anyhow::Error| {
-            if let Err(e) = system::boot::esp_unwritable(&paths, esp, &what, &format!("{e:#}")) {
-                println!("archix: {what}: {e:#}");
-            }
-        };
-        if let Err(e) = system::boot::set_default_entry(esp, booted) {
-            unwritten(format!("generation {booted} couldn't be made the boot default"), e);
-        }
-        if let Err(e) = system::boot::follow_with_fallback(&paths, esp, booted) {
-            unwritten(
-                format!("the fallback UKI couldn't be pointed at generation {booted}"),
-                e,
-            );
-        }
-    }
-    deployments.point_current(booted)?;
-    if let Some(note) = note {
-        println!("{note}");
-        let mut notes = fs::read_to_string(paths.notes()).unwrap_or_default();
-        notes.push_str(&note);
-        notes.push('\n');
-        let _ = fs::write(paths.notes(), notes);
     }
     Ok(())
 }

@@ -570,7 +570,6 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
             )),
             None => {}
         }
-        let deployment = crate::system::boot::booted_deployment(root);
         for (path, target) in manifest.links() {
             let at = root.join(path.trim_start_matches('/'));
             if fs::symlink_metadata(&at).is_ok_and(|meta| meta.is_file()) {
@@ -582,8 +581,7 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
                         format!("secret {name}")
                     });
                 lines.push(format!(
-                    "warning: {path} should be a link to {what} but is a file; it holds plain text on disk{}, and the next switch refuses until it's moved away",
-                    deployment.map_or(String::new(), |n| format!(" in deployment {n}"))
+                    "warning: {path} should be a link to {what} but is a file; it holds plain text on disk, and the next switch refuses until it's moved away"
                 ));
             }
         }
@@ -601,7 +599,7 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
     for (name, entry) in current.map(|m| &m.secrets).into_iter().flatten() {
         if entry.absent {
             lines.push(format!(
-                "secret {name} is left out of the current deployment (switched --without-secrets); `archix secrets rekey` where an admin key is, then switch"
+                "secret {name} is left out of the current generation (switched --without-secrets); `archix secrets rekey` where an admin key is, then switch"
             ));
         }
     }
@@ -626,7 +624,7 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
     lines
 }
 
-/// Files in the running /etc, and the pending deployment's, that hold a value of the booted deployment's file secrets on disk, as the /etc merge refuses to carry; reading the values takes root, and `manifest` is the booted one when it can be read.
+/// Files in /etc that hold a value of the file secrets on disk; reading the values takes root, and `manifest` is the applied one when it can be read.
 fn plaintext_lines(paths: &crate::paths::Paths, manifest: &Manifest) -> Vec<String> {
     let root = &paths.root;
     if !manifest
@@ -655,20 +653,12 @@ fn plaintext_lines(paths: &crate::paths::Paths, manifest: &Manifest) -> Vec<Stri
         .into_keys()
         .filter_map(|path| path.strip_prefix("/etc/").map(str::to_string))
         .collect();
-    let mut places = vec![(root.join("etc"), crate::system::boot::booted_deployment(root))];
-    if let Some((pending, _)) = crate::etcmerge::pending(root) {
-        places.push((crate::etcmerge::deployment_etc(root, pending), Some(pending)));
-    }
-    let mut lines = Vec::new();
-    for (etc, number) in places {
-        for (path, names) in live::scan_etc(&etc, &values, &skip) {
-            lines.push(format!(
-                "warning: {path} holds secret {names} in plaintext on disk{}; remove it (change a NetworkManager connection whose secret archix places with `nmcli connection modify --temporary`, or in the config)",
-                number.map_or(String::new(), |n| format!(" (deployment {n})"))
-            ));
-        }
-    }
-    lines
+    live::scan_etc(&root.join("etc"), &values, &skip)
+        .into_iter()
+        .map(|(path, names)| format!(
+            "warning: {path} holds secret {names} in plaintext on disk; remove it (change a NetworkManager connection whose secret archix places with `nmcli connection modify --temporary`, or in the config)"
+        ))
+        .collect()
 }
 
 /// A template's text with each placeholder replaced by its value, in locked memory.

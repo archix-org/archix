@@ -41,18 +41,6 @@ impl SystemChange {
 /// Where a managed path is on disk for one pass over the files, or None when the pass leaves it to another.
 pub type Locate<'a> = &'a dyn Fn(&str) -> Option<PathBuf>;
 
-/// The deployment tree a managed path belongs to, if any; everything else, /usr/local included, is written on the live system.
-pub fn deployment_tree(path: &str) -> Option<&'static str> {
-    if super::usr_local::holds(path) {
-        return None;
-    }
-    ["usr", "etc", "opt", "boot"].into_iter().find(|tree| {
-        path.strip_prefix('/')
-            .and_then(|rest| rest.strip_prefix(tree))
-            .is_some_and(|rest| rest.starts_with('/'))
-    })
-}
-
 /// The users and groups in one root's account files, read directly instead of through NSS, so they can be a deployment's.
 #[derive(Debug, Default)]
 pub struct Accounts {
@@ -1524,18 +1512,6 @@ mod tests {
         assert!(a.file_name().unwrap().to_string_lossy().starts_with(".x.archix."));
         let (tmp, _) = create_temp(&target).unwrap();
         assert_eq!(fs::symlink_metadata(&tmp).unwrap().mode() & 0o777, 0o600);
-    }
-
-    #[test]
-    fn managed_paths_split_into_deployment_trees_and_the_live_system() {
-        assert_eq!(deployment_tree("/etc/x"), Some("etc"));
-        assert_eq!(deployment_tree("/usr/local/bin/x"), None);
-        assert_eq!(deployment_tree("/usr/lib/x"), Some("usr"));
-        assert_eq!(deployment_tree("/opt/x/y"), Some("opt"));
-        assert_eq!(deployment_tree("/etcetera/x"), None);
-        assert_eq!(deployment_tree("/home/u/.x"), None);
-        assert_eq!(deployment_tree("/efi/loader/entries/m.conf"), None);
-        assert_eq!(deployment_tree("/var/lib/x"), None);
     }
 
     #[test]

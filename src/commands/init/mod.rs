@@ -89,8 +89,6 @@ enum BootFacts {
         kernel: String,
         microcode: Vec<String>,
         params: Vec<String>,
-        /// Why the first switch can't lay this system out as deployments, if it can't.
-        blocker: Option<String>,
         /// The ESP is mounted in /boot, which the config moves to boot.esp's default, /efi.
         esp_in_boot: bool,
         /// mkinitcpio's microcode hook already puts microcode in the initramfs, so boot.microcode stays empty.
@@ -126,7 +124,6 @@ struct Facts {
     files: Vec<FoundFile>,
     /// The secrets left out, by path, a secret directory standing for what's in it, and ones outside /etc.
     secret_paths: Vec<String>,
-    btrfs: bool,
     /// Why rollbacks can't work on this root, none when they can.
     rollback_unavailable: Option<String>,
     boot: BootFacts,
@@ -662,7 +659,6 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
                     .filter(|image| !microcode_hook && Path::new("/boot").join(image).is_file())
                     .map(str::to_string)
                     .collect();
-                let blocker = archix::deploy::layout::unsupported(root, Path::new(&esp));
                 let esp_in_boot = fs::canonicalize(&esp)
                     .is_ok_and(|esp| esp.starts_with(fs::canonicalize("/boot").unwrap_or_else(|_| "/boot".into())));
                 BootFacts::Ready {
@@ -670,7 +666,6 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
                     kernel,
                     microcode,
                     params,
-                    blocker,
                     esp_in_boot,
                     microcode_hook,
                 }
@@ -740,7 +735,6 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         unreproducible,
         files,
         secret_paths,
-        btrfs: capture::is_btrfs(Path::new("/")),
         rollback_unavailable: archix::snapshot::unsupported(Path::new("/")),
         boot,
         flatpak_apps,
@@ -1249,7 +1243,7 @@ fn report(facts: &Facts, answers: &Answers) {
         .collect();
     if !copied.is_empty() {
         note(format!(
-            "unit files no package installed in /usr/lib/systemd/system are copied to /etc/systemd/system, since each deployment's /usr holds only what packages install: {}",
+            "unit files no package installed in /usr/lib/systemd/system are copied to /etc/systemd/system, since archix reproduces /usr only from packages: {}",
             some_of(&copied, 6)
         ));
     }
@@ -1300,28 +1294,26 @@ fn report(facts: &Facts, answers: &Answers) {
     }
     section("Generations");
     done(format!(
-        "gc keeps 2 deployments to boot or roll back to, and the records of the newest {} generations and any younger than {} days",
+        "gc keeps the records of the newest {} generations and any younger than {} days",
         answers.keep(),
         answers.keep_days()
     ));
 }
 
-/// What the first switch will do about booting, each line good news or a warning.
+/// What the config sets up about booting, each line good news or a warning.
 fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
     let mut lines = match &facts.boot {
         BootFacts::NoLoader => vec![(
             false,
-            "no systemd-boot found; archix boots every generation as a deployment from its own systemd-boot entry, so `archix switch` needs systemd-boot installed (bootctl install) first".to_string(),
+            "no systemd-boot found; archix's boot entries and automatic fallback need it (bootctl install)".to_string(),
         )],
         BootFacts::NoRoot => vec![(
             false,
-            "the kernel command line has no root=, which deployment entries need; `archix switch` refuses until kernel_params has it".to_string(),
+            "the kernel command line has no root=, which boot entries need; add it to kernel_params".to_string(),
         )],
         BootFacts::Ready {
             esp,
             kernel,
-            blocker,
-            esp_in_boot,
             microcode_hook,
             ..
         } => {
@@ -1332,47 +1324,22 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
                     "mkinitcpio's microcode hook puts the microcode in the initramfs, so boot.microcode stays empty rather than loading it twice".to_string(),
                 ));
             }
-            if let Some(why) = blocker {
-                lines.push((false, format!("the first switch can't lay this system out as deployments: {why}")));
-                if *esp_in_boot {
-                    lines.push((
-                        false,
-                        "the config leaves boot.esp at its default, /efi, where the ESP has to move".to_string(),
-                    ));
-                }
-            }
             lines
         }
     };
-    if first_step(facts).is_none() {
-        let staging = if facts.btrfs {
-            "a btrfs snapshot"
-        } else {
-            "copies and overlays"
-        };
-        lines.push((
-            true,
-            format!("the first switch lays the system out as deployment 1; each switch then builds the next deployment from {staging} beside the running one, and it boots at the next restart"),
-        ));
-    }
+    lines.push((
+        true,
+        "each switch applies in place, live, with no reboot; archix doesn't write boot entries yet".to_string(),
+    ));
     lines
 }
 
-/// What has to change on this machine before `archix switch` can lay it out as deployments, if anything.
+/// What has to change on this machine before archix's boot entries can work, if anything.
 fn first_step(facts: &Facts) -> Option<String> {
     match &facts.boot {
         BootFacts::NoLoader => Some("install systemd-boot (`bootctl install`)".to_string()),
         BootFacts::NoRoot => Some("add the root= kernel parameter to kernel_params".to_string()),
-        BootFacts::Ready {
-            blocker: Some(_),
-            esp_in_boot: true,
-            ..
-        } => Some(
-            "mount the ESP at /efi instead of /boot: change its line in /etc/fstab, then mount it there; archix keeps that line in each deployment's fstab"
-                .to_string(),
-        ),
-        BootFacts::Ready { blocker: Some(why), .. } => Some(why.clone()),
-        BootFacts::Ready { blocker: None, .. } => None,
+        BootFacts::Ready { .. } => None,
     }
 }
 
@@ -1820,47 +1787,6 @@ mod tests {
                 (name.to_string(), pkg)
             })
             .collect()
-    }
-
-    #[test]
-    fn an_esp_in_boot_is_named_as_what_to_fix_first_and_never_written_to_the_config() {
-        let mut facts = super::tui::tests::facts();
-        let BootFacts::Ready {
-            blocker, esp_in_boot, ..
-        } = &mut facts.boot
-        else {
-            unreachable!()
-        };
-        *blocker = Some("the ESP is mounted at /boot, in /boot".into());
-        *esp_in_boot = true;
-        let lines = boot_lines(&facts);
-        assert!(
-            !lines
-                .iter()
-                .any(|(_, line)| line.contains("lays the system out as deployment 1")),
-            "{lines:?}"
-        );
-        assert!(
-            lines.iter().any(|(good, line)| !good && line.contains("in /boot")),
-            "{lines:?}"
-        );
-        let step = first_step(&facts).unwrap();
-        assert!(step.contains("/efi") && step.contains("/etc/fstab"), "{step}");
-        let answers = Answers::recommended(&facts);
-        let config = build(&facts, &answers, Path::new("/cfg"), "box");
-        let boot = Lua::Table(config.fields.clone()).render(0);
-        assert!(
-            boot.contains("loader = \"systemd-boot\"") && !boot.contains("esp ="),
-            "{boot}"
-        );
-
-        let ready = super::tui::tests::facts();
-        assert_eq!(first_step(&ready), None);
-        assert!(
-            boot_lines(&ready)
-                .iter()
-                .any(|(_, line)| line.contains("lays the system out as deployment 1"))
-        );
     }
 
     #[test]

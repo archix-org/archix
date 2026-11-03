@@ -3,11 +3,7 @@ src/aur/	test:aur test:helper test:recipes
 src/commands/helper.rs	test:helper test:aur
 src/commands/init/	test:init
 src/commands/switch.rs	test:switch test:system test:boot test:credentials
-src/commands/deployments.rs	test:switch test:deploy
-src/commands/eject.rs	test:deploy test:switch test:boot test:secrets
 src/commands/lock.rs	test:switch test:archlinux
-src/deploy/	test:deploy test:switch test:boot test:deploy_boot
-src/etcmerge/	test:etcmerge test:switch test:secrets
 src/eval/	test:init test:home test:recipes test:system test:fetch
 src/options/	test:system test:home
 src/value.rs	test:system test:home
@@ -20,16 +16,13 @@ src/system/secureboot.rs	test:boot test:switch
 src/system/authenticode.rs	test:boot
 src/system/blobs.rs	test:boot
 src/system/revoke.rs	test:boot
-src/system/deploy_boot.rs	test:deploy_boot test:deploy
 src/system/rescue	test:rescue test:boot
 src/system/password.rs	test:rescue
 src/commands/rescue.rs	test:rescue test:credentials
 src/system/credentials.rs	test:credentials test:system
-src/deploy/build.rs	test:deploy test:switch test:boot test:deploy_boot test:credentials
-src/system/usr_local.rs	test:system test:deploy test:deploy_boot test:aur test:fetch
 src/system/fstab.rs	test:system test:init test:switch
 src/system/	test:system test:switch
-src/system/capabilities.rs	test:system test:switch test:deploy test:repos
+src/system/capabilities.rs	test:system test:switch test:repos
 src/flatpak.rs	test:flatpak
 src/fetch.rs	test:fetch test:archlinux
 src/archive.rs	test:archlinux test:fetch test:switch
@@ -49,16 +42,23 @@ src/conflicts.rs	test:switch test:aur
 src/installed.rs	test:switch test:system
 src/gc.rs	test:switch
 src/generations.rs	test:switch test:system test:repos
-src/durable.rs	test:switch test:deploy
+src/durable.rs	test:switch
 src/date.rs	test:switch test:archlinux
-src/elf.rs	test:deploy_boot test:switch
+src/elf.rs	test:switch
 src/soname.rs	test:switch
-src/paths.rs	test:switch test:deploy
-src/testhooks.rs	test:switch test:deploy test:boot
-src/secrets/	test:secrets test:credentials test:deploy
+src/paths.rs	test:switch
+src/testhooks.rs	test:switch test:boot
+src/secrets/	test:secrets test:credentials
 src/eval/modules/secrets.lua	test:secrets
 src/snapshot/	test:snapshot
 src/commands/snapshot.rs	test:snapshot
 src/system/btrfs.rs	test:system test:snapshot
 src/captured.rs	test:captured test:switch
 src/eval/isolated.rs	test:captured test:switch
+src/plan_diff.rs	test:switch
+src/system/live.rs	test:switch test:system test:snapshot
+src/system/restart.rs	test:switch
+src/system/running.rs	test:switch
+src/system/esp.rs	test:boot
+src/system/accounts.rs	test:credentials test:system
+src/system/xattr.rs	test:system test:repos

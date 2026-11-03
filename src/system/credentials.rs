@@ -8,7 +8,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 
 use super::User;
-use crate::etcmerge::accounts;
+use crate::system::accounts;
 
 /// Where each user's declared keys go in a deployment.
 pub const KEYS_DIR: &str = "/etc/ssh/authorized_keys.d";

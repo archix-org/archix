@@ -277,7 +277,7 @@ pub(super) fn write_deferred() -> Result<()> {
     Ok(())
 }
 
-/// Writes a config file, and also in the /etc of a committed deployment that hasn't booted yet, so it's there before the /etc merge carries it.
+/// Writes a config file, as its directory's owner when that isn't root.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
     WRITTEN.with(|written| {
         let mut written = written.borrow_mut();
@@ -288,17 +288,10 @@ pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
         });
     });
     if owned_by_someone_else(path) {
-        archix::captured::write_as_owner(path, text)?;
+        archix::captured::write_as_owner(path, text)
     } else {
-        archix::durable::write_config(path, text)?;
+        archix::durable::write_config(path, text)
     }
-    let paths = Paths::system();
-    if let Some(etc) = pending_etc(&paths)
-        && let Some(copy) = in_etc(&paths, path, &etc)
-    {
-        archix::durable::write_config(&copy, text).with_context(|| format!("writing {}", copy.display()))?;
-    }
-    Ok(())
 }
 
 /// Whether root is about to write into a directory another account owns, which it then does as that account.
@@ -309,46 +302,6 @@ fn owned_by_someone_else(path: &Path) -> bool {
             .parent()
             .and_then(|dir| std::fs::metadata(dir).ok())
             .is_some_and(|meta| meta.uid() != 0)
-}
-
-fn identity(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|meta| (meta.dev(), meta.ino()))
-}
-
-/// What a deployment waiting for the next boot means for /etc until then, by whether an /etc merge is carrying changes into it.
-pub(super) fn pending_note(number: u32, carried: bool) -> String {
-    let etc = if carried {
-        "changes to /etc made before then are carried over to it"
-    } else {
-        "no /etc merge is running, so changes to /etc made before then don't reach it"
-    };
-    format!("deployment {number} is committed and boots at the next restart; {etc}")
-}
-
-/// The /etc of the deployment that boots next, when it isn't the one the running /etc belongs to.
-pub(super) fn pending_etc(paths: &Paths) -> Option<std::path::PathBuf> {
-    if !archix::deploy::layout::laid_out(&paths.root) {
-        return None;
-    }
-    let store = archix::deploy::Store::open(&paths.root).ok()?;
-    let etc = store.path(store.current().ok()??).join("etc");
-    (identity(&etc) != identity(&paths.root.join("etc"))).then_some(etc)
-}
-
-/// Where `path`, a file under the running /etc, is under `etc`; None for a file elsewhere.
-fn in_etc(paths: &Paths, path: &Path, etc: &Path) -> Option<std::path::PathBuf> {
-    let live = std::fs::canonicalize(paths.root.join("etc")).ok()?;
-    let path = std::path::absolute(path).ok()?;
-    let parent = path.parent()?;
-    let (found, rest) = parent
-        .ancestors()
-        .find_map(|dir| Some((std::fs::canonicalize(dir).ok()?, parent.strip_prefix(dir).ok()?)))?;
-    Some(
-        etc.join(found.strip_prefix(&live).ok()?)
-            .join(rest)
-            .join(path.file_name()?),
-    )
 }
 
 pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> {
@@ -425,12 +378,7 @@ pub(super) fn pending(
             .iter()
             .map(ToString::to_string),
     );
-    let place = |path: &str| {
-        Some(match system::apply::deployment_tree(path) {
-            Some(_) => here.join(path.trim_start_matches('/')),
-            None => system::usr_local::on_disk(&paths.root, path),
-        })
-    };
+    let place = |path: &str| Some(here.join(path.trim_start_matches('/')));
     lines.extend(
         system::apply::describe(&change, &place, &Accounts::read(&here.join("etc")), &here)?
             .into_iter()
@@ -476,9 +424,6 @@ fn fstab_drift(target: &Target) -> Result<Vec<String>> {
     let Some(generation) = store.current()?.map(|n| store.get(n)).transpose()? else {
         return Ok(Vec::new());
     };
-    if generation.before_archix {
-        return Ok(Vec::new());
-    }
     Ok(system::fstab::drift(
         &super::switch::current_root(&paths).join("etc"),
         system::fstab::esp_of(target.config),
@@ -543,12 +488,6 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
             count(newer, "package is", "packages are")
         );
     }
-    if let Some(boot) = &declared.boot
-        && !archix::deploy::layout::laid_out(&paths.root)
-        && let Some(why) = archix::deploy::layout::unsupported(&paths.root, Path::new(&boot.esp))
-    {
-        println!("`archix switch` refuses to lay this system out as deployments until this is fixed: {why}");
-    }
     let (lines, warned, kept) = pending(target, &declared, &lock)?;
     if lines.is_empty() {
         println!("the system matches the lock and the config");
@@ -584,47 +523,15 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                     paths.packages().display()
                 );
             }
-            match archix::system::boot::booted_deployment(&paths.root) {
-                Some(booted) if booted != number => {
-                    println!("booted generation: {booted}; generation {number} boots at the next restart")
-                }
-                _ => {}
-            }
-            if pending_etc(&paths).is_some() {
-                println!("{}", pending_note(number, archix::etcmerge::running(&paths)));
-            }
-            if let Some(waiting) = archix::system::reboot::waiting(&paths.root) {
-                println!("{}", archix::system::reboot::line(&waiting));
-            }
-            archix::deploy::verify::print_status(&paths);
-            if let Some(warning) = archix::system::usr_local::boot_files_warning(&paths.root) {
-                println!("{warning}");
+            for record in archix::snapshot::Store::open(&paths.root).list().unwrap_or_default() {
+                println!("snapshot  {}", super::snapshot::describe(&record).trim_start());
             }
             if !archix::system::allows_no_password_login(target.config)
-                && archix::system::rescue_auth::accounts(
-                    &archix::deploy::store::Store::open(&paths.root)?
-                        .path(number)
-                        .join("etc"),
-                )
-                .is_ok_and(|found| found.is_empty())
+                && archix::system::rescue_auth::accounts(&paths.root.join("etc")).is_ok_and(|found| found.is_empty())
             {
                 println!(
                     "warning: no account can log in to the rescue entry (root is locked and no wheel or sudo member has a yescrypt or SHA-512 password), so recovering needs a live USB; give root or a wheel user a password with passwd or users.<name>.hashed_password, or set allow_no_password_login = true to silence this"
                 );
-            }
-            if let Some(line) = archix::system::usr_local::hold_status(&paths) {
-                println!("{line}");
-            }
-            for line in archix::system::activate::boot_failures(&paths.root) {
-                println!("{line}");
-            }
-            if let Some(pending) = archix::system::sleep::pending(&paths.root)
-                && archix::system::sleep::drop_in(&paths.root).exists()
-            {
-                println!("{}", archix::system::sleep::note(pending));
-            }
-            if let Some(fallback) = super::switch::read_fallback(&paths).filter(|f| f.to == number) {
-                println!("{}", fallback.note);
             }
             if let Some(note) = archix::system::boot::esp_unwritable_note(&paths) {
                 println!("{note}");
@@ -633,9 +540,6 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 println!(
                     "warning: systemd-boot's LoaderEntryDefault variable (the boot menu's default, or `bootctl set-default`) names {entry} and overrides archix's default; the next switch clears it, or `sudo bootctl set-default ''` now"
                 );
-            }
-            for line in archix::etcmerge::status_lines(&paths) {
-                println!("{line}");
             }
             for line in fstab_drift(target)? {
                 println!("{line}");
@@ -782,27 +686,6 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_config_file_in_the_running_etc_maps_to_the_same_place_in_another_etc() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::under(dir.path());
-        std::fs::create_dir_all(dir.path().join("etc/archix")).unwrap();
-        std::fs::write(dir.path().join("etc/archix/archix.lock"), "").unwrap();
-        let other = dir.path().join("pending/etc");
-        let mapped = |path: &str| in_etc(&paths, &dir.path().join(path), &other).map(|p| p.into_os_string());
-        assert_eq!(
-            mapped("etc/archix/archix.lock"),
-            Some(other.join("archix/archix.lock").into_os_string()),
-            "a rename to a path with a trailing slash fails"
-        );
-        assert_eq!(
-            mapped("etc/archix/lua/hosts/box/installed.lua"),
-            Some(other.join("archix/lua/hosts/box/installed.lua").into_os_string()),
-            "a file in directories not made yet"
-        );
-        assert_eq!(mapped("home/config/init.lua"), None);
-    }
 
     #[test]
     fn dkms_gets_the_headers_of_every_kernel_not_just_the_boot_one() {

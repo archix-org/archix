@@ -8,9 +8,20 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::deploy::{EspStep, Staging, Transaction};
+use super::esp::EspStep;
 use crate::paths::Paths;
 use crate::testhooks::mark;
+
+/// A root `build` makes boot images from, which stage 3 provides; nothing implements it in stage 2, as no switch writes entries.
+pub trait BootRoot {
+    /// Its pacman database.
+    fn local_db(&self) -> PathBuf;
+    /// Where `path`, absolute in the root, is from here.
+    fn read_path(&self, path: &Path) -> Result<PathBuf>;
+    fn output(&self, argv: &[&str]) -> Result<std::process::Output>;
+    /// Like `output`, for the one step that may read the PCR policy key.
+    fn signing_output(&self, argv: &[&str]) -> Result<std::process::Output>;
+}
 
 /// How a generation's boot entry is built: kept with the generation, so a rollback that rebuilds its deployment builds the same entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -305,54 +316,12 @@ pub fn retire_fallbacks(paths: &Paths, esp: &Path, generation: u32) -> Result<()
     Ok(())
 }
 
-/// Makes the fallback UKI a copy of the UKI `generation`'s own entry starts, then takes the others off; false when it has no entry.
-pub fn follow_with_fallback(paths: &Paths, esp: &Path, generation: u32) -> Result<bool> {
-    let Some(uki) = entries(esp)
-        .into_iter()
-        .find(|(number, extra, _)| *number == generation && !extra)
-        .and_then(|(_, _, entry)| uki_of(esp, &entry))
-        .filter(|uki| uki.is_file())
-    else {
-        return Ok(false);
-    };
-    install_fallback(paths, esp, generation, &uki)?;
-    retire_fallbacks(paths, esp, generation)?;
-    Ok(true)
-}
-
-/// Makes kept deployment `number` the boot default, the fallback UKI's and then `current`, as `archix rollback` and `archix rescue use` do; `write_entry` writes its entry when the fallback finds none. The default goes first: a crash between leaves it on `number`, whose boot makes it current.
-pub fn repoint(
-    paths: &Paths,
-    esp: &Path,
-    store: &crate::deploy::Store,
-    number: u32,
-    write_entry: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    set_default_entry(esp, number)?;
-    crate::durable::sync_esp(esp)?;
-    if !follow_with_fallback(paths, esp, number)? {
-        write_entry()?;
-    }
-    store.point_current(number)?;
-    store.choose(number)
-}
-
 /// A generation's normal entry, with systemd-boot's boot counter when it gets `tries` attempts: archix-N+3.conf becomes archix-N.conf once a boot reaches boot-complete.target, and archix-N+0-3.conf is skipped for an older entry after three failed ones.
 fn counted_entry_name(generation: u32, tries: u32) -> String {
     match tries {
         0 => entry_name(generation, ""),
         tries => format!("archix-{generation}+{tries}.conf"),
     }
-}
-
-/// Whether systemd-boot has used up a generation's tries without a boot reaching boot-complete.target.
-pub fn failed_to_boot(paths: &Paths, generation: u32) -> bool {
-    let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) else {
-        return false;
-    };
-    entries(Path::new(esp.trim())).iter().any(|(number, extra, path)| {
-        *number == generation && !extra && is_bad(&path.file_name().unwrap_or_default().to_string_lossy())
-    })
 }
 
 /// statfs's f_type for FAT, which every ESP is.
@@ -365,56 +334,6 @@ pub fn is_fat(path: &Path) -> bool {
     };
     let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
     unsafe { libc::statfs(c_path.as_ptr(), &mut stat) == 0 && stat.f_type as u64 == MSDOS_SUPER_MAGIC }
-}
-
-/// Checked before a switch, rollback or gc changes anything: `esp` must be a mounted FAT filesystem, and the partition systemd-boot started from when it says which (LoaderDevicePartUUID), else entries would land in a bare directory or on a disk the firmware never reads.
-pub fn require_esp(esp: &Path) -> Result<()> {
-    if !crate::testhooks::check_esp() {
-        return Ok(());
-    }
-    let c_path = CString::new(esp.as_os_str().as_encoded_bytes())?;
-    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut stat) } != 0 {
-        bail!(
-            "boot.esp is {}, which can't be read ({}); mount the ESP there, then try again; nothing was changed",
-            esp.display(),
-            io::Error::last_os_error()
-        );
-    }
-    if !is_fat(esp) {
-        bail!(
-            "boot.esp is {}, but no FAT filesystem is mounted there, so boot entries would go into a directory the firmware never reads; mount the ESP (`mount {}` with its fstab line), then try again; nothing was changed",
-            esp.display(),
-            esp.display()
-        );
-    }
-    if super::secureboot::in_chroot() {
-        eprintln!(
-            "note: not checking that {} is the partition the firmware starts from, since this runs in a chroot, whose firmware variables are the live system's",
-            esp.display()
-        );
-        return Ok(());
-    }
-    let Some(loader) = loader_var_entry("LoaderDevicePartUUID") else {
-        return Ok(());
-    };
-    let Some(mounted) = partuuid_of(esp) else {
-        return Ok(());
-    };
-    if !mounted.eq_ignore_ascii_case(loader.trim()) {
-        bail!(
-            "the FAT filesystem at {} is partition {mounted}, but systemd-boot started from partition {}, so its entries would go where the firmware doesn't look; mount that ESP at {}, then try again; nothing was changed",
-            esp.display(),
-            loader.trim(),
-            esp.display()
-        );
-    }
-    Ok(())
-}
-
-/// The partition UUID of the device the filesystem at `path` is on, from /dev/disk/by-partuuid.
-fn partuuid_of(path: &Path) -> Option<String> {
-    disk_link_of(path, "by-partuuid")
 }
 
 /// The name in /dev/disk/`kind` of the device the filesystem at `path` is on.
@@ -518,36 +437,6 @@ pub fn report_esp_fstab(esp: &str, changed: &EspFstab) {
             "fstab      the ESP at {esp} is readable by root only (fmask=0077,dmask=0077), as bootctl wants for its random seed"
         );
     }
-}
-
-/// After deploy-mount or activation failed on a boot systemd-boot is counting, reboots after a pause so the next try or the fallback happens with nobody at the machine; on other boots it returns, leaving the halt or emergency shell for whoever is there, since a reboot would only start the same entry again.
-pub fn reboot_counted_try(what: &str, error: &anyhow::Error, root: &Path, initrd: bool) {
-    if !crate::testhooks::counted_boot() {
-        return;
-    }
-    println!(
-        "archix: {what} failed ({error:#}) on one of a new deployment's counted boot tries; rebooting in 10 seconds so systemd-boot tries it again or falls back to the previous deployment"
-    );
-    if cfg!(debug_assertions) && std::env::var_os("ARCHIX_TEST_COUNTED_BOOT").is_some() {
-        println!("archix: rebooting (skipped in a test)");
-        return;
-    }
-    std::thread::sleep(std::time::Duration::from_secs(10));
-    if !initrd {
-        let _ = Command::new("systemctl")
-            .args([
-                "--no-block",
-                "--job-mode=replace-irreversibly",
-                "start",
-                "reboot.target",
-            ])
-            .status();
-        return;
-    }
-    if let Ok(dir) = fs::File::open(root) {
-        unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
-    }
-    unsafe { libc::reboot(libc::RB_AUTOBOOT) };
 }
 
 /// Whether systemd-boot still counts a generation's boot tries: its entry has counters and isn't bad yet.
@@ -790,8 +679,8 @@ impl Built {
 }
 
 /// Builds a staged deployment's initramfs and UKIs inside its staging root, from its own kernels and /etc, signing them when Secure Boot signing is on; UKIs the ESP already has are reused. boot.kernel gets the normal entry, every other installed kernel an extra one.
-pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx: &Transaction) -> Result<Built> {
-    let version = owned_version(&staging.tree("pacman"), &plan.kernel).with_context(|| {
+pub fn build(paths: &Paths, plan: &BootPlan, number: u32, root: &dyn BootRoot) -> Result<Built> {
+    let version = owned_version(&root.local_db(), &plan.kernel).with_context(|| {
         format!(
             "the {} kernel package isn't installed in the new deployment; boot.kernel names it",
             plan.kernel
@@ -799,12 +688,16 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
     })?;
     let mut kernels = vec![(plan.kernel.clone(), version.clone())];
     kernels.extend(
-        kernels_in(&staging.tree("pacman"))
+        kernels_in(&root.local_db())
             .into_iter()
             .filter(|(name, _)| *name != plan.kernel && !name.contains('+')),
     );
-    let in_tx = |tx: &Transaction, argv: &[&str], what: &str| -> Result<String> {
-        let output = tx.output(argv)?;
+    let in_tx = |signing: bool, argv: &[&str], what: &str| -> Result<String> {
+        let output = if signing {
+            root.signing_output(argv)?
+        } else {
+            root.output(argv)?
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -816,7 +709,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     };
-    let in_view = |argv: &[&str], what: &str| in_tx(tx, argv, what);
+    let in_view = |argv: &[&str], what: &str| in_tx(false, argv, what);
     in_view(&["rm", "-rf", BUILT], "clearing /boot/archix")?;
     in_view(&["mkdir", "-p", BUILT], "creating /boot/archix")?;
     let os_release = in_view(&["cat", "/etc/os-release"], "reading /etc/os-release")?;
@@ -828,22 +721,22 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
         .map(str::to_string)
         .collect();
     let secure_boot = plan.secure_boot.unwrap_or_else(sbctl_has_keys);
-    let pcr_key = staging
+    let pcr_key = root
         .read_path(Path::new(PCR_PRIVATE_KEY))?
         .is_file()
-        .then(|| fs::read(staging.read_path(Path::new(PCR_PUBLIC_KEY)).ok()?).ok())
+        .then(|| fs::read(root.read_path(Path::new(PCR_PUBLIC_KEY)).ok()?).ok())
         .map(Option::unwrap_or_default);
     let microcode: Vec<String> = plan.microcode.iter().map(|m| format!("/boot/{m}")).collect();
     let mut microcode_files = Vec::new();
     for file in &microcode {
-        microcode_files.push(staging.read_path(Path::new(file))?);
+        microcode_files.push(root.read_path(Path::new(file))?);
     }
     let esp = Path::new(&plan.esp);
     let mut ukis = Vec::new();
     for (kernel, version) in &kernels {
         let main = *kernel == plan.kernel;
         let vmlinuz = Path::new(MODULES).join(version).join("vmlinuz");
-        if !staging.read_path(&vmlinuz)?.is_file() {
+        if !root.read_path(&vmlinuz)?.is_file() {
             bail!("{} is missing from the new deployment", vmlinuz.display());
         }
         let initramfs = format!("{BUILT}/initramfs-{kernel}.img");
@@ -851,7 +744,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
             &["mkinitcpio", "-k", version, "-g", &initramfs, "-S", "autodetect"],
             "mkinitcpio",
         )?;
-        let initramfs_file = staging.read_path(Path::new(&initramfs))?;
+        let initramfs_file = root.read_path(Path::new(&initramfs))?;
         // (title, what the command line adds, what the entry title adds, the entry file suffix)
         let mut variants = vec![(
             "archix",
@@ -881,7 +774,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
             let release_text = text.join("\n") + "\n";
             let cmdline = format!("{}{extra_cmdline}", plan.cmdline.trim());
             let key = payload_key(
-                &staging.read_path(&vmlinuz)?,
+                &root.read_path(&vmlinuz)?,
                 &microcode_files,
                 &initramfs_file,
                 &cmdline,
@@ -913,17 +806,17 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
                 }
                 if pcr_key.is_some() {
                     ukify.push(format!("--pcr-private-key={PCR_PRIVATE_KEY}"));
-                    if staging.read_path(Path::new(PCR_PUBLIC_KEY))?.is_file() {
+                    if root.read_path(Path::new(PCR_PUBLIC_KEY))?.is_file() {
                         ukify.push(format!("--pcr-public-key={PCR_PUBLIC_KEY}"));
                     }
                 }
                 let argv: Vec<&str> = ukify.iter().map(String::as_str).collect();
                 match pcr_key {
-                    Some(_) => in_tx(&staging.signing_transaction()?, &argv, "ukify build")?,
+                    Some(_) => in_tx(true, &argv, "ukify build")?,
                     None => in_view(&argv, "ukify build")?,
                 };
                 if secure_boot {
-                    let file = staging.read_path(Path::new(&output))?;
+                    let file = root.read_path(Path::new(&output))?;
                     run(
                         Command::new("sbctl").env("ESP_PATH", esp).arg("sign").arg(&file),
                         "sbctl sign",
@@ -952,7 +845,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, number: u32, staging: &Staging, tx:
     let mut to_check = Vec::new();
     for uki in &ukis {
         to_check.push(match uki.built {
-            true => staging.read_path(&Path::new(BUILT).join(&uki.name))?,
+            true => root.read_path(&Path::new(BUILT).join(&uki.name))?,
             false => uki_dir(esp).join(&uki.name),
         });
     }
@@ -1087,12 +980,12 @@ impl EspStep for Entries<'_> {
     }
 
     fn clean(&self) -> Result<()> {
-        crate::deploy::commit::clean_esp(Path::new(&self.plan.esp))
+        super::esp::clean_esp(Path::new(&self.plan.esp))
     }
 
     fn abandon(&self, number: u32, previous: Option<u32>) -> Result<()> {
         let esp = Path::new(&self.plan.esp);
-        crate::deploy::commit::clean_esp(esp)?;
+        super::esp::clean_esp(esp)?;
         let _ = fs::remove_file(fallback_path(esp, number));
         drop_entries(self.paths, esp, number)?;
         let _ = fs::remove_file(entry_records(self.paths).join(fallback_name(number)));
@@ -1534,15 +1427,6 @@ pub fn counting_off() -> Option<String> {
     })
 }
 
-/// How many UKIs a deployment of `plan` built from pacman database `local_db` puts on the ESP: one per kernel, the protected twin, and the fallback copy, written while the previous fallback is still there.
-pub fn uki_count(plan: &BootPlan, local_db: &Path) -> u64 {
-    let others = kernels_in(local_db)
-        .iter()
-        .filter(|(name, _)| *name != plan.kernel && !name.contains('+'))
-        .count();
-    2 + u64::from(plan.anticheat) + others as u64
-}
-
 /// What a switch's boot entries need on the ESP: `ukis` the size of the newest, the rescue UKI written again beside the one there (`rescue`, its size if known) when the rescue entry is on, and a margin.
 pub fn space_needed(newest: u64, ukis: u64, rescue: Option<Option<u64>>) -> u64 {
     let rescue = rescue.map_or(0, |size| size.unwrap_or(newest));
@@ -1687,28 +1571,6 @@ pub fn firmware_warnings(efivars: &Path, esp: &Path) -> Vec<String> {
     warnings
 }
 
-/// Checked before a switch changes anything: with Secure Boot enforcing, entries archix won't sign could never boot.
-pub fn check_signing(secure_boot: Option<bool>) -> Result<()> {
-    let enforcing = super::secureboot::Machine::new()
-        .state()
-        .is_some_and(|state| state.enabled && !state.setup_mode);
-    if enforcing && !secure_boot.unwrap_or_else(sbctl_has_keys) && super::secureboot::in_chroot() {
-        eprintln!(
-            "warning: this host's Secure Boot is on and the boot entry won't be signed; ignored, since this runs in a chroot"
-        );
-    } else if enforcing && !secure_boot.unwrap_or_else(sbctl_has_keys) {
-        bail!(
-            "Secure Boot is on, but this switch's boot entry wouldn't be signed ({}), so the firmware would refuse it; nothing was changed. Run `sudo archix secure-boot setup`, or set boot.secure_boot = true if sbctl already has keys",
-            if secure_boot == Some(false) {
-                "boot.secure_boot = false"
-            } else {
-                "sbctl has no keys"
-            }
-        );
-    }
-    Ok(())
-}
-
 /// With Secure Boot enforcing, an unsigned entry or loader would leave the new default unbootable, so it fails the switch before anything is committed.
 fn refuse_unsigned(plan: &BootPlan, ukis: &[PathBuf]) -> Result<()> {
     let Some(state) = super::secureboot::Machine::new().state() else {
@@ -1755,17 +1617,6 @@ pub fn booted() -> Option<u32> {
     })
 }
 
-/// The deployment this boot runs on the root at `root`: what the initramfs recorded mounting, else the entry systemd-boot started.
-pub fn booted_deployment(root: &Path) -> Option<u32> {
-    fs::read_to_string(root.join(DEPLOYMENT_RECORD.trim_start_matches('/')))
-        .ok()
-        .and_then(|text| text.trim().parse().ok())
-        .or_else(booted)
-}
-
-/// Where the initramfs records the deployment it mounted, which lasts until shutdown.
-pub const DEPLOYMENT_RECORD: &str = "/run/archix/deployment";
-
 /// The entry systemd-boot started when it names an archix generation but isn't what archix wrote there.
 pub fn tampered_selected_entry() -> Option<String> {
     if booted_generation(&crate::testhooks::kernel_cmdline()).is_some() {
@@ -1774,22 +1625,6 @@ pub fn tampered_selected_entry() -> Option<String> {
     let entry = crate::testhooks::selected_entry()?;
     parse_entry(&entry_id(&entry))?;
     (!entry_unchanged(&Paths::system(), &entry)).then_some(entry)
-}
-
-/// The login note for a boot whose initramfs mounted the current deployment instead of the selected entry's, from what deploy-mount left beside its record of the deployment.
-pub fn refused_entry_note(paths: &Paths) -> Option<String> {
-    let record = paths
-        .root
-        .join(DEPLOYMENT_RECORD.trim_start_matches('/'))
-        .with_file_name(super::deploy_boot::ENTRY_REFUSED);
-    let text = fs::read_to_string(record).ok()?;
-    let (entry, why) = text.split_once('\n')?;
-    let running = booted_deployment(&paths.root).map_or_else(String::new, |n| format!(" {n}"));
-    Some(format!(
-        "archix: systemd-boot started the boot entry {entry}, but archix booted the current deployment{running} instead: {}. Someone or something outside archix changed what the entry starts, on the ESP or in the boot menu's editor; archix's copy of the entry is {}",
-        why.trim(),
-        entry_record(paths, entry).display()
-    ))
 }
 
 /// Adds `note` to the login notes once, which the next switch clears, and prints it.
@@ -2561,7 +2396,7 @@ mod tests {
         drop_entries(&paths, esp.path(), 3).unwrap();
         remove_unused_ukis_but(esp.path(), &[]).unwrap();
         prune_records(&paths, esp.path()).unwrap();
-        crate::deploy::commit::clean_esp(esp.path()).unwrap();
+        crate::system::esp::clean_esp(esp.path()).unwrap();
         assert!(entries(esp.path()).is_empty(), "both deployments' entries went");
         assert!(
             !uki_dir(esp.path()).join("a.efi").exists(),
@@ -2581,7 +2416,7 @@ mod tests {
         assert_eq!(loader(), "default archix-2.conf\npreferred archix-3.conf\n");
         assert!(!loader().contains("rescue"));
         assert!(entries(esp.path()).iter().all(|(n, _, _)| [2, 3].contains(n)));
-        assert_eq!(crate::deploy::keep::boot_default("default archix-rescue.conf\n"), None);
+        assert_eq!(crate::system::esp::boot_default("default archix-rescue.conf\n"), None);
         assert!(!loader_names(esp.path(), 0));
         assert!(!counting(esp.path(), 0) && !is_bad(super::super::rescue::ENTRY));
     }

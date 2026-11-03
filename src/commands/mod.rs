@@ -1,5 +1,3 @@
-mod deployments;
-mod eject;
 mod helper;
 mod init;
 mod lock;
@@ -31,8 +29,7 @@ use archix::repos::{Custom, Repo, is_official, ordered};
 use archix::resolve::Aur;
 use archix::value::Value;
 
-pub use deployments::{hooks, mount_deployment, verify};
-pub use helper::{edit_installed, install_temporarily, pick, prefetch, search, upgrade};
+pub use helper::{edit_installed, pick, prefetch, search, upgrade};
 pub use init::init;
 pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
 
@@ -76,10 +73,9 @@ pub fn secure_boot_check(anticheat: bool) -> bool {
     }
     missing == 0
 }
-pub use eject::{How as EjectHow, eject};
 pub use switch::{
-    allow_partial, boot_check, cache_push, declare_and_switch, deploy_flatpak, gc, generations, hook_record,
-    prune_hidden, rollback, switch, without_secrets,
+    allow_partial, boot_check, cache_push, declare_and_switch, gc, generations, hook_record, rollback, switch,
+    without_secrets,
 };
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
@@ -155,7 +151,6 @@ struct Declared {
     ignored: BTreeSet<String>,
     keep: u32,
     keep_days: u32,
-    deployments_keep: u32,
     aur_url: String,
     aur_review: bool,
     archive_url: String,
@@ -375,16 +370,6 @@ fn declared(config: &Value) -> Result<Declared> {
         ignored: strings("ignored_packages").into_iter().collect(),
         keep: generation_limit("keep", 10),
         keep_days: generation_limit("keep_days", 30),
-        deployments_keep: match map.get("deployments") {
-            Some(Value::Map(deployments)) => match deployments.get("keep") {
-                Some(Value::Int(n)) if *n >= 1 => u32::try_from(*n).unwrap_or(2),
-                Some(Value::Int(n)) => {
-                    bail!("deployments.keep is {n}, but archix always keeps at least 1 deployment, the one that boots")
-                }
-                _ => 2,
-            },
-            _ => 2,
-        },
         aur_url: match map.get("aur") {
             Some(Value::Map(aur)) => match aur.get("url") {
                 Some(Value::Str(url)) => url.clone(),

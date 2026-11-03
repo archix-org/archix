@@ -88,9 +88,9 @@ pub fn check(accounts: &[Account], user: &str, password: &str) -> bool {
 }
 
 /// What the rescue says, and does, when no account can open it.
-pub fn refusal(deployment: u32) -> String {
+pub fn refusal() -> String {
     format!(
-        "the rescue entry opens only for root or a member of wheel with a password, and deployment {deployment}'s /etc/shadow has none: root is locked and no wheel user has a password (or it's a hash type other than yescrypt or SHA-crypt). Nothing was opened; boot a deployment from the menu and set one with passwd, or recover from a live USB: {GUIDE}"
+        "the rescue entry opens only for root or a member of wheel with a password, and the root's /etc/shadow has none: root is locked and no wheel user has a password (or it's a hash type other than yescrypt or SHA-crypt). Nothing was opened; boot the system and set one with passwd, or recover from a live USB: {GUIDE}"
     )
 }
 
@@ -229,7 +229,7 @@ mod tests {
             [],
             "locked, locked with a hash, not in wheel, empty"
         );
-        assert!(refusal(4).contains("deployment 4") && refusal(4).contains(GUIDE));
+        assert!(refusal().contains("/etc/shadow") && refusal().contains(GUIDE));
         let expired = format!("root:{SHA512}:20000:0:99999:7::1:\n");
         assert_eq!(
             accounts(etc(PASSWD, &expired, GROUP).path()).unwrap(),

@@ -279,7 +279,7 @@ pub fn fallback_note(from: u32, to: u32, failure: &Failure) -> String {
 
 /// archix-health-check.service: checks the booted deployment while systemd-boot is still counting its entry, and on failure marks the entry bad, notes why, and reboots if asked to.
 pub fn run_boot(paths: &Paths) -> Result<bool> {
-    let Some(booted) = super::boot::booted_deployment(&paths.root) else {
+    let Some(booted) = super::boot::booted() else {
         println!("archix: this boot isn't from an archix entry; nothing to check");
         return Ok(true);
     };

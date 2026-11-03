@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::CString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
 
 use super::Hook;
 use super::apply::SystemChange;
@@ -74,93 +73,6 @@ pub fn due(change: &SystemChange, rewritten: &BTreeSet<String>) -> BTreeMap<Stri
         .filter(|(path, _)| changed.contains(path.as_str()) || rewritten.contains(*path))
         .map(|(path, hook)| (path.clone(), hook.clone()))
         .collect()
-}
-
-/// Splits due on_change scripts into those run right after the switch writes their file, on the live system under `root` (files outside the deployment trees whose user exists there), and those left for the deployment's first boot.
-pub fn split_live(due: BTreeMap<String, Hook>, root: &Path) -> (BTreeMap<String, Hook>, BTreeMap<String, Hook>) {
-    due.into_iter().partition(|(path, hook)| {
-        super::apply::deployment_tree(path).is_none()
-            && hook.user.as_ref().is_none_or(|user| account(root, user).is_some())
-    })
-}
-
-/// The on_change scripts and hooks waiting for one deployment's boot, whose activation runs them once its users exist.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Pending {
-    #[serde(default)]
-    pub on_change: BTreeMap<String, Hook>,
-    #[serde(default)]
-    pub hooks: BTreeMap<String, Hook>,
-}
-
-impl Pending {
-    pub fn is_empty(&self) -> bool {
-        self.on_change.is_empty() && self.hooks.is_empty()
-    }
-}
-
-/// Where what deployment `number`'s boot runs is recorded.
-pub fn pending_path(state: &Path, number: u32) -> PathBuf {
-    state.join("pending-hooks").join(format!("{number}.json"))
-}
-
-/// What waits for deployment `number`'s boot; an unreadable record is set aside and runs nothing.
-pub fn pending(state: &Path, number: u32) -> Pending {
-    let path = pending_path(state, number);
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Pending::default();
-    };
-    serde_json::from_str(&text).unwrap_or_else(|e| {
-        let kept = path.with_extension("unreadable");
-        eprintln!(
-            "warning: {} is unreadable ({e}); its hooks won't run, the file is kept as {}",
-            path.display(),
-            kept.display()
-        );
-        let _ = fs::rename(&path, &kept);
-        Pending::default()
-    })
-}
-
-/// Records what deployment `number`'s boot runs: the `due` on_change scripts, added to any already waiting for it, and `hooks`.
-pub fn defer(state: &Path, number: u32, due: &BTreeMap<String, Hook>, hooks: &BTreeMap<String, Hook>) -> Result<()> {
-    let mut waiting = pending(state, number);
-    waiting.on_change.extend(due.clone());
-    waiting.hooks = hooks.clone();
-    let path = pending_path(state, number);
-    if waiting.is_empty() {
-        return match fs::remove_file(&path) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(e).with_context(|| format!("removing {}", path.display()))
-            }
-            _ => Ok(()),
-        };
-    }
-    crate::durable::write(&path, serde_json::to_string_pretty(&waiting)?.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))
-}
-
-/// At boot, under `root`: runs what waits for deployment `number`, deleting its record only once all of it succeeded; returns the failures.
-pub fn run_pending(root: &Path, state: &Path, number: u32) -> Vec<String> {
-    let waiting = pending(state, number);
-    if waiting.is_empty() {
-        return Vec::new();
-    }
-    println!("archix: running deployment {number}'s hooks");
-    let failures = run(root, &waiting.on_change, &waiting.hooks);
-    if failures.is_empty() {
-        // What the hooks wrote must be on disk before the record that they still have to run goes.
-        if let Err(e) = crate::durable::sync_filesystems_checked(&[root, state]) {
-            return vec![format!("flushing what the hooks wrote: {e:#}")];
-        }
-        let path = pending_path(state, number);
-        if let Err(e) = fs::remove_file(&path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return vec![format!("clearing {}: {e}", path.display())];
-        }
-    }
-    failures
 }
 
 /// Runs the on_change scripts in `due`, then every hook, on the system under `root`; failures are returned, not fatal.
@@ -279,111 +191,6 @@ mod tests {
             user: None,
             after: after.iter().map(|s| s.to_string()).collect(),
         }
-    }
-
-    #[test]
-    fn deferred_on_change_scripts_accumulate_and_hooks_are_replaced_until_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = dir.path();
-        assert!(pending(state, 3).is_empty());
-        let script = |run: &str| Hook {
-            run: run.into(),
-            user: None,
-            after: Vec::new(),
-        };
-        let hooks = |run: &str| BTreeMap::from([("h".to_string(), script(run))]);
-        defer(
-            state,
-            3,
-            &BTreeMap::from([("/etc/a".to_string(), script("old a"))]),
-            &hooks("first"),
-        )
-        .unwrap();
-        defer(
-            state,
-            3,
-            &BTreeMap::from([
-                ("/etc/a".to_string(), script("new a")),
-                ("/etc/b".to_string(), script("b")),
-            ]),
-            &hooks("second"),
-        )
-        .unwrap();
-        let waiting = pending(state, 3);
-        assert_eq!(waiting.on_change.len(), 2);
-        assert_eq!(
-            waiting.on_change["/etc/a"].run, "new a",
-            "a later rollback's script replaces an earlier one"
-        );
-        assert_eq!(waiting.hooks["h"].run, "second");
-        assert!(pending(state, 4).is_empty(), "each deployment has its own");
-        defer(state, 5, &BTreeMap::new(), &BTreeMap::new()).unwrap();
-        assert!(!pending_path(state, 5).exists(), "nothing due writes nothing");
-    }
-
-    #[test]
-    fn pending_hooks_are_cleared_only_once_all_of_them_succeeded() {
-        let dir = tempfile::tempdir().unwrap();
-        let (state, log) = (dir.path().join("state"), dir.path().join("log"));
-        let hook = |run: String| Hook {
-            run,
-            user: None,
-            after: Vec::new(),
-        };
-        let flag = dir.path().join("fail");
-        fs::write(&flag, "").unwrap();
-        let hooks = BTreeMap::from([(
-            "h".to_string(),
-            hook(format!("echo ran >> {}; test ! -e {}", log.display(), flag.display())),
-        )]);
-        defer(&state, 7, &BTreeMap::new(), &hooks).unwrap();
-        let failures = run_pending(Path::new("/"), &state, 7);
-        assert_eq!(failures.len(), 1, "{failures:?}");
-        assert!(
-            pending_path(&state, 7).exists(),
-            "a failed hook stays pending for the next boot"
-        );
-        fs::remove_file(&flag).unwrap();
-        assert!(run_pending(Path::new("/"), &state, 7).is_empty());
-        assert!(!pending_path(&state, 7).exists());
-        assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
-        assert!(run_pending(Path::new("/"), &state, 7).is_empty(), "nothing runs twice");
-        assert_eq!(fs::read_to_string(&log).unwrap(), "ran\nran\n");
-    }
-
-    #[test]
-    fn on_change_of_files_written_live_runs_now_unless_its_user_is_new() {
-        let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("etc")).unwrap();
-        fs::write(
-            root.path().join("etc/passwd"),
-            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n",
-        )
-        .unwrap();
-        let script = |user: Option<&str>| Hook {
-            run: "true".into(),
-            user: user.map(str::to_string),
-            after: Vec::new(),
-        };
-        let due = BTreeMap::from([
-            ("/etc/a.conf".to_string(), script(None)),
-            ("/usr/bin/b".to_string(), script(None)),
-            ("/usr/local/bin/f".to_string(), script(None)),
-            ("/srv/c".to_string(), script(None)),
-            ("/home/alice/.config/d".to_string(), script(Some("alice"))),
-            ("/home/bob/.config/e".to_string(), script(Some("bob"))),
-        ]);
-        let (live, at_boot) = split_live(due, root.path());
-        assert_eq!(
-            live.keys().collect::<Vec<_>>(),
-            ["/home/alice/.config/d", "/srv/c", "/usr/local/bin/f"],
-            "files written at the switch, the shared /usr/local's too, whose user exists run now"
-        );
-        assert_eq!(
-            at_boot.keys().collect::<Vec<_>>(),
-            ["/etc/a.conf", "/home/bob/.config/e", "/usr/bin/b"],
-            "deployment files, and a user only the new deployment has, wait for the boot"
-        );
     }
 
     #[test]

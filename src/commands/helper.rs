@@ -1,4 +1,3 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -6,25 +5,17 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use archix::archive::{ARCHIVE_URL, Archive};
-use archix::aur::build::Builder;
 use archix::aur::index::Index;
-use archix::aur::install::Installer;
 use archix::aur::review::review;
-use archix::deploy::{self, build::Plan, layout};
-use archix::generations::{Store, now};
 use archix::installed::{self, FILE};
 use archix::lock::AUR_REPO;
-use archix::packages::{Packages, check_packages};
 use archix::pacman::{read_local_db, read_sync_db};
 use archix::paths::Paths;
-use archix::plan::{Change, plan};
 use archix::resolve::{resolve, snapshot_conf};
-use archix::system::apply::SystemChange;
 
 use super::lock::{current_lock, load_lockfile, save_lock};
 use super::{
-    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, count, declared, recipes, require_root,
-    transaction_for, user_cache,
+    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, declared, recipes, require_root, user_cache,
 };
 
 /// Adds (or removes) packages in the host's installed.lua, or the one in `path`; the new text waits for the switch to commit and is evaluated from memory until then.
@@ -103,178 +94,6 @@ fn declared_elsewhere(config_dir: &Path, host: &str, listed: &[String], add: &[S
         .filter(|name| declared.packages.contains(name) && !listed.contains(name))
         .cloned()
         .collect()
-}
-
-/// Installs packages without declaring them, in a new deployment built on the current one; the next switch drops them unless they get declared.
-pub fn install_temporarily(target: &Target, names: &[String], noconfirm: bool) -> Result<()> {
-    require_root("install --temp")?;
-    let paths = Paths::system();
-    check_pacman_free(&paths)?;
-    let declared = declared(target.config)?;
-    let boot = declared
-        .boot_plan()?
-        .context("a temporary install builds a deployment, which needs boot.*")?;
-    if !layout::laid_out(&paths.root) {
-        bail!(
-            "a temporary install builds on the current deployment, and this system isn't laid out as deployments yet; run `archix switch` first"
-        );
-    }
-    let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
-    let archive = Archive::new(&declared.archive_url)
-        .with_mirrors(&declared.archive_mirrors)
-        .with_caches(&declared.package_caches);
-    let git = aur_git(&declared)?;
-    let recipes = recipes(target, &declared)?;
-    let aur = aur_source(&git, &declared, &archive, Some(&lock), false, &recipes);
-    let cache = user_cache()?;
-    let temp = resolve(
-        &archive,
-        &cache,
-        lock.date,
-        &declared.repos,
-        names,
-        &declared.prefer,
-        Some(&aur),
-        &Default::default(),
-    )?;
-    review(&git, Some(&lock), &temp, declared.aur_review && !noconfirm, &confirm)?;
-
-    let db = super::switch::installed_db(&paths);
-    let installed = read_local_db(&db)?;
-    let changes: Vec<Change> = plan(&temp.packages, &installed)
-        .into_iter()
-        .filter(|change| matches!(change, Change::Install { .. }))
-        .collect();
-    if changes.is_empty() {
-        println!("already installed: {}", names.join(" "));
-        return Ok(());
-    }
-    for change in &changes {
-        println!("{change}");
-    }
-    if !noconfirm
-        && !confirm(&format!(
-            "install {} without declaring them, in a new deployment that boots at the next restart?",
-            count(changes.len(), "package", "packages")
-        ))?
-    {
-        bail!("aborted; nothing was changed");
-    }
-    let aur_names: Vec<String> = changes
-        .iter()
-        .filter_map(|change| match change {
-            Change::Install { name, .. } if temp.packages[name].is_built() => Some(name.clone()),
-            _ => None,
-        })
-        .collect();
-    let built = if aur_names.is_empty() {
-        BTreeMap::new()
-    } else {
-        let builder = Builder {
-            paths: &paths,
-            archive: &archive,
-            git: &git,
-            snapshot_cache: &cache,
-            skip_check: &declared.skip_check,
-            require_locked: declared.require_locked_build,
-        };
-        Installer::new(&builder, &temp, &declared.build_on_host, Some(&recipes))?.build(&aur_names)?
-    };
-    let full = transaction_for(
-        &archive,
-        &paths,
-        temp.date,
-        &temp.packages,
-        &changes,
-        &built,
-        &declared.repos,
-    )?;
-    let new: BTreeSet<&String> = changes
-        .iter()
-        .filter_map(|change| match change {
-            Change::Install { name, .. } => Some(name),
-            _ => None,
-        })
-        .collect();
-    let packages = Packages {
-        reinstall: false,
-        install: full.install,
-        remove: Vec::new(),
-        versions: full
-            .versions
-            .into_iter()
-            .filter(|(name, _)| new.contains(name))
-            .collect(),
-        reasons: new.iter().map(|name| ((*name).clone(), names.contains(name))).collect(),
-    };
-    let here = super::switch::current_root(&paths);
-    archix::conflicts::check(&packages.install, &packages.remove, &db, &here)?;
-    check_packages(&packages)?;
-    let store = Store::new(&paths);
-    let current = store.current()?.context("there's no current generation to build on")?;
-    let mut generation = store.get(current)?;
-    let deployments = deploy::Store::open(&paths.root)?;
-    let number = store.next_number()?.max(deployments.next_number()?);
-    generation.number = number;
-    generation.created = now();
-    generation.settings.boot = Some(boot.clone());
-    for name in &new {
-        let mut pkg = temp.packages[*name].clone();
-        pkg.explicit = names.contains(name);
-        if let Some(path) = built.get(*name) {
-            pkg.sha256 = archix::fetch::sha256(path)?;
-            pkg.file = path
-                .file_name()
-                .map_or(pkg.file.clone(), |file| file.to_string_lossy().into_owned());
-        }
-        generation.packages.insert((*name).clone(), pkg);
-    }
-    let system_change = SystemChange {
-        from: generation.system.clone(),
-        to: generation.system.clone(),
-    };
-    let paused = archix::etcmerge::pause(&paths)?;
-    if let Err(e) = archix::etcmerge::prepare(&paths, number) {
-        eprintln!(
-            "warning: taking the /etc merge's base failed ({e:#}), so /etc changes made before the reboot carry over only from the commit on"
-        );
-    }
-    eprintln!(":: building deployment {number} from deployment {current}");
-    deploy::build::build(
-        &deployments,
-        &Plan {
-            paths: &paths,
-            number,
-            base: current,
-            packages: &packages,
-            system: &system_change,
-            boot: &boot,
-            repos: &declared.repos,
-            record: &generation,
-            keep: declared.deployments_keep as usize,
-            config: &|staged: &Path| super::switch::carry_config(target.config_dir, &paths, staged),
-            credentials: None,
-            scan: None,
-        },
-    )
-    .inspect_err(|_| {
-        archix::etcmerge::discard(&paths, number);
-        super::switch::resume_etc_merge(&paths, paused);
-    })?;
-    archix::system::reboot::refresh_note(&paths.root);
-    archix::system::sleep::after_commit(&paths.root);
-    let merging = archix::etcmerge::start(&paths).unwrap_or_else(|e| {
-        eprintln!("warning: starting the /etc merge into deployment {number} failed: {e:#}");
-        false
-    });
-    println!(
-        "installed {} without declaring it, in deployment {number}, which boots at the next restart; the next `archix switch` drops it unless it's declared",
-        names.join(" ")
-    );
-    if super::lock::pending_etc(&paths).is_some() {
-        println!("{}", super::lock::pending_note(number, merging));
-    }
-    Ok(())
 }
 
 /// One search result: where it's from, what it is, and how it's shown.

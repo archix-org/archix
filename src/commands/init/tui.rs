@@ -64,7 +64,7 @@ impl Step {
             Step::Packages => "What's installed, and what happens to what isn't declared.",
             Step::System => "Settings, accounts and services taken over as they are.",
             Step::Files => "Edited and hand-written files under /etc that archix can manage.",
-            Step::Boot => "A boot entry per deployment; every generation boots as its own deployment.",
+            Step::Boot => "The boot settings archix keeps for its boot entries; a switch applies in place.",
             Step::Generations => "How many old generations gc keeps around.",
             Step::Dotfiles => "Optional: bring dotfiles into the config as live links.",
             Step::Review => "Everything init will write. Nothing has changed yet.",
@@ -1079,8 +1079,8 @@ impl<'a> App<'a> {
         ));
         lines.push(row("Config files", count(answers.files.len(), "file", "files")));
         let boot = match (&facts.boot, answers.boot) {
-            (BootFacts::Ready { esp, .. }, true) => format!("an entry per deployment on {esp}"),
-            _ => "not managed, so `archix switch` refuses".into(),
+            (BootFacts::Ready { esp, .. }, true) => format!("systemd-boot on {esp}"),
+            _ => "not managed".into(),
         };
         lines.push(row("Boot", boot));
         lines.push(row(
@@ -1187,10 +1187,7 @@ impl<'a> App<'a> {
                         "Show each AUR build recipe and ask before trusting it",
                         answers.aur_review,
                     ),
-                    _ => (
-                        "Boot every generation as its own deployment, from a systemd-boot entry",
-                        answers.boot,
-                    ),
+                    _ => ("Manage booting with systemd-boot", answers.boot),
                 };
                 let row = Row::Flip(control);
                 let mark = if on { "[x] " } else { "[ ] " };
@@ -1345,14 +1342,12 @@ pub(super) mod tests {
             services: BTreeMap::from([("sshd.service".to_string(), true)]),
             files: vec![file("/etc/fstab", true), file("/etc/shells", false)],
             secret_paths: vec!["/etc/wireguard/ (2 files)".into()],
-            btrfs: true,
             rollback_unavailable: None,
             boot: BootFacts::Ready {
                 esp: "/boot".into(),
                 kernel: "linux".into(),
                 microcode: Vec::new(),
                 params: vec!["root=UUID=x".into(), "rw".into()],
-                blocker: None,
                 esp_in_boot: false,
                 microcode_hook: false,
             },
