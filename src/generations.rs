@@ -59,6 +59,9 @@ pub struct Settings {
     /// How the generation's boot entry is built, so changing it makes a new generation and a rebuild builds the same entry.
     #[serde(default)]
     pub boot: Option<crate::system::boot::BootPlan>,
+    /// The config's `rollback` table, which a rollback away from this generation snapshots and prunes by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<crate::snapshot::Policy>,
 }
 
 fn default_deployments_keep() -> u32 {
@@ -311,6 +314,7 @@ mod tests {
                 keep_days: 30,
                 deployments_keep: 2,
                 boot: None,
+                rollback: None,
             },
             config_commit: None,
             config_dirty: false,

@@ -33,6 +33,7 @@ use archix::system::apply::{Accounts, SystemChange};
 use archix::system::{self, SystemState, live};
 
 use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
+use super::snapshot::Rollbacks;
 use super::{
     Declared, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
     confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies,
@@ -124,6 +125,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     check_pacman_free(&paths)?;
     let declared = declared(target.config)?;
     let boot = declared.boot_plan()?;
+    let policy = archix::snapshot::Policy::from_config(target.config)?;
+    let rollbacks = Rollbacks::of(&paths.root, policy.clone());
     let (mut lock, _) = current_lock(target, &declared, Snapshot::Locked, true, noconfirm, false)?;
     if let Some(warning) = super::lock_age_warning(&lock, declared.lock_warn_after_days) {
         eprintln!("{warning}");
@@ -234,6 +237,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             keep_days: declared.keep_days,
             deployments_keep: declared.deployments_keep,
             boot: boot.clone(),
+            rollback: policy.clone(),
         },
         config_commit: commit.as_ref().map(|(hash, _)| hash.clone()),
         config_dirty: commit.is_some_and(|(_, dirty)| dirty),
@@ -398,7 +402,12 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     for change in &changes {
         println!("{change}");
     }
-    for line in system_lines.iter().chain(&flatpak_lines) {
+    for line in system_lines
+        .iter()
+        .chain(&flatpak_lines)
+        .map(String::as_str)
+        .chain(rollbacks.line())
+    {
         println!("{line}");
     }
     print_hooks(&system_change);
@@ -552,6 +561,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
     let number = store.next_number()?;
     generation.number = number;
+    let label = match target.captured {
+        Some(captured) => format!(
+            "before switch to tree {}",
+            &captured.tree[..captured.tree.len().min(12)]
+        ),
+        None => format!("before switch to generation {number}"),
+    };
+    let taken = rollbacks
+        .before(&paths.root, current.as_ref(), label)
+        .map_err(|e| e.context("nothing of the switch was applied"))?;
     let root = live::Root::new(&paths.root);
     eprintln!(":: applying generation {number}");
     let applied = live::apply(&live::Plan {
@@ -572,8 +591,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     })
     .map_err(|e| {
         e.context(format!(
-            "generation {number} wasn't recorded, and generation {} stays current",
-            current.as_ref().map_or("none".to_string(), |g| g.number.to_string())
+            "generation {number} wasn't recorded, and generation {} stays current{}",
+            current.as_ref().map_or("none".to_string(), |g| g.number.to_string()),
+            before_note(taken.as_ref())
         ))
     })?;
     system::credentials::forget_overrides(&paths.state, &passwords);
@@ -586,6 +606,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     generation.package_capabilities = applied.package_capabilities;
     store.save(&generation)?;
     store.set_current(number)?;
+    for warning in rollbacks.after(&paths, &generation.packages) {
+        eprintln!("warning: {warning}");
+    }
     after_apply(
         target,
         &declared,
@@ -598,6 +621,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         applied.users,
         soft_failures,
     )
+}
+
+/// Where the state before a failed apply is, for its error.
+fn before_note(taken: Option<&archix::snapshot::Record>) -> String {
+    match taken {
+        Some(record) => format!(
+            "; snapshot {} holds the system as it was before (`archix snapshot list`)",
+            record.number
+        ),
+        None => String::new(),
+    }
 }
 
 /// Prints what the evaluated plan changes from the current generation's: packages, files, units, users and the rest, with no secret or password hash in it.
@@ -1414,6 +1448,7 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
             .with_context(|| format!("generation {number}'s stored plan doesn't parse; nothing was changed"))?;
     }
     let current_generation = store.get(current)?;
+    let rollbacks = Rollbacks::of(&paths.root, current_generation.settings.rollback.clone());
     let db = paths.local_db();
     let installed = read_local_db(&db)?;
     let ignored = generation.settings.ignored.iter().cloned().collect();
@@ -1459,7 +1494,12 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     for change in &changes {
         println!("{change}");
     }
-    for line in system_lines.iter().chain(&flatpak_lines) {
+    for line in system_lines
+        .iter()
+        .chain(&flatpak_lines)
+        .map(String::as_str)
+        .chain(rollbacks.line())
+    {
         println!("{line}");
     }
     print_hooks(&system_change);
@@ -1500,6 +1540,13 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
     archix::conflicts::check(&packages.install, &packages.remove, &db, &paths.root)?;
     check_packages(&packages)?;
     let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
+    let taken = rollbacks
+        .before(
+            &paths.root,
+            Some(&current_generation),
+            format!("before rollback to generation {number}"),
+        )
+        .map_err(|e| e.context("nothing of the rollback was applied"))?;
     let root = live::Root::new(&paths.root);
     eprintln!(":: applying {name}");
     let applied = live::apply(&live::Plan {
@@ -1514,7 +1561,12 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
         rewritten: &rewritten,
         started,
     })
-    .map_err(|e| e.context(format!("generation {current} stays current")))?;
+    .map_err(|e| {
+        e.context(format!(
+            "generation {current} stays current{}",
+            before_note(taken.as_ref())
+        ))
+    })?;
     let mut soft_failures = applied.failures;
     if applied.package_capabilities != generation.package_capabilities {
         let mut updated = generation.clone();
@@ -1522,6 +1574,9 @@ pub fn rollback(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<
         store.update(&updated)?;
     }
     store.set_current(number)?;
+    for warning in rollbacks.after(&paths, &generation.packages) {
+        eprintln!("warning: {warning}");
+    }
     let etc = paths.root.join("etc");
     if let Err(e) = system::apply::create_homes(
         &applied.users,
@@ -1571,6 +1626,18 @@ pub fn generations() -> Result<()> {
             generation.date,
             count(generation.packages.len(), "package", "packages")
         );
+    }
+    let snapshots = archix::snapshot::Store::open(&paths.root).list()?;
+    if !snapshots.is_empty() {
+        println!("snapshots, by the state each holds:");
+    }
+    for record in snapshots {
+        let marker = if current.is_some() && record.generation == current {
+            "*"
+        } else {
+            " "
+        };
+        println!("{marker} {}", super::snapshot::describe(&record));
     }
     Ok(())
 }

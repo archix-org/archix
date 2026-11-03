@@ -135,11 +135,41 @@ impl Policy {
     }
 }
 
-/// What prune dropped, and what it couldn't free.
+/// What prune dropped, and the space left when it stayed under the floor with no snapshot it may drop.
 #[derive(Debug, Default, PartialEq)]
 pub struct Pruned {
     pub deleted: Vec<u32>,
-    pub warnings: Vec<String>,
+    pub short: Option<Space>,
+}
+
+impl Space {
+    /// What to tell the user when the root stays under the floor, with `cache` bytes in archix's package cache.
+    pub fn warning(&self, min_free: u32, cache: u64) -> String {
+        format!(
+            "only {:.0}% ({} MiB) of the root filesystem is free, below rollback.min_free = {min_free}% or the {} MiB a keep needs; every snapshot left is manual, has a boot entry or is the newest, and archix's package cache holds {} MiB of packages the archive can't serve again. Delete snapshots with `archix snapshot delete N`, or free space",
+            self.percent,
+            self.bytes >> 20,
+            KEEP_RESERVE >> 20,
+            cache >> 20
+        )
+    }
+}
+
+/// Room left on the root's btrfs, as `btrfs filesystem usage -b` estimates it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Space {
+    pub percent: f64,
+    pub bytes: u64,
+}
+
+/// Room kept free beyond rollback.min_free for one keep, a writable clone of a snapshot plus its metadata.
+pub const KEEP_RESERVE: u64 = 1 << 30;
+
+impl Space {
+    /// Under the floor: less than `min_free` percent, or less than the keep reserve.
+    pub fn short(&self, min_free: u32) -> bool {
+        self.percent < f64::from(min_free) || self.bytes < KEEP_RESERVE
+    }
 }
 
 /// The snapshots under `<root>/.archix/snapshots`, each `N/root` with its `N/record.json`.
@@ -268,18 +298,16 @@ impl Store {
         }
     }
 
-    /// Applies `policy` with `free_percent` measuring the root, such as crate::system::btrfs::free_percent: the newest keep_switch switch and keep_pacman pacman snapshots stay, manual and `pinned` ones always do; then, while less than min_free percent is free, the oldest it may drop go too, never the newest snapshot.
-    pub fn prune(
-        &self,
-        policy: &Policy,
-        pinned: &BTreeSet<u32>,
-        free_percent: impl Fn() -> Option<f64>,
-    ) -> Result<Pruned> {
+    /// Applies `policy` with `space` measuring the root, such as crate::system::btrfs::space: the newest keep_switch switch and keep_pacman pacman snapshots stay, manual and `pinned` ones always do; then, while the root is under the floor (min_free percent, or the keep reserve), the oldest it may drop go too, never the newest snapshot.
+    pub fn prune(&self, policy: &Policy, pinned: &BTreeSet<u32>, space: impl Fn() -> Option<Space>) -> Result<Pruned> {
         let records = self.list()?;
         let mut pruned = Pruned::default();
         for number in over_count(&records, policy, pinned) {
             self.delete(number)?;
             pruned.deleted.push(number);
+        }
+        if !pruned.deleted.is_empty() {
+            self.settle()?;
         }
         let newest = records.last().map(|record| record.number);
         let mut candidates: Vec<u32> = records
@@ -290,27 +318,28 @@ impl Store {
             .filter(|number| Some(*number) != newest && !pruned.deleted.contains(number))
             .collect();
         candidates.reverse();
-        while let Some(free) = free_percent().filter(|free| *free < f64::from(policy.min_free)) {
+        while let Some(free) = space().filter(|free| free.short(policy.min_free)) {
             let Some(number) = candidates.pop() else {
-                pruned.warnings.push(format!(
-                    "only {free:.0}% of the root filesystem is free, below rollback.min_free = {}%, and every snapshot left is manual, has a boot entry or is the newest; delete some with `archix snapshot delete N` or free space",
-                    policy.min_free
-                ));
+                pruned.short = Some(free);
                 break;
             };
             self.delete(number)?;
             pruned.deleted.push(number);
-            // btrfs frees a deleted subvolume's space in the background and counts it only once committed.
-            btrfs(
-                Command::new("btrfs").args(["-q", "subvolume", "sync"]).arg(&self.dir),
-                "wait for deleted snapshots to be cleaned up",
-            )?;
-            btrfs(
-                Command::new("btrfs").args(["filesystem", "sync"]).arg(&self.dir),
-                "commit the freed space",
-            )?;
+            self.settle()?;
         }
         Ok(pruned)
+    }
+
+    /// Waits until deleted snapshots' space is free and counted: btrfs frees it in the background and counts it only once committed.
+    fn settle(&self) -> Result<()> {
+        btrfs(
+            Command::new("btrfs").args(["-q", "subvolume", "sync"]).arg(&self.dir),
+            "wait for deleted snapshots to be cleaned up",
+        )?;
+        btrfs(
+            Command::new("btrfs").args(["filesystem", "sync"]).arg(&self.dir),
+            "commit the freed space",
+        )
     }
 
     /// Makes snapshot `number` the root from the next boot under the name `@`, as fstab and the command line mount it: a writable clone with pacman's lock taken out, `prepare` run on it (accounts and /var/lib come later), then swapped with `@` in one RENAME_EXCHANGE; the root it replaces becomes a snapshot of kind replaced, recorded with `replaced`. `top` is the btrfs top level, mounted. Returns the replaced root's number.
@@ -549,6 +578,62 @@ pub fn record_root(archix: &Path, top: &Path) -> Result<String> {
         serde_json::to_string_pretty(&serde_json::json!({ "format": FORMAT, "uuid": uuid }))?.as_bytes(),
     )?;
     Ok(uuid)
+}
+
+/// What `prune_root` did.
+#[derive(Debug, Default)]
+pub struct Freed {
+    pub deleted: Vec<u32>,
+    /// Bytes of refetchable packages dropped from archix's cache.
+    pub dropped: u64,
+    pub warnings: Vec<String>,
+}
+
+/// Prunes the snapshots under `paths.root` by `policy`, measuring with `space`; when none may go and it's still under the floor, drops the packages the archive can serve again that only older locks name (not `current`, the lock now applied), then warns if that wasn't enough.
+pub fn prune_root(
+    paths: &crate::paths::Paths,
+    policy: &Policy,
+    current: &BTreeMap<String, Locked>,
+    space: impl Fn() -> Option<Space>,
+) -> Freed {
+    let store = Store::open(&paths.root);
+    let mut freed = Freed::default();
+    // Read first: the locks of the snapshots prune drops name packages only the cache still holds.
+    let older: Vec<BTreeMap<String, Locked>> = store
+        .list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|record| record.packages)
+        .chain(
+            crate::generations::Store::new(paths)
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|g| g.packages),
+        )
+        .collect();
+    let pruned = match store.prune(policy, &BTreeSet::new(), &space) {
+        Ok(pruned) => pruned,
+        Err(e) => {
+            freed.warnings.push(format!("pruning snapshots: {e:#}"));
+            return freed;
+        }
+    };
+    freed.deleted = pruned.deleted;
+    if pruned.short.is_none() {
+        return freed;
+    }
+    let older: Vec<&BTreeMap<String, Locked>> = older.iter().collect();
+    match crate::gc::drop_refetchable(paths, current, &older) {
+        Ok(bytes) => freed.dropped = bytes,
+        Err(e) => freed.warnings.push(format!("dropping refetchable packages: {e:#}")),
+    }
+    if let Some(free) = space().filter(|free| free.short(policy.min_free)) {
+        freed
+            .warnings
+            .push(free.warning(policy.min_free, crate::gc::cache_size(paths)));
+    }
+    freed
 }
 
 /// Whether rollbacks can work on the root at `root`: btrfs, with `/` a subvolume other than the top level, which no snapshot can replace.

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use archix::snapshot::{Kind, Meta, Policy, Store, layout};
+use archix::snapshot::{KEEP_RESERVE, Kind, Meta, Policy, Space, Store, layout};
 
 fn sh(command: &str) -> String {
     let output = Command::new("sh").arg("-c").arg(command).output().unwrap();
@@ -156,7 +156,13 @@ fn prune_keeps_each_kinds_newest_and_never_drops_manual_pinned_or_the_newest_sna
         min_free: 10,
         entries: 5,
     };
-    let pruned = store.prune(&policy, &BTreeSet::from([1]), || Some(50.0)).unwrap();
+    let plenty = |percent: f64| {
+        Some(Space {
+            percent,
+            bytes: 64 * KEEP_RESERVE,
+        })
+    };
+    let pruned = store.prune(&policy, &BTreeSet::from([1]), || plenty(50.0)).unwrap();
     assert_eq!(
         pruned.deleted,
         [2],
@@ -167,7 +173,7 @@ fn prune_keeps_each_kinds_newest_and_never_drops_manual_pinned_or_the_newest_sna
     let pruned = store
         .prune(&policy, &BTreeSet::from([1]), || {
             free.set(free.get() + 3.0);
-            Some(free.get())
+            plenty(free.get())
         })
         .unwrap();
     assert_eq!(
@@ -175,15 +181,94 @@ fn prune_keeps_each_kinds_newest_and_never_drops_manual_pinned_or_the_newest_sna
         [4, 5, 6],
         "short of space it drops the oldest it may until min_free is back"
     );
-    assert!(pruned.warnings.is_empty());
-    let pruned = store.prune(&policy, &BTreeSet::from([1]), || Some(1.0)).unwrap();
+    assert_eq!(pruned.short, None);
+    let pruned = store.prune(&policy, &BTreeSet::from([1]), || plenty(1.0)).unwrap();
     assert_eq!(numbers(&store), [1, 3, 7], "manual 3, pinned 1 and the newest, 7, stay");
     assert!(pruned.deleted.is_empty());
-    assert!(
-        pruned.warnings[0].contains("rollback.min_free"),
-        "{:?}",
-        pruned.warnings
+    assert_eq!(pruned.short, plenty(1.0), "it says how short it stayed");
+}
+
+#[test]
+#[ignore]
+fn the_keep_reserve_prunes_a_big_disk_whose_percentage_is_fine_but_whose_bytes_arent() {
+    let disk = Disk::new("1G");
+    disk.mount_archix();
+    let store = Store::open(&disk.root);
+    for _ in 0..4 {
+        store.create(&disk.root, Kind::Switch, Meta::default()).unwrap();
+    }
+    let policy = Policy {
+        keep_switch: 10,
+        keep_pacman: 10,
+        min_free: 10,
+        entries: 5,
+    };
+    let calls = std::cell::Cell::new(0u64);
+    let pruned = store
+        .prune(&policy, &BTreeSet::new(), || {
+            calls.set(calls.get() + 1);
+            Some(Space {
+                percent: 80.0,
+                bytes: calls.get() * KEEP_RESERVE / 2,
+            })
+        })
+        .unwrap();
+    assert_eq!(
+        pruned.deleted,
+        [1],
+        "80% free but half a keep's room: the oldest goes, then a whole keep's room is free"
     );
+    assert_eq!(numbers(&store), [2, 3, 4]);
+}
+
+#[test]
+#[ignore]
+fn refetchable_packages_leave_archix_s_cache_only_once_no_snapshot_may_go() {
+    let disk = Disk::new("1G");
+    disk.mount_archix();
+    let paths = archix::paths::Paths::under(&disk.root);
+    let store = Store::open(&disk.root);
+    let locked = |file: &str| archix::lock::Locked {
+        version: "1-1".into(),
+        repo: "core".into(),
+        file: file.into(),
+        ..Default::default()
+    };
+    let old = std::collections::BTreeMap::from([("zlib".to_string(), locked("zlib-old.pkg.tar.zst"))]);
+    let now = std::collections::BTreeMap::from([("zlib".to_string(), locked("zlib-new.pkg.tar.zst"))]);
+    for packages in [old.clone(), old.clone(), now.clone()] {
+        store
+            .create(
+                &disk.root,
+                Kind::Switch,
+                Meta {
+                    packages,
+                    ..Meta::default()
+                },
+            )
+            .unwrap();
+    }
+    let cached = |file: &str| paths.packages().join(file);
+    fs::create_dir_all(paths.packages()).unwrap();
+    fs::write(cached("zlib-old.pkg.tar.zst"), "old").unwrap();
+    fs::write(cached("zlib-new.pkg.tar.zst"), "new").unwrap();
+    let policy = Policy::default();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let freed = archix::snapshot::prune_root(&paths, &policy, &now, || {
+        seen.borrow_mut()
+            .push((numbers(&store).len(), cached("zlib-old.pkg.tar.zst").exists()));
+        Some(Space { percent: 1.0, bytes: 0 })
+    });
+    assert_eq!(freed.deleted, [1, 2], "every snapshot but the newest goes first");
+    let seen = seen.into_inner();
+    assert!(
+        seen.iter().filter(|(left, _)| *left > 1).all(|(_, cached)| *cached),
+        "the old package stays while a snapshot may still go: {seen:?}"
+    );
+    assert!(!cached("zlib-old.pkg.tar.zst").exists(), "then it goes");
+    assert!(cached("zlib-new.pkg.tar.zst").exists(), "the current lock's stays");
+    assert_eq!(freed.dropped, 3);
+    assert!(freed.warnings[0].contains("rollback.min_free"), "{:?}", freed.warnings);
 }
 
 fn uuid_of(path: &Path) -> String {

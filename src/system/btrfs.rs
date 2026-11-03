@@ -36,8 +36,8 @@ fn parse(report: &str) -> Option<Usage> {
     })
 }
 
-/// The share of the btrfs at `mount` still free to write, in percent, as `btrfs filesystem usage -b` estimates it from unallocated space and room in the data chunks.
-pub fn free_percent(mount: &Path) -> Option<f64> {
+/// The room still free to write on the btrfs at `mount`, in percent and bytes, as `btrfs filesystem usage -b` estimates it from unallocated space and room in the data chunks.
+pub fn space(mount: &Path) -> Option<crate::snapshot::Space> {
     let output = Command::new("btrfs")
         .args(["filesystem", "usage", "-b"])
         .arg(mount)
@@ -46,11 +46,11 @@ pub fn free_percent(mount: &Path) -> Option<f64> {
     output
         .status
         .success()
-        .then(|| free_percent_in(&String::from_utf8_lossy(&output.stdout)))
+        .then(|| space_in(&String::from_utf8_lossy(&output.stdout)))
         .flatten()
 }
 
-fn free_percent_in(report: &str) -> Option<f64> {
+fn space_in(report: &str) -> Option<crate::snapshot::Space> {
     let field = |name: &str| {
         report
             .lines()
@@ -61,7 +61,10 @@ fn free_percent_in(report: &str) -> Option<f64> {
             .ok()
     };
     let (size, free) = (field("Device size:")?, field("Free (estimated):")?);
-    (size > 0).then(|| free as f64 * 100.0 / size as f64)
+    (size > 0).then(|| crate::snapshot::Space {
+        percent: free as f64 * 100.0 / size as f64,
+        bytes: free,
+    })
 }
 
 /// Bytes no chunk holds yet on the btrfs at `mount`.
@@ -142,8 +145,14 @@ Metadata,DUP: Size:268435456, Used:250662912 (93.38%)
     fn free_space_is_the_estimate_against_the_device_size() {
         let report =
             "Overall:\n    Device size:\t\t  1073741824\n    Free (estimated):\t\t   268435456\t(min: 134217728)\n";
-        assert_eq!(free_percent_in(report), Some(25.0));
-        assert_eq!(free_percent_in(STUCK), None, "no estimate, no number");
+        assert_eq!(
+            space_in(report),
+            Some(crate::snapshot::Space {
+                percent: 25.0,
+                bytes: 268435456
+            })
+        );
+        assert_eq!(space_in(STUCK), None, "no estimate, no number");
     }
 
     #[test]
