@@ -328,7 +328,11 @@ enum SnapshotAction {
     /// Delete a snapshot
     Delete { number: u32 },
     /// Lay the root out for rollbacks: /.archix and /var/lib as subvolumes of their own, with pacman's database, DKMS's and archix's state kept on the root; /var/lib moves at the next boot
-    Setup,
+    Setup {
+        /// On a root that is btrfs's top level: move it into an `@` subvolume at the next boot, in the initramfs; other subvolumes at the top level stay as they are
+        #[arg(long)]
+        move_root: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -475,7 +479,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Gc => Some("gc"),
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
-        Command::Snapshot(SnapshotAction::Setup) => Some("snapshot setup"),
+        Command::Snapshot(SnapshotAction::Setup { .. }) => Some("snapshot setup"),
         Command::Resync => Some("resync"),
         Command::Secrets(Secrets::Init { .. }) => Some("secrets init"),
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
@@ -704,7 +708,7 @@ fn run() -> Result<ExitCode> {
                 SnapshotAction::Create { note } => commands::snapshot::create(note)?,
                 SnapshotAction::List => commands::snapshot::list()?,
                 SnapshotAction::Delete { number } => commands::snapshot::delete(number)?,
-                SnapshotAction::Setup => commands::snapshot::setup()?,
+                SnapshotAction::Setup { move_root } => commands::snapshot::setup(move_root)?,
             }
             return Ok(ExitCode::SUCCESS);
         }
@@ -722,6 +726,7 @@ fn run() -> Result<ExitCode> {
                 archix::system::emergency::forget(&paths);
             }
             archix::system::health::boot_complete(&paths)?;
+            commands::limine_after_good_boot(&paths);
             return Ok(ExitCode::SUCCESS);
         }
         Command::Unblessed => {

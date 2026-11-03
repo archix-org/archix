@@ -534,6 +534,14 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
     if let Some(note) = super::keep::snap_pac_note(&paths) {
         println!("{note}");
     }
+    if let Some(migration) = archix::system::limine::load(&paths)
+        && migration.phase == archix::system::limine::Phase::Trying
+    {
+        println!(
+            "moving from Limine to systemd-boot: each switch has the firmware try systemd-boot (entry {:04X}) once; it goes first once a boot through it counts as good, and until then Limine stays first",
+            migration.entry
+        );
+    }
     for line in super::switch::hook_warnings(&paths) {
         println!("warning: {line}");
     }

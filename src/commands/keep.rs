@@ -13,7 +13,7 @@ use archix::snapshot::{self, layout, varlib};
 use archix::system::{self, accounts, boot, menu};
 use archix::value::Value;
 
-use super::snapshot::{Top, contents, current_generation, root_device, store};
+use super::snapshot::{Top, archix_mounted, contents, current_generation, root_device, store};
 use super::{check_pacman_free, confirm, require_root};
 
 /// In @archix's snapshot directory while a keep waits for its reboot: what `--cancel` needs to undo it.
@@ -36,9 +36,9 @@ fn declared_users(paths: &Paths, record: &snapshot::Record) -> Result<BTreeSet<S
     let (Some(generation), Some(commit)) = (record.generation, &record.commit) else {
         return Ok(BTreeSet::new());
     };
-    let stored = archix::captured::Applied::at(&paths.root, &paths.state)
-        .verified(generation, commit, record.tree.as_deref())
-        .with_context(|| {
+    let stored =
+        archix::captured::Applied::verified_at(&paths.root, &paths.state, generation, commit, record.tree.as_deref())
+            .with_context(|| {
             format!(
                 "snapshot {}'s generation {generation} can't be read back from root's repository; nothing was changed",
                 record.number
@@ -122,6 +122,7 @@ fn kept_images(
     paths: &Paths,
     plan: &boot::BootPlan,
     number: u32,
+    replaced_root: &Path,
     snapshot_root: &Path,
     clone: &Path,
 ) -> Result<menu::Images> {
@@ -139,7 +140,7 @@ fn kept_images(
             extras: Vec::new(),
         });
     }
-    if state.current.main.is_some() && boot::limine_keep_refusal(&paths.root, snapshot_root).is_none() {
+    if state.current.main.is_some() && boot::limine_keep_refusal(replaced_root, snapshot_root).is_none() {
         return Ok(state.current);
     }
     eprintln!(":: building snapshot {number}'s boot image, which the ESP no longer has");
@@ -214,6 +215,20 @@ fn motd_path(root: &Path) -> PathBuf {
     root.join("run/motd.d/archix-keep.motd")
 }
 
+/// The snapshots a keep goes by; a try boot's root is an overlay, not btrfs, but its @archix is mounted as usual.
+fn keep_store(root: &Path) -> Result<snapshot::Store> {
+    if system::initrd::trying().is_none() {
+        return store();
+    }
+    if !archix_mounted(root) {
+        bail!(
+            "{} isn't mounted in this try boot, so its snapshots can't be reached",
+            root.join(snapshot::MOUNT).display()
+        );
+    }
+    Ok(snapshot::Store::open(root))
+}
+
 /// What a pending keep's notice says.
 pub fn pending_notice(number: u32) -> String {
     format!(
@@ -231,7 +246,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
             "rollback to snapshot {pending} is pending already; reboot, or `archix rollback --cancel` first; nothing was changed"
         );
     }
-    let store = store()?;
+    let store = keep_store(&root)?;
     if let Some(why) = snapshot::foreign_root(&root) {
         bail!("{why}; nothing was changed");
     }
@@ -242,15 +257,22 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
     let current = current_generation(&paths)?;
     let plan = current.as_ref().and_then(|g| g.settings.boot.clone());
     let snapshot_root = store.path(number);
+    let declared = declared_users(&paths, &record)?;
+    // The top level through @archix's mount, as a try boot's root is an overlay.
+    let (uuid, _) = root_device(&root.join(snapshot::MOUNT))?;
+    let top = Top::mount(&uuid)?;
+    let replaced_root = top.dir.join(snapshot::ROOT);
     if let Some(plan) = &plan
         && plan.loader == boot::Loader::Limine
-        && let Some(why) = boot::limine_keep_refusal(&root, &snapshot_root)
+        && let Some(why) = boot::limine_keep_refusal(&replaced_root, &snapshot_root)
     {
         bail!("{why}; nothing was changed");
     }
-    let declared = declared_users(&paths, &record)?;
-    let var_lib = root.join("var/lib");
-    let split = layout::subvolume_of(&var_lib).is_some_and(|path| path == format!("/{}", layout::VAR_LIB));
+    let trying = system::initrd::trying().is_some();
+    let var_lib = top.dir.join(layout::VAR_LIB);
+    let split = var_lib.is_dir()
+        && (trying
+            || layout::subvolume_of(&root.join("var/lib")).is_some_and(|path| path == format!("/{}", layout::VAR_LIB)));
     println!(
         "keeping snapshot {number}: {}",
         super::snapshot::describe(&record).trim_start()
@@ -267,9 +289,6 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
     if !noconfirm && !confirm(&format!("keep snapshot {number}?"))? {
         bail!("aborted; nothing was changed");
     }
-    let (uuid, _) = root_device(&root)?;
-    let top = Top::mount(&uuid)?;
-    let replaced_root = top.dir.join(snapshot::ROOT);
     let mut placeholders = Vec::new();
     let mut images = None;
     let previous = menu::load(&menu::dir(&paths))?;
@@ -295,12 +314,22 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
             if let Some(plan) = &plan
                 && plan.loader != boot::Loader::Limine
             {
-                images = Some(kept_images(&paths, plan, number, &snapshot_root, clone)?);
+                images = Some(kept_images(
+                    &paths,
+                    plan,
+                    number,
+                    &replaced_root,
+                    &snapshot_root,
+                    clone,
+                )?);
             }
             Ok(())
         },
     )?;
-    println!("snapshot {number} is now @, from the next boot; the running system is snapshot {replaced}");
+    match trying {
+        true => println!("snapshot {number} is now @, from the next boot; the @ it replaces is snapshot {replaced}"),
+        false => println!("snapshot {number} is now @, from the next boot; the running system is snapshot {replaced}"),
+    }
     for name in &placeholders {
         println!(
             "{name} was deleted since snapshot {number}, so it comes back locked (no password, expired, nologin shell); `archix user unlock {name}` enables a declared one"
@@ -335,7 +364,11 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
                     );
                 }
                 warnings.extend(report.warnings);
-                moved = report.dir;
+                moved = report
+                    .dir
+                    .as_deref()
+                    .and_then(|dir| dir.strip_prefix(&var_lib).ok())
+                    .map(Path::to_path_buf);
             }
             Err(e) => warnings.push(format!("putting /var/lib in step with snapshot {number}: {e:#}")),
         }
@@ -389,16 +422,17 @@ pub fn cancel() -> Result<()> {
     let Some(number) = snapshot::keep_pending(&root) else {
         bail!("no rollback is pending; nothing was changed");
     };
-    let store = store()?;
+    let store = keep_store(&root)?;
     let text = fs::read_to_string(store.dir().join(DONE))
         .with_context(|| format!("reading {}, which says what to undo", store.dir().join(DONE).display()))?;
     let done: Done = serde_json::from_str(&text).context("parsing what the keep did")?;
-    let (uuid, _) = root_device(&root)?;
+    let (uuid, _) = root_device(&root.join(snapshot::MOUNT))?;
     let top = Top::mount(&uuid)?;
     store.cancel_keep(&top.dir, done.replaced)?;
     let mut warnings = Vec::new();
+    let var_lib = top.dir.join(layout::VAR_LIB);
     if let Some(dir) = &done.moved
-        && let Err(e) = varlib::undo(&root.join("var/lib"), dir)
+        && let Err(e) = varlib::undo(&var_lib, &var_lib.join(dir))
     {
         warnings.push(format!("putting /var/lib back as it was: {e:#}"));
     }
@@ -490,5 +524,24 @@ pub fn snap_pac_note(paths: &Paths) -> Option<String> {
 pub fn after_boot(paths: &Paths) {
     if snapshot::keep_pending(&paths.root).is_none() {
         let _ = fs::remove_file(snapshot::Store::open(&paths.root).dir().join(DONE));
+    }
+}
+
+/// After a boot that counted as good: finishes a move from Limine to systemd-boot that this boot came through.
+pub fn limine_after_good_boot(paths: &Paths) {
+    if system::initrd::trying().is_some() || boot::booted() != Some(menu::Entry::Current) {
+        return;
+    }
+    let Ok(Some(generation)) = current_generation(paths) else {
+        return;
+    };
+    let Some(plan) = &generation.settings.boot else { return };
+    match system::limine::finish(paths, plan) {
+        Ok(lines) => {
+            for line in lines {
+                println!("{line}");
+            }
+        }
+        Err(e) => println!("archix: finishing the move from Limine to systemd-boot: {e:#}"),
     }
 }

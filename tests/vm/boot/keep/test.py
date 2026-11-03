@@ -1,5 +1,5 @@
-# Keep: `archix rollback N` makes snapshot N the root from the next boot under the name @, carries accounts made since, refuses pacman and switches until the reboot, and `--cancel` swaps the running system back.
-from boot.common import HOST, bind, boot, bump, entries, ok, out, snapshots, switch
+# Keep: `archix rollback N` makes snapshot N the root from the next boot under the name @, carries accounts made since (from @, also in a try boot), refuses pacman and switches until the reboot, and `--cancel` swaps the running system back.
+from boot.common import HOST, bind, boot, bump, entries, entry, ok, out, snapshots, switch, trying
 
 
 def refused_pacman():
@@ -54,5 +54,25 @@ def run(m, t):
         started = boot()
         t.check(started == "archix-current.conf", f"the current entry should start, not {started}")
         t.check(out("cat /etc/archix-vmtest").strip() == "1", f"still the kept snapshot: {out('cat /etc/archix-vmtest')}")
-        t.check(f"{replaced}" in " ".join(map(str, snapshots())), f"the earlier replaced root stays a snapshot: {snapshots()}")
+        t.check(replaced in snapshots(), f"the earlier replaced root stays a snapshot: {snapshots()}")
+        older = kept - 1
+        t.check(entry(f"archix-snapshot-{older}.conf") is not None, f"snapshot {older} should have an entry: {entries()}")
+        m.succeed("useradd -m -s /bin/bash before_try", what="adding a user to @ before the try boot")
+        m.select_entry(f"archix-snapshot-{older}.conf")
+        m.reboot()
+
+    with t.step("4: keep from a try boot carries accounts from @, not the try's /etc"):
+        boot()
+        t.check((trying() or {}).get("snapshot") == older, f"a try boot of snapshot {older}: {trying()}")
+        m.succeed("useradd -m -s /bin/bash in_try", what="adding a user in the try boot's throwaway /etc")
+        said = m.succeed(f"{HOST} rollback {older} --noconfirm 2>&1", what="keeping the tried snapshot")
+        t.check("the @ it replaces is snapshot" in said, f"keep from a try boot names the @ it replaces: {said}")
+        m.reboot()
+
+    with t.step("5: the tried snapshot is the root, with @'s accounts"):
+        started = boot()
+        t.check(started == "archix-current.conf" and trying() is None, f"the current entry should start, not in try mode: {started} {trying()}")
+        t.check(out("cat /etc/archix-vmtest").strip() == "0", f"the root is snapshot {older}: {out('cat /etc/archix-vmtest')}")
+        t.check(ok("getent passwd before_try"), "the user added to @ comes along")
+        t.check(not ok("getent passwd in_try"), "the user added only in the try boot's layer doesn't")
         t.log(f"entries {entries()}")

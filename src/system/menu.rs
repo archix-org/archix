@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -104,13 +103,8 @@ pub struct State {
 
 /// Where the menu's state and entry records are: @archix's boot directory when `root`/.archix is a subvolume of its own, else the archix state's.
 pub fn dir(paths: &Paths) -> PathBuf {
-    let archix = paths.root.join(crate::snapshot::MOUNT);
-    let separate = match (fs::metadata(&paths.root), fs::metadata(&archix)) {
-        (Ok(root), Ok(archix)) => archix.is_dir() && root.dev() != archix.dev(),
-        _ => false,
-    };
-    match separate {
-        true => archix.join("boot"),
+    match crate::snapshot::archix_on(&paths.root) {
+        true => paths.root.join(crate::snapshot::MOUNT).join("boot"),
         false => paths.state.join("boot"),
     }
 }

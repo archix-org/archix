@@ -33,6 +33,7 @@ use archix::value::Value;
 
 pub use helper::{edit_installed, pick, prefetch, search, upgrade};
 pub use init::init;
+pub use keep::limine_after_good_boot;
 pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
 
 /// `archix secure-boot setup`.

@@ -22,7 +22,7 @@ fn sh(script: &str) -> String {
 }
 
 fn on_layout(body: &str) -> Setup {
-    Setup::on(Machine::on_layout("4G"), &[], body, &[])
+    Setup::on(Machine::on_layout("8G"), &[], body, &[])
 }
 
 fn top(machine: &Machine) -> &Path {

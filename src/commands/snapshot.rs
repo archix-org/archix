@@ -265,8 +265,11 @@ pub fn delete(number: u32) -> Result<()> {
     Ok(())
 }
 
-pub fn setup() -> Result<()> {
+pub fn setup(move_root: bool) -> Result<()> {
     let root = archix::testhooks::root();
+    if move_root {
+        return schedule_root_move(&root);
+    }
     let (uuid, options) = root_device(&root)?;
     let top = Top::mount(&uuid)?;
     match layout::setup(&root, &top.dir, &uuid, &options)? {
@@ -275,6 +278,26 @@ pub fn setup() -> Result<()> {
             "the root is laid out for rollbacks once you reboot: the next boot moves /var/lib into its own subvolume before any service starts, so services' data stays put when you roll back"
         ),
     }
+    Ok(())
+}
+
+/// Schedules the move of a root that is btrfs's top level into `@`, which the initramfs makes at the next boot.
+pub(super) fn schedule_root_move(root: &Path) -> Result<()> {
+    if !layout::subvolume_of(root).is_some_and(|path| path == "/") {
+        bail!(
+            "{} isn't btrfs's top level, so there's nothing to move; nothing was changed",
+            root.display()
+        );
+    }
+    if !archix::system::initrd::hook_installed(root) {
+        bail!(
+            "the move happens in the initramfs, which doesn't have archix's hook yet: let archix manage booting (boot = {{ loader = \"systemd-boot\" }}) and switch first; nothing was changed"
+        );
+    }
+    snapshot::rootmove::schedule(root)?;
+    println!(
+        "the root moves into an @ subvolume at the next boot, in the initramfs: don't power off while it says so. Other subvolumes at the top level stay as they are; after that boot, the next switch lays the root out for rollbacks"
+    );
     Ok(())
 }
 

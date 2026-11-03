@@ -332,6 +332,7 @@ pub fn mount(root: &Path, run: &Path, cmdline: &str) -> Result<Choice> {
     if fs_type != "btrfs" {
         return Ok(Choice::Current);
     }
+    root_in_at(root, &device)?;
     let store = run.join("store");
     fs::create_dir_all(&store).with_context(|| format!("creating {}", store.display()))?;
     if sys_mount(&device, &store, "btrfs", 0, &format!("subvol=/{}", layout::ARCHIX)).is_err() {
@@ -411,6 +412,57 @@ fn try_snapshot(root: &Path, run: &Path, store: &Path, device: &str, snapshot: u
     Ok(())
 }
 
+/// The subvolume path and whether read-only, of what's mounted at `point`.
+fn mounted_subvolume(point: &Path) -> Option<(String, bool)> {
+    let info = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    info.lines().rev().find_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if Path::new(fields.get(4)?) != point {
+            return None;
+        }
+        Some((fields.get(3)?.to_string(), fields.get(5)?.split(',').any(|o| o == "ro")))
+    })
+}
+
+/// With btrfs's top level mounted at `root` as the command line has it: finishes a scheduled move of the root into `@`, and from then on mounts `@` there instead, as the old root's files are gone from the top level.
+fn root_in_at(root: &Path, device: &str) -> Result<()> {
+    let Some((subvolume, read_only)) = mounted_subvolume(root) else {
+        return Ok(());
+    };
+    let (mark, moved) = (
+        root.join(crate::snapshot::rootmove::MARK),
+        root.join(crate::snapshot::rootmove::MOVED),
+    );
+    if subvolume != "/" || !(mark.exists() || moved.exists()) {
+        return Ok(());
+    }
+    if mark.exists() {
+        println!("archix: moving the root into @, which takes a while once; don't power off");
+        sys_mount(device, root, "btrfs", libc::MS_REMOUNT, "").context("mounting the top level read-write")?;
+    }
+    match crate::snapshot::rootmove::finish(root)? {
+        crate::snapshot::rootmove::Finished::NotMoved => return Ok(()),
+        crate::snapshot::rootmove::Finished::InAt { kept } => {
+            for path in kept {
+                println!(
+                    "archix: {} is a subvolume, so it stays at the top level",
+                    path.display()
+                );
+            }
+        }
+    }
+    umount(root);
+    let flags = if read_only { libc::MS_RDONLY } else { 0 };
+    sys_mount(
+        device,
+        root,
+        "btrfs",
+        flags,
+        &format!("subvol=/{}", crate::snapshot::ROOT),
+    )
+    .context("mounting @ as the root")
+}
+
 /// Makes the rescue entry the next boot's, once, and reboots into it; with no EFI variables to set, fails so the initramfs opens its shell.
 fn rescue_next(why: &str) -> Result<()> {
     println!("archix: {why}; starting the rescue entry");
@@ -437,6 +489,11 @@ fn rescue_next(why: &str) -> Result<()> {
     bail!("the reboot into the rescue entry failed")
 }
 
+/// Whether the root at `root` builds its initramfs with archix's hook, which a move of the root into `@` needs.
+pub fn hook_installed(root: &Path) -> bool {
+    root.join("etc/mkinitcpio.conf.d/archix.conf").is_file()
+}
+
 /// The mkinitcpio hook for both initramfs types, its initrd unit and the conf.d line that adds it.
 pub fn hook_files() -> Vec<(PathBuf, String)> {
     let static_binary = crate::integration::STATIC_BINARY;
@@ -445,7 +502,7 @@ pub fn hook_files() -> Vec<(PathBuf, String)> {
         (
             root.join("etc/initcpio/install/archix"),
             format!(
-                "#!/bin/bash\n\nbuild() {{\n    add_binary {static_binary} /usr/bin/archix\n    if type -P mkfs.ext4 > /dev/null; then\n        add_binary mkfs.ext4\n    fi\n    \
+                "#!/bin/bash\n\nbuild() {{\n    add_binary {static_binary} /usr/bin/archix\n    if type -P mkfs.ext4 > /dev/null; then\n        add_binary mkfs.ext4\n    fi\n    if type -P btrfs > /dev/null; then\n        add_binary btrfs\n    fi\n    \
                  local module path\n    for module in loop overlay; do\n        path=$(modinfo -k \"$KERNELVERSION\" -n \"$module\" 2> /dev/null) || continue\n        [ ! -e \"$path\" ] || add_module \"$module\"\n    done\n    add_runscript\n    \
                  add_file /etc/initcpio/archix/archix-boot-mount.service /usr/lib/systemd/system/archix-boot-mount.service\n    \
                  add_symlink /usr/lib/systemd/system/initrd-root-fs.target.requires/archix-boot-mount.service /usr/lib/systemd/system/archix-boot-mount.service\n}}\n\n\

@@ -128,7 +128,15 @@ struct Facts {
     secret_paths: Vec<String>,
     /// Why rollbacks can't work on this root, none when they can.
     rollback_unavailable: Option<String>,
+    /// The root is btrfs's top level, which can move into `@` at the next boot.
+    root_at_top: bool,
     boot: BootFacts,
+    /// On a Limine machine, how systemd-boot would boot it, which init offers to move it to.
+    systemd_boot_offer: Option<BootFacts>,
+    /// snap-pac's pacman hooks by file name, when it's installed: snapper snapshots every pacman run too.
+    snap_pac_hooks: Vec<String>,
+    /// Timeshift takes btrfs snapshots too.
+    timeshift_btrfs: bool,
     flatpak_apps: BTreeMap<String, InstalledApp>,
     flatpak_remotes: BTreeMap<String, Remote>,
     flatpak_gone: Vec<String>,
@@ -166,6 +174,12 @@ struct Answers {
     keep_days: String,
     /// Snapshot before every switch and pacman run; on by default where the root allows it.
     rollbacks: bool,
+    /// Move a root at btrfs's top level into `@` at the next boot, so it can have rollbacks.
+    move_root: bool,
+    /// Mask snap-pac's hooks, so only archix snapshots pacman runs.
+    snap_pac_off: bool,
+    /// Move a Limine machine to systemd-boot.
+    to_systemd_boot: bool,
     dotfiles_user: usize,
     dotfiles: BTreeSet<String>,
     settings: BTreeSet<usize>,
@@ -209,6 +223,9 @@ impl Answers {
             keep: String::new(),
             keep_days: String::new(),
             rollbacks: facts.rollback_unavailable.is_none(),
+            move_root: false,
+            snap_pac_off: false,
+            to_systemd_boot: false,
             dotfiles_user: 0,
             dotfiles: facts
                 .dotfiles
@@ -349,6 +366,13 @@ pub fn init(config_dir: &Path, host: &str, defaults: bool, repack: &[String]) ->
             )),
             None => e,
         }),
+        Ok(()) if moves_root(&facts, &answers) => {
+            archix::snapshot::rootmove::schedule(Path::new("/"))?;
+            println!(
+                "the root moves into an @ subvolume at the boot after your first switch, which puts archix's initramfs hook in; don't power off while that boot says so"
+            );
+            Ok(())
+        }
         result => result,
     }
 }
@@ -630,55 +654,72 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         .collect();
 
     let limine = machine.local.contains_key("limine") || Path::new("/usr/bin/limine").exists();
+    let ready_at = |esp: String| -> BootFacts {
+        let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
+        if params.iter().any(|p| p.starts_with("root=")) {
+            let running = fs::read_to_string(format!(
+                "/usr/lib/modules/{}/pkgbase",
+                fs::read_to_string("/proc/sys/kernel/osrelease")
+                    .unwrap_or_default()
+                    .trim()
+            ))
+            .ok();
+            let installed: Vec<String> = archix::system::boot::installed_kernels()
+                .into_iter()
+                .map(|(base, _)| base)
+                .collect();
+            let kernel = boot_kernel(&machine.local, running.as_deref(), &installed);
+            let mut mkinitcpio: Vec<String> = fs::read_to_string("/etc/mkinitcpio.conf").into_iter().collect();
+            let mut drop_ins: Vec<PathBuf> = fs::read_dir("/etc/mkinitcpio.conf.d")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
+                .collect();
+            drop_ins.sort();
+            mkinitcpio.extend(drop_ins.iter().filter_map(|path| fs::read_to_string(path).ok()));
+            let microcode_hook = microcode_hook(&mkinitcpio);
+            let microcode = ["amd-ucode.img", "intel-ucode.img"]
+                .into_iter()
+                .filter(|image| !microcode_hook && Path::new("/boot").join(image).is_file())
+                .map(str::to_string)
+                .collect();
+            let esp_in_boot = fs::canonicalize(&esp)
+                .is_ok_and(|esp| esp.starts_with(fs::canonicalize("/boot").unwrap_or_else(|_| "/boot".into())));
+            BootFacts::Ready {
+                esp,
+                kernel,
+                microcode,
+                params,
+                esp_in_boot,
+                microcode_hook,
+            }
+        } else {
+            BootFacts::NoRoot
+        }
+    };
     let boot = match systemd_boot_esp {
         None if limine => BootFacts::Limine,
         None => BootFacts::NoLoader,
-        Some(esp) => {
-            let params = capture::kernel_params(&fs::read_to_string("/proc/cmdline").unwrap_or_default());
-            if params.iter().any(|p| p.starts_with("root=")) {
-                let running = fs::read_to_string(format!(
-                    "/usr/lib/modules/{}/pkgbase",
-                    fs::read_to_string("/proc/sys/kernel/osrelease")
-                        .unwrap_or_default()
-                        .trim()
-                ))
-                .ok();
-                let installed: Vec<String> = archix::system::boot::installed_kernels()
-                    .into_iter()
-                    .map(|(base, _)| base)
-                    .collect();
-                let kernel = boot_kernel(&machine.local, running.as_deref(), &installed);
-                let mut mkinitcpio: Vec<String> = fs::read_to_string("/etc/mkinitcpio.conf").into_iter().collect();
-                let mut drop_ins: Vec<PathBuf> = fs::read_dir("/etc/mkinitcpio.conf.d")
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.extension().is_some_and(|ext| ext == "conf"))
-                    .collect();
-                drop_ins.sort();
-                mkinitcpio.extend(drop_ins.iter().filter_map(|path| fs::read_to_string(path).ok()));
-                let microcode_hook = microcode_hook(&mkinitcpio);
-                let microcode = ["amd-ucode.img", "intel-ucode.img"]
-                    .into_iter()
-                    .filter(|image| !microcode_hook && Path::new("/boot").join(image).is_file())
-                    .map(str::to_string)
-                    .collect();
-                let esp_in_boot = fs::canonicalize(&esp)
-                    .is_ok_and(|esp| esp.starts_with(fs::canonicalize("/boot").unwrap_or_else(|_| "/boot".into())));
-                BootFacts::Ready {
-                    esp,
-                    kernel,
-                    microcode,
-                    params,
-                    esp_in_boot,
-                    microcode_hook,
-                }
-            } else {
-                BootFacts::NoRoot
-            }
-        }
+        Some(esp) => ready_at(esp),
     };
+    let systemd_boot_offer = match boot {
+        BootFacts::Limine => capture::esp_path()
+            .map(ready_at)
+            .filter(|offer| matches!(offer, BootFacts::Ready { .. })),
+        _ => None,
+    };
+    let root_at_top = capture::is_btrfs(Path::new("/"))
+        && archix::snapshot::layout::subvolume_of(Path::new("/")).is_some_and(|path| path == "/");
+    let snap_pac_hooks = package_files(&paths.local_db(), "snap-pac")
+        .into_iter()
+        .filter_map(|path| path.strip_prefix("usr/share/libalpm/hooks/").map(str::to_string))
+        .filter(|name| name.ends_with(".hook"))
+        .collect();
+    let timeshift_btrfs = machine.local.contains_key("timeshift")
+        && fs::read_to_string("/etc/timeshift/timeshift.json")
+            .is_ok_and(|text| text.contains("\"btrfs_mode\" : \"true\"") || text.contains("\"btrfs_mode\": \"true\""));
 
     let mut flatpak_apps = flatpak::installed()?;
     let remotes = flatpak::remotes()?;
@@ -741,13 +782,37 @@ fn gather(paths: &Paths, default_dir: &Path) -> Result<Facts> {
         files,
         secret_paths,
         rollback_unavailable: archix::snapshot::unsupported(Path::new("/")),
+        root_at_top,
         boot,
+        systemd_boot_offer,
+        snap_pac_hooks,
+        timeshift_btrfs,
         flatpak_apps,
         flatpak_remotes,
         flatpak_gone,
         dotfiles,
         authorized_keys,
     })
+}
+
+/// The files the installed package `name` owns, relative to the root, from pacman's database at `local_db`.
+fn package_files(local_db: &Path, name: &str) -> Vec<String> {
+    let Some(entry) = fs::read_dir(local_db)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|entry| archix::pacman::name_from_entry(&entry.file_name().to_string_lossy()) == name)
+    else {
+        return Vec::new();
+    };
+    fs::read_to_string(entry.path().join("files"))
+        .unwrap_or_default()
+        .lines()
+        .skip_while(|line| *line != "%FILES%")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Where package files of installed versions may still be: pacman's cache, and the build caches yay and paru keep in each home.
@@ -855,6 +920,25 @@ fn choose_repacks(
 }
 
 /// The config `answers` make of `facts`.
+/// The boot facts the config manages booting by: this machine's systemd-boot, or the one a Limine machine moves to.
+fn managed_boot<'a>(facts: &'a Facts, answers: &Answers) -> Option<&'a BootFacts> {
+    match (&facts.boot, &facts.systemd_boot_offer) {
+        (BootFacts::Ready { .. }, _) if answers.boot => Some(&facts.boot),
+        (BootFacts::Limine, Some(offer)) if answers.to_systemd_boot => Some(offer),
+        _ => None,
+    }
+}
+
+/// Whether the root, at btrfs's top level, moves into `@` at the boot after the first switch, which puts archix's initramfs hook in.
+fn moves_root(facts: &Facts, answers: &Answers) -> bool {
+    facts.root_at_top && answers.move_root && managed_boot(facts, answers).is_some()
+}
+
+/// Whether init offers to mask snap-pac's hooks: never on Limine, where snapper's snapshots are the only bootable ones.
+fn snap_pac_offered(facts: &Facts) -> bool {
+    !facts.snap_pac_hooks.is_empty() && !matches!(facts.boot, BootFacts::Limine)
+}
+
 fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     let mut packages = facts.packages.clone();
     packages.extend(
@@ -1053,19 +1137,26 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
         }
         table.push((file.path.clone(), Lua::Table(fields)));
     }
+    if answers.snap_pac_off && snap_pac_offered(facts) {
+        for hook in &facts.snap_pac_hooks {
+            table.push((
+                format!("/etc/pacman.d/hooks/{hook}"),
+                Lua::Table(vec![("link".into(), Lua::str("/dev/null"))]),
+            ));
+        }
+    }
     if !table.is_empty() {
         config.set("files", Lua::Table(table));
     }
     let mut boot = Vec::new();
-    if let BootFacts::Ready {
+    if let Some(BootFacts::Ready {
         esp,
         kernel,
         microcode,
         params,
         esp_in_boot,
         ..
-    } = &facts.boot
-        && answers.boot
+    }) = managed_boot(facts, answers)
     {
         boot.push(("loader".to_string(), Lua::str("systemd-boot")));
         if esp != "/efi" && !esp_in_boot {
@@ -1092,7 +1183,7 @@ fn build(facts: &Facts, answers: &Answers, dir: &Path, host: &str) -> Host {
     if !generations.is_empty() {
         config.set("generations", Lua::Table(generations));
     }
-    if answers.rollbacks && facts.rollback_unavailable.is_none() {
+    if (answers.rollbacks && facts.rollback_unavailable.is_none()) || moves_root(facts, answers) {
         config.set("rollback", Lua::Table(vec![("enable".to_string(), Lua::Bool(true))]));
     }
     if answers.read_only {
@@ -1325,7 +1416,7 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
             ),
             (
                 false,
-                "automatic fallback needs systemd-boot 260 or newer, which archix recommends; switching this machine to it isn't offered yet".to_string(),
+                "automatic fallback needs systemd-boot 260 or newer, which archix recommends; init can move this machine to it: Limine stays installed and first until a boot through systemd-boot counts as good".to_string(),
             ),
         ],
         BootFacts::Ready {
@@ -1345,6 +1436,27 @@ fn boot_lines(facts: &Facts) -> Vec<(bool, String)> {
         }
     };
     lines.push((true, "each switch applies in place, live, with no reboot".to_string()));
+    if !facts.snap_pac_hooks.is_empty() {
+        lines.push((
+            false,
+            match &facts.boot {
+                BootFacts::Limine => "snap-pac also snapshots every pacman run; on Limine its snapshots are the bootable ones, so it stays on".to_string(),
+                _ => "snap-pac also snapshots every pacman run, beside archix's own snapshots; init can mask its hooks, or keep both (archix leaves snapper's configs and snapshots alone either way)".to_string(),
+            },
+        ));
+    }
+    if facts.timeshift_btrfs {
+        lines.push((
+            false,
+            "Timeshift takes btrfs snapshots too, so two tools manage snapshots of this root; archix leaves Timeshift's settings and snapshots alone, but restoring one with Timeshift replaces the root behind archix's back (`archix resync` adopts it)".to_string(),
+        ));
+    }
+    if facts.root_at_top {
+        lines.push((
+            false,
+            "the root is btrfs's top level, which no snapshot can replace; init can move it into an @ subvolume at the boot after the first switch, leaving other subvolumes at the top level as they are".to_string(),
+        ));
+    }
     if let BootFacts::Ready { .. } = &facts.boot {
         lines.push((
             true,
@@ -1940,6 +2052,81 @@ mod tests {
         assert!(!answers.rollbacks);
         let host = Lua::Table(build(&facts, &answers, Path::new("/cfg"), "box").fields).render(0);
         assert!(!host.contains("rollback ="), "{host}");
+    }
+
+    #[test]
+    fn snap_pac_is_masked_only_when_asked_and_never_offered_on_limine() {
+        let mut facts = super::tui::tests::facts();
+        facts.snap_pac_hooks = vec!["05-snap-pac-pre.hook".into(), "zz-snap-pac-post.hook".into()];
+        let answers = Answers::recommended(&facts);
+        assert!(!answers.snap_pac_off, "keeping both is the default");
+        let render = |facts: &Facts, answers: &Answers| {
+            Lua::Table(build(facts, answers, Path::new("/cfg"), "box").fields).render(0)
+        };
+        assert!(!render(&facts, &answers).contains("snap-pac"));
+        let off = Answers {
+            snap_pac_off: true,
+            ..answers.clone()
+        };
+        let host = render(&facts, &off);
+        for hook in ["05-snap-pac-pre.hook", "zz-snap-pac-post.hook"] {
+            assert!(
+                host.contains(&format!(
+                    "[\"/etc/pacman.d/hooks/{hook}\"] = {{ link = \"/dev/null\" }}"
+                )),
+                "{hook}:\n{host}"
+            );
+        }
+        facts.boot = BootFacts::Limine;
+        assert!(!snap_pac_offered(&facts));
+        assert!(!render(&facts, &off).contains("snap-pac"), "never on Limine");
+    }
+
+    #[test]
+    fn a_limine_machine_gets_systemd_boot_only_when_moving_to_it_is_picked() {
+        let mut facts = super::tui::tests::facts();
+        let ready = std::mem::replace(&mut facts.boot, BootFacts::Limine);
+        facts.systemd_boot_offer = Some(ready);
+        let answers = Answers::recommended(&facts);
+        assert!(!answers.to_systemd_boot && !answers.boot);
+        let render = |answers: &Answers| Lua::Table(build(&facts, answers, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            !render(&answers).contains("boot ="),
+            "staying on Limine writes no boot settings"
+        );
+        let host = render(&Answers {
+            to_systemd_boot: true,
+            ..answers
+        });
+        assert!(
+            host.contains("loader = \"systemd-boot\"") && host.contains("root=UUID=x"),
+            "{host}"
+        );
+    }
+
+    #[test]
+    fn a_root_at_the_top_level_gets_rollbacks_only_when_it_moves_and_archix_manages_booting() {
+        let mut facts = super::tui::tests::facts();
+        facts.root_at_top = true;
+        facts.rollback_unavailable = Some("/ is btrfs's top level".into());
+        let answers = Answers::recommended(&facts);
+        assert!(!answers.move_root);
+        assert!(!moves_root(&facts, &answers));
+        let moving = Answers {
+            move_root: true,
+            ..answers.clone()
+        };
+        assert!(moves_root(&facts, &moving));
+        let host = Lua::Table(build(&facts, &moving, Path::new("/cfg"), "box").fields).render(0);
+        assert!(
+            host.contains("rollback = {") && host.contains("enable = true"),
+            "{host}"
+        );
+        let unmanaged = Answers { boot: false, ..moving };
+        assert!(
+            !moves_root(&facts, &unmanaged),
+            "the move needs archix's initramfs hook"
+        );
     }
 
     #[test]

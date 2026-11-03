@@ -732,6 +732,15 @@ fn write_boot(
         Ok(_) => {}
         Err(e) => failures.push(format!("the rescue entry wasn't refreshed: {e:#}")),
     }
+    if failures.is_empty() {
+        match system::limine::start(paths, plan) {
+            Ok(Some(line)) => println!("{line}"),
+            Ok(None) => {}
+            Err(e) => failures.push(format!(
+                "the move from Limine to systemd-boot didn't start, so Limine still boots this machine: {e:#}"
+            )),
+        }
+    }
     if let Err(e) = archix::durable::write(
         &paths.root.join(system::health::TIMEOUT_DROP_IN.trim_start_matches('/')),
         system::health::timeout_drop_in(plan.unblessed_timeout).as_bytes(),
@@ -1492,11 +1501,16 @@ pub fn revert(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()
         bail!("{why}; nothing was changed");
     }
     if let Some(applied) = &generation.applied {
-        let stored = archix::captured::Applied::at(&paths.root, &paths.state)
-            .verified(number, &applied.commit, Some(&applied.tree))
-            .with_context(|| {
-                format!("generation {number} can't be read back from root's repository; nothing was changed")
-            })?;
+        let stored = archix::captured::Applied::verified_at(
+            &paths.root,
+            &paths.state,
+            number,
+            &applied.commit,
+            Some(&applied.tree),
+        )
+        .with_context(|| {
+            format!("generation {number} can't be read back from root's repository; nothing was changed")
+        })?;
         archix::eval::isolated::read_plan(&stored.plan)
             .with_context(|| format!("generation {number}'s stored plan doesn't parse; nothing was changed"))?;
     }

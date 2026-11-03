@@ -1,4 +1,5 @@
 pub mod layout;
+pub mod rootmove;
 pub mod varlib;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -653,6 +654,15 @@ pub fn foreign_root(root: &Path) -> Option<String> {
     })
 }
 
+/// Whether @archix is mounted at `root`/.archix, a filesystem of its own there rather than the directory setup leaves on the root before the reboot that mounts it.
+pub fn archix_on(root: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (fs::metadata(root), fs::metadata(root.join(MOUNT))) {
+        (Ok(root), Ok(archix)) => archix.is_dir() && root.dev() != archix.dev(),
+        _ => false,
+    }
+}
+
 /// The snapshot a keep made `@` from the next boot, while the running root is still the one it replaced.
 pub fn keep_pending(root: &Path) -> Option<u32> {
     let path = root.join(crate::pacman::hooks::KEEP_PENDING.trim_start_matches('/'));
@@ -734,8 +744,12 @@ pub fn unsupported(root: &Path) -> Option<String> {
         ));
     }
     match layout::subvolume_of(root) {
+        Some(path) if (path == "/" || path.is_empty()) && rootmove::scheduled(root) => Some(format!(
+            "{} is btrfs's top level, and it moves into an `@` subvolume at the next boot; rollbacks work after that",
+            root.display()
+        )),
         Some(path) if path == "/" || path.is_empty() => Some(format!(
-            "{} is btrfs's top level, not a subvolume, so a snapshot of it can't become the root; reinstall with an `@` subvolume, as CachyOS and archinstall lay it out",
+            "{} is btrfs's top level, not a subvolume, so a snapshot of it can't become the root; `archix init` or `archix snapshot setup --move-root` moves it into an `@` subvolume at the next boot",
             root.display()
         )),
         _ => None,

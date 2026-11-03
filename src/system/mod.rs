@@ -15,6 +15,7 @@ pub mod grub;
 pub mod health;
 pub mod hooks;
 pub mod initrd;
+pub mod limine;
 pub mod live;
 pub mod menu;
 pub mod merge;

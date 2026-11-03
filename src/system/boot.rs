@@ -549,7 +549,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
 }
 
 /// Signs a loader on the ESP as a copy that replaces it by rename, so a crash never leaves it half written.
-fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
+pub(crate) fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
     let tmp = path.with_file_name(name);
@@ -651,7 +651,7 @@ pub fn point_loader(esp: &Path, preferred: &str, default: &str, signed: bool) ->
     Ok(())
 }
 
-const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+pub(crate) const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 
 /// systemd-boot's EFI variable `name`, where the test hooks put it in a debug build.
 fn loader_var(name: &str) -> Option<PathBuf> {
@@ -792,10 +792,10 @@ pub fn counting_off() -> Option<String> {
     })
 }
 
-const GLOBAL_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+pub(crate) const GLOBAL_GUID: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
 
 /// The file paths in an EFI load option (Boot####), lowercased with forward slashes, and its description.
-fn load_option(bytes: &[u8]) -> Option<(String, Vec<String>)> {
+pub(crate) fn load_option(bytes: &[u8]) -> Option<(String, Vec<String>)> {
     let data = bytes.get(4..)?;
     let list_len = u16::from_le_bytes(data.get(4..6)?.try_into().ok()?) as usize;
     let units: Vec<u16> = data

@@ -658,3 +658,145 @@ fn under_secure_boot_an_image_is_signed_once_and_shared_by_the_entries_that_boot
     checks.eq(signs(), 1, "the image was signed once, at the first switch");
     checks.finish();
 }
+
+/// An EFI variable's file: attributes, then `data`.
+fn efivar(dir: &Path, name: &str, data: &[u8]) {
+    let mut bytes = vec![7u8, 0, 0, 0];
+    bytes.extend_from_slice(data);
+    fs::write(dir.join(name), bytes).unwrap();
+}
+
+/// A load option named `label` starting `loader` (backslashes) on the ESP.
+fn load_option(label: &str, loader: &str) -> Vec<u8> {
+    let path: Vec<u8> = loader.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+    let mut list = vec![4u8, 4];
+    list.extend_from_slice(&((path.len() + 4) as u16).to_le_bytes());
+    list.extend_from_slice(&path);
+    list.extend_from_slice(&[0x7f, 0xff, 4, 0]);
+    let mut option = 1u32.to_le_bytes().to_vec();
+    option.extend_from_slice(&(list.len() as u16).to_le_bytes());
+    option.extend(label.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+    option.extend_from_slice(&list);
+    option
+}
+
+fn efi_u16s(dir: &Path, name: &str) -> Vec<u16> {
+    fs::read(dir.join(name))
+        .unwrap_or_default()
+        .get(4..)
+        .unwrap_or_default()
+        .chunks(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn a_limine_machine_moves_to_systemd_boot_only_once_a_boot_through_it_counted_as_good() {
+    const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    const LOADER: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let esp = machine.esp();
+    fs::create_dir_all(esp.join("EFI/limine")).unwrap();
+    fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
+    fs::write(esp.join("EFI/limine/BOOTX64.EFI"), "limine").unwrap();
+    fs::write(esp.join("EFI/BOOT/BOOTX64.EFI"), "limine").unwrap();
+    for (dir, name) in [
+        ("usr/share/libalpm/hooks", "limine-snapper-sync.hook"),
+        ("usr/lib/systemd/system", "limine-snapper-sync.service"),
+    ] {
+        fs::write(machine.system_file(dir).join(name), "").unwrap();
+    }
+    let vars = tempfile::TempDir::new().unwrap();
+    efivar(
+        vars.path(),
+        &format!("Boot0000-{GLOBAL}"),
+        &load_option("Limine", "\\EFI\\limine\\BOOTX64.EFI"),
+    );
+    efivar(vars.path(), &format!("BootOrder-{GLOBAL}"), &0u16.to_le_bytes());
+    let efi = ("ARCHIX_TEST_EFIVARS", vars.path().to_str().unwrap());
+    let run = tempfile::TempDir::new().unwrap();
+    let good_boot = [
+        efi,
+        ("ARCHIX_TEST_RUN", run.path().to_str().unwrap()),
+        ("ARCHIX_TEST_ENTRY", "archix-current.conf"),
+    ];
+
+    let out = setup.ok_env(&[efi], &["switch", "--noconfirm"]);
+    checks.check(
+        out.contains("Limine stays first"),
+        format_args!("the switch says what it did: {out}"),
+    );
+    checks.check(
+        esp.join("EFI/systemd/systemd-bootx64.efi").is_file(),
+        "systemd-boot is on the ESP",
+    );
+    checks.eq(
+        efi_u16s(vars.path(), &format!("BootOrder-{GLOBAL}")),
+        vec![0, 1],
+        "systemd-boot's entry comes after Limine's",
+    );
+    checks.eq(
+        efi_u16s(vars.path(), &format!("BootNext-{GLOBAL}")),
+        vec![1],
+        "and the next boot tries it once",
+    );
+    checks.eq(
+        fs::read_to_string(esp.join("EFI/BOOT/BOOTX64.EFI")).ok(),
+        Some("limine".to_string()),
+        "the removable-media path stays Limine's",
+    );
+
+    setup.ok_env(&good_boot, &["boot-complete"]);
+    checks.eq(
+        efi_u16s(vars.path(), &format!("BootOrder-{GLOBAL}")),
+        vec![0, 1],
+        "a good boot through Limine changes nothing",
+    );
+
+    efivar(
+        vars.path(),
+        &format!("LoaderInfo-{LOADER}"),
+        &"systemd-boot 262"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>(),
+    );
+    setup.ok_env(&good_boot, &["boot-complete"]);
+    checks.eq(
+        efi_u16s(vars.path(), &format!("BootOrder-{GLOBAL}")),
+        vec![1, 0],
+        "a good boot through systemd-boot puts it first",
+    );
+    checks.eq(
+        fs::read(esp.join("EFI/BOOT/BOOTX64.EFI")).ok(),
+        fs::read(esp.join("EFI/systemd/systemd-bootx64.efi")).ok(),
+        "and on the removable-media path",
+    );
+    checks.eq(
+        fs::read_to_string(esp.join("EFI/BOOT/BOOTX64.EFI.before-archix")).ok(),
+        Some("limine".to_string()),
+        "Limine's loader there is kept",
+    );
+    for link in [
+        "etc/pacman.d/hooks/limine-snapper-sync.hook",
+        "etc/systemd/system/limine-snapper-sync.service",
+    ] {
+        checks.eq(
+            fs::read_link(machine.system_file(link)).ok(),
+            Some(std::path::PathBuf::from("/dev/null")),
+            format_args!("{link} masks Limine's copying of kernels"),
+        );
+    }
+    checks.check(esp.join("EFI/limine/BOOTX64.EFI").is_file(), "Limine stays installed");
+    let again = setup.ok_env(&[efi], &["switch", "--noconfirm"]);
+    checks.check(
+        !again.contains("Limine stays first"),
+        format_args!("a later switch has nothing more to do: {again}"),
+    );
+    checks.finish();
+}

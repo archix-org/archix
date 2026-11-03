@@ -87,6 +87,9 @@ enum Control {
     Keep,
     KeepDays,
     Rollbacks,
+    MoveRoot,
+    SnapPac,
+    ToSystemdBoot,
     DotUser,
     Dotfiles,
     Settings,
@@ -130,6 +133,18 @@ const ORPHANS: [&str; 2] = [
 const ROLLBACKS: [&str; 2] = [
     "on: a btrfs snapshot before every switch and pacman run, to roll back to or boot (recommended)",
     "off",
+];
+const MOVE_ROOT: [&str; 2] = [
+    "move it into an @ subvolume at the boot after the first switch, so rollbacks work; other subvolumes at the top level stay as they are",
+    "leave it at the top level; rollbacks stay off",
+];
+const SNAP_PAC: [&str; 2] = [
+    "keep both: snapper and archix each snapshot pacman runs",
+    "mask snap-pac's pacman hooks, so only archix does; snapper's configs and snapshots stay as they are",
+];
+const TO_SYSTEMD_BOOT: [&str; 2] = [
+    "stay on Limine: a broken update falls back only by picking a snapshot by hand",
+    "move to systemd-boot for automatic fallback: Limine stays installed and first until a boot through systemd-boot counts as good",
 ];
 const DRIFT: [&str; 3] = [
     "the next switch asks whether to add it to installed.lua or keep it untracked (recommended)",
@@ -381,11 +396,20 @@ impl<'a> App<'a> {
                 if matches!(facts.boot, BootFacts::Ready { .. }) {
                     controls.push(Control::Boot);
                 }
+                if matches!(facts.boot, BootFacts::Limine) && facts.systemd_boot_offer.is_some() {
+                    controls.push(Control::ToSystemdBoot);
+                }
             }
             Step::Generations => {
                 controls.extend([Control::Keep, Control::KeepDays]);
                 if facts.rollback_unavailable.is_none() {
                     controls.push(Control::Rollbacks);
+                }
+                if facts.root_at_top && super::managed_boot(facts, &self.answers).is_some() {
+                    controls.push(Control::MoveRoot);
+                }
+                if super::snap_pac_offered(facts) {
+                    controls.push(Control::SnapPac);
                 }
             }
             Step::Dotfiles => {
@@ -408,6 +432,9 @@ impl<'a> App<'a> {
             Control::Orphans => ORPHANS.map(str::to_string).to_vec(),
             Control::Drift => DRIFT.map(str::to_string).to_vec(),
             Control::Rollbacks => ROLLBACKS.map(str::to_string).to_vec(),
+            Control::MoveRoot => MOVE_ROOT.map(str::to_string).to_vec(),
+            Control::SnapPac => SNAP_PAC.map(str::to_string).to_vec(),
+            Control::ToSystemdBoot => TO_SYSTEMD_BOOT.map(str::to_string).to_vec(),
             Control::DotUser => self.users().into_iter().cloned().collect(),
             _ => Vec::new(),
         }
@@ -421,6 +448,9 @@ impl<'a> App<'a> {
             Control::Orphans => usize::from(!answers.keep_orphans),
             Control::Drift => answers.drift,
             Control::Rollbacks => usize::from(!answers.rollbacks),
+            Control::MoveRoot => usize::from(!answers.move_root),
+            Control::SnapPac => usize::from(answers.snap_pac_off),
+            Control::ToSystemdBoot => usize::from(answers.to_systemd_boot),
             Control::DotUser => answers.dotfiles_user,
             _ => 0,
         }
@@ -538,6 +568,9 @@ impl<'a> App<'a> {
                 Control::Orphans => answers.keep_orphans = i == 0,
                 Control::Drift => answers.drift = i,
                 Control::Rollbacks => answers.rollbacks = i == 0,
+                Control::MoveRoot => answers.move_root = i == 0,
+                Control::SnapPac => answers.snap_pac_off = i == 1,
+                Control::ToSystemdBoot => answers.to_systemd_boot = i == 1,
                 Control::DotUser if answers.dotfiles_user != i => {
                     answers.dotfiles_user = i;
                     answers.dotfiles = self
@@ -1079,8 +1112,11 @@ impl<'a> App<'a> {
             format!("{} of {}", answers.services.len(), facts.services.len()),
         ));
         lines.push(row("Config files", count(answers.files.len(), "file", "files")));
-        let boot = match (&facts.boot, answers.boot) {
-            (BootFacts::Ready { esp, .. }, true) => format!("systemd-boot on {esp}"),
+        let boot = match super::managed_boot(facts, answers) {
+            Some(BootFacts::Ready { esp, .. }) if answers.to_systemd_boot => {
+                format!("systemd-boot on {esp}, moved to from Limine")
+            }
+            Some(BootFacts::Ready { esp, .. }) => format!("systemd-boot on {esp}"),
             _ => "not managed".into(),
         };
         lines.push(row("Boot", boot));
@@ -1095,6 +1131,9 @@ impl<'a> App<'a> {
         lines.push(row(
             "Rollbacks",
             match &facts.rollback_unavailable {
+                Some(_) if answers.move_root && facts.root_at_top => {
+                    "after the root moves into @ at the boot after the first switch".into()
+                }
                 Some(why) => format!("not available: {why}"),
                 None if answers.rollbacks => "a snapshot before every switch and pacman run".into(),
                 None => "off".into(),
@@ -1250,6 +1289,9 @@ impl<'a> App<'a> {
                     Control::Orphans => "Dependencies nothing needs any more",
                     Control::Drift => "Later, when you install something with plain pacman or yay",
                     Control::Rollbacks => "Rollbacks",
+                    Control::MoveRoot => "The root is btrfs's top level, which no snapshot can replace",
+                    Control::SnapPac => "snap-pac also snapshots every pacman run",
+                    Control::ToSystemdBoot => "Limine boots this machine",
                     Control::MissingVersions => "If a locked AUR version can't be built any more",
                     _ => "Whose dotfiles",
                 };
@@ -1344,6 +1386,7 @@ pub(super) mod tests {
             files: vec![file("/etc/fstab", true), file("/etc/shells", false)],
             secret_paths: vec!["/etc/wireguard/ (2 files)".into()],
             rollback_unavailable: None,
+            root_at_top: false,
             boot: BootFacts::Ready {
                 esp: "/boot".into(),
                 kernel: "linux".into(),
@@ -1352,6 +1395,9 @@ pub(super) mod tests {
                 esp_in_boot: false,
                 microcode_hook: false,
             },
+            systemd_boot_offer: None,
+            snap_pac_hooks: Vec::new(),
+            timeshift_btrfs: false,
             flatpak_apps: BTreeMap::new(),
             flatpak_remotes: BTreeMap::new(),
             flatpak_gone: Vec::new(),

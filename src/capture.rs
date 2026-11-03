@@ -786,6 +786,11 @@ pub fn systemd_boot_esp() -> Option<String> {
     if !installed {
         return None;
     }
+    esp_path()
+}
+
+/// The mounted ESP bootctl finds, whether or not systemd-boot is on it.
+pub fn esp_path() -> Option<String> {
     let output = Command::new("bootctl").arg("--print-esp-path").output().ok()?;
     let esp = String::from_utf8_lossy(&output.stdout).trim().to_string();
     (output.status.success() && !esp.is_empty()).then_some(esp)

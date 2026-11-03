@@ -84,7 +84,7 @@ impl Paths {
     /// archix's own package cache: on @archix when the root has it, so it stays out of paccache's reach and survives a keep; else under the cache directory.
     pub fn packages(&self) -> PathBuf {
         let on_archix = self.root.join(crate::snapshot::MOUNT);
-        if on_archix.is_dir() {
+        if crate::snapshot::archix_on(&self.root) {
             return on_archix.join("packages");
         }
         self.cache.join("pkg")

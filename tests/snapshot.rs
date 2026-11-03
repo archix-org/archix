@@ -603,3 +603,149 @@ fn setup_leaves_var_lib_to_the_next_boot_whose_split_keeps_what_rolls_back_on_th
         "and not the services' data"
     );
 }
+
+/// Makes the top level at `top` a root again, from nothing: files, top-level subvolumes the root uses by path (home, srv) and another tool's (@snapshots), and one nested in the root's directories at /var/lib/machines.
+fn top_level_root(top: &Path) {
+    sh(&format!(
+        "cd {top} && for s in $(btrfs subvolume list -o . | awk '{{print $NF}}' | sort -r); do btrfs -q subvolume delete \"$s\"; done; rm -rf ./* ./.archix-* \
+         && mkdir -p etc usr/bin var/lib && echo 'UUID=abcd / btrfs rw,noatime 0 0' > etc/fstab && echo bin > usr/bin/tool \
+         && btrfs -q subvolume create home && echo mine > home/data && btrfs -q subvolume create var/lib/machines && echo vm > var/lib/machines/disk \
+         && btrfs -q subvolume create srv && echo site > srv/index && btrfs -q subvolume create @snapshots && echo theirs > @snapshots/1",
+        top = top.display()
+    ));
+}
+
+fn is_subvolume(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).is_ok_and(|meta| meta.ino() == 256)
+}
+
+/// Runs the move's finish in a copy of this test binary that ARCHIX_TEST_CRASH kills at `point`.
+fn move_killed_at(top: &Path, point: &str) {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--include-ignored", "--exact", "move_in_a_child", "--nocapture"])
+        .env("ARCHIX_TEST_CRASH", point)
+        .env("ARCHIX_TEST_MOVE_TOP", top)
+        .status()
+        .unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the move should have been killed at {point}: {status}"
+    );
+}
+
+/// Not a test of its own: what move_killed_at runs.
+#[test]
+#[ignore]
+fn move_in_a_child() {
+    if let Some(top) = std::env::var_os("ARCHIX_TEST_MOVE_TOP") {
+        let _ = archix::snapshot::rootmove::finish(Path::new(&top));
+    }
+}
+
+#[test]
+#[ignore]
+fn a_root_at_the_top_level_moves_into_at_resumably_every_top_level_subvolume_stays_and_the_initramfs_mounts_at_from_then_on()
+ {
+    use archix::snapshot::rootmove::{self, Finished};
+    let disk = Disk::new("1G");
+    sh(&format!("umount {}", disk.root.display()));
+    let top = &disk.top;
+    for point in [
+        None,
+        Some("move-root-snapshotted"),
+        Some("move-root-nested-moved"),
+        Some("move-root-cleaned"),
+    ] {
+        top_level_root(top);
+        assert_eq!(
+            rootmove::finish(top).unwrap(),
+            Finished::NotMoved,
+            "nothing happens unless scheduled"
+        );
+        rootmove::schedule(top).unwrap();
+        if let Some(point) = point {
+            move_killed_at(top, point);
+        }
+        let finished = rootmove::finish(top).unwrap();
+        assert!(matches!(finished, Finished::InAt { .. }), "{point:?}: {finished:?}");
+        let at = top.join("@");
+        assert!(is_subvolume(&at), "{point:?}: @ is a subvolume");
+        assert_eq!(
+            fs::read_to_string(at.join("usr/bin/tool")).unwrap(),
+            "bin\n",
+            "{point:?}"
+        );
+        let fstab = fs::read_to_string(at.join("etc/fstab")).unwrap();
+        assert!(
+            fstab.contains("UUID=abcd / btrfs rw,noatime,subvol=/@ 0 0"),
+            "{point:?}: {fstab}"
+        );
+        assert!(
+            fstab.contains("UUID=abcd /srv btrfs subvol=/srv 0 0"),
+            "{point:?}: a top-level subvolume the root used by path is mounted there: {fstab}"
+        );
+        assert!(!fstab.contains("@snapshots"), "{point:?}: {fstab}");
+        assert_eq!(fstab.matches(" / ").count(), 1, "{point:?}: {fstab}");
+        assert!(
+            fstab.contains("UUID=abcd /home btrfs subvol=/home 0 0"),
+            "{point:?}: {fstab}"
+        );
+        assert_eq!(
+            fs::read_to_string(at.join("var/lib/machines/disk")).ok().as_deref(),
+            Some("vm\n"),
+            "{point:?}: a subvolume nested in the old root's directories moves into @"
+        );
+        assert!(
+            is_subvolume(&at.join("var/lib/machines")) && at.join("home").is_dir(),
+            "{point:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(top.join("home/data")).unwrap(),
+            "mine\n",
+            "{point:?}: a top-level subvolume stays"
+        );
+        let mut left: Vec<String> = fs::read_dir(top)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [".archix-root-in-at", "@", "@snapshots", "home", "srv"],
+            "{point:?}: the old root's files are gone, the subvolumes stay"
+        );
+        assert_eq!(fs::read_to_string(top.join("@snapshots/1")).unwrap(), "theirs\n");
+        assert_eq!(fs::read_to_string(top.join("srv/index")).unwrap(), "site\n");
+        assert!(
+            !at.join(".archix-move-root").exists() && !at.join("@snapshots").exists(),
+            "{point:?}"
+        );
+        assert!(
+            matches!(rootmove::finish(top).unwrap(), Finished::InAt { .. }),
+            "a later boot mounts @ again"
+        );
+    }
+    top_level_root(top);
+    rootmove::schedule(top).unwrap();
+    let device = sh(&format!("findmnt -n -o SOURCE {}", top.display()));
+    let device = device.trim().split('[').next().unwrap().to_string();
+    let run = tempfile::TempDir::new().unwrap();
+    for boot in 0..2 {
+        sh(&format!("mount -o ro {device} {}", disk.root.display()));
+        archix::system::initrd::mount(&disk.root, run.path(), "").unwrap();
+        assert_eq!(
+            layout::subvolume_of(&disk.root).as_deref(),
+            Some("/@"),
+            "boot {boot}: the initramfs mounts @ as the root"
+        );
+        assert_eq!(fs::read_to_string(disk.root.join("usr/bin/tool")).unwrap(), "bin\n");
+        assert!(
+            sh(&format!("findmnt -n -o OPTIONS {}", disk.root.display())).starts_with("ro"),
+            "boot {boot}: read-only as the kernel mounted it"
+        );
+        sh(&format!("umount {}", disk.root.display()));
+    }
+}

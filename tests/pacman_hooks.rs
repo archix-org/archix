@@ -470,7 +470,7 @@ fn after_a_plain_transaction_the_current_entry_gets_its_tries_again_and_a_change
         "archix-test-initcpio",
         "install -Dm644 /dev/stdin \"$pkgdir/usr/lib/initcpio/archix-test-blob\" <<< blob; install -Dm644 /dev/stdin \"$pkgdir/etc/mkinitcpio.conf.d/archix-test.conf\" <<< 'FILES+=(/usr/lib/initcpio/archix-test-blob)'",
     );
-    let setup = on_btrfs("2G", "rollback = { enable = true }, drift = \"keep\"");
+    let setup = on_btrfs("3G", "rollback = { enable = true }, drift = \"keep\"");
     let machine = &setup.machine;
     setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
     bless(&setup);

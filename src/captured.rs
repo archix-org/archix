@@ -355,7 +355,7 @@ impl Applied {
     /// On the rollback layout it's @archix's, so it survives a keep; without one, under archix's state.
     pub fn at(root: &Path, state: &Path) -> Applied {
         let on_archix = root.join(crate::snapshot::MOUNT);
-        let base = if on_archix.is_dir() {
+        let base = if crate::snapshot::archix_on(root) {
             on_archix
         } else {
             state.to_path_buf()
@@ -471,6 +471,20 @@ impl Applied {
         )
         .ok()?;
         Some(text(out)).filter(|t| !t.is_empty())
+    }
+
+    /// Generation `number` as `verified` reads it, from @archix's repository or, for a generation recorded before rollbacks were set up, the archix state's under `state`, which held root's repository until then.
+    pub fn verified_at(root: &Path, state: &Path, number: u32, commit: &str, tree: Option<&str>) -> Result<Stored> {
+        let applied = Applied::at(root, state);
+        let earlier = Applied {
+            git_dir: state.join("config.git"),
+        };
+        match applied.verified(number, commit, tree) {
+            Err(e) if earlier.git_dir != applied.git_dir && earlier.git_dir.join("HEAD").is_file() => {
+                earlier.verified(number, commit, tree).map_err(|_| e)
+            }
+            result => result,
+        }
     }
 
     /// Generation `number`, read back for use: refs/generations/<number> must be the `commit` its record holds, every object must pass `git fsck`, and its config must be `tree` when the record names one; keep, revert and rollback read nothing else.
