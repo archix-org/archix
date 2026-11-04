@@ -17,6 +17,7 @@ def run(m, t):
         switch("the first switch, which schedules the move")
         before = out(SUM).strip()
         listed = out("ls -A /var/lib").split()
+        cut.baseline(f"before the cut at {point}")
         cut.arm(point)
         m.reboot()
         reached = cut.reset_on_cut(timeout=900)

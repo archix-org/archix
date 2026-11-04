@@ -22,6 +22,7 @@ def run(m, t):
         before = out(FILES).strip()
         said = m.succeed("archix snapshot setup --move-root 2>&1", what="scheduling the move")
         t.log(said)
+        cut.baseline(f"before the cut at {point or 'none'}")
         if point:
             cut.arm(point)
         m.reboot()

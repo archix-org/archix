@@ -90,8 +90,40 @@ def settle(timeout=2400):
         time.sleep(5)
 
 
-def problems(snapshot=None, packages=True):
-    """What's inconsistent on the booted system: archix status, the snapshot store, the menu's images, the boot state, and pacman's database and files; snapshot must exist (its entry goes once a boot is blessed, as it's no longer the slot)."""
+LOCK = "/var/lib/pacman/db.lck"
+MARK = "var/rollback/archix/pacman-unfinished.json"
+# The uncut system's pacman -Dk and -Qkk, which each check after a cut is compared with.
+base = None
+# The last check's counts, which record() puts on the cut's line.
+last = ""
+
+
+def pacman_state():
+    """pacman -Dk's and -Qkk's exits and lines, unfiltered and logged in full; the lines compared leave out only mtime mismatches and the per-package totals, which count them."""
+    m = common.m
+    dk_status, dk = m.execute("pacman -Dk 2>&1", 900)
+    qkk_status, qkk = m.execute("pacman -Qkk 2>&1", 2400)
+    lines = [line for line in (dk + "\n" + qkk).splitlines()
+             if line.strip() and "(Modification time mismatch)" not in line and not re.search(r": \d+ total files, \d+ altered files?$", line)]
+    return {"dk": dk_status, "qkk": qkk_status, "lines": lines, "raw": len(qkk.splitlines())}
+
+
+def baseline(what):
+    """Takes the uncut system's pacman state that the checks after the next cuts compare with."""
+    global base
+    base = pacman_state()
+    common.t.log(f"baseline ({what}): pacman -Dk exit {base['dk']}, -Qkk exit {base['qkk']}, {len(base['lines'])} lines compared of {base['raw']}")
+
+
+def unfinished_on_root():
+    """Whether @, the root a try boot isn't running, holds the unfinished mark; None when @ can't be looked at."""
+    status, text = common.m.execute(f"dev=$(findmnt -no SOURCE /.archix | sed 's/\\[.*//') && mkdir -p /run/archix-top && mount -o ro,subvolid=5 $dev /run/archix-top && {{ [ -e /run/archix-top/@/{MARK} ] && echo present || echo absent; umount /run/archix-top; }}", 60)
+    return {"present": True, "absent": False}.get(text.strip().splitlines()[-1] if text.strip() else "", None)
+
+
+def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=None, compare=True):
+    """What's inconsistent on the booted system: archix status, the snapshot store, the menu's images, the boot state, pacman's database and files against the baseline, db.lck (present only if lock), the unfinished mark in the booted root (only if mark) and on @ (mark_on_root, unless None); snapshot must exist (its entry goes once a boot is blessed, as it's no longer the slot)."""
+    global last
     found = []
     if not common.ok("mountpoint -q /efi"):
         found.append(f"the ESP isn't mounted: {out('systemctl status efi.mount --no-pager 2>&1 | tail -5')}")
@@ -123,11 +155,43 @@ def problems(snapshot=None, packages=True):
             found.append(f"snapshot {snapshot} is gone")
     if common.ok("btrfs subvolume list / | grep -q 'path @archix-keep$'") and not common.ok("[ -e /run/archix/keep-pending ]"):
         found.append("an unfinished keep's clone is left")
+    counts = []
     if packages:
-        status, text = common.m.execute("pacman -Dk > /dev/null 2>&1 || echo 'warning: pacman -Dk finds database errors'; pacman -Qkk 2>&1 > /dev/null | grep '^warning: ' | grep -v -E ' /etc/| /var/log/|\\((Modification time|Permissions|UID|GID) mismatch\\)' | head -20", 600, quiet=True)
-        if text.strip():
-            found.append(f"pacman finds the system broken: {text.strip()[-600:]}")
+        now = pacman_state()
+        if base is None or not compare:
+            counts.append(f"dk={now['dk']} qkk={now['qkk']} lines={len(now['lines'])} (not compared)")
+        else:
+            new = [line for line in now["lines"] if line not in base["lines"]]
+            gone = [line for line in base["lines"] if line not in now["lines"]]
+            counts.append(f"dk={now['dk']}/{base['dk']} qkk={now['qkk']}/{base['qkk']} lines={len(now['lines'])}/{len(base['lines'])} differing={len(new) + len(gone)}")
+            if now["dk"] != base["dk"]:
+                found.append(f"pacman -Dk exits {now['dk']}, the uncut system {base['dk']}")
+            if new or gone:
+                found.append(f"pacman -Dk/-Qkk differ from the uncut system in {len(new) + len(gone)} line(s): new {new[:15]}, gone {gone[:15]}")
+    held = common.ok(f"[ -e {LOCK} ]")
+    counts.append(f"db.lck={'present' if held else 'absent'}")
+    if held != lock:
+        found.append(f"db.lck is {'present' if held else 'absent'} on the booted root; expected {'present' if lock else 'absent'}")
+    marked = common.ok(f"[ -e /{MARK} ]")
+    counts.append(f"mark={'present' if marked else 'absent'}")
+    if marked != mark:
+        found.append(f"the unfinished mark is {'present' if marked else 'absent'} on the booted root; expected {'present' if mark else 'absent'}")
+    if mark_on_root is not None:
+        on_root = unfinished_on_root()
+        counts.append(f"mark-on-@={ {True: 'present', False: 'absent', None: 'unread'}[on_root] }")
+        if on_root != mark_on_root:
+            found.append(f"the unfinished mark on @ is {on_root}; expected {'present' if mark_on_root else 'absent'}")
+    last = " ".join(counts)
+    common.t.log(f"checks: {last}")
     return found
+
+
+def kind(number):
+    """A snapshot's kind from its record: switch, pacman, manual or replaced."""
+    try:
+        return json.loads(out(f"cat /.archix/snapshots/{number}/record.json")).get("kind")
+    except ValueError:
+        return None
 
 
 def replaced(said):
@@ -136,11 +200,15 @@ def replaced(said):
 
 
 def record(point, booted, boots, seconds, entry, tried, found, note=""):
+    global last
     line = f"CUT point={point} booted={'yes' if booted else 'NO'} boots={boots} took={seconds:.0f}s entry={entry} try={tried} consistent={'yes' if not found else 'NO'}"
+    if last:
+        line += f" checks={last!r}"
     if note:
         line += f" note={note!r}"
     if found:
         line += f" problems={found!r}"
+    last = ""
     results.append(line)
     common.t.log(line)
     print(line, flush=True)

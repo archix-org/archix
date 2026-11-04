@@ -43,6 +43,7 @@ def run(m, t):
         kept = snapshots()[-1]
         user = f"cut{i}"
         m.succeed(f"useradd -m {user}", what="adding an account after the snapshot")
+        cut.baseline(f"before the keep cut at {point}")
         cut.arm(point)
         cut.background(f"{HOST} rollback {kept} --noconfirm", "/root/keep.log")
         reached = cut.reset_on_cut(timeout=900)
@@ -60,6 +61,7 @@ def run(m, t):
         user = f"cancel{i}"
         m.succeed(f"useradd -m {user}", what="adding an account after the snapshot")
         m.succeed(f"{HOST} rollback {kept} --noconfirm", what="keeping a snapshot")
+        cut.baseline(f"before the --cancel cut at {point}")
         cut.arm(point)
         cut.background(f"{HOST} rollback --cancel", "/root/cancel.log")
         reached = cut.reset_on_cut(timeout=900)

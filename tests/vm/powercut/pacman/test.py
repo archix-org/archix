@@ -59,7 +59,11 @@ def judge(m, t, point, before, fallback=True):
     tried = (trying() or {}).get("snapshot")
     new = [n for n in snapshots() if n not in before]
     pre = new[0] if new else None
-    found = cut.problems(snapshot=pre)
+    # A pacman snapshot is taken in PreTransaction, while pacman holds db.lck, so a try boot of one has it; @, which the cut tore, still holds the unfinished mark.
+    if fallback:
+        found = cut.problems(snapshot=pre, lock=tried is not None and cut.kind(tried) == "pacman", mark_on_root=True)
+    else:
+        found = cut.problems(snapshot=pre, compare=False)
     if pre is None:
         found.append(f"the hook's snapshot is gone: {before} -> {snapshots()}")
     slot = (pre if before.armed else before.slot) if fallback else None
@@ -87,6 +91,7 @@ def run(m, t):
         m.reboot()
         cut.settle()
         t.require(trying() is None, f"the boot after the switch should be the current system's: {trying()}")
+        cut.baseline("the system before the update")
 
     def start():
         before = Before(snapshots())
@@ -106,8 +111,9 @@ def run(m, t):
         except Exception as e:
             cut.record(f"pre-{reached}", False, 0, 0, "-", None, [str(e)[:300]])
             t.require(False, "no boot came up after the cut in the step before the transaction")
-        found = cut.problems()
         tried = (trying() or {}).get("snapshot")
+        # The cut killed pacman in its PreTransaction hooks, so the root it left keeps db.lck, and the mark comes after these points.
+        found = cut.problems(lock=tried is None or cut.kind(tried) == "pacman")
         if not out("pacman -Q linux").split()[-1].startswith("7.2.9") or tried:
             found.append(f"a cut before the transaction changed anything should leave the current system booting as it was: {out('pacman -Q linux')}, try {trying()}")
         added = [n for n in snapshots() if n not in before]
@@ -155,7 +161,10 @@ def run(m, t):
 
     def control():
         before = snapshots()
-        m.succeed(f"{UPDATE} > {LOG} 2>&1", timeout=1800, what="the whole update")
+        # A cut step whose pacman outlived it would hold the lock this one needs.
+        m.wait_until_succeeds("! pgrep -x pacman", timeout=1800, what="no pacman left running")
+        status, said = m.execute(f"{UPDATE} > {LOG} 2>&1; status=$?; tail -c 3000 {LOG}; exit $status", 1800)
+        t.require(status == 0, f"the whole update failed (exit {status}): {said}")
         m.reboot()
         judge(m, t, "none", before, fallback=False)
         t.check(out("uname -r").startswith("7.2.11"), f"the new kernel should boot: {out('uname -r')}")
