@@ -89,6 +89,32 @@ pub fn keep_copy(paths: &Paths, file: &str) -> Result<Kept> {
     Ok(how)
 }
 
+/// Moves the package copies a switch kept in `from`, the cache directory, before @archix was mounted, into `to`, @archix's, keeping any `to` has already; returns how many moved. Renames where they can, else copies, as they're on other subvolumes.
+pub fn adopt_cache(from: &Path, to: &Path) -> Result<usize> {
+    let Ok(entries) = fs::read_dir(from) else {
+        return Ok(0);
+    };
+    fs::create_dir_all(to)?;
+    let mut moved = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let text = name.to_string_lossy();
+        let (source, target) = (entry.path(), to.join(&name));
+        if !text.ends_with(".pkg.tar.zst") && !text.ends_with(".pkg.tar.zst.sig")
+            || text.starts_with('.')
+            || target.exists()
+        {
+            continue;
+        }
+        if fs::rename(&source, &target).is_err() {
+            crate::durable::copy(&source, &target)?;
+        }
+        moved += 1;
+    }
+    fs::remove_dir_all(from).with_context(|| format!("removing {}", from.display()))?;
+    Ok(moved)
+}
+
 /// The bytes archix's own package cache holds on disk, each hard-linked file once; reflinked blocks count too, as this cache alone can pin them.
 pub fn cache_size(paths: &Paths) -> u64 {
     use std::os::unix::fs::MetadataExt;
@@ -230,6 +256,31 @@ mod tests {
         paths.pacman_cache = dir.join("pacman");
         fs::create_dir_all(&paths.pacman_cache).unwrap();
         paths
+    }
+
+    #[test]
+    fn copies_kept_before_archix_had_its_subvolume_move_into_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("cache/pkg"), dir.path().join("archix/packages"));
+        fs::create_dir_all(&from).unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(from.join("htop-1.pkg.tar.zst"), "old").unwrap();
+        fs::write(from.join("jq-1.pkg.tar.zst"), "old").unwrap();
+        fs::write(to.join("jq-1.pkg.tar.zst"), "new").unwrap();
+        fs::write(from.join(".vim-1.pkg.tar.zst.part"), "torn").unwrap();
+        assert_eq!(adopt_cache(&from, &to).unwrap(), 1);
+        assert_eq!(fs::read_to_string(to.join("htop-1.pkg.tar.zst")).unwrap(), "old");
+        assert_eq!(
+            fs::read_to_string(to.join("jq-1.pkg.tar.zst")).unwrap(),
+            "new",
+            "a copy there already stays"
+        );
+        assert!(
+            !to.join(".vim-1.pkg.tar.zst.part").exists(),
+            "a torn copy isn't adopted"
+        );
+        assert!(!from.exists(), "the old cache goes, so its blocks aren't pinned twice");
+        assert_eq!(adopt_cache(&from, &to).unwrap(), 0, "once is enough");
     }
 
     #[test]

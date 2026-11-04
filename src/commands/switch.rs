@@ -998,6 +998,7 @@ fn after_apply(
     mut soft_failures: Vec<String>,
 ) -> Result<()> {
     super::lock::write_deferred()?;
+    adopt_package_cache(paths);
     for pkg in lock.packages.values().filter(|pkg| !pkg.file.is_empty()) {
         if let Err(e) = archix::gc::keep_copy(paths, &pkg.file) {
             soft_failures.push(format!("keeping {} in archix's package cache: {e:#}", pkg.file));
@@ -1035,6 +1036,26 @@ fn after_apply(
     println!("switched to generation {number} (snapshot {})", lock.date);
     push_to_cache(declared);
     report_soft_failures(&soft_failures, &format!("generation {number} is applied and current"))
+}
+
+/// Once @archix is mounted, moves the package copies the switch that set rollbacks up kept in the cache directory into @archix's cache, where reverts and keeps look; it only warns if it can't.
+fn adopt_package_cache(paths: &Paths) {
+    let old = paths.cache.join("pkg");
+    if old == paths.packages() || !archix::snapshot::archix_on(&paths.root) {
+        return;
+    }
+    match archix::gc::adopt_cache(&old, &paths.packages()) {
+        Ok(0) => {}
+        Ok(moved) => println!(
+            "archix: moved {moved} package copies from {} into {}",
+            old.display(),
+            paths.packages().display()
+        ),
+        Err(e) => println!(
+            "archix: couldn't move the package copies in {} into @archix: {e:#}",
+            old.display()
+        ),
+    }
 }
 
 /// Lists unsafe downgrades and asks, defaulting to no; `--noconfirm` refuses them unless `allow` is set.
@@ -1867,6 +1888,7 @@ pub fn boot_check() -> Result<()> {
     if let Err(e) = system::menu::adopt(&paths) {
         println!("archix: couldn't move the boot menu's state into @archix: {e:#}");
     }
+    adopt_package_cache(&paths);
     if let Some(entry) = system::boot::tampered_selected_entry() {
         system::boot::add_login_note(
             &paths,
