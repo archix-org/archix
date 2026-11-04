@@ -237,14 +237,78 @@ fn attach_loop(file: &Path) -> Result<PathBuf> {
     Ok(device)
 }
 
+/// Room a layer file needs beyond its own size, for the filesystem's metadata (btrfs writes into preallocated extents need it) and the root's own writes: a sixteenth of it, at least 64 MiB.
+pub fn layer_margin(size: u64) -> u64 {
+    (size / 16).max(64 << 20)
+}
+
+fn free_bytes(dir: &Path) -> Result<u64> {
+    let path = c_path(dir)?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(path.as_ptr(), &mut stat) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("reading the free space of {}", dir.display()));
+    }
+    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// ext4's superblock magic, at byte 0x38 of the superblock, which starts 1024 bytes in.
+const EXT4_MAGIC_AT: u64 = 1024 + 0x38;
+
+/// Whether `path` reads back an ext4 superblock, as the mount will need.
+fn reads_back(path: &Path) -> Result<()> {
+    use std::os::unix::fs::FileExt;
+    let handle = fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut magic = [0u8; 2];
+    handle
+        .read_exact_at(&mut magic, EXT4_MAGIC_AT)
+        .with_context(|| format!("reading {}'s superblock", path.display()))?;
+    if magic != [0x53, 0xef] {
+        bail!("{} holds no ext4 superblock", path.display());
+    }
+    Ok(())
+}
+
+const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
+
+fn detach_loop(device: &Path) {
+    if let Ok(handle) = fs::File::open(device) {
+        unsafe { libc::ioctl(handle.as_raw_fd(), LOOP_CLR_FD as _) };
+    }
+}
+
 /// Makes the throwaway layer at `at`: a preallocated NOCOW file in `dir` (@archix/try) formatted ext4 and loop mounted, trying `sizes` largest first, else tmpfs; returns what it made and its size.
 pub fn make_layer(dir: &Path, at: &Path, sizes: &[u64]) -> (String, u64) {
+    let (kind, size, notes) = make_layer_with(dir, at, sizes, &|_, _| {});
+    for note in notes {
+        println!("archix: {note}");
+    }
+    (kind, size)
+}
+
+/// make_layer, with what it couldn't do as notes; `tamper` sees each formatted file before it's checked, for tests.
+pub fn make_layer_with(
+    dir: &Path,
+    at: &Path,
+    sizes: &[u64],
+    tamper: &dyn Fn(&Path, u64),
+) -> (String, u64, Vec<String>) {
+    let mut notes = Vec::new();
     let file = dir.join(LAYER_FILE);
     let _ = fs::remove_file(&file);
     let _ = fs::create_dir_all(dir);
     let _ = no_cow(dir);
     for size in sizes {
         let made = (|| -> Result<()> {
+            let free = free_bytes(dir)?;
+            let needed = size + layer_margin(*size);
+            if free < needed {
+                bail!(
+                    "only {} MiB free, under the {} MiB it needs with room for the filesystem's own writes",
+                    free >> 20,
+                    needed >> 20
+                );
+            }
             let handle = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -262,14 +326,24 @@ pub fn make_layer(dir: &Path, at: &Path, sizes: &[u64]) -> (String, u64) {
             if !status.success() {
                 bail!("mkfs.ext4 failed");
             }
+            tamper(&file, *size);
+            // A write into the preallocated file that the full disk refused shows only when it's flushed, or as EIO at the mount.
+            fs::File::open(&file)
+                .and_then(|handle| handle.sync_all())
+                .context("flushing the formatted layer file")?;
+            reads_back(&file).context("the formatted layer file didn't read back")?;
             let device = attach_loop(&file)?;
+            if let Err(e) = reads_back(&device) {
+                detach_loop(&device);
+                return Err(e.context("the layer's loop device didn't read back"));
+            }
             fs::create_dir_all(at)?;
             sys_mount(&device.to_string_lossy(), at, "ext4", 0, "")
         })();
         match made {
-            Ok(()) => return ("file".to_string(), *size),
+            Ok(()) => return ("file".to_string(), *size, notes),
             Err(e) => {
-                println!("archix: no {} MiB layer file: {e:#}", size >> 20);
+                notes.push(format!("no {} MiB layer file: {e:#}", size >> 20));
                 let _ = fs::remove_file(&file);
             }
         }
@@ -277,10 +351,12 @@ pub fn make_layer(dir: &Path, at: &Path, sizes: &[u64]) -> (String, u64) {
     let _ = fs::create_dir_all(at);
     let size = sizes.last().copied().unwrap_or(256 << 20);
     match sys_mount("archix-try", at, "tmpfs", 0, &format!("size={size},mode=0755")) {
-        Ok(()) => ("tmpfs".to_string(), size),
+        Ok(()) => ("tmpfs".to_string(), size, notes),
         Err(e) => {
-            println!("archix: no tmpfs layer either: {e:#}; the layer is the initramfs's own memory");
-            ("memory".to_string(), 0)
+            notes.push(format!(
+                "no tmpfs layer either: {e:#}; the layer is the initramfs's own memory"
+            ));
+            ("memory".to_string(), 0, notes)
         }
     }
 }

@@ -26,13 +26,28 @@ def try_boot(m, t, older, why):
 
 def run(m, t):
     bind(m, t)
-    with t.step("1: a try boot fills its layer"):
+    with t.step("0: with the downloaded packages still on the disk, the layer is whole or smaller with why, never an unreadable file"):
         boot()
         bump(1)
         switch()
         older = snapshots()[-1]
         bump(2)
         switch()
+        t.log(f"free before the try boot: {free_mib()} MiB")
+        tried = try_boot(m, t, older, "with the package cache on the disk")
+        notes = out("journalctl -b -o cat --no-pager | grep -a 'layer file' || true")
+        t.log(f"layer {tried}; the initramfs said: {notes}")
+        # At a69ecaa this disk gave a 4 GiB file that fallocate and mkfs.ext4 accepted and the mount read back as EIO.
+        t.check("I/O error" not in notes, f"no layer should be made that doesn't read back: {notes}")
+        if tried.get("layer") == "file" and tried.get("size") == 4 << 30:
+            status, said = m.execute("dd if=/dev/zero of=/root/fill bs=1M count=6000 2>&1", 900)
+            t.check(status != 0 and "No space left on device" in said and "Input/output error" not in said, f"the 4 GiB layer should fill to ENOSPC, not EIO: {status} {said[-300:]}")
+        else:
+            t.check("didn't read back" in notes or "MiB free" in notes, f"a smaller layer should say why the 4 GiB one wasn't made: {tried} {notes}")
+        m.reboot()
+
+    with t.step("1: a try boot fills its layer"):
+        boot()
         # The 7 GiB disk leaves a 4 GiB layer only just room, which the downloaded packages can take.
         m.succeed("rm -f /var/cache/pacman/pkg/*.pkg.tar.*")
         t.log(f"free before the try boot: {free_mib()} MiB")

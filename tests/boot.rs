@@ -800,3 +800,71 @@ fn a_limine_machine_moves_to_systemd_boot_only_once_a_boot_through_it_counted_as
     );
     checks.finish();
 }
+
+/// A tmpfs of `mib` MiB, unmounted with its loop devices when dropped.
+struct Scratch(tempfile::TempDir);
+
+impl Scratch {
+    fn new(mib: u64) -> Scratch {
+        let dir = tempfile::tempdir().unwrap();
+        sh(&format!(
+            "mount -t tmpfs -o size={mib}M archix-scratch {}",
+            dir.path().display()
+        ));
+        Scratch(dir)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let dir = self.0.path().display();
+        let _ = Command::new("bash")
+            .args(["-c", &format!("umount -l {dir}/layer 2>/dev/null; umount -l {dir}")])
+            .status();
+    }
+}
+
+#[test]
+#[ignore]
+fn a_layer_file_whose_filesystem_doesnt_read_back_is_dropped_for_a_smaller_one_naming_why() {
+    let _system = lock_system();
+    let scratch = Scratch::new(256);
+    let (dir, at) = (scratch.0.path().join("try"), scratch.0.path().join("layer"));
+    let tamper = |file: &Path, size: u64| {
+        if size == 64 << 20 {
+            use std::io::Write;
+            let mut handle = fs::OpenOptions::new().write(true).open(file).unwrap();
+            handle.write_all(&[0u8; 4096]).unwrap();
+        }
+    };
+    let (kind, size, notes) = archix::system::initrd::make_layer_with(&dir, &at, &[64 << 20, 16 << 20], &tamper);
+    assert_eq!((kind.as_str(), size), ("file", 16 << 20), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("no 64 MiB layer file") && note.contains("didn't read back")),
+        "{notes:?}"
+    );
+    assert!(!notes.iter().any(|note| note.contains("I/O error")), "{notes:?}");
+    let written = sh(&format!(
+        "dd if=/dev/zero of={}/fill bs=1M count=8 2>&1 && sync && echo ok",
+        at.display()
+    ));
+    assert!(written.trim_end().ends_with("ok"), "{written}");
+}
+
+#[test]
+#[ignore]
+fn a_layer_file_isnt_made_without_room_for_it_and_its_margin() {
+    let _system = lock_system();
+    let scratch = Scratch::new(128);
+    let (dir, at) = (scratch.0.path().join("try"), scratch.0.path().join("layer"));
+    let (kind, size, notes) = archix::system::initrd::make_layer_with(&dir, &at, &[100 << 20, 16 << 20], &|_, _| {});
+    assert_eq!((kind.as_str(), size), ("file", 16 << 20), "{notes:?}");
+    assert!(
+        notes
+            .iter()
+            .any(|note| note.starts_with("no 100 MiB layer file") && note.contains("MiB free")),
+        "{notes:?}"
+    );
+}
