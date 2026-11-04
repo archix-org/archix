@@ -152,10 +152,7 @@ fn deploy_integrate_in_a_v0_2_0_switchs_staging_view_fails_its_mkinitcpio_before
         "v0.2.0 writes its own integration and commits when deploy-integrate fails\n{stderr}"
     );
     assert!(stderr.contains(REFUSAL), "{stderr}");
-    assert_eq!(
-        fs::read_to_string(staging.join("etc/mkinitcpio.conf.d/archix-refuse-deployments.conf")).unwrap(),
-        "HOOKS+=(archix-refuse-deployments)\n"
-    );
+    let drop_in = fs::read_to_string(staging.join("etc/mkinitcpio.conf.d/archix-refuse-deployments.conf")).unwrap();
     let hook = staging.join("etc/initcpio/install/archix-refuse-deployments");
     let Some(kernel) = fs::read_dir("/usr/lib/modules")
         .ok()
@@ -168,7 +165,9 @@ fn deploy_integrate_in_a_v0_2_0_switchs_staging_view_fails_its_mkinitcpio_before
     fs::create_dir_all(&install).unwrap();
     fs::copy(&hook, install.join("archix-refuse-deployments")).unwrap();
     let conf = dir.path().join("mkinitcpio.conf");
-    fs::write(&conf, "HOOKS=(base archix-refuse-deployments)\n").unwrap();
+    let system = fs::read_to_string("/etc/mkinitcpio.conf")
+        .unwrap_or_else(|_| "HOOKS=(base udev autodetect modconf kms block filesystems fsck)\n".to_string());
+    fs::write(&conf, format!("{system}\n{drop_in}")).unwrap();
     let image = dir.path().join("initramfs.img");
     let out = Command::new("mkinitcpio")
         .arg("-k")
@@ -186,6 +185,10 @@ fn deploy_integrate_in_a_v0_2_0_switchs_staging_view_fails_its_mkinitcpio_before
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "mkinitcpio should fail\n{stderr}");
     assert!(stderr.lines().last().unwrap_or_default().contains(REFUSAL), "{stderr}");
+    assert!(
+        !stderr.contains("WARNING"),
+        "the refusal should be all mkinitcpio says, before any other hook runs: {stderr}"
+    );
     assert!(!image.exists());
 }
 

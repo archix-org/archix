@@ -116,7 +116,8 @@ pub fn integrate(root: &Path, message: &str) -> Result<bool> {
         Ok(path)
     };
     write(HOOK, &hook_script(message), 0o755)?;
-    write(HOOK_CONF, "HOOKS+=(archix-refuse-deployments)\n", 0o644)?;
+    // First, so mkinitcpio exits before any other hook adds a module and warns, and the refusal is all it says.
+    write(HOOK_CONF, "HOOKS=(archix-refuse-deployments \"${HOOKS[@]}\")\n", 0o644)?;
     Ok(true)
 }
 
