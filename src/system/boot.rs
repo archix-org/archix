@@ -759,8 +759,11 @@ pub fn bless_booted(paths: &Paths) -> Result<()> {
     }) else {
         return Ok(());
     };
+    crate::testhooks::mark("bless-rename");
     fs::rename(dir.join(&counted), &target).with_context(|| format!("renaming {counted} to {id}"))?;
+    crate::testhooks::mark("bless-renamed");
     crate::durable::sync_esp(&target).with_context(|| format!("syncing {id}"))?;
+    crate::testhooks::mark("bless-synced");
     println!("archix: the boot counted as good: renamed {counted} to {id}, synced under its new name");
     Ok(())
 }

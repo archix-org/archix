@@ -267,6 +267,31 @@ pub fn refuse_packaged_usr_files(system: &SystemChange, local_db: &Path) -> Resu
     )
 }
 
+/// The context of an apply's error when it failed before changing anything, which a switch tells apart from one part way.
+#[derive(Debug)]
+pub struct NothingApplied(pub &'static str);
+
+impl std::fmt::Display for NothingApplied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} failed before anything was changed", self.0)
+    }
+}
+
+/// Whether a package transaction that failed got far enough to change the system: the local database changed, or pacman's log says a transaction started after `log_before` bytes.
+pub fn transaction_began(
+    before: &BTreeMap<String, crate::pacman::LocalPkg>,
+    after: &BTreeMap<String, crate::pacman::LocalPkg>,
+    log: &[u8],
+    log_before: u64,
+) -> bool {
+    let changed = before.len() != after.len()
+        || before
+            .iter()
+            .any(|(name, pkg)| after.get(name).is_none_or(|now| now.version != pkg.version));
+    let since = log.get(log_before as usize..).unwrap_or_default();
+    changed || String::from_utf8_lossy(since).contains("[ALPM] transaction started")
+}
+
 /// The steps of an apply that finished, which an error partway names.
 struct Progress(Vec<&'static str>);
 
@@ -277,7 +302,7 @@ impl Progress {
                 self.0.push(name);
                 Ok(value)
             }
-            Err(e) if self.0.is_empty() => Err(e.context(format!("{name} failed before anything was changed"))),
+            Err(e) if self.0.is_empty() => Err(e.context(NothingApplied(name))),
             Err(e) => Err(e.context(format!(
                 "{name} failed after these were applied: {}; the system is part way between the two states",
                 self.0.join(", ")
@@ -294,9 +319,22 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
     let db = paths.local_db();
     let before = crate::pacman::read_local_db(&db)?;
     let kernel = super::running::Running::new(root.path());
+    crate::testhooks::fail_at("switch-apply").context(NothingApplied("the apply"))?;
     if !plan.packages.install.is_empty() || !plan.packages.remove.is_empty() {
         kernel.keep(paths, &before, plan.packages);
+        let log = root.path().join("var/log/pacman.log");
+        let log_before = fs::metadata(&log).map_or(0, |meta| meta.len());
         let transacted = crate::packages::transact(root, plan.packages, &db);
+        if transacted.is_err()
+            && transaction_began(
+                &before,
+                &crate::pacman::read_local_db(&db).unwrap_or_default(),
+                &fs::read(&log).unwrap_or_default(),
+                log_before,
+            )
+        {
+            progress.0.push("part of the package transaction");
+        }
         if root.running() {
             for failed in super::dkms::reconcile(Path::new(super::boot::MODULES)) {
                 eprintln!("warning: {failed} failed, so DKMS may not remove that module's files later");
@@ -304,6 +342,7 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
         }
         kernel.restore(paths);
         progress.step("the package transaction", transacted)?;
+        crate::testhooks::mark("switch-packages");
         progress.step(
             "checking the config's /usr files",
             refuse_packaged_usr_files(plan.system, &db),
@@ -341,6 +380,7 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
     let mut failures = apply::disable_services(plan.system, &run);
     let on_root = |path: &str| Some(root.path().join(path.trim_start_matches('/')));
     progress.step("files", apply::files(paths, plan.system, &on_root, &accounts))?;
+    crate::testhooks::mark("switch-files");
     let package_capabilities = progress.step(
         "file capabilities",
         set_capabilities(root.path(), &db, plan.system, plan.package_capabilities),
@@ -506,4 +546,55 @@ fn services(change: &SystemChange) -> Vec<String> {
         }
     }
     failures
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use super::*;
+
+    fn db(packages: &[(&str, &str)]) -> BTreeMap<String, crate::pacman::LocalPkg> {
+        packages
+            .iter()
+            .map(|(name, version)| {
+                let pkg = crate::pacman::LocalPkg {
+                    name: name.to_string(),
+                    version: version.to_string(),
+                    arch: "x86_64".to_string(),
+                    explicit: true,
+                    installed_at: None,
+                };
+                (name.to_string(), pkg)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_transaction_counts_as_begun_once_the_database_or_pacmans_log_says_so() {
+        let before = db(&[("a", "1"), ("b", "1")]);
+        let old_log = b"[2026-11-04] [ALPM] transaction started\n[2026-11-04] [ALPM] transaction completed\n";
+        let at = old_log.len() as u64;
+        assert!(
+            !transaction_began(&before, &before, old_log, at),
+            "an earlier transaction in the log isn't this one"
+        );
+        let mut log = old_log.to_vec();
+        log.extend_from_slice(b"[2026-11-04] [PACMAN] Running 'pacman -U'\n");
+        assert!(
+            !transaction_began(&before, &before, &log, at),
+            "refused before its commit"
+        );
+        log.extend_from_slice(b"[2026-11-04] [ALPM] transaction started\n");
+        assert!(
+            transaction_began(&before, &before, &log, at),
+            "its commit began, even with nothing in the database yet"
+        );
+        assert!(
+            transaction_began(&before, &db(&[("a", "2"), ("b", "1")]), old_log, at),
+            "a package changed"
+        );
+        assert!(
+            transaction_began(&before, &db(&[("a", "1")]), old_log, at),
+            "a package went"
+        );
+    }
 }

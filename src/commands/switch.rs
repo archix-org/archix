@@ -609,6 +609,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     let taken = rollbacks
         .before(&paths, current.as_ref(), label)
         .map_err(|e| e.context("nothing of the switch was applied"))?;
+    archix::testhooks::mark("switch-snapshot");
+    let marked = count_before_switch(&paths, &rollbacks, boot.as_ref(), number);
     let root = live::Root::new(&paths.root);
     eprintln!(":: applying generation {number}");
     let applied = live::apply(&live::Plan {
@@ -628,12 +630,22 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         started,
     })
     .map_err(|e| {
+        let untouched = e.downcast_ref::<live::NothingApplied>().is_some();
+        let left = match (marked, untouched) {
+            (true, true) => {
+                let _ = archix::pacman::hooks::finished(&paths.state);
+                String::new()
+            }
+            (true, false) => "; the system is marked as part way, so its next counted boot doesn't count as good and falls back to the slot, unless a switch finishes first".to_string(),
+            (false, _) => String::new(),
+        };
         e.context(format!(
-            "generation {number} wasn't recorded, and generation {} stays current{}",
+            "generation {number} wasn't recorded, and generation {} stays current{}{left}",
             current.as_ref().map_or("none".to_string(), |g| g.number.to_string()),
             before_note(taken.as_ref())
         ))
     })?;
+    archix::testhooks::mark("switch-applied");
     system::credentials::forget_overrides(&paths.state, &passwords);
     let mut soft_failures = applied.failures;
     if !prepared.values.is_empty()
@@ -644,7 +656,19 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     generation.package_capabilities = applied.package_capabilities;
     store.save(&generation)?;
     store.set_current(number)?;
+    archix::testhooks::mark("switch-recorded");
     soft_failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &generation.packages));
+    if marked {
+        // pacman doesn't flush what it extracted, nor the apply what it wrote; the mark goes only once they're on disk.
+        archix::durable::sync_filesystems(&[&paths.root]);
+        archix::testhooks::mark("switch-flushed");
+        if let Err(e) = archix::pacman::hooks::finished(&paths.state) {
+            soft_failures.push(format!(
+                "{e:#}; the next boot won't count as good until a switch or transaction finishes"
+            ));
+        }
+        archix::testhooks::mark("switch-finished");
+    }
     after_apply(
         target,
         &declared,
@@ -766,6 +790,43 @@ fn write_boot(
         failures.push(format!("recording boot.unblessed_timeout: {e:#}"));
     }
     failures
+}
+
+/// Before the apply, with rollbacks on: gives the current entry its tries and the slot its entry, so a boot this switch breaks part way falls back, then marks the switch unfinished so such a boot doesn't count as good; returns whether it marked it.
+fn count_before_switch(
+    paths: &Paths,
+    rollbacks: &Rollbacks,
+    boot: Option<&system::boot::BootPlan>,
+    number: u32,
+) -> bool {
+    let (Some(plan), Some(policy)) = (boot, rollbacks.policy()) else {
+        return false;
+    };
+    if plan.loader == system::boot::Loader::Limine {
+        return false;
+    }
+    if let Err(e) = system::menu::refresh(paths, plan, Some(policy.entries), true) {
+        eprintln!(
+            "warning: the boot menu wasn't written before this switch, so a boot it breaks part way may not fall back: {e:#}"
+        );
+        return false;
+    }
+    let unfinished = archix::pacman::hooks::Unfinished {
+        pacman: std::process::id(),
+        started: archix::generations::now(),
+        slot: system::menu::load(&system::menu::dir(paths))
+            .ok()
+            .and_then(|state| state.slot),
+        switch: Some(number),
+    };
+    if let Err(e) = archix::pacman::hooks::mark_unfinished(&paths.state, &unfinished) {
+        eprintln!(
+            "warning: this switch isn't marked as running, so a power cut during it may leave a torn system that counts as good: {e:#}"
+        );
+        return false;
+    }
+    archix::testhooks::mark("switch-marked");
+    true
 }
 
 /// Where the state before a failed apply is, for its error.

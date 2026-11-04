@@ -427,7 +427,7 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
         .map(|state| state.blessed_failed_units)
         .unwrap_or_default();
     let failed = match crate::pacman::hooks::unfinished(&paths.state) {
-        Some(unfinished) => Some(("pacman-transaction".to_string(), unfinished.why())),
+        Some(unfinished) => Some((unfinished.target().to_string(), unfinished.why())),
         None => {
             let targets = targets(check.as_ref(), &users, &allowed);
             let timeout = check.as_ref().map_or(120, |check| check.timeout);

@@ -199,6 +199,7 @@ fn count_before(paths: &Paths, pacman: u32, current: &Generation, policy: &Polic
         slot: system::menu::load(&system::menu::dir(paths))
             .ok()
             .and_then(|state| state.slot),
+        switch: None,
     };
     if let Err(e) = hooks::mark_unfinished(&paths.state, &unfinished) {
         println!(

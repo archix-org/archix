@@ -446,6 +446,9 @@ pub struct Unfinished {
     pub started: u64,
     /// The fallback slot when it started, which predates it.
     pub slot: Option<u32>,
+    /// The generation a switch was applying, when archix's own switch set the mark rather than a plain transaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub switch: Option<u32>,
 }
 
 impl Unfinished {
@@ -457,10 +460,24 @@ impl Unfinished {
             ),
             None => String::new(),
         };
-        format!(
-            "the pacman transaction started at {} was cut off before the step after it finished, so the files it was changing may be torn{slot}, or boot this entry again and finish the update with pacman",
-            crate::system::health::utc(self.started)
-        )
+        match self.switch {
+            Some(number) => format!(
+                "the switch to generation {number} started at {} was cut off before it finished, so the packages and files it was changing may be torn{slot}, or boot this entry again and run `archix switch` again",
+                crate::system::health::utc(self.started)
+            ),
+            None => format!(
+                "the pacman transaction started at {} was cut off before the step after it finished, so the files it was changing may be torn{slot}, or boot this entry again and finish the update with pacman",
+                crate::system::health::utc(self.started)
+            ),
+        }
+    }
+
+    /// The health check's name for what failed.
+    pub fn target(&self) -> &'static str {
+        match self.switch {
+            Some(_) => "switch",
+            None => "pacman-transaction",
+        }
     }
 }
 

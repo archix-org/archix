@@ -1000,3 +1000,105 @@ fn a_masked_or_shadowed_hook_is_reported_by_status_and_at_boot() {
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_switch_cut_off_part_way_is_marked_unfinished_after_giving_the_current_entry_its_tries_and_the_slot_its_entry() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let body = "rollback = { enable = true }, drift = \"keep\"";
+    let setup = on_btrfs("3G", body);
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    bless(&setup);
+    let entries = machine.esp().join("loader/entries");
+    fs::rename(
+        entries.join("archix-current+2.conf"),
+        entries.join("archix-current.conf"),
+    )
+    .unwrap();
+    setup.set_body(
+        &[],
+        &format!("{body}, files = {{ [\"/etc/archix-cut-test\"] = {{ text = \"one\" }} }}"),
+    );
+    let out = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_CRASH", "switch-files")],
+        &["switch", "--noconfirm"],
+    );
+    checks.check(
+        !out.status.success() && machine.root.join("etc/archix-cut-test").exists(),
+        format!("the switch dies once it has written the config's files: {}", text(&out)),
+    );
+    checks.check(
+        machine.entries().contains(&"archix-current+2.conf".to_string()),
+        format!(
+            "the current entry got its two tries before the switch changed anything: {:?}",
+            machine.entries()
+        ),
+    );
+    let slot = snapshots(machine).last().unwrap().number;
+    checks.check(
+        machine.entries().contains(&format!("archix-snapshot-{slot}+1.conf")),
+        format!(
+            "and the switch's snapshot, the slot, has its entry: {:?}",
+            machine.entries()
+        ),
+    );
+    let marked = archix::pacman::hooks::unfinished(&setup.paths.state);
+    checks.check(
+        marked
+            .as_ref()
+            .is_some_and(|unfinished| unfinished.slot == Some(slot) && unfinished.switch.is_some()),
+        format!("the switch is marked as unfinished, naming the slot: {marked:?}"),
+    );
+    let check = setup.run_env(
+        &[
+            COUNTING,
+            ("ARCHIX_TEST_COUNTED_BOOT", "1"),
+            ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
+        ],
+        &["health-check"],
+    );
+    checks.check(
+        !check.status.success()
+            && text(&check).contains("failed its health check switch")
+            && text(&check).contains("was cut off before it finished")
+            && text(&check).contains(&format!("`archix rollback {slot}` keeps it")),
+        format!(
+            "so the boot after it fails its health check, naming the slot: {}",
+            text(&check)
+        ),
+    );
+    let out = setup.run_env(&[COUNTING], &["switch", "--noconfirm"]);
+    checks.check(
+        out.status.success() && archix::pacman::hooks::unfinished(&setup.paths.state).is_none(),
+        format!("a switch that finishes drops the mark: {}", text(&out)),
+    );
+    checks.finish();
+}
+
+#[test]
+#[ignore]
+fn a_switch_that_changes_nothing_before_failing_leaves_no_mark() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let body = "rollback = { enable = true }, drift = \"keep\"";
+    let setup = on_btrfs("3G", body);
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    bless(&setup);
+    setup.set_body(
+        &[],
+        &format!("{body}, files = {{ [\"/etc/archix-cut-test\"] = {{ text = \"two\" }} }}"),
+    );
+    let out = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_FAIL", "switch-apply")],
+        &["switch", "--noconfirm"],
+    );
+    checks.check(
+        !out.status.success() && text(&out).contains("before anything was changed"),
+        format!("the apply fails before its first step: {}", text(&out)),
+    );
+    let marked = archix::pacman::hooks::unfinished(&setup.paths.state);
+    checks.check(marked.is_none(), format!("so nothing is marked unfinished: {marked:?}"));
+    checks.finish();
+}
