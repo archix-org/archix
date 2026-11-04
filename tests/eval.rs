@@ -883,3 +883,33 @@ fn secrets_render_to_links_templates_and_ciphertexts_and_never_their_values() {
     .unwrap_or_default();
     assert!(error.contains("packages.[1]: a secret can't go here"), "{error}");
 }
+
+#[test]
+fn subcommand_help_answers_without_a_config() {
+    let empty = tempfile::tempdir().unwrap();
+    for args in [
+        &["snapshot", "setup", "--help"][..],
+        &["user", "unlock", "--help"],
+        &["rescue", "rollback", "--help"],
+        &["help", "snapshot", "setup"],
+    ] {
+        for config in [empty.path().to_path_buf(), empty.path().join("missing")] {
+            let out = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))
+                .arg("--config")
+                .arg(&config)
+                .args(args)
+                .env_remove("ARCHIX_CONFIG")
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success() && !stderr.contains("no archix config"),
+                "archix {args:?}: {stderr}"
+            );
+            assert!(
+                String::from_utf8_lossy(&out.stdout).contains("Usage:"),
+                "archix {args:?}"
+            );
+        }
+    }
+}
