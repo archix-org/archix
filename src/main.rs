@@ -561,6 +561,17 @@ fn hold_exclusive() -> Result<()> {
 }
 
 fn run() -> Result<ExitCode> {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<&std::ffi::OsStr> = args.iter().map(|arg| arg.as_os_str()).collect();
+    if let Some(why) = archix::old_model::refusal(&archix::testhooks::root(), &args) {
+        if args.contains(&std::ffi::OsStr::new("deploy-integrate"))
+            && archix::old_model::integrate(&archix::testhooks::root(), &why)?
+        {
+            eprintln!("archix: {why}");
+            return Ok(ExitCode::SUCCESS);
+        }
+        anyhow::bail!(why);
+    }
     // A switch by 0.1.0-dogfood that replaced archix itself left units saying `ExecStart=/usr/bin/archix (deleted) boot-check`.
     let cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;

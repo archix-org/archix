@@ -72,3 +72,5 @@ src/pacman/hooks.rs	test:pacman_hooks test:switch
 src/commands/pacman_hook.rs	test:pacman_hooks
 src/integration.rs	test:pacman_hooks test:switch
 src/revert.rs	test:switch
+src/old_model.rs	test:old_model
+src/main.rs	test:old_model

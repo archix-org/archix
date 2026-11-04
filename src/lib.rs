@@ -19,6 +19,7 @@ pub mod installed;
 pub mod integration;
 pub mod lock;
 pub mod luagen;
+pub mod old_model;
 pub mod options;
 pub mod packages;
 pub mod pacman;
