@@ -13,7 +13,7 @@ return {
         after = archix.option { type = t.list_of(t.str), default = {}, description = "Hooks that must run before this one." },
       }),
       default = {},
-      description = "Scripts run at the first boot of the deployment every switch or rollback commits, like NixOS activation scripts: early, once its users exist and its /var changes are applied, before networking, D-Bus and logins. A switch with nothing to build runs them right away. They run once per switch, so make them idempotent; a failing hook is reported on the console and at the next login, runs again at the next boot, and doesn't undo the switch.",
+      description = "Scripts run as root at the end of every switch or revert that applies, like NixOS activation scripts: once packages, users, files and services are in place, on the running system. They run once per switch, so make them idempotent; a failing hook is reported in the switch's output and at the next login, and doesn't undo the switch.",
     },
   },
 }

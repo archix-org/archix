@@ -43,12 +43,12 @@ return {
         },
       }),
       default = {},
-      description = "Filesystems to mount at boot, keyed by mount point, written into /etc/fstab, which archix writes whole in each deployment: its own lines for the root and the ESP, then these and swap. Like the rest of a deployment they apply at the next boot, and a rollback brings back the fstab of the deployment rolled back to. /, /usr, /opt, /boot, /etc, /var, /var/lib, /var/lib/pacman, /var/lib/dkms, /archix and the ESP can't be declared; /usr/local can.",
+      description = "Filesystems to mount at boot, keyed by mount point, written into /etc/fstab, which archix writes whole at each switch: its own lines for the root and the ESP, then these and swap. They're mounted from the next boot on (a switch doesn't mount or unmount anything), and a keep brings back the fstab of the snapshot kept. /, /usr, /opt, /boot, /etc, /var, /var/lib, /var/lib/pacman, /var/lib/dkms, /archix and the ESP can't be declared; /usr/local can.",
     },
     drop_mounts = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "Mount points, and /dev/mapper/<name> for /etc/crypttab volumes, whose lines the next deployment may leave out of /etc/fstab and /etc/crypttab although nothing declares them. Without this a switch refuses to drop a line that's mounted or open now, or for /home, /var or /srv and under them, naming each, so a hand-added line can't vanish with its data. Take an entry out once the deployment without it has booted.",
+      description = "Mount points, and /dev/mapper/<name> for /etc/crypttab volumes, whose lines a switch may leave out of /etc/fstab and /etc/crypttab although nothing declares them. Without this a switch refuses to drop a line that's mounted or open now, or for /home, /var or /srv and under them, naming each, so a hand-added line can't vanish with its data. Take an entry out once the system without it has booted.",
     },
     swap = archix.option {
       type = t.list_of(t.submodule {
@@ -64,7 +64,7 @@ return {
         required = archix.option { type = t.bool, default = false, description = "Make the boot wait for it; by default it's nofail." },
       }),
       default = {},
-      description = "Swap partitions and files, written into each deployment's /etc/fstab; they apply at the next boot.",
+      description = "Swap partitions and files, written into /etc/fstab at each switch; they're used from the next boot on.",
     },
     zram = {
       enable = archix.option {

@@ -13,7 +13,7 @@ local text_file = t.submodule {
   secret = archix.option {
     type = t.nullable(t.str),
     default = archix.null,
-    description = "Make the file a link to this secret (secrets.items), which the deployment's boot decrypts into /run/archix/secrets with the secret's owner and mode; the deployment holds only the link.",
+    description = "Make the file a link to this secret (secrets.items), which the switch and every boot decrypt into /run/archix/secrets with the secret's owner and mode; the root holds only the link.",
   },
   mode = archix.option { type = t.str, default = "0644" },
   owner = archix.option { type = t.str, default = "root" },
@@ -21,7 +21,7 @@ local text_file = t.submodule {
   on_change = archix.option {
     type = t.nullable(t.lines),
     default = archix.null,
-    description = "A bash script run as root when a switch or rollback changed this file: for a file in /etc, /usr (but /usr/local), /opt or /boot, at the new deployment's first boot, before networking and before the hooks; for a file elsewhere, which is written right away, right after it's written.",
+    description = "A bash script run as root when a switch or revert changed this file, right after the switch has written it and started or stopped the services, before the hooks.",
   },
   mutable = archix.option {
     type = t.nullable(t.bool),
@@ -43,7 +43,7 @@ return {
     files = archix.option {
       type = t.attrs_of(text_file),
       default = {},
-      description = "Files archix writes, keyed by absolute path; give one of text, source, link, url or merge. Files in /etc, /usr, /opt and /boot go into the new deployment and take effect at the next boot; files elsewhere, /usr/local included, which every deployment shares, are written once the switch commits. Files archix replaces are backed up and restored when they leave the config.",
+      description = "Files archix writes, keyed by absolute path; give one of text, source, link, url or merge. They're written by the switch, in place, wherever they are; a program that read one before sees the change when it reads it again (on_change can tell it to). Files archix replaces are backed up and restored when they leave the config.",
     },
     mutable_files = archix.option {
       type = t.bool,
@@ -53,19 +53,19 @@ return {
     capabilities = archix.option {
       type = t.attrs_of(t.str),
       default = {},
-      description = "File capabilities, keyed by the path of a file a package installs (or the config declares) in /usr or /opt, in setcap's text form, such as cap_sys_nice+ep. They're set in the new deployment before it's committed, on a copy of the file so no other deployment changes, and `archix verify` checks them; a path that isn't there is refused. Dropping one gives the file back what its package or install script left it.",
+      description = "File capabilities, keyed by the path of a file a package installs (or the config declares) in /usr or /opt, in setcap's text form, such as cap_sys_nice+ep. They're set by the switch once packages and files are in place, and `archix verify` checks them; a path that isn't there is refused. Dropping one gives the file back what its package or install script left it.",
     },
     units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd system units, keyed by file name such as foo.service." },
     user_units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd user units for every user, keyed by file name." },
     services = archix.option {
       type = t.attrs_of(t.bool),
       default = {},
-      description = "System units to enable (true) or disable (false) in the next deployment; they start or stop at the next boot.",
+      description = "System units to enable (true) or disable (false); a newly enabled one is started, and a disabled one stopped, by the switch, and one whose unit file the switch rewrote is restarted unless restart_if_changed says not to.",
     },
     masked_units = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "System units to mask, such as sleep.target, so nothing can start them: each becomes a link to /dev/null in /etc/systemd/system in the next deployment.",
+      description = "System units to mask, such as sleep.target, so nothing can start them: each becomes a link to /dev/null in /etc/systemd/system at the switch.",
     },
     default_target = archix.option {
       type = t.nullable(t.str),
@@ -99,7 +99,7 @@ return {
         hashed_password = archix.option {
           type = t.nullable(t.str),
           default = archix.null,
-          description = "The password as a crypt(3) hash (`mkpasswd` prints a yescrypt one), or \"!\" to lock the account; set in the next deployment at every switch, so a password changed with passwd goes back to it, and archix diff says so. A locked or expired account stays so, and a password set in the rescue entry holds until this hash changes. Anyone who can read the config can try to crack it offline.",
+          description = "The password as a crypt(3) hash (`mkpasswd` prints a yescrypt one), or \"!\" to lock the account; set at every switch, so a password changed with passwd goes back to it, and archix diff says so. A locked or expired account stays so, and a password set in the rescue entry holds until this hash changes. Anyone who can read the config can try to crack it offline.",
         },
         initial_hashed_password = archix.option {
           type = t.nullable(t.str),
@@ -109,7 +109,7 @@ return {
         ssh_authorized_keys = archix.option {
           type = t.list_of(t.str),
           default = {},
-          description = "SSH public keys that may log in as the user, one .pub line each, written to /etc/ssh/authorized_keys.d/<user> in the next deployment; ~/.ssh/authorized_keys keeps working beside them. Declaring any installs openssh; enable sshd.service in services.",
+          description = "SSH public keys that may log in as the user, one .pub line each, written to /etc/ssh/authorized_keys.d/<user> at the switch; ~/.ssh/authorized_keys keeps working beside them. Declaring any installs openssh; enable sshd.service in services.",
         },
       }),
       default = {},
@@ -118,12 +118,12 @@ return {
     allow_no_password_login = archix.option {
       type = t.bool,
       default = false,
-      description = "Let a switch build a deployment in which neither root nor a wheel or sudo member has a password, which a switch otherwise refuses when the running system has one, as the rescue boot entry needs one to open.",
+      description = "Let a switch leave a system in which neither root nor a wheel or sudo member has a password, which a switch otherwise refuses when the running system has one, as the rescue boot entry needs one to open.",
     },
     tmpfiles = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "tmpfiles.d lines, such as \"d /var/lib/foo 0750 foo foo -\", written to /etc/tmpfiles.d/archix.conf in the next deployment and applied when it boots. Lines touching archix's own paths are refused.",
+      description = "tmpfiles.d lines, such as \"d /var/lib/foo 0750 foo foo -\", written to /etc/tmpfiles.d/archix.conf at the switch and applied by systemd-tmpfiles from the next boot on. Lines touching archix's own paths are refused.",
     },
     groups = archix.option {
       type = t.attrs_of(t.submodule {

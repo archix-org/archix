@@ -60,7 +60,7 @@ fn eval_err(files: &[(&str, &str)]) -> String {
 }
 
 #[test]
-fn option_descriptions_say_what_waits_for_the_next_boot() {
+fn option_descriptions_say_what_a_switch_applies_in_place_and_what_waits_for_the_next_boot() {
     let dir = config(&[("init.lua", "return {}")]);
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))
         .args([
@@ -84,34 +84,38 @@ fn option_descriptions_say_what_waits_for_the_next_boot() {
             .to_string()
     };
     for stale in [
+        "deployment",
+        "first boot",
+        "commits",
+        "committed",
         "the running one",
-        "at the end of every switch",
         "changed this file, before the hooks",
     ] {
         let found: Vec<&str> = options
             .iter()
-            .filter(|option| option["description"].as_str().is_some_and(|text| text.contains(stale)))
+            .filter(|option| {
+                option["description"]
+                    .as_str()
+                    .is_some_and(|text| text.to_lowercase().contains(stale))
+            })
             .filter_map(|option| option["path"].as_str())
             .collect();
         assert!(found.is_empty(), "{found:?} still say {stale:?}");
     }
     for (path, says) in [
-        ("hooks", "first boot"),
-        ("hooks", "before networking"),
+        ("hooks", "end of every switch"),
         ("hooks.<name>.user", "no session bus"),
-        ("files", "next boot"),
-        ("files.<name>.on_change", "first boot"),
-        ("files.<name>.on_change", "right after it's written"),
+        ("files", "written by the switch"),
+        ("files.<name>.on_change", "right after"),
         ("home.files.<name>.on_change", "right after"),
-        ("home.files", "without waiting for the boot"),
-        ("services", "next boot"),
+        ("services", "stopped, by the switch"),
         ("user_services", "next login"),
-        ("firewall.enable", "next boot"),
         ("file_systems", "next boot"),
-        ("file_systems", "rollback brings back"),
+        ("file_systems", "keep"),
         ("swap", "next boot"),
         ("zram.enable", "next boot"),
-        ("flatpak.apps", "first boot"),
+        ("flatpak.apps", "by the switch, after its packages"),
+        ("tmpfiles", "next boot"),
     ] {
         let text = description(path);
         assert!(text.contains(says), "{path}: {text}");

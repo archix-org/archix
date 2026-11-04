@@ -78,7 +78,7 @@ return {
         reachable = archix.option {
           type = t.list_of(t.str),
           default = {},
-          description = "Hosts that must answer before a boot counts as good: \"host:port\" must accept a TCP connection, a bare host must answer a ping, and \"gateway\" is the default IPv4 gateway. A host that's down for a reason outside the deployment (the router, a captive portal, a laptop on a train) fails the check just the same and falls back from a good update, so list only what is always up when this machine boots; switching again once it answers brings the update back.",
+          description = "Hosts that must answer before a boot counts as good: \"host:port\" must accept a TCP connection, a bare host must answer a ping, and \"gateway\" is the default IPv4 gateway. A host that's down for a reason outside this machine (the router, a captive portal, a laptop on a train) fails the check just the same and falls back from a good update, so list only what is always up when this machine boots; switching again once it answers brings the update back.",
         },
         login = archix.option {
           type = t.bool,

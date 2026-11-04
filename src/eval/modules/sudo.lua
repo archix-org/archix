@@ -6,7 +6,7 @@ return {
       enable = archix.option {
         type = t.bool,
         default = false,
-        description = "Install sudo and write /etc/sudoers.d/archix (mode 0440) into the next deployment, checked with `visudo -c` while it's built; a rule visudo refuses fails the switch with nothing changed.",
+        description = "Install sudo and write /etc/sudoers.d/archix (mode 0440), checked with `visudo -c` before the switch applies anything; a rule visudo refuses fails the switch with nothing changed.",
       },
       wheel = archix.option { type = t.bool, default = true, description = "Let members of wheel run any command as any user." },
       wheel_needs_password = archix.option { type = t.bool, default = true, description = "Whether wheel members type their password (false gives them NOPASSWD)." },

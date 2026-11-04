@@ -113,7 +113,7 @@ local function secret_name(name, fname)
 end
 
 archix = {
-  -- A placeholder the deployment's boot replaces with the value; evaluation never sees it.
+  -- A placeholder the switch and each boot replace with the value; evaluation never sees it.
   secret = function(name) return "{{archix-secret:" .. secret_name(name, "archix.secret") .. "}}" end,
   secret_path = function(name) return "/run/archix/secrets/" .. secret_name(name, "archix.secret_path") end,
   fetchurl = fetchurl,

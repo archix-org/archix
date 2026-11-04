@@ -41,7 +41,7 @@ return {
           },
         }),
         default = {},
-        description = "Secrets by name, decrypted at each boot of the deployment into /run/archix/secrets/<name> (a ramfs, never on disk); files[path] = { secret = name } links to one, archix.secret(name) puts one into a file's text, and units read archix.secret_path(name) through EnvironmentFile= or LoadCredential=.",
+        description = "Secrets by name, decrypted by each switch and at each boot into /run/archix/secrets/<name> (a ramfs, never on disk); files[path] = { secret = name } links to one, archix.secret(name) puts one into a file's text, and units read archix.secret_path(name) through EnvironmentFile= or LoadCredential=.",
       },
     },
   },
