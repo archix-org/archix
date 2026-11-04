@@ -128,7 +128,13 @@ fn kept_images(
 ) -> Result<menu::Images> {
     let state = menu::load(&menu::dir(paths))?;
     let esp = Path::new(&plan.esp);
+    // The record names only the main image, so a snapshot with more kernels or the protected twin needs all of its images found or built.
+    let extras = plan.anticheat
+        || boot::kernels_in(&local_db_in(snapshot_root))
+            .iter()
+            .any(|(name, _)| *name != plan.kernel && !name.contains('+'));
     if let Some(name) = state.snapshots.get(&number)
+        && !extras
         && esp.join(menu::IMAGES).join(name).is_file()
     {
         let version = boot::owned_version(&local_db_in(snapshot_root), &plan.kernel).unwrap_or_default();
@@ -140,7 +146,17 @@ fn kept_images(
             extras: Vec::new(),
         });
     }
-    if state.current.main.is_some() && boot::limine_keep_refusal(replaced_root, snapshot_root).is_none() {
+    let on_esp = |images: &menu::Images| {
+        images
+            .main
+            .iter()
+            .chain(images.extras.iter().map(|(_, _, image)| image))
+            .all(|image| esp.join(menu::IMAGES).join(&image.name).is_file())
+    };
+    if state.current.main.is_some()
+        && on_esp(&state.current)
+        && boot::limine_keep_refusal(replaced_root, snapshot_root).is_none()
+    {
         return Ok(state.current);
     }
     eprintln!(":: building snapshot {number}'s boot image, which the ESP no longer has");
