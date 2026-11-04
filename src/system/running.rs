@@ -88,7 +88,7 @@ impl Running {
             .arg(&tmp)
             .status()
             .is_ok_and(|status| status.success())
-            && fs::rename(&tmp, &dir).is_ok();
+            && crate::durable::rename(&tmp, &dir).is_ok();
         match restored {
             true => eprintln!(":: kept the running kernel's modules, so they still load until you reboot"),
             false => eprintln!(

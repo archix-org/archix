@@ -83,7 +83,10 @@ pub fn reconcile(modules: &Path) -> Vec<String> {
         }
         let target = format!("{}/{}", entry.module, entry.version);
         let copies = stale_copies(Path::new(TREE), modules, &entry);
-        let moved: Vec<&PathBuf> = copies.iter().filter(|c| fs::rename(c, aside(c)).is_ok()).collect();
+        let moved: Vec<&PathBuf> = copies
+            .iter()
+            .filter(|c| crate::durable::rename(c, aside(c)).is_ok())
+            .collect();
         let installed = Command::new("dkms")
             .args(["install", &target, "-k", &entry.kernel])
             .output()
@@ -92,7 +95,7 @@ pub fn reconcile(modules: &Path) -> Vec<String> {
             let _ = if installed {
                 fs::remove_file(aside(copy))
             } else {
-                fs::rename(aside(copy), copy)
+                crate::durable::rename(aside(copy), copy)
             };
         }
         if !installed {

@@ -71,8 +71,7 @@ pub fn remember(state: &Path, url: &str) -> Result<()> {
     if configured(state) == url {
         return Ok(());
     }
-    fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
-    fs::write(state.join("archive-url"), format!("{url}\n")).with_context(|| format!("writing {}", state.display()))
+    crate::durable::write(&state.join("archive-url"), format!("{url}\n").as_bytes())
 }
 
 /// The package architectures this CPU can run: x86_64 plus each x86-64 level the dynamic loader reports as supported, for CachyOS's x86_64_v3/v4 repos.
@@ -246,7 +245,7 @@ impl Archive {
             // pacman writes this into an empty local db on first use; parallel first uses race on it.
             let tmp = local.join(format!("ALPM_DB_VERSION.{}", std::process::id()));
             fs::write(&tmp, "9\n")?;
-            fs::rename(&tmp, &version)?;
+            crate::durable::rename(&tmp, &version)?;
         }
         for repo in repos {
             let path = sync.join(format!("{repo}.db"));
@@ -314,7 +313,7 @@ impl Archive {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(e) => return Err(e).with_context(|| format!("copying {path}")),
             }
-            fs::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
+            crate::durable::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
             return Ok(true);
         }
         let mut response = match self.agent.get(url).call() {
@@ -328,7 +327,7 @@ impl Archive {
             return Err(e).with_context(|| format!("downloading {url}"));
         }
         file.sync_all()?;
-        fs::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
+        crate::durable::rename(&part, dest).with_context(|| format!("renaming {}", part.display()))?;
         Ok(true)
     }
 }

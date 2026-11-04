@@ -116,7 +116,8 @@ pub fn split_var_lib(root: &Path, var_lib: &Path) -> Result<()> {
         let from = old.join(name);
         let to = rolled.join(name);
         if from.symlink_metadata().is_ok() && !to.exists() {
-            fs::rename(&from, &to).with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+            crate::durable::rename(&from, &to)
+                .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
         }
         fs::create_dir_all(&to).with_context(|| format!("creating {}", to.display()))?;
     }

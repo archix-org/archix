@@ -387,7 +387,7 @@ fn set_aside(chosen: &Path, config_dir: &Path) -> Option<PathBuf> {
     }
     let aside = PathBuf::from(format!("{}.failed", chosen.display()));
     let _ = fs::remove_dir_all(&aside);
-    fs::rename(chosen, &aside).ok()?;
+    archix::durable::rename(chosen, &aside).ok()?;
     Some(aside)
 }
 
@@ -1761,9 +1761,9 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
 fn write_config(dir: &Path, host: &str, config: &Host) -> Result<()> {
     let host_dir = installed::default_dir(dir, host);
     fs::create_dir_all(&host_dir).with_context(|| format!("creating {}", host_dir.display()))?;
-    fs::write(
-        dir.join("init.lua"),
-        "return { imports = { \"hosts.\" .. archix.hostname } }\n",
+    archix::durable::write(
+        &dir.join("init.lua"),
+        b"return { imports = { \"hosts.\" .. archix.hostname } }\n",
     )?;
     write_host(dir, host, config)?;
     write_installed(dir, host, &config.packages)?;
@@ -1779,16 +1779,15 @@ fn write_config(dir: &Path, host: &str, config: &Host) -> Result<()> {
 fn write_host(dir: &Path, host: &str, config: &Host) -> Result<()> {
     let body = Lua::Table(config.fields.clone()).render(0);
     let path = installed::default_dir(dir, host).join("init.lua");
-    fs::write(
+    archix::durable::write(
         &path,
-        format!("-- Written by `archix init` from this machine; edit it freely.\nreturn {body}\n"),
+        format!("-- Written by `archix init` from this machine; edit it freely.\nreturn {body}\n").as_bytes(),
     )
-    .with_context(|| format!("writing {}", path.display()))
 }
 
 fn write_installed(dir: &Path, host: &str, packages: &[String]) -> Result<()> {
     let path = installed::default_dir(dir, host).join(installed::FILE);
-    fs::write(&path, installed::render(packages)).with_context(|| format!("writing {}", path.display()))
+    archix::durable::write(&path, installed::render(packages).as_bytes())
 }
 
 /// Gives `dir` and everything under it to the owner of `like`, so files in a user's repo or home stay theirs.

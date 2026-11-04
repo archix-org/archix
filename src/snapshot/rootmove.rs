@@ -192,7 +192,7 @@ pub fn finish(top: &Path) -> Result<Finished> {
             );
         }
         crate::durable::sync_filesystems_checked(&[top])?;
-        fs::rename(&new, &at).with_context(|| format!("renaming {} to {}", new.display(), at.display()))?;
+        crate::durable::rename(&new, &at).with_context(|| format!("renaming {} to {}", new.display(), at.display()))?;
         crate::durable::sync_filesystems_checked(&[top])?;
     }
     crate::testhooks::mark("move-root-snapshotted");
@@ -241,7 +241,7 @@ pub fn finish(top: &Path) -> Result<Finished> {
         if let Some(parent) = to.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        fs::rename(&from, &to).with_context(|| format!("moving subvolume {} into @", from.display()))?;
+        crate::durable::rename(&from, &to).with_context(|| format!("moving subvolume {} into @", from.display()))?;
     }
     crate::durable::sync_filesystems_checked(&[top])?;
     crate::testhooks::mark("move-root-nested-moved");

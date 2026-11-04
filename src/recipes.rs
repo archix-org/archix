@@ -204,7 +204,7 @@ impl Recipes {
             fs::write(&pkgbuild, text)?;
             fs::create_dir_all(dir.parent().expect("has a parent"))?;
             let _ = fs::remove_dir_all(&dir);
-            fs::rename(&tmp, &dir)?;
+            crate::durable::rename(&tmp, &dir)?;
         }
         let info = self.srcinfo(&dir, &commit)?;
         Ok(Recipe {
@@ -277,7 +277,7 @@ impl Recipes {
         fs::remove_dir_all(tmp.join(".git"))?;
         fs::write(tmp.join(".archix-commit"), &commit)?;
         let _ = fs::remove_dir_all(&dir);
-        fs::rename(&tmp, &dir)?;
+        crate::durable::rename(&tmp, &dir)?;
         Ok((dir, commit))
     }
 
@@ -289,8 +289,7 @@ impl Recipes {
         }
         let text = print_srcinfo(dir, &self.cache)?;
         let info = srcinfo::parse(&text)?;
-        fs::create_dir_all(cached.parent().expect("has a parent"))?;
-        fs::write(&cached, &text)?;
+        crate::durable::write(&cached, text.as_bytes())?;
         Ok(info)
     }
 }

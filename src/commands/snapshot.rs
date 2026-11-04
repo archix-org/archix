@@ -388,7 +388,7 @@ pub fn resync() -> Result<()> {
             for (file, text) in archix::system::accounts::FILES.iter().zip(&carried.texts) {
                 if let Some(text) = text {
                     let path = root.join("etc").join(file);
-                    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+                    archix::durable::write_config(&path, text.as_bytes())?;
                 }
             }
             println!("carried users, groups and passwords over from the root it replaced ({path})");

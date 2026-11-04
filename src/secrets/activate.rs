@@ -130,7 +130,7 @@ pub fn place(dir: &Path, name: &str, value: &[u8], uid: u32, gid: u32, mode: u32
                 return Err(std::io::Error::last_os_error().into());
             }
         }
-        fs::rename(&tmp, &target)?;
+        crate::durable::rename(&tmp, &target)?;
         Ok(())
     })();
     if done.is_err() {

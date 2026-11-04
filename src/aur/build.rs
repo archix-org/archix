@@ -230,7 +230,7 @@ impl Builder<'_> {
                 // The same version is built again for another recipe or snapshot, and every generation must keep its own build.
                 let file = format!("{}-{file}", build_id(commit, date));
                 let dest = self.paths.packages().join(&file);
-                fs::rename(&produced, &dest).or_else(|_| fs::copy(&produced, &dest).map(|_| ()))?;
+                crate::durable::rename(&produced, &dest).or_else(|_| fs::copy(&produced, &dest).map(|_| ()))?;
                 fs::File::open(&dest)?.sync_all()?;
                 hashes.push(crate::fetch::sha256(&dest)?);
                 files.push((pkg.name.clone(), file));
@@ -384,7 +384,7 @@ impl Builder<'_> {
                 )
             })?;
         }
-        fs::write(&marker, date.to_string())?;
+        crate::durable::write(&marker, date.to_string().as_bytes())?;
         Ok(())
     }
 

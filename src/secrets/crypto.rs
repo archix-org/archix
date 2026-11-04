@@ -76,7 +76,7 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     file.write_all(contents)
         .and_then(|()| file.sync_all())
         .with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    crate::durable::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     crate::durable::sync_dir(path)
 }
 
@@ -439,7 +439,7 @@ pub fn write_ciphertext(path: &Path, ciphertext: &[u8]) -> Result<()> {
         .and_then(|()| file.sync_all())
         .with_context(|| format!("writing {}", tmp.display()))?;
     crate::testhooks::crash_at("secrets-write");
-    fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+    crate::durable::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
     crate::durable::sync_dir(path)
 }
 

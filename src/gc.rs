@@ -85,7 +85,7 @@ pub fn keep_copy(paths: &Paths, file: &str) -> Result<Kept> {
             paths.packages().display()
         );
     };
-    fs::rename(&temp, &target)?;
+    crate::durable::rename(&temp, &target)?;
     Ok(how)
 }
 
@@ -106,7 +106,7 @@ pub fn adopt_cache(from: &Path, to: &Path) -> Result<usize> {
         {
             continue;
         }
-        if fs::rename(&source, &target).is_err() {
+        if crate::durable::rename(&source, &target).is_err() {
             crate::durable::copy(&source, &target)?;
         }
         moved += 1;

@@ -298,7 +298,7 @@ pub fn prefetch(url: &str) -> Result<()> {
         if let Some(parent) = blob.parent() {
             fs::create_dir_all(parent)?;
         }
-        if fs::rename(&tmp, &blob).is_err() {
+        if archix::durable::rename(&tmp, &blob).is_err() {
             fs::copy(&tmp, &blob)?;
         }
     }

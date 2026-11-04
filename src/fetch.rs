@@ -87,7 +87,7 @@ fn copy_whole(from: &Path, to: &Path) -> Result<()> {
         let _ = fs::remove_file(&part);
         return Err(e).with_context(|| format!("copying {}", from.display()));
     }
-    fs::rename(&part, to).with_context(|| format!("renaming {}", part.display()))
+    crate::durable::rename(&part, to).with_context(|| format!("renaming {}", part.display()))
 }
 
 /// A hard link to a file another cache holds, since pacman never rewrites a cached package in place, or a copy when they're on different filesystems.
@@ -95,7 +95,7 @@ fn link_or_copy(from: &Path, to: &Path) -> Result<()> {
     let part = to.with_extension(format!("part.{}", std::process::id()));
     let _ = fs::remove_file(&part);
     if fs::hard_link(from, &part).is_ok() {
-        return fs::rename(&part, to).with_context(|| format!("renaming {}", part.display()));
+        return crate::durable::rename(&part, to).with_context(|| format!("renaming {}", part.display()));
     }
     copy_whole(from, to)
 }

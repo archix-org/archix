@@ -287,7 +287,7 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, sources: &Path) ->
     tar.into_inner()?.finish()?.sync_all()?;
     let sha256 = crate::fetch::sha256(&archive)?;
     let kept = sources.join(&sha256);
-    fs::rename(&archive, &kept).with_context(|| format!("renaming {}", archive.display()))?;
+    crate::durable::rename(&archive, &kept).with_context(|| format!("renaming {}", archive.display()))?;
     let (epoch, rest) = match pkg.version.split_once(':') {
         Some((epoch, rest)) => (Some(epoch), rest),
         None => (None, pkg.version.as_str()),
@@ -325,7 +325,7 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, sources: &Path) ->
     }
     if let Some(install) = &pkg.install {
         let name = format!("{}.install", pkg.name);
-        fs::write(dir.join(&name), install)?;
+        crate::durable::write(&dir.join(&name), install.as_bytes())?;
         let _ = writeln!(text, "install={name}");
     }
     // makepkg would otherwise strip, compress or drop files the package shipped as they were.
@@ -336,7 +336,7 @@ pub fn write_recipe(pkg: &Installed, root: &Path, dir: &Path, sources: &Path) ->
         sha256
     );
     text.push_str("package() {\n  bsdtar --numeric-owner -xpf \"$srcdir/files.tar.zst\" -C \"$pkgdir\"\n}\n");
-    fs::write(dir.join("PKGBUILD"), text)?;
+    crate::durable::write(&dir.join("PKGBUILD"), text.as_bytes())?;
     Ok(Written {
         size: fs::metadata(&kept)?.len(),
         archive: kept,

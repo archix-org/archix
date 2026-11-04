@@ -452,7 +452,7 @@ impl Store {
                 .join(journal.replaced.to_string());
             fs::create_dir_all(&in_top).with_context(|| format!("creating {}", in_top.display()))?;
             // The replaced root stays writable: it's the running system until the reboot.
-            fs::rename(&clone, in_top.join(SNAPSHOT))
+            crate::durable::rename(&clone, in_top.join(SNAPSHOT))
                 .with_context(|| format!("moving the replaced root to {}", in_top.join(SNAPSHOT).display()))?;
             crate::durable::sync_dir(&in_top)?;
             crate::durable::sync_filesystems_checked(&[top])?;

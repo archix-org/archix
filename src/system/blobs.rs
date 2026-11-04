@@ -23,7 +23,7 @@ pub fn store(paths: &Paths, blobs: &BTreeMap<String, Vec<u8>>) -> Result<()> {
         }
         let tmp = dir.join(format!(".{sha256}.{}", std::process::id()));
         fs::write(&tmp, content).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
+        crate::durable::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
     }
     Ok(())
 }
@@ -49,7 +49,7 @@ pub fn ensure(paths: &Paths, archive: &Archive, rendered: &Rendered) -> Result<(
         if crate::fetch::sha256(Path::new(target))? == file.sha256 {
             let tmp = dir.join(format!(".{}.{}", file.sha256, std::process::id()));
             fs::copy(target, &tmp).with_context(|| format!("copying {target} to {}", tmp.display()))?;
-            fs::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
+            crate::durable::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
         }
     }
     for (sha256, url) in &rendered.fetches {
@@ -67,7 +67,7 @@ pub fn ensure(paths: &Paths, archive: &Archive, rendered: &Rendered) -> Result<(
             let _ = fs::remove_file(&tmp);
             bail!("{url} has sha256 {got}, but the config says {sha256}");
         }
-        fs::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
+        crate::durable::rename(&tmp, &path).with_context(|| format!("storing {}", path.display()))?;
     }
     Ok(())
 }

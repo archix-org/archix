@@ -258,7 +258,7 @@ fn own_inode(path: &Path) -> Result<()> {
             }
         }
         set_times(&tmp, &meta)?;
-        fs::rename(&tmp, path)?;
+        crate::durable::rename(&tmp, path)?;
         Ok(())
     })();
     if copied.is_err() {

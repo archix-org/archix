@@ -199,7 +199,7 @@ impl TrialKeyring {
                 if let Some(stem) = name.strip_suffix(".gpg") {
                     names.push(stem.to_string());
                 }
-                fs::rename(file.path(), import.join(&name))
+                crate::durable::rename(file.path(), import.join(&name))
                     .with_context(|| format!("moving {} to {}", file.path().display(), import.display()))?;
             }
         }

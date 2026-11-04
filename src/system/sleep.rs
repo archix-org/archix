@@ -50,7 +50,7 @@ pub fn sync(root: &Path) -> Result<()> {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, &text).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+        crate::durable::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
 }

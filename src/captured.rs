@@ -793,6 +793,6 @@ pub fn write_file_here(dir: &Path, name: &OsStr, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("creating {}", temp.display()))?;
     std::io::Write::write_all(&mut file, bytes)?;
     file.sync_all()?;
-    fs::rename(&temp, &target).with_context(|| format!("renaming over {}", target.display()))?;
+    crate::durable::rename(&temp, &target).with_context(|| format!("renaming over {}", target.display()))?;
     Ok(())
 }

@@ -107,12 +107,13 @@ pub fn integrate(root: &Path, message: &str) -> Result<bool> {
         return Ok(false);
     }
     let write = |rel: &str, text: &str, mode: u32| -> Result<PathBuf> {
-        use std::os::unix::fs::PermissionsExt;
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap())
             .with_context(|| format!("creating {}", path.parent().unwrap().display()))?;
-        fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(mode))?;
+        match mode {
+            0o755 => crate::durable::write_executable(&path, text.as_bytes())?,
+            _ => crate::durable::write(&path, text.as_bytes())?,
+        }
         Ok(path)
     };
     write(HOOK, &hook_script(message), 0o755)?;

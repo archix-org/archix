@@ -695,7 +695,7 @@ pub fn check(paths: &Paths, change: &SystemChange, locate: Locate) -> Result<()>
 /// Renames, or copies and deletes when `from` and `to` are on different filesystems (a separate /home, a btrfs subvolume).
 fn move_path(from: &Path, to: &Path) -> Result<()> {
     let at = || format!("moving {} to {}", from.display(), to.display());
-    match fs::rename(from, to) {
+    match crate::durable::rename(from, to) {
         Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {
             copy_preserving(from, to)?;
             if fs::symlink_metadata(from).with_context(at)?.is_dir() {
@@ -1224,7 +1224,7 @@ fn replace_if_unchanged(
             Ok(()) => Ok(None),
             Err(e) if e.raw_os_error() == Some(libc::EEXIST) => again(),
             Err(e) if e.raw_os_error() == Some(libc::EINVAL) && fs::symlink_metadata(target).is_err() => {
-                fs::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
+                crate::durable::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
                 Ok(None)
             }
             Err(e) if e.raw_os_error() == Some(libc::EINVAL) => again(),
@@ -1250,7 +1250,7 @@ fn replace_if_unchanged(
         }
         Err(e) if e.raw_os_error() == Some(libc::EINVAL) => match fs::metadata(target).map(|meta| Version::of(&meta)) {
             Ok(now) if now == *read => {
-                fs::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
+                crate::durable::rename(tmp, target).with_context(|| format!("writing {}", target.display()))?;
                 Ok(None)
             }
             _ => again(),
@@ -1426,7 +1426,7 @@ fn write(paths: &Paths, target: &Path, want: &ManagedFile, accounts: &Accounts, 
             tmp
         }
     };
-    match fs::rename(&tmp, target) {
+    match crate::durable::rename(&tmp, target) {
         Err(e) if e.raw_os_error() == Some(libc::EBUSY) && want.link.is_none() => {
             // A bind-mounted file (like /etc/resolv.conf inside arch-chroot) can't be replaced, only rewritten.
             fs::copy(&tmp, target).with_context(|| format!("writing {}", target.display()))?;
@@ -1452,7 +1452,7 @@ mod tests {
         fs::write(&target, "old").unwrap();
         let (_, read) = read_version(&target).unwrap().unwrap();
         fs::write(dir.path().join("app.tmp"), "app").unwrap();
-        fs::rename(dir.path().join("app.tmp"), &target).unwrap();
+        crate::durable::rename(dir.path().join("app.tmp"), &target).unwrap();
         let (tmp, file) = create_temp(&target).unwrap();
         fs::write(&tmp, "merged from old").unwrap();
         let ours = Version::of(&file.metadata().unwrap());

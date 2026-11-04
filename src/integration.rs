@@ -176,10 +176,14 @@ pub fn write_all(paths: &Paths, archix: &Path, place: &dyn Fn(&Path) -> Result<P
         if fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
             fs::remove_file(&target).with_context(|| format!("removing the link {}", target.display()))?;
         }
-        let mode = if content.starts_with("#!") { 0o755 } else { 0o644 };
-        fs::write(&target, &content).with_context(|| format!("writing {}", target.display()))?;
-        fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(mode))
-            .with_context(|| format!("chmod {}", target.display()))?;
+        // Hooks, units and scripts a boot needs, so a cut never leaves one empty.
+        if content.starts_with("#!") {
+            crate::durable::write_executable(&target, content.as_bytes())?;
+        } else {
+            crate::durable::write(&target, content.as_bytes())?;
+            fs::set_permissions(&target, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+                .with_context(|| format!("chmod {}", target.display()))?;
+        }
     }
     for (link, unit) in boot_wants() {
         let target = place(&link)?;
@@ -269,7 +273,7 @@ pub fn sync_pacman_conf(conf: &Path, repos: &[Repo]) -> Result<()> {
     if wanted != current {
         let tmp = conf.with_extension("conf.archix");
         fs::write(&tmp, &wanted).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
+        crate::durable::rename(&tmp, conf).with_context(|| format!("writing {}", conf.display()))?;
     }
     Ok(())
 }
@@ -284,10 +288,8 @@ pub fn record(paths: &Paths, packages: Vec<String>) -> Result<Option<OutsideChan
     let mut changes = outside_changes(paths)?;
     changes.push(change.clone());
     let path = paths.outside_changes();
-    fs::create_dir_all(&paths.state).with_context(|| format!("creating {}", paths.state.display()))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, serde_json::to_string_pretty(&changes)?).with_context(|| format!("writing {}", tmp.display()))?;
-    fs::rename(&tmp, &path).with_context(|| format!("writing {}", path.display()))?;
+    // Flushed, as the write replay found a cut leaving it renamed into place but empty, which archix status then failed to parse.
+    crate::durable::write(&path, serde_json::to_string_pretty(&changes)?.as_bytes())?;
     Ok(Some(change))
 }
 

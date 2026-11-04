@@ -1289,7 +1289,8 @@ pub fn make_swapfile(file: &Path, bytes: u64) -> Result<()> {
             return Err(e);
         }
     }
-    fs::rename(&temp, file).with_context(|| format!("renaming {} to {}", temp.display(), file.display()))?;
+    crate::durable::rename(&temp, file)
+        .with_context(|| format!("renaming {} to {}", temp.display(), file.display()))?;
     crate::durable::sync_dir(dir)?;
     println!("archix: made the swap file {} ({bytes} bytes)", file.display());
     Ok(())

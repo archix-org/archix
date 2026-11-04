@@ -242,6 +242,34 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Renames `from` to `to` so a power cut leaves either name with whole contents: flushes what's renamed first (a file's data, or for a directory its filesystem, as its files' data isn't the directory's), then both directories' entries. Its error is the rename's own, so callers can tell EXDEV and friends apart.
+pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
+    let (from, to) = (from.as_ref(), to.as_ref());
+    let meta = fs::symlink_metadata(from)?;
+    if meta.is_dir() {
+        let dir = File::open(from)?;
+        if unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    } else if meta.is_file() {
+        File::open(from)?.sync_all()?;
+    }
+    fs::rename(from, to)?;
+    let parent = |path: &Path| {
+        path.parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+    };
+    let (old, new) = (parent(from), parent(to));
+    for dir in [new.clone(), old.filter(|old| Some(old) != new.as_ref())]
+        .into_iter()
+        .flatten()
+    {
+        File::open(&dir)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Renames `from` to `to`, failing if `to` exists.
 pub fn rename_noreplace(from: &Path, to: &Path) -> Result<()> {
     let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).context("path has a NUL byte");

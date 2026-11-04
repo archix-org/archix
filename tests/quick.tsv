@@ -1,4 +1,4 @@
-always	lib:archix bin:archix test:no_global_sync test:eval test:formats test:hm
+always	lib:archix bin:archix test:no_global_sync test:no_bare_rename test:eval test:formats test:hm
 src/aur/	test:aur test:helper test:recipes
 src/commands/helper.rs	test:helper test:aur
 src/commands/init/	test:init

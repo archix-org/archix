@@ -1846,7 +1846,7 @@ pub fn cache_push(dir: &std::path::Path) -> Result<()> {
             // Through a temporary name, so a machine reading the cache never sees half a file.
             let tmp = to.join(format!(".{}.part", entry.file_name().to_string_lossy()));
             fs::copy(&source, &tmp).with_context(|| format!("copying {}", source.display()))?;
-            fs::rename(&tmp, &dest)?;
+            archix::durable::rename(&tmp, &dest)?;
             copied += 1;
         }
         Ok(())

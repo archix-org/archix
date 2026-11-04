@@ -167,7 +167,7 @@ fn move_into(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::rename(from, to).with_context(|| format!("moving {} to {}", from.display(), to.display()))
+    crate::durable::rename(from, to).with_context(|| format!("moving {} to {}", from.display(), to.display()))
 }
 
 /// Puts /var/lib, at `var_lib`, in step with snapshot `number`, whose packages pacman's database `then` lists, from the system whose database `now` lists: each file a package of the snapshot owns there goes back to its version from the snapshot's package, which `archive` finds by name, version and arch, if the file is unchanged since the current package installed it (else it's left with a warning, as pacman does with a changed backup file); each file only the current packages own is moved aside into `.archix-moved/<number>`, so reinstalling its package doesn't find it in the way. Every step is in that directory's manifest before it's made.

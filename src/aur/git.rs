@@ -62,7 +62,7 @@ impl AurGit {
             let _ = fs::remove_dir_all(&tmp);
             bail!("could not clone {url}; the package base may have been deleted from the AUR");
         }
-        fs::rename(&tmp, &repo).or_else(|e| if repo.is_dir() { Ok(()) } else { Err(e) })?;
+        crate::durable::rename(&tmp, &repo).or_else(|e| if repo.is_dir() { Ok(()) } else { Err(e) })?;
         Ok(())
     }
 

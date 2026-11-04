@@ -578,7 +578,7 @@ pub(crate) fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
                 .and_then(|file| file.sync_all())
                 .with_context(|| format!("writing {}", tmp.display()))
         })
-        .and_then(|()| fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
+        .and_then(|()| crate::durable::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
     if signed.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -760,7 +760,7 @@ pub fn bless_booted(paths: &Paths) -> Result<()> {
         return Ok(());
     };
     crate::testhooks::mark("bless-rename");
-    fs::rename(dir.join(&counted), &target).with_context(|| format!("renaming {counted} to {id}"))?;
+    crate::durable::rename(dir.join(&counted), &target).with_context(|| format!("renaming {counted} to {id}"))?;
     crate::testhooks::mark("bless-renamed");
     crate::durable::sync_esp(&target).with_context(|| format!("syncing {id}"))?;
     crate::testhooks::mark("bless-synced");
@@ -1047,7 +1047,7 @@ pub fn mark_bad(esp: &Path, id: &str) -> Result<bool> {
     };
     let bad = path.with_file_name(format!("{stem}+0-{}.conf", left + done));
     if bad != path {
-        fs::rename(&path, &bad).with_context(|| format!("renaming {}", path.display()))?;
+        crate::durable::rename(&path, &bad).with_context(|| format!("renaming {}", path.display()))?;
         crate::durable::sync_esp(esp)?;
     }
     Ok(true)
