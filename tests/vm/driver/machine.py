@@ -355,6 +355,9 @@ class Machine:
     def crash(self):
         """A reset, QEMU's system_reset: what the guest hadn't written is lost, and what reached the virtual disk stays, as on a disk without a volatile write cache."""
         self.qmp("system_reset")
+        # A READY the reset boot sent counts as gone with it, or a cut early in a boot would leave the driver waiting on a dead shell.
+        with self.lock:
+            self.seen = len(self.ready)
         self.new_boot("reset (system_reset)")
 
     def select_entry(self, name):
