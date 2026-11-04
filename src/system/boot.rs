@@ -573,17 +573,12 @@ pub(crate) fn sign_replacing(esp: &Path, path: &Path) -> Result<()> {
                 "sbctl sign",
             )
         })
-        .and_then(|()| {
-            fs::File::open(&tmp)
-                .and_then(|file| file.sync_all())
-                .with_context(|| format!("writing {}", tmp.display()))
-        })
-        .and_then(|()| crate::durable::rename(&tmp, path).with_context(|| format!("replacing {}", path.display())));
+        .and_then(|()| crate::durable::rename_esp(&tmp, path));
     if signed.is_err() {
         let _ = fs::remove_file(&tmp);
     }
     signed?;
-    crate::durable::sync_renamed(path)
+    crate::durable::sync_esp(esp)
 }
 
 /// Random hex that makes a UKI's hash its own: once archix has revoked images, a rebuild must never come out identical to one of them.
@@ -638,7 +633,7 @@ fn lock_editor(esp: &Path) -> Result<()> {
     }
     let mut lines: Vec<&str> = text.lines().filter(|line| !is_editor(line)).collect();
     lines.push("editor no");
-    crate::durable::write(&conf, (lines.join("\n") + "\n").as_bytes())
+    crate::durable::write_esp(&conf, (lines.join("\n") + "\n").as_bytes())
 }
 
 /// Points loader.conf at archix's menu: `preferred` the glob systemd-boot walks in sort-key order past entries without tries, `default` the entry it starts when every one is bad; the editor goes off when the images are signed. Clears the EFI variables that would override it.
@@ -654,11 +649,12 @@ pub fn point_loader(esp: &Path, preferred: &str, default: &str, signed: bool) ->
     lines.push(format!("preferred {preferred}"));
     let text = lines.join("\n") + "\n";
     if text != old {
-        crate::durable::write(&conf, text.as_bytes())?;
+        crate::durable::write_esp(&conf, text.as_bytes())?;
     }
     if signed {
         lock_editor(esp)?;
     }
+    crate::durable::sync_esp(esp)?;
     clear_overrides(Some(default));
     Ok(())
 }
@@ -760,7 +756,7 @@ pub fn bless_booted(paths: &Paths) -> Result<()> {
         return Ok(());
     };
     crate::testhooks::mark("bless-rename");
-    crate::durable::rename(dir.join(&counted), &target).with_context(|| format!("renaming {counted} to {id}"))?;
+    crate::durable::rename_esp(&dir.join(&counted), &target)?;
     crate::testhooks::mark("bless-renamed");
     crate::durable::sync_esp(&target).with_context(|| format!("syncing {id}"))?;
     crate::testhooks::mark("bless-synced");

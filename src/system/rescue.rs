@@ -362,11 +362,11 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, root: &dyn boot::BootRoot) -> Res
             (size + boot::MARGIN) >> 20
         );
     }
-    crate::durable::copy(&built, &esp.join(DIR).join(&name))?;
+    crate::durable::copy_esp(&built, &esp.join(DIR).join(&name))?;
     crate::durable::sync_esp(esp)?;
     let _ = fs::remove_dir_all(root.read_path(Path::new(BUILT))?);
     crate::testhooks::mark("rescue-uki");
-    crate::durable::write(&entry_path(esp), entry_text(&name, &kernel).as_bytes())?;
+    crate::durable::write_esp(&entry_path(esp), entry_text(&name, &kernel).as_bytes())?;
     crate::durable::sync_esp(esp)?;
     crate::testhooks::mark("rescue-entry");
     remove_unused(esp, &name)?;

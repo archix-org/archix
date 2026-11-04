@@ -411,6 +411,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     drop_unwanted(esp, how.dir, planned)?;
     let existing = on_esp(esp);
     let names = entry_files(esp);
+    let mut replaced = Vec::new();
     for planned in planned {
         let id = planned.entry.id();
         let counted = how.counted && !matches!(planned.entry, Entry::Extra(_));
@@ -420,14 +421,21 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
         let unchanged =
             existing.get(&id) == Some(&name) && fs::read_to_string(entries.join(&name)).is_ok_and(|old| old == text);
         if !unchanged {
-            crate::durable::write(&entries.join(&name), text.as_bytes())?;
+            crate::durable::write_esp(&entries.join(&name), text.as_bytes())?;
             crate::testhooks::mark("menu-entry-written");
         }
-        // A cut between the write above and this removal leaves two names for one entry, so every other one goes.
-        for old in names.iter().filter(|old| boot::entry_id(old) == id && **old != name) {
-            fs::remove_file(entries.join(old)).with_context(|| format!("removing {old}"))?;
-            crate::testhooks::mark("menu-entry-replaced");
-        }
+        replaced.extend(
+            names
+                .iter()
+                .filter(|old| boot::entry_id(old) == id && **old != name)
+                .cloned(),
+        );
+    }
+    // The new names reach the disk before the old ones go, so a cut leaves an entry under two names, which drop_second_names settles, never under none.
+    crate::durable::sync_esp(esp)?;
+    for old in replaced {
+        fs::remove_file(entries.join(&old)).with_context(|| format!("removing {old}"))?;
+        crate::testhooks::mark("menu-entry-replaced");
     }
     crate::durable::sync_esp(esp)?;
     crate::testhooks::mark("menu-synced");
@@ -624,7 +632,7 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
             bail!("the boot image {name} is neither on the ESP nor freshly built");
         }
         crate::testhooks::mark("boot-image-copy");
-        crate::durable::copy(&built, &esp.join(IMAGES).join(name))?;
+        crate::durable::copy_esp(&built, &esp.join(IMAGES).join(name))?;
         crate::testhooks::mark("boot-image-copied");
     }
     crate::durable::sync_esp(esp)?;

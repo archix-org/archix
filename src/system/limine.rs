@@ -220,7 +220,7 @@ fn systemd_boot_binary(root: &Path) -> PathBuf {
 
 fn copy_loader(paths: &Paths, plan: &boot::BootPlan, to: &Path) -> Result<()> {
     let esp = Path::new(&plan.esp);
-    crate::durable::copy(&systemd_boot_binary(&paths.root), to)?;
+    crate::durable::copy_esp(&systemd_boot_binary(&paths.root), to)?;
     if plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys) {
         boot::sign_replacing(esp, to)?;
     }
@@ -311,7 +311,9 @@ pub fn finish(paths: &Paths, plan: &boot::BootPlan) -> Result<Vec<String>> {
     let esp = Path::new(&plan.esp);
     let fallback = esp.join(FALLBACK);
     if fallback.is_file() && !esp.join(FALLBACK_KEPT).exists() && !is_systemd_boot(&fallback) {
-        crate::durable::copy(&fallback, &esp.join(FALLBACK_KEPT))?;
+        crate::durable::copy_esp(&fallback, &esp.join(FALLBACK_KEPT))?;
+        // The kept copy is on the disk before the loader it keeps is replaced.
+        crate::durable::sync_esp(esp)?;
     }
     copy_loader(paths, plan, &fallback)?;
     crate::testhooks::mark("limine-fallback-written");

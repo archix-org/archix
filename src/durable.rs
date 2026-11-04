@@ -24,6 +24,7 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    refuse_fat(path)?;
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = path.with_file_name(tmp_name);
@@ -43,8 +44,66 @@ fn write_mode(path: &Path, contents: &[u8], mode: Option<u32>) -> Result<()> {
     sync_renamed(path)
 }
 
+/// Whether `path`, or the directory it would be made in, is on FAT, as the ESP is.
+fn on_fat(path: &Path) -> bool {
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let Ok(c) = std::ffi::CString::new(probe.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+    unsafe { libc::statfs(c.as_ptr(), &mut stat) == 0 && stat.f_type as i64 == MSDOS_SUPER_MAGIC }
+}
+
+/// The per-file flushes here are wrong on FAT: fsyncing a file renamed over another writes its new directory entry while the old name's removal waits in another sector, so a cut leaves two names on one file's clusters, which fsck.fat then truncates to nothing; the ESP's writes go through write_esp, copy_esp and rename_esp, and one sync_esp per step.
+fn refuse_fat(path: &Path) -> Result<()> {
+    if on_fat(path) {
+        anyhow::bail!(
+            "{} is on a FAT filesystem (the ESP): write it with durable::write_esp, copy_esp or rename_esp and flush the step with sync_esp, as a per-file fsync there can leave two names on one file's clusters",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Writes a file on the ESP as a temporary file renamed over it, flushing nothing: the caller ends the step with sync_esp, which writes FAT's buffers together and flushes the disk.
+pub fn write_esp(path: &Path, contents: &[u8]) -> Result<()> {
+    let tmp = esp_tmp(path);
+    removing_on_error(&tmp, || {
+        fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
+        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+    })
+}
+
+/// Copies a file onto the ESP like write_esp, streaming it.
+pub fn copy_esp(from: &Path, to: &Path) -> Result<()> {
+    let tmp = esp_tmp(to);
+    removing_on_error(&tmp, || {
+        fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
+        fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
+    })
+}
+
+/// Renames a file on the ESP, flushing nothing, as write_esp; the caller ends the step with sync_esp.
+pub fn rename_esp(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to).with_context(|| format!("renaming {} to {}", from.display(), to.display()))
+}
+
+fn esp_tmp(path: &Path) -> std::path::PathBuf {
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
 /// Flushes a file renamed into place and its directory; on FAT the new name's entry says empty until the file itself is synced again.
 pub fn sync_renamed(path: &Path) -> Result<()> {
+    refuse_fat(path)?;
     if crate::testhooks::broken("renamed-unsynced") {
         return sync_dir(path);
     }
@@ -68,6 +127,7 @@ pub fn copy(from: &Path, to: &Path) -> Result<()> {
     if let Some(dir) = to.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
+    refuse_fat(to)?;
     let mut tmp_name = to.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(".tmp");
     let tmp = to.with_file_name(tmp_name);
@@ -245,6 +305,7 @@ pub fn create_config_dirs(dir: &Path) -> Result<()> {
 /// Renames `from` to `to` so a power cut leaves either name with whole contents: flushes what's renamed first (a file's data, or for a directory its filesystem, as its files' data isn't the directory's), then both directories' entries. Its error is the rename's own, so callers can tell EXDEV and friends apart.
 pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
     let (from, to) = (from.as_ref(), to.as_ref());
+    refuse_fat(to).map_err(|e| std::io::Error::other(format!("{e:#}")))?;
     let meta = fs::symlink_metadata(from)?;
     if meta.is_dir() {
         let dir = File::open(from)?;

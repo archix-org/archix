@@ -3,7 +3,7 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use common::*;
@@ -997,4 +997,94 @@ fn with_secure_boot_enforcing_a_switch_whose_entry_wouldnt_be_signed_refuses_bef
         !machine.system_file("etc/archix-unsigned-test").exists(),
         "before applying anything: {text}"
     );
+}
+
+/// A FAT image mounted over a machine's ESP, unmounted when dropped.
+struct FatEsp(PathBuf, #[allow(dead_code)] tempfile::TempDir);
+
+impl FatEsp {
+    fn over(esp: &Path) -> FatEsp {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("esp.img");
+        fs::create_dir_all(esp).unwrap();
+        sh(&format!(
+            "truncate -s 512M {0} && mkfs.fat -F 32 {0} > /dev/null && mount -o loop,umask=0077 {0} {1}",
+            image.display(),
+            esp.display()
+        ));
+        FatEsp(esp.to_path_buf(), dir)
+    }
+}
+
+impl Drop for FatEsp {
+    fn drop(&mut self) {
+        let _ = Command::new("umount").arg(&self.0).status();
+    }
+}
+
+#[test]
+#[ignore]
+fn a_switch_writes_a_fat_esp_with_a_flush_per_step_and_never_a_per_file_fsync_there() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let _esp = FatEsp::over(&machine.esp());
+    let fat = [COUNTING, ("ARCHIX_TEST_CHECK_ESP", "1")];
+    let out = setup.run_env(&fat, &["switch", "--noconfirm"]);
+    checks.check(
+        out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("wasn't written"),
+        format!(
+            "a switch writes its menu on a FAT ESP: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    );
+    checks.eq(
+        machine.entries(),
+        vec!["archix-current+2.conf".to_string()],
+        "the current entry, counted, on FAT",
+    );
+    checks.check(!images(machine).is_empty(), "and its image");
+    let entries = machine.esp().join("loader/entries");
+    fs::rename(
+        entries.join("archix-current+2.conf"),
+        entries.join("archix-current.conf"),
+    )
+    .unwrap();
+    setup.set_body(&[], r#"files = { ["/etc/archix-fat-test"] = { text = "one" } }"#);
+    let out = setup.run_env(&fat, &["switch", "--noconfirm"]);
+    checks.check(
+        out.status.success() && !String::from_utf8_lossy(&out.stderr).contains("wasn't written"),
+        format!(
+            "a switch that renames the entry for its tries works on FAT: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ),
+    );
+    checks.eq(
+        machine.entries(),
+        vec!["archix-current+2.conf".to_string()],
+        "the blessed entry renamed to get its tries again",
+    );
+    let leftovers = sh(&format!("find {} -name '*.tmp'", machine.esp().display()));
+    checks.check(
+        leftovers.trim().is_empty(),
+        format!("no temporary files left on the ESP: {leftovers}"),
+    );
+    for (what, error) in [
+        (
+            "write",
+            archix::durable::write(&machine.esp().join("probe"), b"x").map_err(|e| format!("{e:#}")),
+        ),
+        (
+            "copy",
+            archix::durable::copy(Path::new("/etc/hostname"), &machine.esp().join("probe"))
+                .map_err(|e| format!("{e:#}")),
+        ),
+    ] {
+        checks.check(
+            error.as_ref().is_err_and(|e| e.contains("FAT") && e.contains("write_esp")),
+            format!("durable::{what}, whose per-file fsync can leave two names on one file's clusters on FAT, refuses the ESP: {error:?}"),
+        );
+    }
+    checks.finish();
 }
