@@ -509,6 +509,15 @@ fn active(unit: &str) -> bool {
 fn services(change: &SystemChange) -> Vec<String> {
     let mut failures = Vec::new();
     systemctl(&["daemon-reload"], &mut failures);
+    for (verb, unit) in unit_actions(change, &active) {
+        systemctl(&[verb, &unit], &mut failures);
+    }
+    failures
+}
+
+/// What a switch does to units on the running system, given which are `active`: stops the disabled or dropped, starts the newly enabled, try-restarts those whose unit file it rewrote and reloads those whose RELOADS file changed.
+pub fn unit_actions(change: &SystemChange, active: &dyn Fn(&str) -> bool) -> Vec<(&'static str, String)> {
+    let mut actions = Vec::new();
     let off = change
         .to
         .services
@@ -525,7 +534,7 @@ fn services(change: &SystemChange) -> Vec<String> {
         );
     for unit in off {
         if active(unit) {
-            systemctl(&["stop", unit], &mut failures);
+            actions.push(("stop", unit.clone()));
         }
     }
     let changed = change.changed_paths();
@@ -539,13 +548,65 @@ fn services(change: &SystemChange) -> Vec<String> {
         });
         let newly = change.from.services.get(unit) != Some(&true);
         let never = change.to.restart_if_changed.get(unit) == Some(&false);
+        let reread = RELOADS
+            .iter()
+            .any(|(reloads, path)| *reloads == unit && changed.contains(path));
         if newly && !active(unit) {
-            systemctl(&["start", unit], &mut failures);
+            actions.push(("start", unit.clone()));
         } else if rewritten && !never {
-            systemctl(&["try-restart", unit], &mut failures);
+            actions.push(("try-restart", unit.clone()));
+        } else if reread {
+            actions.push(("try-reload-or-restart", unit.clone()));
         }
     }
-    failures
+    actions
+}
+
+/// Units archix writes whose running service reads a file the switch may change on its own: reloaded when only that file changed.
+const RELOADS: &[(&str, &str)] = &[(super::firewall::UNIT, super::firewall::RULES)];
+
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use crate::system::{ManagedFile, SystemState, firewall};
+
+    fn file(sha256: &str) -> ManagedFile {
+        ManagedFile {
+            sha256: sha256.to_string(),
+            link: None,
+            mode: 0o644,
+            owner: "root".to_string(),
+            group: "root".to_string(),
+            merge: None,
+        }
+    }
+
+    fn with_rules(sha256: &str) -> SystemState {
+        let mut state = SystemState::default();
+        state.files.insert(firewall::RULES.to_string(), file(sha256));
+        state
+            .files
+            .insert(format!("/etc/systemd/system/{}", firewall::UNIT), file("unit"));
+        state.services.insert(firewall::UNIT.to_string(), true);
+        state
+    }
+
+    #[test]
+    fn the_firewall_reloads_when_only_its_rules_change_and_not_when_nothing_does() {
+        let change = SystemChange {
+            from: with_rules("a"),
+            to: with_rules("b"),
+        };
+        assert_eq!(
+            unit_actions(&change, &|_| true),
+            vec![("try-reload-or-restart", firewall::UNIT.to_string())]
+        );
+        let same = SystemChange {
+            from: with_rules("a"),
+            to: with_rules("a"),
+        };
+        assert!(unit_actions(&same, &|_| true).is_empty());
+    }
 }
 
 #[cfg(test)]
