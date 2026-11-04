@@ -74,7 +74,12 @@ impl Root {
 
 impl super::boot::BootRoot for Root {
     fn local_db(&self) -> PathBuf {
-        self.path.join("var/lib/pacman/local")
+        // A root laid out for rollbacks keeps the database under /var/rollback, bound over /var/lib/pacman only where it boots, so not in a keep's clone.
+        let rolled = self.path.join(crate::snapshot::layout::ON_ROOT).join("pacman/local");
+        match rolled.is_dir() {
+            true => rolled,
+            false => self.path.join("var/lib/pacman/local"),
+        }
     }
 
     fn read_path(&self, path: &Path) -> Result<PathBuf> {
