@@ -438,23 +438,36 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     boot::point_loader(esp, PREFERRED, CURRENT, how.signed)
 }
 
-/// The images `planned` needs that aren't on the ESP yet, by name.
-/// Takes the snapshot entries whose image is neither on the ESP nor in `built` out of `planned`, as after a cut between recording a new image and copying it, when a try boot or keep refreshes the menu from another root; returns them. The current system's entry stays, so its missing image fails the refresh.
-fn drop_unreachable(esp: &Path, built: &Path, planned: &mut Vec<Planned>) -> Vec<(u32, String)> {
+/// Takes the snapshot entries whose image is neither on the ESP nor in `built` out of `planned`, as after a cut between recording a new image and copying it, when a try boot or keep refreshes the menu from another root; returns them. The current system's and the fallback slot's entries stay: the slot's missing image fails the refresh here, naming it, as a menu without it would leave a broken boot nowhere to fall back to.
+fn drop_unreachable(
+    esp: &Path,
+    built: &Path,
+    planned: &mut Vec<Planned>,
+    slot: Option<u32>,
+) -> Result<Vec<(u32, String)>> {
+    let reachable = |image: &str| esp.join(IMAGES).join(image).exists() || built.join(image).is_file();
+    if let Some(lost) = planned
+        .iter()
+        .find(|p| slot.is_some_and(|slot| p.entry == Entry::Snapshot(slot)) && !reachable(&p.image))
+    {
+        bail!(
+            "the fallback slot, snapshot {}, boots the image {}, which is neither on the ESP nor among the images this root built, so the menu isn't written rather than written without the slot",
+            slot.unwrap_or_default(),
+            lost.image
+        );
+    }
     let mut dropped = Vec::new();
-    planned.retain(|p| {
-        let reachable = esp.join(IMAGES).join(&p.image).exists() || built.join(&p.image).is_file();
-        match (&p.entry, reachable) {
-            (Entry::Snapshot(number), false) => {
-                dropped.push((*number, p.image.clone()));
-                false
-            }
-            _ => true,
+    planned.retain(|p| match (&p.entry, reachable(&p.image)) {
+        (Entry::Snapshot(number), false) => {
+            dropped.push((*number, p.image.clone()));
+            false
         }
+        _ => true,
     });
-    dropped
+    Ok(dropped)
 }
 
+/// The images `planned` needs that aren't on the ESP yet, by name.
 fn missing_images<'a>(esp: &Path, planned: &'a [Planned]) -> BTreeSet<&'a str> {
     planned
         .iter()
@@ -588,7 +601,7 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
     }
     fs::create_dir_all(esp.join(IMAGES)).with_context(|| format!("creating {}", esp.join(IMAGES).display()))?;
     let built_dir = paths.root.join(boot::BUILT.trim_start_matches('/'));
-    for (number, image) in drop_unreachable(esp, &built_dir, &mut planned) {
+    for (number, image) in drop_unreachable(esp, &built_dir, &mut planned, state.slot)? {
         eprintln!(
             "warning: snapshot {number}'s boot image {image} is neither on the ESP nor among the images this root built, so it has no boot entry"
         );
@@ -978,9 +991,35 @@ mod tests {
             planned(Entry::Snapshot(4), "gone.efi"),
         ];
         assert_eq!(
-            drop_unreachable(&esp, &built, &mut planned),
+            drop_unreachable(&esp, &built, &mut planned, Some(2)).unwrap(),
             [(4, "gone.efi".to_string())]
         );
         assert_eq!(planned.len(), 3);
+    }
+
+    #[test]
+    fn the_fallback_slots_entry_is_never_dropped_for_a_missing_image_the_refresh_fails_naming_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, built) = (tmp.path().join("esp"), tmp.path().join("built"));
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::create_dir_all(&built).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        let mut planned = vec![
+            planned(Entry::Current, "a.efi"),
+            planned(Entry::Snapshot(3), "gone.efi"),
+            planned(Entry::Snapshot(4), "gone.efi"),
+        ];
+        let error = format!(
+            "{:#}",
+            drop_unreachable(&esp, &built, &mut planned, Some(4)).unwrap_err()
+        );
+        assert!(
+            error.contains("fallback slot, snapshot 4") && error.contains("gone.efi"),
+            "{error}"
+        );
+        assert!(
+            planned.iter().any(|p| p.entry == Entry::Snapshot(4)),
+            "the slot's entry stays planned"
+        );
     }
 }
