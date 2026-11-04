@@ -659,6 +659,60 @@ fn under_secure_boot_an_image_is_signed_once_and_shared_by_the_entries_that_boot
     checks.finish();
 }
 
+#[test]
+#[ignore]
+fn with_revoke_unused_a_switch_that_drops_a_signed_image_revokes_it() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let esp = setup.machine.esp();
+    sbctl_keys(&esp);
+    let switch = |revoke: bool, initramfs: &str| {
+        setup.set_body(
+            &[],
+            &format!(
+                r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", secure_boot = true, revoke_unused = {revoke}, rescue_entry = false }}, kernel_params = {{ "root=/dev/vda2 rw" }}, files = {{ ["/etc/mkinitcpio.conf.d/zz-archix-test.conf"] = {{ text = "{initramfs}" }} }}"#,
+                esp.display()
+            ),
+        );
+        let output = setup.run_env(&[COUNTING], &["switch", "--noconfirm"]);
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+    switch(false, "# one");
+    let first = image_of(&setup.machine, "archix-current.conf");
+    let off = switch(false, "FILES=(/etc/hostname)");
+    checks.check(
+        image_of(&setup.machine, "archix-current.conf") != first && !images(&setup.machine).contains(&first),
+        format_args!(
+            "the initramfs change drops the first image: {:?}",
+            images(&setup.machine)
+        ),
+    );
+    checks.check(
+        !off.contains("revoking boot images") && !off.contains("\nrevoked "),
+        format_args!("with revoke_unused off nothing is revoked: {off}"),
+    );
+    let second = image_of(&setup.machine, "archix-current.conf");
+    let on = switch(true, "FILES=(/etc/hostname /etc/os-release)");
+    checks.check(
+        !images(&setup.machine).contains(&second),
+        format_args!(
+            "the next initramfs change drops the second image: {:?}",
+            images(&setup.machine)
+        ),
+    );
+    // The container has no dbx to write, so the attempt fails: what matters is that the switch makes it.
+    checks.check(
+        on.contains("revoking boot images no entry uses"),
+        format_args!("with revoke_unused on the switch revokes the signed image it dropped: {on}"),
+    );
+    checks.finish();
+}
+
 /// An EFI variable's file: attributes, then `data`.
 fn efivar(dir: &Path, name: &str, data: &[u8]) {
     let mut bytes = vec![7u8, 0, 0, 0];

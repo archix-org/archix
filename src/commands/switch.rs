@@ -784,6 +784,12 @@ fn write_boot(
             )),
         }
     }
+    if failures.is_empty()
+        && plan.revoke_unused
+        && let Err(e) = system::revoke::revoke(paths, false, true, &|_| Ok(true))
+    {
+        failures.push(format!("revoking boot images no entry uses: {e:#}"));
+    }
     if let Err(e) = archix::durable::write(
         &paths.root.join(system::health::TIMEOUT_DROP_IN.trim_start_matches('/')),
         system::health::timeout_drop_in(plan.unblessed_timeout).as_bytes(),
