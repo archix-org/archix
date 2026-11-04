@@ -96,6 +96,8 @@ def main():
         seen = {"suite": suite, "key": sys.argv[3], "fs": os.environ.get("FS") or "ext4", "commit": commit, "seconds": int(float(sys.argv[4])),
                 "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "logs": [log.name for log in logs]}
         stem.with_suffix(".json").write_text(json.dumps(seen) + "\n")
+        kept = f", its logs in {stem.with_suffix('.logs.tar.gz')}" if logs else ""
+        print(f"recorded: {suite} on {seen['fs']} passed at {seen['at']} (commit {commit}, {seen['seconds']} s, key {sys.argv[3][:16]}){kept}")
         for old in sorted(results().glob("*.json"), key=lambda p: p.stat().st_mtime)[:-KEEP]:
             old.unlink()
             old.with_suffix(".logs.tar.gz").unlink(missing_ok=True)
