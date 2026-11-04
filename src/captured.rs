@@ -372,18 +372,50 @@ impl Applied {
         command
     }
 
+    /// Makes the repository if there's none, has git flush every object and ref it writes, and drops the empty loose objects a power cut before an unflushed write reached the disk leaves, which git would otherwise call corrupt instead of writing again.
     fn ensure(&self) -> Result<()> {
-        if self.git_dir.join("HEAD").is_file() {
-            return Ok(());
+        if !self.git_dir.join("HEAD").is_file() {
+            if let Some(parent) = self.git_dir.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            run(
+                self.git(&["init", "-q", "--bare"]),
+                "git init of root's config repository",
+            )?;
+            fs::set_permissions(&self.git_dir, fs::Permissions::from_mode(0o700))?;
         }
-        if let Some(parent) = self.git_dir.parent() {
-            fs::create_dir_all(parent)?;
+        for (key, value) in [("core.fsync", "all"), ("core.fsyncMethod", "fsync")] {
+            let set = run(self.git(&["config", "--get", key]), "git config").map(text).ok();
+            if set.as_deref() != Some(value) {
+                run(
+                    self.git(&["config", key, value]),
+                    "git config of root's config repository",
+                )?;
+            }
         }
-        run(
-            self.git(&["init", "-q", "--bare"]),
-            "git init of root's config repository",
-        )?;
-        fs::set_permissions(&self.git_dir, fs::Permissions::from_mode(0o700))?;
+        self.drop_torn()
+    }
+
+    fn drop_torn(&self) -> Result<()> {
+        let objects = self.git_dir.join("objects");
+        for dir in fs::read_dir(&objects)
+            .with_context(|| format!("reading {}", objects.display()))?
+            .flatten()
+        {
+            let name = dir.file_name();
+            if name.len() != 2 || !dir.path().is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(dir.path())?.flatten() {
+                if file.metadata().is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
+                    eprintln!(
+                        "warning: root's config repository had an empty object, {}, as a power cut leaves one; it's written again",
+                        file.path().display()
+                    );
+                    fs::remove_file(file.path())?;
+                }
+            }
+        }
         Ok(())
     }
 

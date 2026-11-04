@@ -709,3 +709,40 @@ fn the_lock_recorded_with_a_generation_is_the_one_applied_even_if_the_live_one_c
     assert_eq!(text, applied_lock);
     let _ = fs::remove_file(swapped);
 }
+
+#[test]
+fn roots_config_repository_survives_objects_a_power_cut_left_empty_and_flushes_what_it_writes() {
+    let owner = setup();
+    let dir = config(&owner, "torn-objects", "return { packages = { \"vim\" } }\n");
+    let work = Work::new(&captures()).unwrap();
+    let captured = captured::capture(&dir, &work).unwrap();
+    let applied = Applied {
+        git_dir: work.dir.join("torn.git"),
+    };
+    let tree = applied.store_tree(&captured).unwrap();
+    let emptied = sh(&format!(
+        r"find {}/objects -type f -path '*/objects/??/*' -print -exec truncate -s 0 {{}} \; | wc -l",
+        applied.git_dir.display()
+    ));
+    assert!(
+        emptied.trim().parse::<u32>().unwrap() > 0,
+        "the store wrote loose objects"
+    );
+    println!(
+        "EVIDENCE torn objects: emptied {} loose objects, as a cut before git's data reached the disk leaves them",
+        emptied.trim()
+    );
+    assert_eq!(
+        applied.store_tree(&captured).unwrap(),
+        tree,
+        "a store after the cut writes the objects again"
+    );
+    let generation = applied.record(1, &tree, b"lock", b"{}").unwrap();
+    let stored = applied.verified(1, &generation.commit, Some(&tree)).unwrap();
+    assert_eq!(stored.lock, b"lock".to_vec());
+    let config = fs::read_to_string(applied.git_dir.join("config")).unwrap_or_default();
+    assert!(
+        config.contains("fsync = all") && config.contains("fsyncMethod = fsync"),
+        "root's repository flushes objects and refs as git writes them: {config}"
+    );
+}
