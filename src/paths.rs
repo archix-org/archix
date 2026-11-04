@@ -50,6 +50,19 @@ impl Paths {
         }
     }
 
+    /// `under(root)` for a root mounted on its own, as the rescue entry and a live USB mount it: a root laid out for rollbacks has archix's state and pacman's database under /var/rollback, which only its boot binds over /var/lib.
+    pub fn on_root(root: &std::path::Path) -> Paths {
+        let mut paths = Paths::under(root);
+        let rolled = root.join(crate::snapshot::layout::ON_ROOT);
+        if rolled.join("archix").is_dir() {
+            paths.state = rolled.join("archix");
+        }
+        if rolled.join("pacman").is_dir() {
+            paths.pacman_db = rolled.join("pacman");
+        }
+        paths
+    }
+
     fn live() -> Paths {
         Paths {
             pacman_db: PathBuf::from("/var/lib/pacman"),
@@ -88,5 +101,28 @@ impl Paths {
             return on_archix.join("packages");
         }
         self.cache.join("pkg")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_root_mounted_without_its_binds_has_its_state_and_database_under_var_rollback() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = Paths::on_root(root.path());
+        assert_eq!(
+            plain.state,
+            root.path().join("var/lib/archix"),
+            "a root not laid out for rollbacks"
+        );
+        assert_eq!(plain.pacman_db, root.path().join("var/lib/pacman"));
+        std::fs::create_dir_all(root.path().join("var/rollback/archix")).unwrap();
+        std::fs::create_dir_all(root.path().join("var/rollback/pacman")).unwrap();
+        let laid_out = Paths::on_root(root.path());
+        assert_eq!(laid_out.state, root.path().join("var/rollback/archix"));
+        assert_eq!(laid_out.pacman_db, root.path().join("var/rollback/pacman"));
+        assert_eq!(laid_out.pacman_conf, root.path().join("etc/pacman.conf"));
     }
 }

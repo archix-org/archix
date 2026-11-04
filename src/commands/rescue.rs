@@ -226,10 +226,7 @@ fn fs_type(device: &Path) -> Result<String> {
 
 /// Whether the current generation of the root mounted at `root` has rollbacks on; a root no switch recorded counts as on.
 fn rollbacks_on(root: &Path) -> bool {
-    let paths = Paths {
-        state: root.join(archix::snapshot::layout::ON_ROOT).join("archix"),
-        ..Paths::under(root)
-    };
+    let paths = Paths::on_root(root);
     let store = archix::generations::Store::new(&paths);
     match store.current() {
         Ok(Some(number)) => store.get(number).is_ok_and(|g| g.settings.rollback.is_some()),
@@ -460,7 +457,7 @@ impl Session {
             None => is_mount_point(Path::new(ROOT_MOUNT)).then(|| PathBuf::from(ROOT_MOUNT)),
         };
         let under_root = root.and_then(|root| {
-            let esp = fs::read_to_string(Paths::under(&root).state.join("boot/esp")).ok()?;
+            let esp = fs::read_to_string(Paths::on_root(&root).state.join("boot/esp")).ok()?;
             let at = root.join(esp.trim().trim_start_matches('/'));
             at.is_dir().then_some(at)
         });
@@ -596,7 +593,7 @@ impl Session {
         let hash = password::sha512_crypt(first.as_bytes(), &password::salt()?);
         password::set(&root.join("etc"), user, &hash).with_context(|| format!("setting {user}'s password"))?;
         println!("set {user}'s password");
-        let paths = Paths::under(&root);
+        let paths = Paths::on_root(&root);
         let records = archix::generations::Store::new(&paths);
         let generation = records.current()?.and_then(|current| records.get(current).ok());
         let declared = generation
