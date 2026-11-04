@@ -256,6 +256,11 @@ pub fn start(paths: &Paths, plan: &boot::BootPlan) -> Result<Option<String>> {
     )))
 }
 
+/// Whether the next boot goes through the systemd-boot a move from Limine puts on the ESP: the running loader's LoaderFeatures are Limine's then, which don't say systemd-boot counts boots, but that boot must be counted to count as good and finish the move.
+pub fn next_boot_is_archix_systemd_boot(paths: &Paths, loader: boot::Loader, esp: &Path) -> bool {
+    loader == boot::Loader::SystemdBoot && present(paths, esp) && !load(paths).is_some_and(|m| m.phase == Phase::Done)
+}
+
 /// Whether systemd-boot started this boot, by the LoaderInfo variable it sets.
 fn booted_by_systemd_boot() -> bool {
     let Some(path) = crate::testhooks::efivars().map(|dir| dir.join(format!("LoaderInfo-{}", boot::LOADER_GUID)))
@@ -349,4 +354,43 @@ pub fn finish(paths: &Paths, plan: &boot::BootPlan) -> Result<Vec<String>> {
 
 fn is_systemd_boot(path: &Path) -> bool {
     fs::read(path).is_ok_and(|bytes| bytes.windows(29).any(|w| w == b"#### LoaderInfo: systemd-boot"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_menu_written_for_the_move_from_limine_counts_its_boots_whatever_limine_reports() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::under(root.path());
+        let esp = root.path().join("efi");
+        fs::create_dir_all(esp.join("EFI/limine")).unwrap();
+        assert!(
+            next_boot_is_archix_systemd_boot(&paths, boot::Loader::SystemdBoot, &esp),
+            "the boot after the switch goes through the systemd-boot archix puts on the ESP"
+        );
+        assert!(
+            !next_boot_is_archix_systemd_boot(&paths, boot::Loader::Limine, &esp),
+            "staying on Limine"
+        );
+        save(
+            &paths,
+            &Migration {
+                phase: Phase::Done,
+                entry: 8,
+            },
+        )
+        .unwrap();
+        assert!(
+            !next_boot_is_archix_systemd_boot(&paths, boot::Loader::SystemdBoot, &esp),
+            "once moved, systemd-boot's own LoaderFeatures say"
+        );
+        fs::remove_dir_all(esp.join("EFI/limine")).unwrap();
+        fs::remove_file(state_path(&paths)).unwrap();
+        assert!(
+            !next_boot_is_archix_systemd_boot(&paths, boot::Loader::SystemdBoot, &esp),
+            "no Limine, nothing to move from"
+        );
+    }
 }

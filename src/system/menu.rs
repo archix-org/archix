@@ -628,7 +628,9 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
         crate::testhooks::mark("boot-image-copied");
     }
     crate::durable::sync_esp(esp)?;
-    let counted = plan.tries > 0 && boot::loader_counts_boots(crate::testhooks::loader_features());
+    let counted = plan.tries > 0
+        && (boot::loader_counts_boots(crate::testhooks::loader_features())
+            || super::limine::next_boot_is_archix_systemd_boot(paths, plan.loader, esp));
     let signed = plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys);
     match plan.loader {
         Loader::SystemdBoot => write(
