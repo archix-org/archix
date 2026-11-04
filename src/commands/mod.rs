@@ -120,11 +120,13 @@ pub fn evaluate_config(
     let work = archix::captured::Work::new(Path::new(archix::captured::CAPTURES))?;
     let captured = archix::captured::capture(config_dir, &work)?;
     archix::testhooks::after_capture();
-    Ok(reevaluate(&captured, host, &overlay).map(|config| Evaluated {
-        config,
-        captured: Some(captured),
-        _work: Some(work),
-    }))
+    Ok(reevaluate(&captured, host, &overlay)
+        .map_err(|error| captured.explain(error))
+        .map(|config| Evaluated {
+            config,
+            captured: Some(captured),
+            _work: Some(work),
+        }))
 }
 
 /// Evaluates an already captured tree again, with another overlay, in the isolated child.

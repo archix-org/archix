@@ -746,3 +746,34 @@ fn roots_config_repository_survives_objects_a_power_cut_left_empty_and_flushes_w
         "root's repository flushes objects and refs as git writes them: {config}"
     );
 }
+
+#[test]
+fn a_gitignored_file_the_config_reads_fails_naming_it_and_saying_its_gitignored() {
+    let owner = setup();
+    fs::set_permissions(&owner.home, fs::Permissions::from_mode(0o755)).unwrap();
+    for (name, init) in [
+        ("ignored-require", "return require(\"local\")\n"),
+        (
+            "ignored-read",
+            "return { files = { [\"/etc/x\"] = { text = archix.read_file(\"secret.txt\") } } }\n",
+        ),
+    ] {
+        let dir = config(&owner, name, init);
+        fs::create_dir_all(dir.join("lua")).unwrap();
+        fs::write(dir.join("lua/local.lua"), "return {}\n").unwrap();
+        fs::write(dir.join("secret.txt"), "x\n").unwrap();
+        fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
+        fs::write(dir.join(".gitignore"), "lua/local.lua\nsecret.txt\n").unwrap();
+        sh(&format!("chown -R {USER}: {}", dir.display()));
+        let (ok, said) = archix(&dir, None, &["status"]);
+        let file = if name == "ignored-require" {
+            "lua/local.lua"
+        } else {
+            "secret.txt"
+        };
+        assert!(
+            !ok && said.contains(file) && said.contains("gitignored") && said.contains("capture"),
+            "{name}: {said}"
+        );
+    }
+}

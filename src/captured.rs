@@ -143,6 +143,39 @@ pub struct Captured {
     scratch: PathBuf,
     /// Root's own scratch files about the tree, which nobody else can read.
     private: PathBuf,
+    /// Files in the config directory a .gitignore keeps out of the tree, relative to it.
+    pub ignored: Vec<String>,
+}
+
+impl Captured {
+    /// `error`, an evaluation's, with what it names that's gitignored said so, as such a file isn't in the tree evaluated.
+    pub fn explain(&self, error: String) -> String {
+        let named: Vec<&str> = self
+            .ignored
+            .iter()
+            .map(String::as_str)
+            .filter(|path| {
+                let module = path
+                    .trim_start_matches("lua/")
+                    .trim_end_matches(".lua")
+                    .replace('/', ".");
+                error.contains(*path)
+                    || error.contains(&format!("'{module}'"))
+                    || error.contains(&format!("\"{module}\""))
+            })
+            .collect();
+        if named.is_empty() {
+            return error;
+        }
+        format!(
+            "{error}\n{} gitignored, so not in the capture of the config, which is what archix evaluates: a generation must be reproducible from its tree. Stop ignoring {}, or keep a secret in it as an encrypted file (secrets.items)",
+            match named.as_slice() {
+                [one] => format!("{one} is"),
+                many => format!("{} are", many.join(", ")),
+            },
+            if named.len() == 1 { "it" } else { "them" }
+        )
+    }
 }
 
 /// Where root commands keep their captures of the config while they run.
@@ -234,11 +267,24 @@ pub fn capture(config_dir: &Path, work: &Work) -> Result<Captured> {
             "the config tree root unpacked ({checked}) isn't the one its owner captured ({tree}); git submodules and files git can't archive aren't supported in the config"
         );
     }
+    let ignored = run(
+        git(&["ls-files", "-z", "--others", "--ignored", "--exclude-standard"]),
+        "git ls-files, as the config's owner",
+    )
+    .map(|out| {
+        String::from_utf8_lossy(&out)
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default();
     Ok(Captured {
         tree,
         dir,
         scratch,
         private,
+        ignored,
     })
 }
 
