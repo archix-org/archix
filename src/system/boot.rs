@@ -943,12 +943,36 @@ pub fn limine_keep_refusal(current: &Path, snapshot: &Path) -> Option<String> {
     ))
 }
 
-/// Whether this machine's firmware enforces Secure Boot; never for a test root, which this firmware doesn't boot.
+/// Whether this machine's firmware enforces Secure Boot; never for a test root, which this firmware doesn't boot, unless a debug build fakes one with ARCHIX_TEST_SECUREBOOT_ROOT.
 pub fn firmware_enforces() -> bool {
-    crate::testhooks::root() == Path::new("/")
+    let faked = cfg!(debug_assertions) && std::env::var_os("ARCHIX_TEST_SECUREBOOT_ROOT").is_some();
+    (crate::testhooks::root() == Path::new("/") || faked)
         && super::secureboot::Machine::new()
             .state()
             .is_some_and(|state| state.enabled && !state.setup_mode)
+}
+
+/// Checked before a switch or revert changes anything: with Secure Boot enforcing, images archix won't sign could never boot.
+pub fn check_signing(plan: &BootPlan) -> Result<()> {
+    if plan.loader == Loader::Limine {
+        return Ok(());
+    }
+    let enforcing = firmware_enforces();
+    let signed = plan.secure_boot.unwrap_or_else(sbctl_has_keys);
+    if enforcing && !signed && super::secureboot::in_chroot() {
+        eprintln!(
+            "warning: this host's Secure Boot is on and the boot images won't be signed; ignored, since this runs in a chroot"
+        );
+    } else if enforcing && !signed {
+        bail!(
+            "Secure Boot is on, but this switch's boot images wouldn't be signed ({}), so the firmware would refuse them; nothing was changed. Run `sudo archix secure-boot setup`, or set boot.secure_boot = true if sbctl already has keys",
+            match plan.secure_boot {
+                Some(false) => "boot.secure_boot = false",
+                _ => "sbctl has no keys",
+            }
+        );
+    }
+    Ok(())
 }
 
 /// With Secure Boot enforcing, an unsigned image or loader would leave the menu unbootable, so it fails before the menu points at it.

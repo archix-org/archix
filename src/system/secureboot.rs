@@ -21,7 +21,15 @@ pub struct Machine {
 }
 
 impl Machine {
+    /// This machine, or in a debug build the root ARCHIX_TEST_SECUREBOOT_ROOT names, whose sys/firmware/efi/efivars a test fakes.
     pub fn new() -> Machine {
+        if cfg!(debug_assertions)
+            && let Some(root) = std::env::var_os("ARCHIX_TEST_SECUREBOOT_ROOT")
+        {
+            return Machine {
+                root: PathBuf::from(root),
+            };
+        }
         Machine {
             root: PathBuf::from("/"),
         }

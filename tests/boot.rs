@@ -896,3 +896,51 @@ fn after_rotate_pcr_key_a_switch_with_nothing_else_to_do_builds_images_signed_wi
         "and the one after has nothing to do again: {again}"
     );
 }
+
+/// A root whose efivars say Secure Boot is enforcing, for ARCHIX_TEST_SECUREBOOT_ROOT.
+fn enforcing() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let vars = dir.path().join("sys/firmware/efi/efivars");
+    fs::create_dir_all(&vars).unwrap();
+    for (name, value) in [("SecureBoot", 1u8), ("SetupMode", 0)] {
+        fs::write(
+            vars.join(format!("{name}-8be4df61-93ca-11d2-aa0d-00e098032b8c")),
+            [6, 0, 0, 0, value],
+        )
+        .unwrap();
+    }
+    dir
+}
+
+#[test]
+#[ignore]
+fn with_secure_boot_enforcing_a_switch_whose_entry_wouldnt_be_signed_refuses_before_applying() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let boot = boot_body(machine).replace("rescue_entry = false", "rescue_entry = false, secure_boot = false");
+    setup.set_body(
+        &[],
+        &format!(r#"{boot}, files = {{ ["/etc/archix-unsigned-test"] = {{ text = "x" }} }}"#),
+    );
+    let fake = enforcing();
+    let out = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_SECUREBOOT_ROOT", fake.path().to_str().unwrap())],
+        &["switch", "--noconfirm"],
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains("wouldn't be signed") && text.contains("nothing was changed"),
+        "it refuses naming why: {text}"
+    );
+    assert!(
+        !machine.system_file("etc/archix-unsigned-test").exists(),
+        "before applying anything: {text}"
+    );
+}

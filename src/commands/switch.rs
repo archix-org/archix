@@ -604,6 +604,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         None => format!("before switch to generation {number}"),
     };
     if let Some(boot) = &boot {
+        system::boot::check_signing(boot)?;
         system::menu::precheck(&paths, boot).map_err(|e| e.context("nothing was changed"))?;
     }
     let taken = rollbacks
@@ -1686,6 +1687,9 @@ pub fn revert(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()
     archix::conflicts::check(&packages.install, &packages.remove, &db, &paths.root)?;
     check_packages(&packages)?;
     let rewritten = system::apply::out_of_date(&system_change, &place, &accounts)?;
+    if let Some(boot) = generation.settings.boot.as_ref() {
+        system::boot::check_signing(boot)?;
+    }
     let taken = rollbacks
         .before(
             &paths,
