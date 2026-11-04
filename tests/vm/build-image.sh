@@ -5,6 +5,9 @@ archive=${ARCHIVE:-https://archive.archlinux.org}
 dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl git e2fsprogs) archix=/work/archix
 fs=${FS:-ext4}
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
+# LOADER=limine builds an image Limine boots from the ESP, with the kernel and initramfs there, as CachyOS installs it.
+loader=${LOADER:-systemd-boot}
+[ "$loader" != limine ] || packages+=(limine efibootmgr)
 # IMG=/work/top.img with ROOT_AT_TOP=1 builds the power-cut suite's second image, its btrfs root on the top level rather than in @.
 img=${IMG:-/work/disk.img}
 rm -f "$img"
@@ -50,16 +53,22 @@ cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
 ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 install -Dm755 "$archix" /mnt/usr/bin/archix
 install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
-bootctl --esp-path=/mnt/efi --no-variables install >/dev/null
+if [ "$loader" = limine ]; then
+  install -Dm644 /mnt/usr/share/limine/BOOTX64.EFI /mnt/efi/EFI/BOOT/BOOTX64.EFI
+  install -Dm644 /mnt/usr/share/limine/BOOTX64.EFI /mnt/efi/EFI/limine/BOOTX64.EFI
+else
+  bootctl --esp-path=/mnt/efi --no-variables install >/dev/null
+  printf 'timeout 2\nconsole-mode keep\n' > /mnt/efi/loader/loader.conf
+fi
 # The ESP in fstab, as on any real install: early boot units must not wait on it in a cycle.
 echo "UUID=$(blkid -s UUID -o value "$esp") /efi vfat defaults 0 2" >> /mnt/etc/fstab
-printf 'timeout 2\nconsole-mode keep\n' > /mnt/efi/loader/loader.conf
 
 mkdir -p /mnt/etc/archix
 rootflags= progs=; [ "$fs" = btrfs ] && rootflags='"rootflags=subvol=@", ' progs='"btrfs-progs", '
 [ -z "${ROOT_AT_TOP:-}" ] || rootflags=
 extra=$(for package in ${TARGET_PACKAGES:-}; do printf '"%s", ' "$package"; done)
-sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" \
+[ "$loader" != limine ] || progs+='"limine", "efibootmgr", '
+sed -e "s/@ROOT_UUID@/${root_uuid,,}/" -e "s|loader = \"systemd-boot\"|loader = \"$loader\"|" -e "s|\"rw\", |\"rw\", $rootflags|" -e "s|{ \"base\", |{ \"base\", $progs|" -e "s|@ARCHIVE_URL@|$archive|" \
   -e "s|@EXTRA_PACKAGES@|$extra|" "$dir/config.lua" > /mnt/etc/archix/init.lua
 # The guest runs the driver's root shell, which config.lua takes from here.
 install -Dm755 /vm/driver/backdoor.sh /mnt/etc/archix/archix-backdoor
@@ -73,8 +82,17 @@ printf '[Service]\nProtectSystem=strict\nExecStart=/bin/sh -c "while cat /usr/li
 arch-chroot /mnt systemctl enable archix-backdoor.service archix-protected.service systemd-networkd.service systemd-resolved.service
 sed -n 's/.*kernel_params = { \(.*\) },$/\1/p' /mnt/etc/archix/init.lua | tr -d '",' > /mnt/etc/kernel/cmdline
 kernel=$(basename "$(dirname "$(ls /mnt/usr/lib/modules/*/vmlinuz | head -1)")")
-mkdir -p /mnt/efi/EFI/Linux
-arch-chroot /mnt mkinitcpio -k "$kernel" -S autodetect -U /efi/EFI/Linux/arch-linux.efi
-ls /mnt/efi/EFI/Linux
+if [ "$loader" = limine ]; then
+  cp "/mnt/usr/lib/modules/$kernel/vmlinuz" /mnt/efi/vmlinuz-linux
+  arch-chroot /mnt mkinitcpio -k "$kernel" -S autodetect -g /efi/initramfs-linux.img
+  conf=$(printf 'timeout: 1\n\n/Arch Linux\n    protocol: linux\n    path: boot():/vmlinuz-linux\n    cmdline: %s\n    module_path: boot():/initramfs-linux.img\n' "$(cat /mnt/etc/kernel/cmdline)")
+  printf '%s\n' "$conf" > /mnt/efi/limine.conf
+  printf '%s\n' "$conf" > /mnt/efi/EFI/limine/limine.conf
+  ls /mnt/efi /mnt/efi/EFI/limine
+else
+  mkdir -p /mnt/efi/EFI/Linux
+  arch-chroot /mnt mkinitcpio -k "$kernel" -S autodetect -U /efi/EFI/Linux/arch-linux.efi
+  ls /mnt/efi/EFI/Linux
+fi
 sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist
 [ ! -f /mnt/var/lib/archix/archive-url ] || sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/var/lib/archix/archive-url

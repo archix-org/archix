@@ -13,10 +13,12 @@ ROOT = Path(__file__).resolve().parents[3]
 # Everything in the repository that decides what the VM runs: archix's source and toolchain, the image builder and the driver.
 COMMON = ["src", "Cargo.toml", "Cargo.lock", "tests/arch/Dockerfile", "tests/arch/image.sh", "tests/vm/run.sh", "tests/vm/build-image.sh", "tests/vm/driver"]
 BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/boot/base.py"]
-BOOT_TESTS = ["counting", "try", "guard", "unattended", "pacman", "keep", "hang", "glibc", "order", "health", "hook", "layer", "records", "strict", "ptrace", "ext4"]
+BOOT_TESTS = ["counting", "try", "guard", "unattended", "pacman", "keep", "hang", "glibc", "order", "health", "hook", "layer", "records", "strict", "ptrace", "accounts", "ext4"]
 POWERCUT_TESTS = ["pacman", "keep", "varlib", "rootmove", "switch"]
+LIMINE_TESTS = ["keep", "resync", "migration"]
 SUITES = ({f"boot-{name}": BOOT_SHARED + [f"tests/vm/boot/{name}"] for name in BOOT_TESTS}
-          | {f"powercut-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", f"tests/vm/powercut/{name}"] for name in POWERCUT_TESTS})
+          | {f"powercut-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", f"tests/vm/powercut/{name}"] for name in POWERCUT_TESTS}
+          | {f"limine-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/limine/base.py", f"tests/vm/limine/{name}"] for name in LIMINE_TESTS})
 ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": ""}
 IMAGE = "archix-arch-test"
 KEEP = 500

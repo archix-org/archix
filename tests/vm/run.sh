@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `--interactive` a REPL on one test; the suites from the deployment era wait to be ported.
+# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test; the suites from the deployment era wait to be ported.
 set -euo pipefail
 suite=${1:-boot}
 case $suite in
@@ -9,12 +9,14 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 # The driver's suites (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache or ARCHIX_VM_CACHE=0.
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
-case $suite in boot | powercut) driver=$suite ;; *) echo "unknown suite $suite; run.sh takes boot or powercut" >&2; exit 2 ;; esac
-boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace ext4)
+case $suite in boot | powercut | limine) driver=$suite ;; *) echo "unknown suite $suite; run.sh takes boot, powercut or limine" >&2; exit 2 ;; esac
+boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace accounts ext4)
 powercut_tests=(pacman keep varlib rootmove switch)
+# A machine Limine boots (FS=btrfs, built with the test hooks): keep refused across a kernel change, a root replaced as limine-snapper-restore does, and the move to systemd-boot with cuts at each step.
+limine_tests=(keep resync migration)
 # The split suites, boot and powercut, run their tests side by side from one base.
 split=
-case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; esac
+case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; limine) split=("${limine_tests[@]}") ;; esac
 for arg in "${@:2}"; do
   case $arg in
     --interactive) interactive=1 ;;
@@ -57,7 +59,7 @@ if [ -n "$split" ]; then
   for name in "${names[@]}"; do [ "$name" = base ] || pending+=("$suite-$name"); done
 fi
 # Exported before the keys are taken, as cache.py hashes it: set after them, it made every power-cut pass's key change during its run.
-[ "$suite" != powercut ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
+[ "$suite" = boot ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
 if [ ${#pending[@]} -gt 0 ] && [ -z "$interactive" ]; then
   for name in "${pending[@]}"; do inputs[$name]=$(python3 "$cache_py" inputs "$name"); done
   while read -r name key; do keys[$name]=$key; done < <(python3 "$cache_py" keys "${pending[@]}")
@@ -80,7 +82,7 @@ target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
 # ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut suite builds its own, with the test hooks' debug assertions.
-if [ "$suite" = powercut ]; then
+if [ "$suite" = powercut ] || [ "$suite" = limine ]; then
   docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
     cargo build --locked --release && cp /target/powercut/release/archix /work/archix
     cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/powercut/x86_64-unknown-linux-musl/release/archix /work/archix-static'
@@ -95,7 +97,9 @@ else
 fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
-docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" archix-arch-test /vm/build-image.sh
+loader=systemd-boot
+[ "$suite" != limine ] || loader=limine
+docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e LOADER="$loader" archix-arch-test /vm/build-image.sh
 # The power-cut tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
 if [ "$suite" = powercut ]; then
   [[ " ${pending[*]} " != *" powercut-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
@@ -131,11 +135,13 @@ take_slot() {
   done
 }
 # The split suites: the base lays the image out with this run's archix and powers off; each test then boots a qcow2 overlay of that disk with its own copy of the vars, in a heavy slot of its own.
+base=/vm/boot/base.py
+[ "$suite" != limine ] || base=/vm/limine/base.py
 if [ "${names[*]}" = base ]; then
-  "${vm[@]}" python -m driver /vm/boot/base.py "${args[@]}"
+  "${vm[@]}" python -m driver "$base" "${args[@]}"
   exit
 fi
-if ! "${vm[@]}" python -m driver /vm/boot/base.py; then
+if ! "${vm[@]}" python -m driver "$base"; then
   for name in "${pending[@]}"; do summary "$name" failed "the base, which it needs, failed"; done
   echo "$suite: the base failed, so none of ${pending[*]#boot-} ran on ${FS:-ext4}"
   exit 1
