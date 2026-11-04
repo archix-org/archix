@@ -868,3 +868,31 @@ fn a_layer_file_isnt_made_without_room_for_it_and_its_margin() {
         "{notes:?}"
     );
 }
+
+#[test]
+#[ignore]
+fn after_rotate_pcr_key_a_switch_with_nothing_else_to_do_builds_images_signed_with_the_new_key() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let before = images(machine);
+    let out = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        out.contains("nothing to do"),
+        "a second switch has nothing to do: {out}"
+    );
+    let rotated = setup.ok_env(&[], &["secure-boot", "rotate-pcr-key"]);
+    assert!(rotated.contains("run `archix switch`"), "{rotated}");
+    let out = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let after = images(machine);
+    assert!(
+        !out.contains("nothing to do") && after != before,
+        "the switch rotate-pcr-key asks for builds an image with the new key: {before:?} -> {after:?}\n{out}"
+    );
+    let again = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        again.contains("nothing to do"),
+        "and the one after has nothing to do again: {again}"
+    );
+}
