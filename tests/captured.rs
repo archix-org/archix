@@ -121,8 +121,31 @@ fn a_hostile_git_config_in_the_owners_repo_never_runs_as_root() {
     .unwrap();
     fs::write(dir.join(".gitattributes"), "* filter=x\n").unwrap();
     sh(&format!("chown -R {USER}: {}", dir.display()));
+    sh(&format!(
+        "runuser -u {USER} -- sh -c 'cd {} && git status --short > /dev/null; git add -A; git reset -q'",
+        dir.display()
+    ));
+    let fired: Vec<String> = fs::read_dir(&marks)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    println!(
+        "EVIDENCE hostile .git/config: plain git as the owner ran {fired:?} from core.fsmonitor and filter.x.clean"
+    );
+    assert!(
+        fired.contains(&"fsmonitor".to_string()) && fired.contains(&"clean".to_string()),
+        "the positive control: plain git runs the payload: {fired:?}"
+    );
+    fs::remove_dir_all(&marks).unwrap();
+    fs::create_dir_all(&marks).unwrap();
+    fs::set_permissions(&marks, fs::Permissions::from_mode(0o1777)).unwrap();
     let work = Work::new(&captures()).unwrap();
     let captured = captured::capture(&dir, &work).unwrap();
+    println!(
+        "EVIDENCE hostile .git/config: archix's capture ran {} of them",
+        fs::read_dir(&marks).unwrap().count()
+    );
     assert!(captured.dir.join("init.lua").is_file());
     assert_eq!(
         fs::metadata(work.dir.join("git/HEAD")).unwrap().uid(),
@@ -292,9 +315,19 @@ fn a_runaway_config_is_stopped_by_its_limits() {
         memory_bytes: 1 << 30,
         wall: Duration::from_secs(20),
     };
+    let began = std::time::Instant::now();
     let error = evaluate(&owner, "spin", "while true do end", &limits).unwrap_err();
+    println!(
+        "EVIDENCE limits: `while true do end` with RLIMIT_CPU 2 s stopped after {:.1} s: {error}",
+        began.elapsed().as_secs_f64()
+    );
     assert!(error.contains("CPU"), "{error}");
+    let began = std::time::Instant::now();
     let error = evaluate(&owner, "huge", "local s = string.rep('x', 2^40) return {}", &limits).unwrap_err();
+    println!(
+        "EVIDENCE limits: `string.rep(\"x\", 2^40)` with RLIMIT_AS 1 GiB stopped after {:.1} s: {error}",
+        began.elapsed().as_secs_f64()
+    );
     assert!(error.contains("too large"), "{error}");
     let error = evaluate(
         &owner,
@@ -312,7 +345,12 @@ fn a_runaway_config_is_stopped_by_its_limits() {
         memory_bytes: 1 << 30,
         wall: Duration::from_secs(2),
     };
+    let began = std::time::Instant::now();
     let error = evaluate(&owner, "wall", "while true do end", &sleeper).unwrap_err();
+    println!(
+        "EVIDENCE limits: `while true do end` with RLIMIT_CPU 60 s and a 2 s wall clock stopped after {:.1} s: {error}",
+        began.elapsed().as_secs_f64()
+    );
     assert!(error.contains("longer than 2 s"), "{error}");
 }
 
@@ -372,6 +410,14 @@ fn root_writes_into_the_owners_directory_only_as_the_owner_and_never_through_a_s
     let owner = setup();
     let dir = config(&owner, "drift", "return {}\n");
     fs::write("/root/archix-target", "untouched").unwrap();
+    let hash = || {
+        sh("sha256sum /root/archix-target")
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    let before = hash();
     std::os::unix::fs::symlink("/root/archix-target", dir.join("installed.lua")).unwrap();
     sh(&format!("chown -h {USER}: {}/installed.lua", dir.display()));
     let error = format!(
@@ -379,7 +425,11 @@ fn root_writes_into_the_owners_directory_only_as_the_owner_and_never_through_a_s
         captured::write_as_owner(&dir.join("installed.lua"), b"planted").unwrap_err()
     );
     assert!(error.contains("isn't a regular file"), "{error}");
-    assert_eq!(fs::read_to_string("/root/archix-target").unwrap(), "untouched");
+    let after = hash();
+    println!(
+        "EVIDENCE symlinked drift file: installed.lua -> /root/archix-target refused ({error}); target sha256 {before} before, {after} after"
+    );
+    assert_eq!(after, before, "the target changed through the link");
     let linked = owner.home.join("drift-link");
     let _ = fs::remove_file(&linked);
     std::os::unix::fs::symlink("/etc", &linked).unwrap();
@@ -461,6 +511,10 @@ fn the_config_a_root_command_evaluates_is_the_captured_one_so_changing_it_after_
     fs::set_permissions(&owner.home, fs::Permissions::from_mode(0o755)).unwrap();
     let race = format!("echo 'this is not lua' > {}/init.lua", dir.display());
     let (ok, said) = archix(&dir, Some(&race), &["status"]);
+    println!(
+        "EVIDENCE TOCTOU: init.lua replaced with `this is not lua` by ARCHIX_TEST_AFTER_CAPTURE, after the capture and before the evaluation; status exited {}",
+        if ok { 0 } else { 1 }
+    );
     assert!(ok && said.contains("box is locked to snapshot 2026-10-10"), "{said}");
     assert!(
         fs::read_to_string(dir.join("init.lua")).unwrap().contains("not lua"),
