@@ -1692,7 +1692,7 @@ pub fn revert(to: Option<u32>, noconfirm: bool, allow_unsafe: bool) -> Result<()
             Some(&current_generation),
             format!("before revert to generation {number}"),
         )
-        .map_err(|e| e.context("nothing of the rollback was applied"))?;
+        .map_err(|e| e.context("nothing of the revert was applied"))?;
     let root = live::Root::new(&paths.root);
     eprintln!(":: applying {name}");
     let applied = live::apply(&live::Plan {

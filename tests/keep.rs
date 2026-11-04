@@ -387,3 +387,37 @@ fn cancel_puts_var_lib_back_as_it_was() {
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_revert_whose_snapshot_fails_says_nothing_of_the_revert_was_applied() {
+    let _system = lock_system();
+    let setup = on_layout(&format!(
+        r#"{ROLLBACKS}, files = {{ ["/etc/archix-revert-test"] = {{ text = "one" }} }}"#
+    ));
+    setup.first_switch();
+    setup.set_body(
+        &[],
+        &format!(r#"{ROLLBACKS}, files = {{ ["/etc/archix-revert-test"] = {{ text = "two" }} }}"#),
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    let out = setup.run_env(
+        &[("ARCHIX_TEST_FAIL", "snapshot-before")],
+        &["revert", "1", "--noconfirm"],
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("nothing of the revert was applied"), "{text}");
+    assert!(!text.contains("rollback"), "{text}");
+    assert_eq!(
+        fs::read_to_string(setup.machine.system_file("etc/archix-revert-test"))
+            .ok()
+            .as_deref(),
+        Some("two\n"),
+        "{text}"
+    );
+}

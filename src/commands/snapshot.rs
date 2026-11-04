@@ -173,6 +173,7 @@ impl Rollbacks {
                 Ok(None)
             }
             Rollbacks::On(_) => {
+                archix::testhooks::fail_at("snapshot-before")?;
                 let record = Store::open(root)
                     .create(root, Kind::Switch, contents(current, label, None))
                     .context("taking the snapshot before the switch")?;
