@@ -82,7 +82,11 @@ run() { docker exec -e USER=root -e ARCHIX_TEST_TODAY="$today" "${archive[@]}" "
 if [ -z "$listed" ]; then
   # The initramfs runs the static musl build, which can lack libc items the glibc build has.
   docker exec -e USER=root "$cid" cargo build --locked --release --target x86_64-unknown-linux-musl
-  run "$cid" cargo test --locked --no-fail-fast "$@" -- --include-ignored
+  # Arguments after a -- of their own, such as --nocapture, go to the test binaries with --include-ignored.
+  case " $* " in
+    *" -- "*) run "$cid" cargo test --locked --no-fail-fast "$@" --include-ignored ;;
+    *) run "$cid" cargo test --locked --no-fail-fast "$@" -- --include-ignored ;;
+  esac
   exit
 fi
 if [ -n "${ARCHIX_PREBUILT:-}" ]; then

@@ -10,8 +10,8 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
 case $suite in boot | powercut) driver=$suite ;; *) echo "unknown suite $suite; run.sh takes boot or powercut" >&2; exit 2 ;; esac
-boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ext4)
-powercut_tests=(pacman keep varlib rootmove)
+boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace ext4)
+powercut_tests=(pacman keep varlib rootmove switch)
 # The split suites, boot and powercut, run their tests side by side from one base.
 split=
 case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; esac
@@ -50,13 +50,16 @@ summary() {
   [ "$2" != failed ] || echo "::error title=${1#"$suite"-} failed on ${FS:-ext4}::${1#"$suite"-} failed after $3${why:+ (${why})}; its console and timeline are in this job's logs artifact"
 }
 # Each driver test by its result-cache name, those still to run and their keys.
-declare -A keys=()
+declare -A keys=() inputs=()
 pending=()
 if [ -n "$split" ]; then
   [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
   for name in "${names[@]}"; do [ "$name" = base ] || pending+=("$suite-$name"); done
 fi
+# Exported before the keys are taken, as cache.py hashes it: set after them, it made every power-cut pass's key change during its run.
+[ "$suite" != powercut ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
 if [ ${#pending[@]} -gt 0 ] && [ -z "$interactive" ]; then
+  for name in "${pending[@]}"; do inputs[$name]=$(python3 "$cache_py" inputs "$name"); done
   while read -r name key; do keys[$name]=$key; done < <(python3 "$cache_py" keys "${pending[@]}")
   if [ -n "$cache" ]; then
     left=()
@@ -98,7 +101,6 @@ if [ "$suite" = powercut ]; then
   [[ " ${pending[*]} " != *" powercut-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
   [[ " ${pending[*]} " != *" powercut-rootmove "* ]] || docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e IMG=/work/top.img -e ROOT_AT_TOP=1 archix-arch-test /vm/build-image.sh
 fi
-[ "$suite" != powercut ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
 tty=() args=()
 [ -z "$interactive" ] || tty=(-it) args=(--interactive)
 vm=(docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS archix-arch-test)
@@ -110,7 +112,8 @@ record() {
   if [ "${now#* }" = "${keys[$name]}" ]; then
     python3 "$cache_py" record "$name" "${keys[$name]}" "$seconds" "$dir/timeline.log" "$dir/serial.log" "$dir/output.log"
   else
-    echo "$name: the inputs changed during the run; not recording the pass"
+    echo "$name: the inputs changed during the run; not recording the pass. What changed:"
+    diff <(printf '%s\n' "${inputs[$name]}") <(python3 "$cache_py" inputs "$name") | sed 's/^/  /' || true
   fi
 }
 # The runner's own heavy slot, which work-dir.sh took, goes to one VM at a time through own-slot.lock; the others wait for a free one, each holding it until its subshell exits.

@@ -176,7 +176,7 @@ jobs:
       fail-fast: false
       matrix:
         # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; the snapshot tests need btrfs, and ext4 is the lane with rollbacks off.
-        tests: ["counting try pacman unattended", "guard keep hang glibc", "order health hook layer", "records strict"]
+        tests: ["counting try pacman unattended", "guard keep hang glibc", "order health hook layer", "records strict ptrace"]
         fs: [btrfs]
         include:
           - tests: ext4
