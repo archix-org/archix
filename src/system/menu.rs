@@ -446,9 +446,12 @@ fn drop_unreachable(
     slot: Option<u32>,
 ) -> Result<Vec<(u32, String)>> {
     let reachable = |image: &str| esp.join(IMAGES).join(image).exists() || built.join(image).is_file();
+    // With no current entry on the ESP (wiped, as before a live-USB recovery's keep), keeping the menu as it is would leave nothing to boot.
+    let menu_left = on_esp(esp).keys().any(|id| Entry::parse(id) == Some(Entry::Current));
     if let Some(lost) = planned
         .iter()
         .find(|p| slot.is_some_and(|slot| p.entry == Entry::Snapshot(slot)) && !reachable(&p.image))
+        && menu_left
     {
         bail!(
             "the fallback slot, snapshot {}, boots the image {}, which is neither on the ESP nor among the images this root built, so the menu isn't written rather than written without the slot",
@@ -998,12 +1001,37 @@ mod tests {
     }
 
     #[test]
+    fn with_no_current_entry_left_on_the_esp_a_slot_without_its_image_is_dropped_rather_than_writing_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, built) = (tmp.path().join("esp"), tmp.path().join("built"));
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::create_dir_all(&built).unwrap();
+        fs::write(built.join("a.efi"), "a").unwrap();
+        let mut planned = vec![
+            planned(Entry::Current, "a.efi"),
+            planned(Entry::Snapshot(4), "gone.efi"),
+        ];
+        assert_eq!(
+            drop_unreachable(&esp, &built, &mut planned, Some(4)).unwrap(),
+            [(4, "gone.efi".to_string())],
+            "a wiped ESP, as before a live-USB recovery's keep: the current entry alone beats no menu"
+        );
+        assert_eq!(planned.len(), 1);
+    }
+
+    #[test]
     fn the_fallback_slots_entry_is_never_dropped_for_a_missing_image_the_refresh_fails_naming_it() {
         let tmp = tempfile::tempdir().unwrap();
         let (esp, built) = (tmp.path().join("esp"), tmp.path().join("built"));
         fs::create_dir_all(esp.join(IMAGES)).unwrap();
         fs::create_dir_all(&built).unwrap();
         fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        fs::write(
+            esp.join("loader/entries/archix-current.conf"),
+            "uki /EFI/archix/a.efi\n",
+        )
+        .unwrap();
         let mut planned = vec![
             planned(Entry::Current, "a.efi"),
             planned(Entry::Snapshot(3), "gone.efi"),
