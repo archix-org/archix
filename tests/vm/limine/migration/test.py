@@ -44,22 +44,29 @@ def run(m, t):
             cut.disarm()
             boots, took = settle(reached)
             t.log(f"after the cut at {reached}: booted through {loader_info() or 'Limine'}, migration {migration()}")
-        # Each switch makes the firmware try systemd-boot again until a boot through it counted as good.
-        for attempt in range(3):
+        # A switch starts the move or has the firmware try systemd-boot again; the boot BootNext makes must come through it and finish the move.
+        for attempt in range(2):
             if migration().get("phase") == "done":
                 break
             m.succeed(f"{HOST} switch --noconfirm 2>&1 | tail -20", timeout=1800, what=f"a switch starting or retrying the move ({attempt + 1})")
-            if point in FINISH and attempt == 0:
+            cutting = point in FINISH and attempt == 0
+            if cutting:
                 cut.arm(point)
             m.reboot()
-            if point in FINISH and attempt == 0:
+            if cutting:
                 reached = cut.reset_on_cut(timeout=1800)
                 cut.disarm()
                 boots, took = settle(reached)
                 t.log(f"after the cut at {reached}: booted through {loader_info() or 'Limine'}, migration {migration()}")
-            else:
-                settle(point or "control")
-                m.wait_until_succeeds(f"grep -q '\"done\"' {MIGRATION} || [ \"$(tail -c +5 /sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f 2>/dev/null | tr -d '\\000' | cut -c1-12)\" != systemd-boot ]", timeout=600, what="the good boot finishing the move")
+                continue
+            settle(point or "control")
+            t.require("systemd-boot" in loader_info(), f"the boot after a switch that started the move should come through systemd-boot (BootNext), not {loader_info() or 'Limine'}: {migration()}")
+            m.wait_until_succeeds(f"grep -q '\"done\"' {MIGRATION}", timeout=600, what="the boot through systemd-boot counting as good and finishing the move")
+        t.require(migration().get("phase") == "done", f"the move should be done: {migration()}")
+        # A later boot, with no BootNext, must come through systemd-boot as it's first now.
+        m.reboot()
+        settle(point or "control")
+        limine = out("efibootmgr | awk '/Limine/ { sub(/^Boot/, \"\", $1); sub(/\\*$/, \"\", $1); print $1; exit }'").strip()
         found = cut.problems(packages=False)
         if migration().get("phase") != "done":
             found.append(f"the move didn't finish: {migration()}")
@@ -67,6 +74,8 @@ def run(m, t):
         entry = migration().get("entry")
         if entry is None or not order.upper().startswith(f"{entry:04X}"):
             found.append(f"systemd-boot's entry {entry} should be first in the boot order: {order}")
+        if limine and order.upper().startswith(limine.upper()):
+            found.append(f"Limine's entry {limine} should no longer be first: {order}")
         if not fallback_is_systemd_boot():
             found.append("the removable-media path should hold systemd-boot")
         if not ok("[ -f /efi/EFI/BOOT/BOOTX64.EFI.before-archix ]"):
