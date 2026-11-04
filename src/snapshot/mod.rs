@@ -17,6 +17,8 @@ use crate::lock::Locked;
 pub const MOUNT: &str = ".archix";
 const RECORD: &str = "record.json";
 const SNAPSHOT: &str = "root";
+/// The prefix of a snapshot being made, which a cut leaves for the next creation to remove.
+const MAKING: &str = ".making-";
 
 /// The snapshot record format this archix writes.
 pub const FORMAT: u32 = 1;
@@ -240,7 +242,7 @@ impl Store {
         Ok(Some(record))
     }
 
-    /// Removes what a crash left between taking a snapshot and saving its record, which is never a snapshot anyone can roll back to.
+    /// Removes what a crash left before a snapshot was whole: a snapshot being made under its temporary name, and a number without its record (left by archix before snapshots were made under a temporary name), neither of which anyone can roll back to.
     pub fn clean_leftovers(&self) -> Result<Vec<u32>> {
         let mut removed = Vec::new();
         for number in self.numbers()? {
@@ -249,14 +251,26 @@ impl Store {
                 removed.push(number);
             }
         }
+        let making: Vec<PathBuf> = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with(MAKING))
+                .map(|entry| entry.path())
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        for dir in making {
+            self.remove_tree(&dir)?;
+        }
         Ok(removed)
     }
 
-    /// Takes a read-only snapshot of the subvolume at `source` as the next number, saving its record only once the snapshot is whole.
+    /// Takes a read-only snapshot of the subvolume at `source` as the next number. It's made under a temporary name, its filesystem committed before its record is written, and only then renamed to its number, so a cut leaves either nothing under the number or the whole snapshot: an fsync'd record alone could outlive a snapshot btrfs hadn't committed yet.
     pub fn create(&self, source: &Path, kind: Kind, meta: Meta) -> Result<Record> {
         self.clean_leftovers()?;
         let number = self.numbers()?.last().map_or(1, |last| last + 1);
-        let dir = self.dir.join(number.to_string());
+        let final_dir = self.dir.join(number.to_string());
+        let dir = self.dir.join(format!("{MAKING}{number}"));
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         btrfs(
             Command::new("btrfs")
@@ -265,6 +279,7 @@ impl Store {
                 .arg(dir.join(SNAPSHOT)),
             &format!("snapshot {} to {}", source.display(), dir.join(SNAPSHOT).display()),
         )?;
+        crate::durable::sync_filesystems_checked(&[&dir])?;
         crate::testhooks::mark("snapshot-before-record");
         let record = Record {
             format: FORMAT,
@@ -279,6 +294,9 @@ impl Store {
             note: meta.note,
         };
         crate::durable::write(&dir.join(RECORD), serde_json::to_string_pretty(&record)?.as_bytes())?;
+        crate::testhooks::mark("snapshot-before-rename");
+        crate::durable::rename(&dir, &final_dir)
+            .with_context(|| format!("renaming {} to {}", dir.display(), final_dir.display()))?;
         Ok(record)
     }
 
@@ -294,7 +312,11 @@ impl Store {
     }
 
     fn remove_dir(&self, number: u32) -> Result<()> {
-        let dir = self.dir.join(number.to_string());
+        self.remove_tree(&self.dir.join(number.to_string()))
+    }
+
+    fn remove_tree(&self, dir: &Path) -> Result<()> {
+        let dir = dir.to_path_buf();
         let snapshot = dir.join(SNAPSHOT);
         if snapshot.exists() {
             btrfs(

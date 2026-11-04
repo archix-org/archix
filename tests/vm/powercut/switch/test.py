@@ -7,7 +7,7 @@ from powercut import cut
 LOG = "/root/switch.log"
 PACKAGE = "tree"
 # Before the mark: the snapshot, then the menu giving the current entry its tries and the slot its entry (menu-synced ends each refresh; whether it writes an entry depends on the slot).
-BEFORE = ["switch-snapshot", "menu-synced#1"]
+BEFORE = ["snapshot-before-record", "snapshot-before-rename", "switch-snapshot", "menu-synced#1"]
 # Between the mark and its removal: "extract" cuts once pacman starts on the package.
 MARKED = ["switch-marked", "extract", "switch-packages", "switch-files", "switch-applied", "switch-recorded", "boot-image-built", "boot-image-copied", "menu-synced#2", "switch-flushed"]
 AFTER = ["switch-finished"]

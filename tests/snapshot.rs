@@ -803,3 +803,66 @@ fn a_root_at_the_top_level_moves_into_at_resumably_every_top_level_subvolume_sta
         sh(&format!("umount {}", disk.root.display()));
     }
 }
+
+/// Runs a snapshot's creation in a copy of this test binary that ARCHIX_TEST_CRASH kills at `point`, as a power cut would.
+fn create_killed_at(disk: &Disk, point: &str) {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--include-ignored", "--exact", "create_in_a_child", "--nocapture"])
+        .env("ARCHIX_TEST_CRASH", point)
+        .env("ARCHIX_TEST_CREATE_ROOT", &disk.root)
+        .status()
+        .unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the creation should have been killed at {point}: {status}"
+    );
+}
+
+/// Not a test of its own: what create_killed_at runs.
+#[test]
+#[ignore]
+fn create_in_a_child() {
+    let Some(root) = std::env::var_os("ARCHIX_TEST_CREATE_ROOT") else {
+        return;
+    };
+    let _ = Store::open(Path::new(&root)).create(Path::new(&root), Kind::Pacman, Meta::default());
+}
+
+#[test]
+#[ignore]
+fn a_snapshot_cut_short_never_appears_under_its_number_and_the_next_one_cleans_it_up() {
+    for point in ["snapshot-before-record", "snapshot-before-rename"] {
+        let disk = Disk::new("1G");
+        disk.mount_archix();
+        let store = Store::open(&disk.root);
+        store.create(&disk.root, Kind::Switch, Meta::default()).unwrap();
+        create_killed_at(&disk, point);
+        let names: Vec<String> = fs::read_dir(store.dir())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.contains(&"2".to_string()),
+            "a snapshot cut short at {point} shouldn't be under its number, where the menu, the slot and a check after the boot find it: {names:?}"
+        );
+        assert_eq!(numbers(&store), [1], "{point}");
+        let next = store.create(&disk.root, Kind::Manual, Meta::default()).unwrap();
+        assert_eq!(next.number, 2, "{point}: the number is taken again");
+        let left: Vec<String> = fs::read_dir(store.dir())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with('.'))
+            .collect();
+        assert!(left.is_empty(), "{point}: what the cut left is cleaned up: {left:?}");
+        let subvolumes = sh(&format!("btrfs subvolume list -o {}", store.dir().display()));
+        assert_eq!(
+            subvolumes.lines().count(),
+            2,
+            "{point}: no leftover subvolume: {subvolumes}"
+        );
+    }
+}

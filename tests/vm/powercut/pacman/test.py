@@ -10,7 +10,7 @@ LOG = "/root/update.log"
 # The marks of the step after the transaction: the images built, recorded and copied to the ESP, then the menu written with the current entry's tries.
 POST = ["boot-image-built", "boot-image-recorded", "boot-image-copy", "boot-image-copied", "menu-entry-written", "menu-synced"]
 # The step before it renames the current entry to give it its tries, so the step after it finds the name already right and replaces none.
-PRE = ["menu-entry-written", "menu-entry-replaced", "menu-synced"]
+PRE = ["snapshot-before-record", "snapshot-before-rename", "menu-entry-written", "menu-entry-replaced", "menu-synced"]
 EXTRACTED = r":: Processing package changes\.\.\."
 
 
