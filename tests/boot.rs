@@ -1024,7 +1024,7 @@ impl Drop for FatEsp {
 
 #[test]
 #[ignore]
-fn a_switch_writes_a_fat_esp_with_a_flush_per_step_and_never_a_per_file_fsync_there() {
+fn a_switch_writes_a_fat_esp_flushing_data_before_names_and_never_with_a_per_file_fsync() {
     let _system = lock_system();
     let checks = Checks::default();
     let setup = Setup::new(&[], "");
@@ -1070,21 +1070,23 @@ fn a_switch_writes_a_fat_esp_with_a_flush_per_step_and_never_a_per_file_fsync_th
         leftovers.trim().is_empty(),
         format!("no temporary files left on the ESP: {leftovers}"),
     );
-    for (what, error) in [
-        (
-            "write",
-            archix::durable::write(&machine.esp().join("probe"), b"x").map_err(|e| format!("{e:#}")),
-        ),
-        (
-            "copy",
-            archix::durable::copy(Path::new("/etc/hostname"), &machine.esp().join("probe"))
-                .map_err(|e| format!("{e:#}")),
-        ),
-    ] {
-        checks.check(
-            error.as_ref().is_err_and(|e| e.contains("FAT") && e.contains("write_esp")),
-            format!("durable::{what}, whose per-file fsync can leave two names on one file's clusters on FAT, refuses the ESP: {error:?}"),
-        );
-    }
+    // On FAT the general helpers take the ESP's way themselves: the data flushed with the filesystem, then the rename, never a per-file fsync.
+    archix::durable::write(&machine.esp().join("probe-write"), b"written").unwrap();
+    archix::durable::copy(Path::new("/etc/hostname"), &machine.esp().join("probe-copy")).unwrap();
+    checks.eq(
+        fs::read_to_string(machine.esp().join("probe-write")).ok(),
+        Some("written".to_string()),
+        "durable::write on FAT writes the file",
+    );
+    checks.eq(
+        fs::read(machine.esp().join("probe-copy")).ok(),
+        fs::read("/etc/hostname").ok(),
+        "durable::copy on FAT copies it",
+    );
+    let leftovers = sh(&format!("find {} -name '*.tmp'", machine.esp().display()));
+    checks.check(
+        leftovers.trim().is_empty(),
+        format!("and leaves no temporary file: {leftovers}"),
+    );
     checks.finish();
 }
