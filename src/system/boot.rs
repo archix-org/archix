@@ -1043,7 +1043,7 @@ pub fn mark_bad(esp: &Path, id: &str) -> Result<bool> {
     };
     let bad = path.with_file_name(format!("{stem}+0-{}.conf", left + done));
     if bad != path {
-        crate::durable::rename(&path, &bad).with_context(|| format!("renaming {}", path.display()))?;
+        crate::durable::rename_esp(&path, &bad)?;
         crate::durable::sync_esp(esp)?;
     }
     Ok(true)

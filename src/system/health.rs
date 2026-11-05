@@ -463,7 +463,13 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     );
     super::boot::add_login_note(paths, &note);
     if marked && reboot {
-        let _ = Command::new("systemctl").args(["--no-block", "reboot"]).status();
+        if cfg!(debug_assertions)
+            && let Some(record) = std::env::var_os("ARCHIX_TEST_REBOOT")
+        {
+            let _ = fs::write(record, "reboot\n");
+        } else {
+            let _ = Command::new("systemctl").args(["--no-block", "reboot"]).status();
+        }
     }
     Ok(false)
 }

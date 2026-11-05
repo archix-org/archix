@@ -585,7 +585,10 @@ fn after_a_plain_transaction_the_current_entry_gets_its_tries_again_and_a_change
         "the snapshot before it boots the old image from an entry of its own",
     );
     checks.check(
-        machine.entries().contains(&"archix-current+2.conf".to_string()),
+        machine
+            .entries()
+            .iter()
+            .any(|name| name == "archix-current+2.conf" || name == "archix-current+2-0.conf"),
         format!("with tries again: {:?}", machine.entries()),
     );
     pacman(

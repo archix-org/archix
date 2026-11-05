@@ -388,18 +388,15 @@ fn file_name(planned: &Planned, existing: Option<&String>, counted: bool, tries:
     }
 }
 
-/// The other spelling of a counted entry name, with or without a leading zero on its tries left (+1 and +01, +1-1 and +01-1), which systemd-boot and systemd-bless-boot read alike: a changed entry is written under it, so no file is ever renamed over another on the ESP.
+/// The other spelling of a counted entry name that hasn't been tried, +N and +N-0 (N left, none done), which systemd-boot and systemd-bless-boot read alike: a changed entry is written under it, so no file is ever renamed over another on the ESP; an entry with tries done has none.
 fn alternate(name: &str) -> Option<String> {
     let (stem, counters) = name.strip_suffix(".conf")?.split_once('+')?;
-    let (left, rest) = counters.split_at(counters.find('-').unwrap_or(counters.len()));
-    if left.is_empty() || !left.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    match counters.strip_suffix("-0") {
+        Some(left) if digits(left) => Some(format!("{stem}+{left}.conf")),
+        None if digits(counters) => Some(format!("{stem}+{counters}-0.conf")),
+        _ => None,
     }
-    let left = match left.strip_prefix('0') {
-        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
-        _ => format!("0{left}"),
-    };
-    Some(format!("{stem}+{left}{rest}.conf"))
 }
 
 /// How `write` writes the menu.
@@ -1137,22 +1134,20 @@ mod tests {
     fn a_counted_name_has_a_second_spelling_systemd_boot_reads_alike() {
         assert_eq!(
             alternate("archix-snapshot-1+1.conf").as_deref(),
-            Some("archix-snapshot-1+01.conf")
+            Some("archix-snapshot-1+1-0.conf")
         );
         assert_eq!(
-            alternate("archix-snapshot-1+01.conf").as_deref(),
+            alternate("archix-snapshot-1+1-0.conf").as_deref(),
             Some("archix-snapshot-1+1.conf")
         );
         assert_eq!(
-            alternate("archix-current+0-2.conf").as_deref(),
-            Some("archix-current+00-2.conf")
+            alternate("archix-current+0-2.conf"),
+            None,
+            "a tried entry has no second spelling"
         );
-        assert_eq!(
-            alternate("archix-current+1-1.conf").as_deref(),
-            Some("archix-current+01-1.conf")
-        );
+        assert_eq!(alternate("archix-current+1-1.conf"), None);
         assert_eq!(alternate("archix-current.conf"), None);
-        assert_eq!(boot::entry_id("archix-snapshot-1+01.conf"), "archix-snapshot-1.conf");
+        assert_eq!(boot::entry_id("archix-snapshot-1+1-0.conf"), "archix-snapshot-1.conf");
     }
 
     #[test]
@@ -1195,12 +1190,12 @@ mod tests {
             names(),
             [
                 "archix-current+2.conf",
-                "archix-snapshot-1+01.conf",
+                "archix-snapshot-1+1-0.conf",
                 "archix-snapshot-2+1.conf"
             ]
         );
         assert!(
-            fs::read_to_string(esp.join("loader/entries/archix-snapshot-1+01.conf"))
+            fs::read_to_string(esp.join("loader/entries/archix-snapshot-1+1-0.conf"))
                 .unwrap()
                 .contains(&format!("sort-key {SORT_SNAPSHOT}\n")),
             "the changed text is under the new name"
@@ -1216,7 +1211,7 @@ mod tests {
             [
                 "archix-current+2.conf",
                 "archix-snapshot-1+1.conf",
-                "archix-snapshot-2+01.conf"
+                "archix-snapshot-2+1-0.conf"
             ],
             "and back to the first spelling"
         );
