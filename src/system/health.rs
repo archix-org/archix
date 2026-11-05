@@ -402,7 +402,8 @@ fn unreachable_counted_entry(paths: &Paths) -> Option<String> {
 
 /// archix-health-check.service: checks a boot systemd-boot is still counting, and on failure marks its entry bad, records why, and reboots if asked to.
 pub fn run_boot(paths: &Paths) -> Result<bool> {
-    let Some(entry) = super::boot::booted() else {
+    // By name, not by text: an entry a cut left torn is still archix's, and its counted boot is still checked.
+    let Some(entry) = super::boot::booted_by_name() else {
         if let Some(selected) = unreachable_counted_entry(paths) {
             println!(
                 "archix: {selected} is a counted boot try, but its entry isn't on a mounted ESP, so this boot can't count as good; it fails its check, and boot.unblessed_timeout reboots it so the boot counter can fall back"
@@ -426,9 +427,16 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     let allowed = super::menu::load(&super::menu::dir(paths))
         .map(|state| state.blessed_failed_units)
         .unwrap_or_default();
-    let failed = match crate::pacman::hooks::unfinished(&paths.state) {
-        Some(unfinished) => Some((unfinished.target().to_string(), unfinished.why())),
-        None => {
+    let tampered = super::boot::tampered_selected_entry();
+    let failed = match (crate::pacman::hooks::unfinished(&paths.state), tampered) {
+        (Some(unfinished), _) => Some((unfinished.target().to_string(), unfinished.why())),
+        (None, Some(name)) => Some((
+            "entry".to_string(),
+            format!(
+                "{name} on the ESP isn't what archix wrote, as a cut while writing it or an edit leaves it, so this boot can't count as good"
+            ),
+        )),
+        (None, None) => {
             let targets = targets(check.as_ref(), &users, &allowed);
             let timeout = check.as_ref().map_or(120, |check| check.timeout);
             run(&paths.root, &targets, &users, timeout).map(|(target, why)| (target.to_string(), why))

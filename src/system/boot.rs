@@ -1004,6 +1004,12 @@ pub fn booted() -> Option<super::menu::Entry> {
     entry_unchanged(&Paths::system(), &entry).then_some(parsed)
 }
 
+/// The archix entry systemd-boot started this boot from by its name, whether or not its text is still what archix wrote: a cut while writing it changes the text, and such a boot must still be checked.
+pub fn booted_by_name() -> Option<super::menu::Entry> {
+    let entry = crate::testhooks::selected_entry()?;
+    super::menu::Entry::parse(&entry_id(&entry))
+}
+
 /// The entry systemd-boot started when it has an archix entry's name but isn't what archix wrote there.
 pub fn tampered_selected_entry() -> Option<String> {
     let entry = crate::testhooks::selected_entry()?;
