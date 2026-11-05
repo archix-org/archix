@@ -1149,3 +1149,50 @@ fn a_counted_boot_that_finds_the_unfinished_mark_on_a_fat_esp_is_marked_bad_and_
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_move_from_limine_cut_short_after_its_generation_is_recorded_is_taken_up_by_the_next_switch() {
+    const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let esp = machine.esp();
+    fs::create_dir_all(esp.join("EFI/limine")).unwrap();
+    fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
+    fs::write(esp.join("EFI/limine/BOOTX64.EFI"), "limine").unwrap();
+    fs::write(esp.join("EFI/BOOT/BOOTX64.EFI"), "limine").unwrap();
+    let vars = tempfile::TempDir::new().unwrap();
+    efivar(
+        vars.path(),
+        &format!("Boot0000-{GLOBAL}"),
+        &load_option("Limine", "\\EFI\\limine\\BOOTX64.EFI"),
+    );
+    efivar(vars.path(), &format!("BootOrder-{GLOBAL}"), &0u16.to_le_bytes());
+    let efi = ("ARCHIX_TEST_EFIVARS", vars.path().to_str().unwrap());
+    // As the VM's cut at limine-loader-copied: the generation is recorded, the move not started.
+    let cut = setup.run_env(
+        &[efi, ("ARCHIX_TEST_CRASH", "limine-loader-copied")],
+        &["switch", "--noconfirm"],
+    );
+    checks.check(
+        !cut.status.success(),
+        "the switch dies once systemd-boot is copied to the ESP",
+    );
+    checks.check(
+        efi_u16s(vars.path(), &format!("BootNext-{GLOBAL}")).is_empty(),
+        "before the move has a firmware entry",
+    );
+    let out = setup.ok_env(&[efi], &["switch", "--noconfirm"]);
+    checks.check(
+        out.contains("Limine stays first"),
+        format_args!("the next switch, with nothing else to do, starts the move: {out}"),
+    );
+    checks.eq(
+        efi_u16s(vars.path(), &format!("BootNext-{GLOBAL}")),
+        vec![1],
+        "and the next boot tries systemd-boot",
+    );
+    checks.finish();
+}
