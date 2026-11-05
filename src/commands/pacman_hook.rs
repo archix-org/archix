@@ -14,6 +14,8 @@ use archix::system;
 pub enum When {
     Pre,
     Post,
+    /// Run by the step after a transaction that removed archix, from the copy the removal hook made.
+    Remove,
 }
 
 /// What to do when the transaction leaves the root short of space.
@@ -40,6 +42,10 @@ pub fn run(when: When) -> ExitCode {
     let paths = Paths::system();
     let pacman = std::os::unix::process::parent_id();
     match when {
+        When::Remove => {
+            remove(&paths);
+            ExitCode::SUCCESS
+        }
         When::Pre => pre(&paths, pacman, &targets),
         When::Post => {
             post(&paths, pacman, &targets);
@@ -49,6 +55,57 @@ pub fn run(when: When) -> ExitCode {
             ExitCode::SUCCESS
         }
     }
+}
+
+/// After pacman removed archix: takes its integration off and hands the ESP to plain systemd-boot, saying what it did; never fails, as pacman's transaction is done.
+fn remove(paths: &Paths) {
+    let removed = system::removal::remove_integration(paths);
+    println!(
+        "archix: archix was removed; took off {} of its files (units, the initcpio hook, pacman hooks)",
+        removed.len()
+    );
+    if system::live::Root::new(&paths.root).running() {
+        let _ = std::process::Command::new("systemctl").arg("daemon-reload").status();
+    }
+    let esp = fs::read_to_string(paths.state.join("boot").join("esp"))
+        .ok()
+        .map(|esp| esp.trim().to_string())
+        .filter(|esp| !esp.is_empty());
+    let main = current(paths)
+        .and_then(|generation| generation.settings.boot.map(|plan| plan.kernel))
+        .unwrap_or_else(|| "linux".to_string());
+    if let Some(esp) = esp {
+        let esp = Path::new(&esp);
+        let enforcing = system::secureboot::Machine::under(&paths.root)
+            .state()
+            .is_some_and(|state| state.enabled);
+        let keys = system::boot::sbctl_has_keys();
+        if enforcing && !keys {
+            println!(
+                "archix: warning: Secure Boot is on and sbctl has no keys to sign plain systemd-boot's UKIs with, so archix's boot entries stay as they are; they boot this kernel until the next kernel update. Sign a UKI for systemd-boot (mkinitcpio's preset with default_uki, then sbctl sign) and drop archix's entries from {}/loader/entries",
+                esp.display()
+            );
+        } else {
+            match system::removal::hand_over(paths, esp, &main, keys) {
+                Ok(lines) => {
+                    for line in lines {
+                        println!("archix: {line}");
+                    }
+                }
+                Err(e) => println!(
+                    "archix: warning: couldn't hand the ESP to plain systemd-boot ({e:#}), so archix's boot entries stay as they are; they boot this kernel until the next kernel update"
+                ),
+            }
+        }
+    }
+    let store = Store::open(&paths.root);
+    let snapshots = store.dir();
+    println!(
+        "archix: archix's snapshots stay in {} as plain btrfs subvolumes; delete them with `sudo btrfs subvolume delete {}/*/root` once you don't need them",
+        snapshots.display(),
+        snapshots.display()
+    );
+    let _ = fs::remove_file(paths.root.join(system::removal::COPY.trim_start_matches('/')));
 }
 
 fn current(paths: &Paths) -> Option<Generation> {

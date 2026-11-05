@@ -48,8 +48,10 @@ pub fn files(archix: &Path, state: &Path) -> Vec<(PathBuf, String)> {
             format!(
                 "[Trigger]\nOperation = Remove\nType = Package\nTarget = archix\nTarget = archix-git\nTarget = archix-bin\n\n\
                  [Action]\nDescription = archix: noting that this transaction removes archix...\nWhen = PreTransaction\n\
-                 Exec = /bin/sh -c 'mkdir -p {run} && echo $PPID > {REMOVING}'\n",
-                run = Path::new(REMOVING).parent().unwrap_or(Path::new("/run")).display()
+                 Exec = /bin/sh -c 'mkdir -p {run} && echo $PPID > {REMOVING}; [ ! -x {STATIC} ] || cp {STATIC} {COPY}; exit 0'\n",
+                run = Path::new(REMOVING).parent().unwrap_or(Path::new("/run")).display(),
+                STATIC = crate::integration::STATIC_BINARY,
+                COPY = crate::system::removal::COPY,
             ),
         ),
         (
@@ -70,8 +72,9 @@ pub fn files(archix: &Path, state: &Path) -> Vec<(PathBuf, String)> {
             dir.join(POST),
             format!(
                 "{PACKAGE_TRIGGER}[Action]\nDescription = archix: recording the transaction and updating the boot menu...\nWhen = PostTransaction\n\
-                 Exec = /bin/sh -c '[ -x {archix} ] && exec {archix} pacman-hook post; rm -f {}'\nNeedsTargets\n",
-                ours.join(" ")
+                 Exec = /bin/sh -c '[ -x {archix} ] && exec {archix} pacman-hook post; [ -x {copy} ] && {copy} pacman-hook remove < /dev/null; rm -f {} {copy}'\nNeedsTargets\n",
+                ours.join(" "),
+                copy = crate::system::removal::COPY
             ),
         ),
         (PathBuf::from(STRICT_SCRIPT), strict_script(&archix.to_string(), state)),
@@ -584,6 +587,18 @@ mod tests {
         );
         assert!(text(SNAPSHOT).contains("|| exit 0; exec /usr/bin/archix pacman-hook pre"));
         assert!(text(POST).contains(&format!("rm -f /usr/share/libalpm/hooks/{REMOVAL}")));
+        let copy = crate::system::removal::COPY;
+        assert!(
+            text(REMOVAL).contains(&format!("cp /usr/lib/archix/archix-static {copy}"))
+                && !text(REMOVAL).contains("AbortOnFail"),
+            "the removal keeps a copy of archix for the step after, and never stops pacman: {}",
+            text(REMOVAL)
+        );
+        assert!(
+            text(POST).contains(&format!("[ -x {copy} ] && {copy} pacman-hook remove < /dev/null")),
+            "once archix is gone the step after runs the copy's cleanup: {}",
+            text(POST)
+        );
     }
 
     #[test]

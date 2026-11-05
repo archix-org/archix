@@ -1162,3 +1162,95 @@ fn a_switch_cut_off_after_its_generation_is_recorded_is_finished_by_the_next_swi
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn pacman_removing_archix_takes_its_integration_off_and_hands_the_esp_to_plain_systemd_boot() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let packages = Packages::new();
+    let binary = env!("CARGO_BIN_EXE_archix");
+    let archix = packages.build(
+        "archix",
+        &format!("install -Dm755 {binary} \"$pkgdir{binary}\"; install -Dm755 {binary} \"$pkgdir/usr/lib/archix/archix-static\""),
+    );
+    let setup = on_btrfs(
+        "3G",
+        "rollback = { enable = true }, drift = \"keep\", ignored_packages = { \"archix\" }",
+    );
+    let machine = &setup.machine;
+    // The build dir is bound read-only on btrfs machines, where pacman -R couldn't take the binary away.
+    sh(&format!(
+        "umount {r}/target && install -Dm755 {binary} {r}{binary}",
+        r = machine.root.display()
+    ));
+    let installed = pacman(
+        machine,
+        &[OWN],
+        &["-U", "--noconfirm", "--overwrite", "*", archix.to_str().unwrap()],
+        None,
+    );
+    checks.check(installed.status.success(), text(&installed));
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let at = |path: &str| machine.root.join(path.trim_start_matches('/'));
+    for path in [
+        "/etc/systemd/system/archix-boot.service",
+        "/etc/initcpio/install/archix",
+        "/etc/mkinitcpio.conf.d/archix.conf",
+        "/usr/share/libalpm/hooks/01-archix-snapshot.hook",
+    ] {
+        checks.check(at(path).exists(), format!("the switch writes {path}"));
+    }
+    checks.check(
+        machine.entries().iter().any(|e| e.starts_with("archix-current")),
+        format!("and the menu: {:?}", machine.entries()),
+    );
+    let removed = pacman(machine, &[], &["-R", "--noconfirm", "archix"], None);
+    let said = text(&removed);
+    checks.check(removed.status.success(), format!("pacman -R archix succeeds: {said}"));
+    for path in [
+        "/etc/systemd/system/archix-boot.service",
+        "/etc/systemd/system/archix-health-check.service",
+        "/etc/systemd/system/sysinit.target.wants/archix-boot.service",
+        "/etc/systemd/system/systemd-bless-boot.service.d/archix.conf",
+        "/etc/initcpio/install/archix",
+        "/etc/initcpio/hooks/archix",
+        "/etc/mkinitcpio.conf.d/archix.conf",
+        "/usr/share/libalpm/hooks/01-archix-snapshot.hook",
+        "/usr/share/libalpm/hooks/95-archix-post.hook",
+        "/run/archix/archix-removed",
+    ] {
+        checks.check(!at(path).exists(), format!("removing archix takes {path} off: {said}"));
+    }
+    let entries = machine.entries();
+    checks.check(
+        !entries.iter().any(|e| e.starts_with("archix-")) && !machine.esp().join("EFI/archix").exists(),
+        format!("archix's entries and images go: {entries:?}"),
+    );
+    let loader = fs::read_to_string(machine.esp().join("loader/loader.conf")).unwrap_or_default();
+    checks.check(
+        loader.lines().any(|line| line == "default arch-linux.efi") && !loader.contains("preferred"),
+        format!("loader.conf defaults to the plain UKI: {loader}"),
+    );
+    checks.check(
+        machine.esp().join("EFI/Linux/arch-linux.efi").is_file(),
+        format!("the kernel's preset built a UKI systemd-boot lists by itself: {said}"),
+    );
+    let preset = fs::read_to_string(at("/etc/mkinitcpio.d/linux.preset")).unwrap_or_default();
+    checks.check(
+        preset.contains("default_uki=") && preset.contains("EFI/Linux/arch-linux.efi"),
+        format!("and keeps building it: {preset}"),
+    );
+    checks.check(
+        said.contains("btrfs subvolume delete"),
+        format!("the removal says how to delete the snapshots: {said}"),
+    );
+    checks.check(!snapshots(machine).is_empty(), "which stay");
+    let plain = packages.build("archix-test-after-removal", "");
+    let after = pacman(machine, &[OWN], &["-U", "--noconfirm", plain.to_str().unwrap()], None);
+    checks.check(
+        after.status.success(),
+        format!("pacman works after the removal: {}", text(&after)),
+    );
+    checks.finish();
+}
