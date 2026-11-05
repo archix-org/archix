@@ -7,9 +7,9 @@ KERNELS = ("linux", "linux-lts")
 OLD, NEW = "0.15.3", "0.15.4"
 
 
-def kernel_of(package, root=""):
-    """The kernel release package installs under root: the modules directory whose pkgbase names it."""
-    return out(f"for d in {root}/usr/lib/modules/*/; do [ \"$(cat $d/pkgbase 2>/dev/null)\" = {package} ] && [ -f $d/vmlinuz ] && basename $d; done; true").strip()
+def kernel_of(package):
+    """The kernel release package owns; a switch that replaces the running kernel leaves that kernel's modules beside it until the next one."""
+    return out(f"pacman -Qlq {package} | sed -n 's#^/usr/lib/modules/\\([^/]*\\)/vmlinuz$#\\1#p'").strip()
 
 
 def built(kernel, root=""):
@@ -90,6 +90,9 @@ def run(m, t):
         new = {package: kernel_of(package) for package in KERNELS}
         t.log(f"kernels {old} -> {new}")
         t.check(all(old[p] != new[p] for p in KERNELS), f"the update should change both kernels: {old} -> {new}")
+        running = out("uname -r").strip()
+        t.check(running == old["linux-lts"], f"the update should run on the old linux-lts: {running}")
+        t.check(ok("! grep -q '^dummy ' /proc/modules && modprobe dummy"), f"the running kernel should still load a module it hadn't, as pacman replaced its package: {out(f'ls -la /usr/lib/modules/{running}; modprobe dummy 2>&1')}")
         both_kernels(t, NEW)
         if BTRFS:
             before = newest_snapshot()

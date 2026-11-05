@@ -23,7 +23,8 @@ def kernel():
 
 
 def installed_kernel():
-    return out("for d in /usr/lib/modules/*/; do [ -f $d/vmlinuz ] && basename $d; done; true").strip()
+    # Not by directory: a switch that replaces the running kernel leaves that kernel's modules beside the new one.
+    return out("pacman -Qlq linux | sed -n 's#^/usr/lib/modules/\\([^/]*\\)/vmlinuz$#\\1#p'").strip()
 
 
 def built(kernel_release):
