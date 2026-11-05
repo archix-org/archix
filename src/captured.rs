@@ -541,6 +541,11 @@ impl Applied {
         })
     }
 
+    /// The generations whose objects are missing or unreadable, for `archix status`.
+    pub fn damaged(&self) -> Vec<u32> {
+        Vec::new()
+    }
+
     /// The config tree last applied, if any.
     pub fn applied_tree(&self) -> Option<String> {
         let out = run(

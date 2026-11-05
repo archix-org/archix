@@ -777,3 +777,42 @@ fn a_gitignored_file_the_config_reads_fails_naming_it_and_saying_its_gitignored(
         );
     }
 }
+
+#[test]
+fn a_generation_whose_tree_a_cut_lost_is_refused_alone_and_switches_keep_working() {
+    let owner = setup();
+    let first = config(&owner, "lost-tree-1", "return { packages = { \"vim\" } }\n");
+    let second = config(&owner, "lost-tree-2", "return { packages = { \"nano\" } }\n");
+    let work = Work::new(&captures()).unwrap();
+    let applied = Applied {
+        git_dir: work.dir.join("lost.git"),
+    };
+    let one = captured::capture(&first, &work).unwrap();
+    let tree = applied.store_tree(&one).unwrap();
+    let generation = applied.record(1, &tree, b"lock", b"{}").unwrap();
+    // As the replay found: the ref names a commit whose tree's object never reached the disk.
+    let object = applied.git_dir.join("objects").join(&tree[..2]).join(&tree[2..]);
+    fs::remove_file(&object).unwrap();
+    let error = format!(
+        "{:#}",
+        applied.verified(1, &generation.commit, Some(&tree)).unwrap_err()
+    );
+    assert!(
+        error.contains("generation 1") && error.contains("missing or damaged"),
+        "{error}"
+    );
+    assert_eq!(applied.damaged(), [1], "status can name it");
+    let work2 = Work::new(&captures()).unwrap();
+    let two = captured::capture(&second, &work2).unwrap();
+    let other = applied.store_tree(&two).unwrap();
+    let next = applied.record(2, &other, b"lock", b"{}").unwrap();
+    applied
+        .verified(2, &next.commit, Some(&other))
+        .expect("a later generation is checked on its own, so switches and its revert keep working");
+    let again = applied.store_tree(&one).unwrap();
+    assert_eq!(again, tree);
+    applied
+        .verified(1, &generation.commit, Some(&tree))
+        .expect("storing the same tree again repairs the generation that lost it");
+    assert!(applied.damaged().is_empty());
+}
