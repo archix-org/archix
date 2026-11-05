@@ -40,7 +40,11 @@ def run(m, t):
         if point in SWITCH:
             cut.arm(point)
             cut.background(f"{HOST} switch --noconfirm", "/root/switch.log")
-            reached = cut.reset_on_cut(timeout=1800)
+            try:
+                reached = cut.reset_on_cut(timeout=900)
+            except Exception:
+                cut.disarm()
+                t.require(False, f"the switch never reached {point}: {out('tail -c 2000 /root/switch.log')}")
             cut.disarm()
             boots, took = settle(reached)
             t.log(f"after the cut at {reached}: booted through {loader_info() or 'Limine'}, migration {migration()}")
