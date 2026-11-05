@@ -82,7 +82,8 @@ def settle(timeout=2400):
         selected = lines[2].strip() if len(lines) > 2 else ""
         stem = selected.removesuffix(".conf")
         blessed = len(lines) > 3 and (selected in lines[3:] or not any(line.startswith(stem + "+") for line in lines[3:]))
-        if tried or (complete and blessed):
+        # An uncounted boot can't fall back, so it's settled once up even if its check left the entry only under a counted name, as dropping the second name a cut left does.
+        if tried or (complete and (blessed or not counted)):
             common.m.execute("systemctl is-system-running --wait > /dev/null", 600, quiet=True)
             return boots, time.monotonic() - began
         if time.monotonic() - began > timeout:
