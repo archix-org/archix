@@ -1105,3 +1105,60 @@ fn a_switch_that_changes_nothing_before_failing_leaves_no_mark() {
     checks.check(marked.is_none(), format!("so nothing is marked unfinished: {marked:?}"));
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_switch_cut_off_after_its_generation_is_recorded_is_finished_by_the_next_switch_which_drops_the_mark() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let body = "rollback = { enable = true }, drift = \"keep\"";
+    let setup = on_btrfs("3G", body);
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    bless(&setup);
+    setup.set_body(
+        &[],
+        &format!("{body}, files = {{ [\"/etc/archix-cut-test\"] = {{ text = \"one\" }} }}"),
+    );
+    let cut = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_CRASH", "switch-recorded")],
+        &["switch", "--noconfirm"],
+    );
+    checks.check(
+        !cut.status.success(),
+        format!("the switch dies once its generation is recorded: {}", text(&cut)),
+    );
+    let marked = archix::pacman::hooks::unfinished(&setup.paths.state);
+    checks.check(
+        marked.as_ref().is_some_and(|u| u.switch.is_some()),
+        format!("and leaves the mark: {marked:?}"),
+    );
+    let out = setup.run_env(&[COUNTING], &["switch", "--noconfirm"]);
+    checks.check(
+        out.status.success() && text(&out).contains("nothing to do"),
+        format!("the next switch finds the system applied: {}", text(&out)),
+    );
+    let left = archix::pacman::hooks::unfinished(&setup.paths.state);
+    checks.check(
+        left.is_none(),
+        format!(
+            "and, having finished the boot step, drops the mark: {left:?}; {}",
+            text(&out)
+        ),
+    );
+    let check = setup.run_env(
+        &[
+            COUNTING,
+            ("ARCHIX_TEST_COUNTED_BOOT", "1"),
+            ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
+        ],
+        &["health-check"],
+    );
+    checks.check(
+        !text(&check).contains("was cut off before it finished"),
+        format!(
+            "so the next counted boot doesn't fail for the old cut: {}",
+            text(&check)
+        ),
+    );
+    checks.finish();
+}
