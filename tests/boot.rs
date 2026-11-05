@@ -282,7 +282,10 @@ fn a_snapshot_entry_boots_read_only_with_a_throwaway_layer_and_pacman_and_switch
     let _system = lock_system();
     let checks = Checks::default();
     let body = |n: u32| format!(r#"{ROLLBACKS}, files = {{ ["/etc/archix-boot-test"] = {{ text = "{n}" }} }}"#);
-    let setup = on_btrfs(&body(1));
+    // 3 GiB: no room for the 4 GiB layer and its margin, and the 1 GiB one fits with room, where 2 GiB left it on the edge.
+    let disk = Machine::on_btrfs_of("3G");
+    disk.btrfs.as_ref().unwrap().mount_archix();
+    let setup = Setup::on(disk, &[], &body(1), &[]);
     let machine = &setup.machine;
     setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
     setup.set_body(&[], &body(2));
@@ -301,6 +304,7 @@ fn a_snapshot_entry_boots_read_only_with_a_throwaway_layer_and_pacman_and_switch
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&mounted.stdout).into_owned() + &String::from_utf8_lossy(&mounted.stderr);
+    println!("boot-mount said:\n{said}");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert!(mounted.status.success(), "boot-mount: {said}");
         checks.eq(
@@ -312,8 +316,8 @@ fn a_snapshot_entry_boots_read_only_with_a_throwaway_layer_and_pacman_and_switch
             serde_json::from_str(&fs::read_to_string(run.path().join("try")).unwrap()).unwrap();
         checks.eq(trying.snapshot, 2, "the try record names the snapshot");
         checks.check(
-            trying.layer == "file" && trying.size < 4 << 30,
-            format_args!("a 2 GiB disk has no room for the 4 GiB layer, so it got a smaller one: {trying:?} {said}"),
+            trying.layer == "file" && trying.size == 1 << 30,
+            format_args!("a 3 GiB disk has no room for the 4 GiB layer, so it got the 1 GiB one: {trying:?} {said}"),
         );
         let layer = machine.root.join(".archix/try/layer.img");
         let attrs = sh(&format!(
