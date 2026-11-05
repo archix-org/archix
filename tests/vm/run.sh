@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test; the suites from the deployment era wait to be ported.
+# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test, and `run.sh SUITE` each of suite_tests, a test with an image of its own (tests/vm/SUITE: config.lua, image.env, test.py; ext4_tests also run with FS=ext4): selfupgrade the upgrade from a deployments system (ARCHIX_OLD) refused, dkms2 DKMS with two kernels, nvidia NVIDIA's DKMS drivers (TO_DATE, 2026-10-10 by default), cachyos CachyOS on Limine and its move to systemd-boot, churn a year of weekly switches, pcr signed PCR policies with swtpm, firewall the firewall over ssh and a second NIC, rescue the rescue entry, recovery a live-USB recovery, secrets declared secrets on real boots.
 set -euo pipefail
 suite=${1:-boot}
-case $suite in
-  nvidia | dkms2 | cachyos | churn | pcr | firewall | selfupgrade | rescue | recovery | secrets) echo "the $suite suite still drives deployments, which are gone; it waits to be ported to the in-place model on the driver" >&2; exit 2 ;;
-esac
 root=$(cd "$(dirname "$0")/../.." && pwd)
 # The driver's suites (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache or ARCHIX_VM_CACHE=0.
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
-case $suite in boot | powercut | limine) driver=$suite ;; *) echo "unknown suite $suite; run.sh takes boot, powercut or limine" >&2; exit 2 ;; esac
-boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace accounts ext4)
+boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace accounts revoke secureboot entry-edit file-systems removal ext4)
 powercut_tests=(pacman keep varlib rootmove switch)
 # A machine Limine boots (FS=btrfs, built with the test hooks): keep refused across a kernel change, a root replaced as limine-snapper-restore does, and the move to systemd-boot with cuts at each step.
 limine_tests=(keep resync migration)
+suite_tests=(selfupgrade dkms2 nvidia cachyos churn pcr firewall rescue recovery secrets)
+# Those of suite_tests that also apply with FS=ext4, rollbacks off; the release gate runs them on both.
+ext4_tests=(selfupgrade dkms2 nvidia churn pcr firewall rescue secrets)
+case $suite in
+  boot | powercut | limine) driver=$suite ;;
+  *) [[ " ${suite_tests[*]} " == *" $suite "* ]] || { echo "unknown suite $suite; run.sh takes boot, powercut, limine or one of: ${suite_tests[*]}" >&2; exit 2; } ;;
+esac
+# The last commit of the deployments model, which selfupgrade lays the system out with.
+export ARCHIX_OLD=${ARCHIX_OLD:-505fc7b}
 # The split suites, boot and powercut, run their tests side by side from one base.
 split=
 case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; limine) split=("${limine_tests[@]}") ;; esac
@@ -57,6 +62,9 @@ pending=()
 if [ -n "$split" ]; then
   [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
   for name in "${names[@]}"; do [ "$name" = base ] || pending+=("$suite-$name"); done
+else
+  [ -n "$interactive" ] || python3 "$root/tests/vm/driver/hang.py"
+  pending=("$suite")
 fi
 # Exported before the keys are taken, as cache.py hashes it: set after them, it made every power-cut pass's key change during its run.
 [ "$suite" = boot ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
@@ -81,6 +89,7 @@ started=$(date +%s)
 target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
+[ -n "$split" ] || mounts+=(-e IMAGE_DIR="/vm/$suite")
 # ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut suite builds its own, with the test hooks' debug assertions.
 if [ "$suite" = powercut ] || [ "$suite" = limine ]; then
   docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
@@ -94,6 +103,19 @@ else
   docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
     cargo build --locked --release && cp /target/release/archix /work/archix
     cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+fi
+# selfupgrade's two archix-git packages: old, ARCHIX_OLD's static build, and new, this tree's, each versioned as the AUR's PKGBUILD does.
+if [ "$suite" = selfupgrade ]; then
+  rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old" "$work/new"
+  git -C "$root" archive "$ARCHIX_OLD" | tar -x -C "$work/old-src"
+  aur_version() { printf '%s.r%s.g%s' "$(git -C "$root" show "$1:Cargo.toml" | grep -m1 '^version' | cut -d '"' -f2)" "$(git -C "$root" rev-list --count "$1")" "$(git -C "$root" rev-parse --short=7 "$1")"; }
+  aur_version "$ARCHIX_OLD" > "$work/old/version" && git -C "$root" rev-parse --short=7 "$ARCHIX_OLD" > "$work/old/commit"
+  aur_version HEAD > "$work/new/version" && git -C "$root" rev-parse --short=7 HEAD > "$work/new/commit"
+  # git archive dates every file at its commit, so one target dir shared by two old commits would keep the first one's build.
+  docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR="/target/old-$(cat "$work/old/commit")" archix-arch-test bash -c 'set -e
+    cargo build --locked --release --target x86_64-unknown-linux-musl && cp "$CARGO_TARGET_DIR"/x86_64-unknown-linux-musl/release/archix /work/old/archix-static && cp /work/old/archix-static /work/old/archix'
+  rm -rf "$work/old-src"
+  cp "$work/archix" "$work/new/archix" && cp "$work/archix-static" "$work/new/archix-static"
 fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
@@ -134,6 +156,33 @@ take_slot() {
     sleep 2
   done
 }
+# A suite of its own boots its image as it was built, in the runner's own heavy slot.
+if [ -z "$split" ]; then
+  if [ -n "$interactive" ]; then
+    "${vm[@]}" python -m driver "/vm/$suite/test.py" "${args[@]}"
+    exit
+  fi
+  if [ "$suite" = firewall ]; then
+    # The probe side of the VM's second NIC: a tap in a network namespace of its own, so the host's network is untouched.
+    rm -f "$work/reach.sock"
+    l2=$(docker run -d --rm --network none --cap-add NET_ADMIN --device /dev/net/tun --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+      --sysctl net.ipv6.conf.default.disable_ipv6=0 -v "$work":/work -v "$root/tests/vm":/vm:ro archix-arch-test \
+      sh -c 'exec python -u /vm/firewall/l2.py /work/l2.sock /work/reach.sock > /work/l2.log 2>&1')
+  fi
+  status=0
+  "${vm[@]}" python -m driver "/vm/$suite/test.py" 2>&1 | tee "$work/output.log" || status=$?
+  [ -z "${l2:-}" ] || docker rm -f "$l2" > /dev/null 2>&1 || true
+  seconds=$(($(date +%s) - started))
+  if [ "$status" = 0 ]; then
+    echo "== $suite passed: $seconds s"
+    record "$suite" "$seconds" "$work" || echo "warning: recording $suite's pass failed"
+    summary "$suite" passed "$seconds s"
+  else
+    summary "$suite" failed "$seconds s" "$work/output.log"
+    echo "== $suite FAILED (exit $status) after $seconds s on ${FS:-ext4}"
+  fi
+  exit "$status"
+fi
 # The split suites: the base lays the image out with this run's archix and powers off; each test then boots a qcow2 overlay of that disk with its own copy of the vars, in a heavy slot of its own.
 base=/vm/boot/base.py
 [ "$suite" != limine ] || base=/vm/limine/base.py

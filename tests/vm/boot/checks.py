@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: checks.py; fails unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX.
+# Usage: checks.py; fails unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX, and its suite_tests each have a test.py and a cache key, with ci.yml's suites job naming only them.
 import json
 import re
 import sys
@@ -38,9 +38,27 @@ def problems(tests, ci, results):
     return found
 
 
+def listed(name):
+    """A tests/vm/run.sh array, such as suite_tests."""
+    found = re.search(rf"^{name}=\(([^)]*)\)$", (ROOT / "tests/vm/run.sh").read_text(), re.M)
+    return found.group(1).split() if found else []
+
+
+def suite_problems(suites, ext4, ci):
+    """What's wrong with run.sh's suite_tests and ext4_tests against cache.py and ci.yml's suites job."""
+    found = [f"run.sh's suite {name} has no tests/vm/{name}/test.py" for name in suites if not (ROOT / "tests/vm" / name / "test.py").is_file()]
+    cached = re.search(r"^OWN_TESTS = (\[.*\])$", (ROOT / "tests/vm/driver/cache.py").read_text(), re.M)
+    if not cached or sorted(json.loads(cached.group(1))) != sorted(suites):
+        found.append(f"tests/vm/driver/cache.py's OWN_TESTS isn't run.sh's suite_tests ({' '.join(suites)}), so a suite would have no cache key")
+    found += [f"run.sh's ext4_tests names {name}, which isn't in suite_tests" for name in ext4 if name not in suites]
+    found += [f"ci.yml's suites job names {name}, which isn't in run.sh's suite_tests" for name in re.findall(r"^\s*- \{ suite: ([\w-]+), fs: \w+ \}$", ci, re.M) if name not in suites]
+    return found
+
+
 def main():
     tests = boot_tests()
-    found = problems(tests, (ROOT / ".github/workflows/ci.yml").read_text(), (ROOT / "tests/ci/boot-results.sh").read_text())
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    found = problems(tests, ci, (ROOT / "tests/ci/boot-results.sh").read_text()) + suite_problems(listed("suite_tests"), listed("ext4_tests"), ci)
     if found:
         print("\n".join(found))
         return 1

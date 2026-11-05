@@ -176,7 +176,7 @@ jobs:
       fail-fast: false
       matrix:
         # At most four a job, as tests/ci/boot-results.sh restores and saves four caches; the snapshot tests need btrfs, and ext4 is the lane with rollbacks off.
-        tests: ["counting try pacman unattended", "guard keep hang glibc", "order health hook layer", "records strict ptrace accounts"]
+        tests: ["counting try pacman unattended", "guard keep hang glibc", "order health hook layer", "records strict ptrace accounts", "revoke secureboot entry-edit file-systems", "removal"]
         fs: [btrfs]
         include:
           - tests: ext4
@@ -249,4 +249,62 @@ jobs:
         with:
           group: boot
           name: boot-${{ steps.keys.outputs.test1 || strategy.job-index }}-${{ matrix.fs }}
+          status: ${{ job.status }}
+
+  # The suites with an image of their own (tests/vm/run.sh's suite_tests) that fit a CI job, one a job, each pass cached by its inputs' hash as the boot tests' are; the release gate runs every one.
+  suites:
+    needs: [image, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suite: selfupgrade, fs: btrfs }
+          - { suite: dkms2, fs: btrfs }
+          - { suite: pcr, fs: btrfs }
+          - { suite: firewall, fs: btrfs }
+          - { suite: rescue, fs: btrfs }
+          - { suite: recovery, fs: btrfs }
+          - { suite: secrets, fs: btrfs }
+    name: ${{ matrix.suite }} (${{ matrix.fs }})
+    env:
+      FS: ${{ matrix.fs }}
+      RESULT_PREFIX: ""
+    steps:
+      - run: echo "ARCHIX_PREBUILT=$RUNNER_TEMP/build" >> "$GITHUB_ENV" && echo "ARCHIX_VM_RESULTS=$RUNNER_TEMP/vm-results" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v5
+        with:
+          # selfupgrade builds ARCHIX_OLD from history, which a shallow clone lacks.
+          fetch-depth: ${{ matrix.suite == 'selfupgrade' && '0' || '1' }}
+      - uses: ./.github/actions/vm-setup
+        with:
+          group: ${{ matrix.suite }}
+          need-gb: "40"
+      - uses: actions/download-artifact@v4
+        with:
+          name: archix-build
+          path: ${{ runner.temp }}/build
+      - id: keys
+        run: tests/ci/boot-results.sh keys ${{ matrix.suite }}
+      - if: steps.keys.outputs.test1
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
+          key: ${{ steps.keys.outputs.key1 }}
+      - run: tests/ci/boot-results.sh gather
+      - run: tests/vm/run.sh ${{ matrix.suite }}
+      - id: split
+        if: always() && steps.keys.outcome == 'success'
+        run: tests/ci/boot-results.sh split
+      - if: always() && steps.split.outputs.save1
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
+          key: ${{ steps.keys.outputs.key1 }}
+      - if: always()
+        uses: ./.github/actions/vm-finish
+        with:
+          group: ${{ matrix.suite }}
+          name: ${{ matrix.suite }}-${{ matrix.fs }}
           status: ${{ job.status }}

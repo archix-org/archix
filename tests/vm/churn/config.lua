@@ -1,21 +1,24 @@
+-- tests/vm/churn/test.py: a year of weekly switches, each with archix-churn's next version and a new kernel command line.
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "sbctl", "efitools", "archix-churn" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "sbctl", "efitools", "e2fsprogs", "git", "archix-churn" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   custom_repos = { { name = "churn", servers = { "file:///srv/churn-repo" }, sig_level = "Optional TrustAll" } },
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0", "archix.week=0" },
-  boot = { loader = "systemd-boot" }, -- boot
-  deployments = { keep = 2 },
-  generations = { keep = 10, keep_days = 30 }, -- generations
+  boot = { loader = "systemd-boot" },
+  rollback = { enable = true },
+  generations = { keep = 10, keep_days = 30 },
+  allow_no_password_login = true,
   files = {
-    ["/opt/archix-vmtest/bin/archix-vmtest"] = { source = "vmtest.sh", mode = "0755" },
+    ["/opt/archix-vmtest/bin/archix-backdoor"] = { source = "archix-backdoor", mode = "0755" },
     ["/etc/systemd/network/20-wired.network"] = { text = "[Match]\nName=en*\n\n[Network]\nDHCP=yes" },
   },
   units = {
-    ["archix-vmtest.service"] = "[Unit]\nDescription=archix VM test\nAfter=multi-user.target archix-boot.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nExecStart=/opt/archix-vmtest/bin/archix-vmtest\nStandardOutput=journal+console\nTimeoutSec=0\n\n[Install]\nWantedBy=multi-user.target",
+    ["archix-backdoor.service"] = "[Unit]\nDescription=archix VM test driver's root shell\nWants=network-online.target\n\n[Service]\nExecStart=/opt/archix-vmtest/bin/archix-backdoor\n\n[Install]\nWantedBy=multi-user.target",
   },
+  restart_if_changed = { ["archix-backdoor.service"] = false },
   services = {
-    ["archix-vmtest.service"] = true,
+    ["archix-backdoor.service"] = true,
     ["systemd-networkd.service"] = true,
     ["systemd-resolved.service"] = true,
   },

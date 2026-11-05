@@ -30,7 +30,7 @@ Read from nixpkgs `master` on 2026-10-27; paths are in nixpkgs.
 
 1. The driver, and the boot tests on it split into small tests that run side by side from one base and are cached one by one by their inputs (locally in `~/.cache/archix-vm-results/`, newest 500; on CI in the Actions cache). Done; CI runs them on every push.
 2. With deployments gone (2026-11), the boot tests were rewritten for the in-place model and the power-cut replay for test-hook cuts on the driver (below). Done.
-3. Port the suites still driving deployments (nvidia, dkms2, cachyos, churn, pcr, firewall, selfupgrade, rescue, recovery, secrets) to the driver; `run.sh` refuses them until then.
+3. The suites that drove deployments (nvidia, dkms2, cachyos, churn, pcr, firewall, selfupgrade, rescue, recovery, secrets) ported to the driver for the in-place model, each with an image of its own (`tests/vm/SUITE/image.env` sourced by `build-image.sh`, `config.lua`, `test.py`; `tests/vm/suite.py` makes the first switch): `tests/vm/run.sh SUITE`, FS=btrfs, and FS=ext4 for those in run.sh's `ext4_tests`. selfupgrade lays the system out with the last deployments build (`ARCHIX_OLD`, 505fc7b) and requires the upgrade to this tree's archix-git to be refused with the ESP and /archix unchanged.
 
 ## The boot tests
 

@@ -1,15 +1,18 @@
-pkgname=archix
-pkgver=1
+pkgname=archix-git
+pkgver=0
 pkgrel=1
-pkgdesc="archix, packaged for the self-upgrade test from the static binary next to this file"
+pkgdesc="archix, packaged as the AUR's archix-git for the self-upgrade test from the binaries next to this file"
 arch=(x86_64)
-license=(MIT)
+license=('MIT OR Apache-2.0')
+depends=('pacman' 'gcc-libs' 'glibc')
+provides=('archix')
+conflicts=('archix' 'ax')
 options=(!strip !debug)
-source=(archix-static)
-sha256sums=(SKIP)
+source=(archix archix-static)
+sha256sums=(SKIP SKIP)
 
 package() {
-  install -Dm755 archix-static "$pkgdir/usr/bin/archix"
+  install -Dm755 archix "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
   install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
 }

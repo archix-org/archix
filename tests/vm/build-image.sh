@@ -4,6 +4,9 @@ set -euo pipefail
 archive=${ARCHIVE:-https://archive.archlinux.org}
 dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl git e2fsprogs) archix=/work/archix
 fs=${FS:-ext4}
+# IMAGE_DIR=/vm/SUITE takes that suite's config.lua; its image.env may change the variables above and define before_pacstrap, after_pacstrap, install_archix and after_image.
+[ -z "${IMAGE_DIR:-}" ] || dir=$IMAGE_DIR
+[ ! -f "$dir/image.env" ] || . "$dir/image.env"
 [ "$fs" = btrfs ] && packages+=(btrfs-progs)
 # LOADER=limine builds an image Limine boots from the ESP, with the kernel and initramfs there, as CachyOS installs it.
 loader=${LOADER:-systemd-boot}
@@ -13,12 +16,8 @@ img=${IMG:-/work/disk.img}
 rm -f "$img"
 [ -n "${IMG:-}" ] || rm -f /work/vars.fd
 truncate -s "$size" "$img"
-# 1 GiB, as the Arch installation guide suggests.
-sfdisk --quiet "$img" <<SFDISK
-label: gpt
-size=1G, type=uefi
-type=linux
-SFDISK
+# 1 GiB, as the Arch installation guide suggests; image.env's partitions may add more after the root.
+printf '%b' "${partitions:-label: gpt\nsize=1G, type=uefi\ntype=linux\n}" | sfdisk --quiet "$img"
 
 part() { sfdisk -J "$img" | python -c "import json,sys; p=json.load(sys.stdin)['partitiontable']['partitions'][$1]; print(p['start']*512, p['size']*512, p['uuid'])"; }
 read -r esp_start esp_size _ < <(part 0)
@@ -44,15 +43,21 @@ mkdir -p /mnt/efi
 mount -o umask=0077 "$esp" /mnt/efi
 
 grep -v '^NoExtract' /etc/pacman.conf > /tmp/pacman.conf
+! declare -F before_pacstrap > /dev/null || before_pacstrap
 echo "Server = $archive/repos/${date//-//}/\$repo/os/\$arch" > /tmp/mirrorlist
 sed 's|/etc/pacman.d/mirrorlist|/tmp/mirrorlist|' /tmp/pacman.conf > /tmp/pacstrap.conf
 for attempt in 1 2 3; do pacstrap -C /tmp/pacstrap.conf -K /mnt "${packages[@]}" >/dev/null && break; [ "$attempt" = 3 ] && exit 1; sleep 20; done
 cp /tmp/pacman.conf /mnt/etc/pacman.conf
 cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
+! declare -F after_pacstrap > /dev/null || after_pacstrap
 # The filesystem package's resolv.conf is empty; the suites enable systemd-resolved, so point at its stub as an Arch install would.
 ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
-install -Dm755 "$archix" /mnt/usr/bin/archix
-install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
+if declare -F install_archix > /dev/null; then
+  install_archix
+else
+  install -Dm755 "$archix" /mnt/usr/bin/archix
+  install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
+fi
 if [ "$loader" = limine ]; then
   install -Dm644 /mnt/usr/share/limine/BOOTX64.EFI /mnt/efi/EFI/BOOT/BOOTX64.EFI
   install -Dm644 /mnt/usr/share/limine/BOOTX64.EFI /mnt/efi/EFI/limine/BOOTX64.EFI
@@ -96,3 +101,4 @@ else
 fi
 sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/etc/archix/init.lua /mnt/etc/pacman.d/mirrorlist
 [ ! -f /mnt/var/lib/archix/archive-url ] || sed -i "s|$archive|${VM_ARCHIVE:-$archive}|" /mnt/var/lib/archix/archive-url
+! declare -F after_image > /dev/null || after_image

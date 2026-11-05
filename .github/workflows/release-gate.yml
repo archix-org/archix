@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Tests to run, comma-separated, as suite-test (powercut-pacman, powercut-keep, powercut-varlib, powercut-rootmove, boot-counting, ...); empty runs the power-cut tests, which CI doesn't
+        description: Tests to run, comma-separated, as suite-test (powercut-pacman, powercut-keep, powercut-varlib, powercut-rootmove, limine-keep, boot-counting, ...), suite-NAME for a suite with an image of its own on btrfs (suite-nvidia, suite-selfupgrade, ...) and ext4-NAME for it on ext4; empty runs the power-cut and Limine tests and every suite-NAME and ext4-NAME
         default: ""
       repeat:
         description: How many times to run each test job, side by side, to catch an intermittent failure
@@ -34,12 +34,12 @@ jobs:
           REPEAT: ${{ inputs.repeat }}
         run: |
           list() { sed -n "s/^$1_tests=(\(.*\))$/\1/p" tests/vm/run.sh | tr ' ' '\n' | sed "s/^/$1-/"; }
-          known=$( { list boot; list powercut; } | paste -sd,)
-          default=$(list powercut | paste -sd,)
+          known=$( { list boot; list powercut; list limine; list suite; list ext4; } | paste -sd,)
+          default=$( { list powercut; list limine; list suite; list ext4; } | paste -sd,)
           echo "tests=$(tr -d ' ' <<< "${SUITES:-$default}" | tr ',' '\n' | grep -v '^$' | jq -Rnc --arg keep "$known" '[inputs | select(. as $s | $keep | split(",") | index($s))]')" >> "$GITHUB_OUTPUT"
           echo "runs=$(jq -nc --argjson n "${REPEAT:-1}" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
 
-  # Each test in a job of its own, on btrfs but the ext4 lane's; the power-cut suite builds archix itself, with the test hooks' debug assertions.
+  # Each test in a job of its own, on btrfs but the ext4 lane's and ext4-NAME's; the power-cut suite builds archix itself, with the test hooks' debug assertions.
   tests:
     needs: plan
     if: needs.plan.outputs.tests != '[]'
@@ -53,15 +53,23 @@ jobs:
         run: ${{ fromJSON(needs.plan.outputs.runs) }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # selfupgrade builds ARCHIX_OLD from history, which a shallow clone lacks.
+          fetch-depth: ${{ endsWith(matrix.test, '-selfupgrade') && '0' || '1' }}
       - uses: ./.github/actions/vm-setup
         with:
           group: ${{ matrix.test }}
           need-gb: "40"
       - run: |
-          suite=${TEST%%-*}
-          fs=btrfs
-          [ "$TEST" != boot-ext4 ] || fs=ext4
-          FS=$fs tests/vm/run.sh "$suite" "${TEST#*-}"
+          case $TEST in
+            suite-*) FS=btrfs tests/vm/run.sh "${TEST#suite-}" ;;
+            ext4-*) FS=ext4 tests/vm/run.sh "${TEST#ext4-}" ;;
+            *)
+              fs=btrfs
+              [ "$TEST" != boot-ext4 ] || fs=ext4
+              FS=$fs tests/vm/run.sh "${TEST%%-*}" "${TEST#*-}"
+              ;;
+          esac
         env:
           TEST: ${{ matrix.test }}
           VM_TIMEOUT: "18000"
