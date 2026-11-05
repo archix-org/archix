@@ -80,7 +80,7 @@ return {
     },
     sysctl = archix.option { type = t.attrs_of(t.any), default = {}, description = "Kernel settings, written to /etc/sysctl.d/90-archix.conf." },
     udev_rules = archix.option { type = t.attrs_of(t.lines), default = {}, description = "udev rules, keyed by file name without .rules. A switch that adds, changes or drops one reloads udev and replays a change event for every device, so they apply at once." },
-    modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf." },
+    modprobe = archix.option { type = t.attrs_of(t.lines), default = {}, description = "modprobe.d snippets, keyed by file name without .conf. They apply when a module next loads, so for one already loaded from the next boot (or after unloading and loading it again): a switch doesn't reload modules." },
     kernel_modules = archix.option { type = t.list_of(t.str), default = {}, description = "Kernel modules to load at boot." },
     kernel_params = archix.option { type = t.list_of(t.str), default = {}, description = "Kernel command line parameters, written to /etc/kernel/cmdline for boot entries." },
     hostname = archix.option { type = t.nullable(t.str), default = archix.null },
