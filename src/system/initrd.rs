@@ -361,14 +361,33 @@ pub fn make_layer_with(
     }
 }
 
-/// The root's fstab for a try boot: no line for `/`, which is the overlay now, and /var/lib as an overlay of @varlib, mounted read-only at `varlib`, with its upper half in the layer.
+/// The root's fstab for a try boot: no line for `/`, which is the overlay now, none for swap files on it, which swapon can't use on an overlay and the snapshot doesn't hold (their subvolume isn't in it), and /var/lib as an overlay of @varlib, mounted read-only at `varlib`, with its upper half in the layer.
 pub fn try_fstab(fstab: &str, varlib: Option<&Path>, layer: &Path) -> String {
+    let entries = || {
+        fstab
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>())
+    };
+    let elsewhere: Vec<&str> = entries()
+        .filter(|fields| fields.len() > 2 && fields[2] != "swap" && !matches!(fields[1], "/" | "/var/lib"))
+        .map(|fields| fields[1])
+        .collect();
+    let on_root = |file: &str| {
+        file.starts_with('/')
+            && !file.starts_with("/dev/")
+            && !elsewhere.iter().any(|point| Path::new(file).starts_with(point))
+    };
     let mut text = String::new();
     for line in fstab.lines() {
-        let point = line.split_whitespace().nth(1);
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let point = fields.get(1).copied();
         let comment = line.trim_start().starts_with('#');
         match point {
             Some("/") if !comment => text.push_str(&format!("# archix try mode: the root is an overlay\n# {line}\n")),
+            Some("none") if !comment && fields.get(2) == Some(&"swap") && on_root(fields[0]) => {
+                text.push_str(&format!("# archix try mode: no swap file in the overlay\n# {line}\n"))
+            }
             Some("/var/lib") if !comment => match varlib {
                 Some(varlib) => text.push_str(&format!(
                     "# archix try mode: {line}\noverlay /var/lib overlay lowerdir={},upperdir={},workdir={} 0 0\n",
@@ -727,5 +746,32 @@ mod tests {
             "{hook}"
         );
         assert!(script.contains("booted snapshot 7 read-only; `archix rollback 7` to keep, or reboot"));
+    }
+
+    #[test]
+    fn a_try_boots_fstab_leaves_out_swap_files_on_the_overlaid_root_only() {
+        let fstab = "UUID=a / btrfs rw,subvol=/@ 0 0\nUUID=d /mnt/data ext4 nofail 0 2\n\
+                     /swap/swapfile none swap nofail 0 0\n/var/lib/swapfile none swap defaults 0 0\n\
+                     /mnt/data/swapfile none swap defaults 0 0\nUUID=s none swap defaults 0 0\n/dev/zram1 none swap defaults 0 0\n";
+        let text = try_fstab(fstab, None, Path::new("/run/archix/layer"));
+        for kept in [
+            "\nUUID=d /mnt/data ext4 nofail 0 2\n",
+            "\n/mnt/data/swapfile none swap defaults 0 0\n",
+            "\nUUID=s none swap defaults 0 0\n",
+            "\n/dev/zram1 none swap defaults 0 0\n",
+        ] {
+            assert!(text.contains(kept), "{kept:?} kept in {text}");
+        }
+        for dropped in [
+            "/swap/swapfile none swap nofail 0 0",
+            "/var/lib/swapfile none swap defaults 0 0",
+        ] {
+            assert!(
+                text.contains(&format!(
+                    "# archix try mode: no swap file in the overlay\n# {dropped}\n"
+                )),
+                "{dropped} left out of {text}"
+            );
+        }
     }
 }
