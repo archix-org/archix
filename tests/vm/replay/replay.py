@@ -37,6 +37,8 @@ ESP_ONLY = os.environ.get("REPLAY_ESP_ONLY") == "1"
 # How many points boot at once, each in a VM of its own; one while the host's I/O pressure (full avg60) is over IO_PRESSURE.
 JOBS = max(1, int(os.environ.get("REPLAY_JOBS") or 1))
 IO_PRESSURE = 10.0
+# What a batch leaves free of the host's memory: QEMU takes a guest's memory as it touches it, so a VM just started counts for little yet.
+MEMORY_SPARE_MIB = 8192
 SEED = os.environ.get("REPLAY_SEED") or os.environ.get("GITHUB_RUN_ID") or time.strftime("%Y%m%d")
 SETTLE = 1500
 SUMMARY = re.compile(r"^\S+: \d+ total files, \d+ (altered|missing) files$")
@@ -431,7 +433,7 @@ class Scenario:
         try:
             at = 0
             while at < len(tasks):
-                jobs = 1 if io_pressure() > IO_PRESSURE else JOBS
+                jobs = 1 if io_pressure() > IO_PRESSURE else min(JOBS, memory_room())
                 base = tasks[at][0]
                 engine.to(base)
                 batch = []
@@ -466,7 +468,7 @@ class Scenario:
                 for thread in threads:
                     thread.join()
                 if len(batch) > 1:
-                    self.note(f"REPLAY-BATCH test={self.name} {len(batch)} points at once over entry {base}, I/O pressure {io_pressure():.1f}")
+                    self.note(f"REPLAY-BATCH test={self.name} {len(batch)} points at once over entry {base}, I/O pressure {io_pressure():.1f}, room for {memory_room()} VMs")
         finally:
             for machine, _, _ in workers:
                 machine.stop()
@@ -620,6 +622,17 @@ def io_pressure():
     except (OSError, IndexError, ValueError):
         pass
     return 0.0
+
+
+def memory_room():
+    """How many VMs of VM_MEM fit in the host's available memory beyond MEMORY_SPARE_MIB, at least one."""
+    try:
+        for line in open("/proc/meminfo"):
+            if line.startswith("MemAvailable:"):
+                return max(1, (int(line.split()[1]) // 1024 - MEMORY_SPARE_MIB) // int(os.environ.get("VM_MEM") or 3072))
+    except (OSError, ValueError):
+        pass
+    return JOBS
 
 
 def file_name(label):
