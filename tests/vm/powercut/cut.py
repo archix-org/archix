@@ -45,6 +45,12 @@ def fresh(backing):
     m.stop()
     subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-b", backing, "-F", "raw", str(m.work / "disk.qcow2")], check=True)
     (m.work / "vars.fd").unlink(missing_ok=True)
+    # QEMU truncates the serial log when it starts, so the mark new_boot takes must be 0, not the old log's length, or a cut's line early in the next VM is never seen; the old log is kept beside it.
+    if m.serial.exists():
+        kept = 1
+        while (m.work / f"serial.{kept}.log").exists():
+            kept += 1
+        m.serial.rename(m.work / f"serial.{kept}.log")
     m.process = m.shell = None
     m.ready, m.seen, m.boot_id, m.connected = [], 0, None, False
     m.new_boot(f"a fresh overlay of {backing}")
