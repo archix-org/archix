@@ -520,7 +520,7 @@ fn services(change: &SystemChange) -> Vec<String> {
     failures
 }
 
-/// What a switch does to units on the running system, given which are `active`: stops the disabled or dropped, starts the newly enabled, try-restarts those whose unit file it rewrote and reloads those whose RELOADS file changed.
+/// What a switch does to units on the running system, given which are `active`: stops the disabled or dropped, starts the newly enabled, try-restarts those whose unit file it rewrote, reloads those whose RELOADS file changed and restarts systemd-sysctl for new sysctl settings.
 pub fn unit_actions(change: &SystemChange, active: &dyn Fn(&str) -> bool) -> Vec<(&'static str, String)> {
     let mut actions = Vec::new();
     let off = change
@@ -564,8 +564,14 @@ pub fn unit_actions(change: &SystemChange, active: &dyn Fn(&str) -> bool) -> Vec
             actions.push(("try-reload-or-restart", unit.clone()));
         }
     }
+    if change.to.files.contains_key(SYSCTL) && changed.contains(SYSCTL) {
+        actions.push(("restart", "systemd-sysctl.service".to_string()));
+    }
     actions
 }
+
+/// The file `sysctl` renders, which systemd-sysctl applies at boot; restarting it applies a change at once.
+pub const SYSCTL: &str = "/etc/sysctl.d/90-archix.conf";
 
 /// Units archix writes whose running service reads a file the switch may change on its own: reloaded when only that file changed.
 const RELOADS: &[(&str, &str)] = &[(super::firewall::UNIT, super::firewall::RULES)];
@@ -611,6 +617,31 @@ mod unit_tests {
             to: with_rules("a"),
         };
         assert!(unit_actions(&same, &|_| true).is_empty());
+    }
+
+    #[test]
+    fn new_sysctl_settings_apply_at_once_through_systemd_sysctl() {
+        let with = |sha: &str| {
+            let mut state = SystemState::default();
+            state.files.insert(SYSCTL.to_string(), file(sha));
+            state
+        };
+        let change = SystemChange {
+            from: with("a"),
+            to: with("b"),
+        };
+        assert_eq!(
+            unit_actions(&change, &|_| true),
+            vec![("restart", "systemd-sysctl.service".to_string())]
+        );
+        let gone = SystemChange {
+            from: with("a"),
+            to: SystemState::default(),
+        };
+        assert!(
+            unit_actions(&gone, &|_| true).is_empty(),
+            "a dropped setting keeps its value until the next boot, as sysctl can't unset one"
+        );
     }
 }
 
