@@ -603,6 +603,16 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 if !entries.is_empty() {
                     println!("boot entries: {}", entries.join(" "));
                 }
+                let cap = generation.settings.rollback.as_ref().map_or(0, |policy| policy.entries);
+                let records = archix::snapshot::Store::open(&paths.root).list().unwrap_or_default();
+                let missing = archix::system::menu::missing_entries(&esp, &menu, &records, cap);
+                if !missing.is_empty() {
+                    let numbers: Vec<String> = missing.iter().map(u32::to_string).collect();
+                    println!(
+                        "warning: snapshots {} should have boot entries, but the ESP has none or a torn one; the next switch or pacman transaction writes them again",
+                        numbers.join(", ")
+                    );
+                }
             }
             if !archix::system::allows_no_password_login(target.config)
                 && archix::system::rescue_auth::accounts(&paths.root.join("etc")).is_ok_and(|found| found.is_empty())

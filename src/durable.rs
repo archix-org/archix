@@ -69,12 +69,14 @@ fn refuse_fat(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Writes a file on the ESP as a temporary file renamed over it, flushing nothing: the caller ends the step with sync_esp, which writes FAT's buffers together and flushes the disk.
+/// Writes a file on the ESP under a temporary name, flushes the ESP so its data is on the disk before any directory entry gives it a size, then renames it into place and flushes again; a name the menu points at is never written this way, as a rename over a file on FAT can lose both (menu::write gives a changed entry a new name instead).
 pub fn write_esp(path: &Path, contents: &[u8]) -> Result<()> {
     let tmp = esp_tmp(path);
     removing_on_error(&tmp, || {
         fs::write(&tmp, contents).with_context(|| format!("writing {}", tmp.display()))?;
-        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))
+        sync_esp(&tmp)?;
+        fs::rename(&tmp, path).with_context(|| format!("writing {}", path.display()))?;
+        sync_esp(path)
     })
 }
 
@@ -83,7 +85,9 @@ pub fn copy_esp(from: &Path, to: &Path) -> Result<()> {
     let tmp = esp_tmp(to);
     removing_on_error(&tmp, || {
         fs::copy(from, &tmp).with_context(|| format!("copying {} to {}", from.display(), tmp.display()))?;
-        fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))
+        sync_esp(&tmp)?;
+        fs::rename(&tmp, to).with_context(|| format!("writing {}", to.display()))?;
+        sync_esp(to)
     })
 }
 

@@ -293,7 +293,37 @@ pub fn on_esp(esp: &Path) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Drops the other names of an entry on the ESP under two, as a cut between writing its new name and removing its old one leaves it, keeping `booted` (the file this boot's try is counted on) if it's one of them, else the one without a counter; returns the names dropped. systemd-bless-boot can't rename a counted file onto a name that's there.
+/// Whether the entry file `name` on the ESP is whole: a title and a uki or efi line whose image is there, as fsck.fat can leave one empty or holding NULs after a cut.
+fn whole_entry(esp: &Path, name: &str) -> bool {
+    let Ok(text) = fs::read_to_string(esp.join("loader/entries").join(name)) else {
+        return false;
+    };
+    let title = text.lines().any(|line| line.starts_with("title "));
+    let image = text.lines().find_map(|line| {
+        let (key, path) = line.split_once(' ')?;
+        matches!(key, "uki" | "efi").then(|| path.trim().trim_start_matches('/'))
+    });
+    title && !text.contains('\0') && image.is_some_and(|image| esp.join(image).is_file())
+}
+
+/// The snapshots the menu gives an entry whose file on the ESP is missing or not whole, for `archix status`; the next refresh writes them again.
+pub fn missing_entries(esp: &Path, state: &State, records: &[Record], cap: u32) -> Vec<u32> {
+    let on = on_esp(esp);
+    plan(state, records, cap)
+        .iter()
+        .filter_map(|planned| match planned.entry {
+            Entry::Snapshot(number) => {
+                let id = planned.entry.id();
+                (!on.get(&id).is_some_and(|name| whole_entry(esp, name))).then_some(number)
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .collect()
+}
+
+/// Drops the other names of an entry on the ESP under two, as a cut between naming its new file and removing its old one leaves it: of the whole ones, `booted` (the file this boot's try is counted on) stays if it's one, else a counted one, else any; with none whole they all stay for the next refresh to rewrite. Returns the names dropped. systemd-bless-boot can't rename a counted file onto a name that's there.
 pub fn drop_second_names(esp: &Path, booted: Option<&str>) -> Result<Vec<String>> {
     let mut by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for name in entry_files(esp) {
@@ -305,11 +335,19 @@ pub fn drop_second_names(esp: &Path, booted: Option<&str>) -> Result<Vec<String>
             continue;
         }
         names.sort();
-        let keep = booted
-            .filter(|booted| names.iter().any(|name| name == booted))
-            .map(str::to_string)
-            .or_else(|| names.iter().find(|name| **name == id).cloned())
-            .unwrap_or_else(|| names[0].clone());
+        let whole: Vec<&String> = names.iter().filter(|name| whole_entry(esp, name)).collect();
+        let Some(keep) = booted
+            .and_then(|booted| whole.iter().find(|name| ***name == booted))
+            .or_else(|| whole.iter().find(|name| name.contains('+')))
+            .or_else(|| whole.first())
+            .map(|name| name.to_string())
+        else {
+            eprintln!(
+                "warning: no file of the boot entry {id} on the ESP is whole ({}); the next refresh writes it again",
+                names.join(", ")
+            );
+            continue;
+        };
         for name in names.into_iter().filter(|name| *name != keep) {
             let path = esp.join("loader/entries").join(&name);
             fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
@@ -348,6 +386,20 @@ fn file_name(planned: &Planned, existing: Option<&String>, counted: bool, tries:
         (Entry::Current, _) => fresh(tries),
         (Entry::Snapshot(_), _) => fresh(SNAPSHOT_TRIES),
     }
+}
+
+/// The other spelling of a counted entry name, with or without a leading zero on its tries left (+1 and +01, +1-1 and +01-1), which systemd-boot and systemd-bless-boot read alike: a changed entry is written under it, so no file is ever renamed over another on the ESP.
+fn alternate(name: &str) -> Option<String> {
+    let (stem, counters) = name.strip_suffix(".conf")?.split_once('+')?;
+    let (left, rest) = counters.split_at(counters.find('-').unwrap_or(counters.len()));
+    if left.is_empty() || !left.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let left = match left.strip_prefix('0') {
+        Some(stripped) if !stripped.is_empty() => stripped.to_string(),
+        _ => format!("0{left}"),
+    };
+    Some(format!("{stem}+{left}{rest}.conf"))
 }
 
 /// How `write` writes the menu.
@@ -411,31 +463,70 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     drop_unwanted(esp, how.dir, planned)?;
     let existing = on_esp(esp);
     let names = entry_files(esp);
-    let mut replaced = Vec::new();
+    // (old name if this one replaces it, new name, text); a name is never reused for different text, so no file is renamed over another.
+    let mut changed: Vec<(Option<String>, String, String)> = Vec::new();
+    let mut in_place = Vec::new();
     for planned in planned {
         let id = planned.entry.id();
         let counted = how.counted && !matches!(planned.entry, Entry::Extra(_));
         let text = text(planned, counted);
-        let name = file_name(planned, existing.get(&id), counted, how.tries, how.reset);
+        let mut name = file_name(planned, existing.get(&id), counted, how.tries, how.reset);
         crate::durable::write(&record_path(how.dir, &id), text.as_bytes())?;
-        let unchanged =
-            existing.get(&id) == Some(&name) && fs::read_to_string(entries.join(&name)).is_ok_and(|old| old == text);
-        if !unchanged {
-            crate::durable::write_esp(&entries.join(&name), text.as_bytes())?;
-            crate::testhooks::mark("menu-entry-written");
+        let old = existing.get(&id).cloned();
+        if old.as_deref() == Some(name.as_str()) && fs::read_to_string(entries.join(&name)).is_ok_and(|now| now == text)
+        {
+            continue;
         }
-        replaced.extend(
-            names
-                .iter()
-                .filter(|old| boot::entry_id(old) == id && **old != name)
-                .cloned(),
-        );
+        if old.as_deref() == Some(name.as_str()) {
+            let stem = id.trim_end_matches(".conf");
+            let tries = if matches!(planned.entry, Entry::Current) {
+                how.tries
+            } else {
+                SNAPSHOT_TRIES
+            };
+            name = match alternate(&name) {
+                Some(other) => other,
+                None if counted && tries > 0 => format!("{stem}+{tries}.conf"),
+                None => {
+                    in_place.push(name.clone());
+                    name
+                }
+            };
+        }
+        changed.push((old, name, text));
+    }
+    // The data is on the disk before a directory entry gives it a size, as a cut can otherwise leave the entry naming NULs.
+    for (_, name, text) in &changed {
+        let tmp = entries.join(format!("{name}.tmp"));
+        fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+    }
+    if !changed.is_empty() {
+        crate::durable::sync_esp(esp)?;
+    }
+    // Only with counting off has an entry no second name; its old file goes first, leaving that entry briefly unbootable rather than renamed over.
+    for name in &in_place {
+        fs::remove_file(entries.join(name)).with_context(|| format!("removing {name}"))?;
+    }
+    if !in_place.is_empty() {
+        crate::durable::sync_esp(esp)?;
+    }
+    for (_, name, _) in &changed {
+        crate::durable::rename_esp(&entries.join(format!("{name}.tmp")), &entries.join(name))?;
+        crate::testhooks::mark("menu-entry-written");
     }
     // The new names reach the disk before the old ones go, so a cut leaves an entry under two names, which drop_second_names settles, never under none.
     crate::durable::sync_esp(esp)?;
-    for old in replaced {
-        fs::remove_file(entries.join(&old)).with_context(|| format!("removing {old}"))?;
-        crate::testhooks::mark("menu-entry-replaced");
+    let kept: BTreeSet<&String> = changed.iter().map(|(_, name, _)| name).collect();
+    let ids: BTreeSet<String> = planned.iter().map(|p| p.entry.id()).collect();
+    for old in names
+        .iter()
+        .filter(|old| ids.contains(&boot::entry_id(old)) && !kept.contains(old))
+    {
+        let id = boot::entry_id(old);
+        if changed.iter().any(|(_, name, _)| boot::entry_id(name) == id) || existing.get(&id) != Some(old) {
+            fs::remove_file(entries.join(old)).with_context(|| format!("removing {old}"))?;
+            crate::testhooks::mark("menu-entry-replaced");
+        }
     }
     crate::durable::sync_esp(esp)?;
     crate::testhooks::mark("menu-synced");
@@ -889,9 +980,10 @@ mod tests {
             .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
+        // snapshot 2's text changed, and a blessed entry has no second spelling, so it's written counted rather than over itself.
         assert_eq!(
             names,
-            ["archix-current+2.conf", "archix-snapshot-2.conf", "windows.conf"]
+            ["archix-current+2.conf", "archix-snapshot-2+1.conf", "windows.conf"]
         );
         assert!(!esp.join(IMAGES).join("old.efi").exists());
         assert!(esp.join(IMAGES).join("b.efi").exists());
@@ -954,12 +1046,19 @@ mod tests {
         assert_eq!(names, ["archix-current+2.conf"]);
     }
 
+    fn whole(esp: &Path) -> String {
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        format!("title t\nversion 1\nsort-key {SORT_CURRENT}\nuki /{IMAGES}/a.efi\n")
+    }
+
     #[test]
-    fn of_two_names_for_one_entry_the_boot_keeps_the_one_it_counts_on_else_the_uncounted_one() {
+    fn of_two_names_for_one_entry_the_whole_one_stays_the_booted_or_counted_one_first() {
         let tmp = tempfile::tempdir().unwrap();
         let esp = tmp.path();
         let entries = esp.join("loader/entries");
         fs::create_dir_all(&entries).unwrap();
+        let text = whole(esp);
         let names = |dir: &Path| {
             let mut names: Vec<String> = fs::read_dir(dir)
                 .unwrap()
@@ -974,7 +1073,7 @@ mod tests {
             "archix-snapshot-2+1.conf",
             "windows.conf",
         ] {
-            fs::write(entries.join(name), "x").unwrap();
+            fs::write(entries.join(name), &text).unwrap();
         }
         assert_eq!(
             drop_second_names(esp, Some("archix-current+1-1.conf")).unwrap(),
@@ -984,9 +1083,144 @@ mod tests {
             names(&entries),
             ["archix-current+1-1.conf", "archix-snapshot-2+1.conf", "windows.conf"]
         );
-        fs::write(entries.join("archix-current.conf"), "x").unwrap();
-        assert_eq!(drop_second_names(esp, None).unwrap(), ["archix-current+1-1.conf"]);
+        fs::write(entries.join("archix-current.conf"), &text).unwrap();
+        assert_eq!(
+            drop_second_names(esp, None).unwrap(),
+            ["archix-current.conf"],
+            "the counted one stays"
+        );
         assert!(drop_second_names(esp, None).unwrap().is_empty());
+        // What fsck.fat left at P49: the uncounted name emptied, the counted one whole.
+        fs::write(entries.join("archix-current.conf"), "").unwrap();
+        fs::write(entries.join("archix-current+2.conf"), &text).unwrap();
+        fs::remove_file(entries.join("archix-current+1-1.conf")).unwrap();
+        assert_eq!(
+            drop_second_names(esp, Some("archix-current.conf")).unwrap(),
+            ["archix-current.conf"],
+            "a torn name goes, even the booted one"
+        );
+        fs::write(entries.join("archix-current.conf"), "").unwrap();
+        fs::write(entries.join("archix-current+2.conf"), "title t\n\0\0").unwrap();
+        assert!(
+            drop_second_names(esp, None).unwrap().is_empty(),
+            "with none whole, both stay for the next refresh to rewrite"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_the_menu_gives_an_entry_but_the_esp_lacks_or_holds_torn_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path();
+        let text = whole(esp);
+        let entries = esp.join("loader/entries");
+        fs::create_dir_all(&entries).unwrap();
+        let state = State {
+            snapshots: BTreeMap::from([
+                (1, "a.efi".to_string()),
+                (2, "a.efi".to_string()),
+                (3, "a.efi".to_string()),
+            ]),
+            slot: Some(1),
+            ..State::default()
+        };
+        let records = [
+            record(1, Kind::Switch),
+            record(2, Kind::Switch),
+            record(3, Kind::Switch),
+        ];
+        fs::write(entries.join("archix-snapshot-1+1.conf"), &text).unwrap();
+        fs::write(entries.join("archix-snapshot-2+1.conf"), "").unwrap();
+        assert_eq!(missing_entries(esp, &state, &records, 5), [2, 3]);
+    }
+
+    #[test]
+    fn a_counted_name_has_a_second_spelling_systemd_boot_reads_alike() {
+        assert_eq!(
+            alternate("archix-snapshot-1+1.conf").as_deref(),
+            Some("archix-snapshot-1+01.conf")
+        );
+        assert_eq!(
+            alternate("archix-snapshot-1+01.conf").as_deref(),
+            Some("archix-snapshot-1+1.conf")
+        );
+        assert_eq!(
+            alternate("archix-current+0-2.conf").as_deref(),
+            Some("archix-current+00-2.conf")
+        );
+        assert_eq!(
+            alternate("archix-current+1-1.conf").as_deref(),
+            Some("archix-current+01-1.conf")
+        );
+        assert_eq!(alternate("archix-current.conf"), None);
+        assert_eq!(boot::entry_id("archix-snapshot-1+01.conf"), "archix-snapshot-1.conf");
+    }
+
+    #[test]
+    fn a_changed_entry_is_written_under_a_name_the_esp_doesnt_have_and_an_unchanged_one_is_left_alone() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, dir) = (tmp.path().join("esp"), tmp.path().join("state"));
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        let how = Write {
+            esp: &esp,
+            dir: &dir,
+            counted: true,
+            tries: 2,
+            reset: false,
+            signed: false,
+        };
+        let mut current = planned(Entry::Current, "a.efi");
+        current.sort_key = SORT_CURRENT.into();
+        let slot = |n: u32| Planned {
+            sort_key: SORT_SLOT.into(),
+            ..planned(Entry::Snapshot(n), "a.efi")
+        };
+        write(&how, &[current.clone(), slot(1)]).unwrap();
+        let names = || {
+            let mut names: Vec<String> = fs::read_dir(esp.join("loader/entries"))
+                .unwrap()
+                .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        assert_eq!(names(), ["archix-current+2.conf", "archix-snapshot-1+1.conf"]);
+        let inode = |name: &str| fs::metadata(esp.join("loader/entries").join(name)).unwrap().ino();
+        let current_inode = inode("archix-current+2.conf");
+        // A newer snapshot becomes the slot, so snapshot 1's sort key changes, as at P48.
+        write(&how, &[current.clone(), planned(Entry::Snapshot(1), "a.efi"), slot(2)]).unwrap();
+        assert_eq!(
+            names(),
+            [
+                "archix-current+2.conf",
+                "archix-snapshot-1+01.conf",
+                "archix-snapshot-2+1.conf"
+            ]
+        );
+        assert!(
+            fs::read_to_string(esp.join("loader/entries/archix-snapshot-1+01.conf"))
+                .unwrap()
+                .contains(&format!("sort-key {SORT_SNAPSHOT}\n")),
+            "the changed text is under the new name"
+        );
+        assert_eq!(
+            inode("archix-current+2.conf"),
+            current_inode,
+            "an unchanged entry isn't touched"
+        );
+        write(&how, &[current, slot(1), planned(Entry::Snapshot(2), "a.efi")]).unwrap();
+        assert_eq!(
+            names(),
+            [
+                "archix-current+2.conf",
+                "archix-snapshot-1+1.conf",
+                "archix-snapshot-2+01.conf"
+            ],
+            "and back to the first spelling"
+        );
+        assert!(!names().iter().any(|name| name.ends_with(".tmp")));
     }
 
     #[test]

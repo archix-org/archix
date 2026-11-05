@@ -481,8 +481,11 @@ impl Unfinished {
     }
 }
 
+/// Written only after the menu that falls back from it is on the ESP (menu-synced), by the step before a transaction and by a switch.
 pub fn mark_unfinished(state: &Path, unfinished: &Unfinished) -> Result<()> {
-    crate::durable::write(&state.join(UNFINISHED), serde_json::to_string(unfinished)?.as_bytes())
+    crate::durable::write(&state.join(UNFINISHED), serde_json::to_string(unfinished)?.as_bytes())?;
+    crate::testhooks::mark("unfinished-marked");
+    Ok(())
 }
 
 pub fn unfinished(state: &Path) -> Option<Unfinished> {
@@ -493,7 +496,11 @@ pub fn unfinished(state: &Path) -> Option<Unfinished> {
 pub fn finished(state: &Path) -> Result<()> {
     let path = state.join(UNFINISHED);
     match fs::remove_file(&path) {
-        Ok(()) => crate::durable::sync_dir(&path),
+        Ok(()) => {
+            crate::durable::sync_dir(&path)?;
+            crate::testhooks::mark("unfinished-cleared");
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).with_context(|| format!("removing {}", path.display())),
     }
