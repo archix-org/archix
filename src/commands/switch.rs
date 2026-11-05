@@ -428,10 +428,21 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             "nothing to do: the system matches generation {} (snapshot {})",
             current.number, lock.date
         );
+        let mut failures = Vec::new();
+        // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here, its menu first.
+        if let Some(plan) = &boot
+            && system::limine::pending(&paths, plan)
+        {
+            failures.extend(write_boot(&paths, &rollbacks, Some(plan), &current.packages));
+        }
         if !system_change.to.hooks.is_empty() {
             eprintln!(":: running hooks");
         }
-        let failures = system::hooks::run(&paths.root, &BTreeMap::new(), &system_change.to.hooks);
+        failures.extend(system::hooks::run(
+            &paths.root,
+            &BTreeMap::new(),
+            &system_change.to.hooks,
+        ));
         return report_soft_failures(&failures, "nothing was changed");
     }
     for change in &changes {

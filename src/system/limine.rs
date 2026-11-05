@@ -44,6 +44,13 @@ fn save(paths: &Paths, migration: &Migration) -> Result<()> {
     crate::durable::write(&state_path(paths), serde_json::to_string_pretty(migration)?.as_bytes())
 }
 
+/// Whether a move from Limine to systemd-boot is due and not done: the config says systemd-boot and Limine is there.
+pub fn pending(paths: &Paths, plan: &boot::BootPlan) -> bool {
+    plan.loader == boot::Loader::SystemdBoot
+        && present(paths, Path::new(&plan.esp))
+        && load(paths).is_none_or(|m| m.phase != Phase::Done)
+}
+
 /// Whether Limine boots, or booted, this machine: its package, or its loader on the ESP.
 pub fn present(paths: &Paths, esp: &Path) -> bool {
     let installed = fs::read_dir(paths.local_db())
