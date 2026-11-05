@@ -1254,3 +1254,65 @@ fn pacman_removing_archix_takes_its_integration_off_and_hands_the_esp_to_plain_s
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_counted_boot_of_an_entry_a_cut_left_torn_is_still_checked_and_falls_back() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = on_btrfs("3G", "rollback = { enable = true }, drift = \"keep\"");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let entry = machine.esp().join("loader/entries/archix-current+2.conf");
+    let written = fs::read_to_string(&entry).unwrap();
+    // What a cut in the switch's boot step leaves: the entry's text no longer what archix recorded for it.
+    fs::write(&entry, written.replace("sort-key", "sort-key torn")).unwrap();
+    let env = [
+        COUNTING,
+        ("ARCHIX_TEST_COUNTED_BOOT", "1"),
+        ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
+    ];
+    let check = setup.run_env(&env, &["health-check"]);
+    checks.check(
+        !check.status.success()
+            && text(&check).contains("failed its health check")
+            && !text(&check).contains("nothing to check"),
+        format!(
+            "a counted boot of an entry archix didn't write as it is fails its check instead of skipping it: {}",
+            text(&check)
+        ),
+    );
+    checks.check(
+        machine
+            .entries()
+            .iter()
+            .any(|name| name.starts_with("archix-current+0")),
+        format!(
+            "and its entry is marked bad, so the next boot falls back: {:?}",
+            machine.entries()
+        ),
+    );
+    // The same torn entry with its tries back, and @ marked unfinished as the cut switch left it.
+    let bad = machine
+        .entries()
+        .into_iter()
+        .find(|n| n.starts_with("archix-current"))
+        .unwrap();
+    fs::rename(machine.esp().join("loader/entries").join(&bad), &entry).unwrap();
+    archix::pacman::hooks::mark_unfinished(
+        &setup.paths.state,
+        &archix::pacman::hooks::Unfinished {
+            pacman: 1,
+            started: 1_792_576_985,
+            slot: None,
+            switch: Some(2),
+        },
+    )
+    .unwrap();
+    let check = setup.run_env(&env, &["health-check"]);
+    checks.check(
+        !check.status.success() && text(&check).contains("was cut off before it finished"),
+        format!("with @ marked unfinished, the mark is what it names: {}", text(&check)),
+    );
+    checks.finish();
+}
