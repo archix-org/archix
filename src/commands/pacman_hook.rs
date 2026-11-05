@@ -71,10 +71,20 @@ fn remove(paths: &Paths) {
         .ok()
         .map(|esp| esp.trim().to_string())
         .filter(|esp| !esp.is_empty());
-    let main = current(paths)
-        .and_then(|generation| generation.settings.boot.map(|plan| plan.kernel))
-        .unwrap_or_else(|| "linux".to_string());
-    if let Some(esp) = esp {
+    let plan = current(paths).and_then(|generation| generation.settings.boot);
+    let main = plan
+        .as_ref()
+        .map_or_else(|| "linux".to_string(), |plan| plan.kernel.clone());
+    let loader = plan
+        .as_ref()
+        .map_or(system::boot::Loader::SystemdBoot, |plan| plan.loader);
+    // Only a systemd-boot machine is handed to plain systemd-boot; on GRUB or Limine nothing of that loader's is touched.
+    if let Some(esp) = esp.as_deref().filter(|_| loader != system::boot::Loader::SystemdBoot) {
+        match system::removal::leave_for_other_loader(&paths.root, Path::new(esp), loader) {
+            Ok(lines) => lines.iter().for_each(|line| println!("archix: {line}")),
+            Err(e) => println!("archix: warning: couldn't take archix's own entries off the ESP: {e:#}"),
+        }
+    } else if let Some(esp) = esp {
         let esp = Path::new(&esp);
         let enforcing = system::secureboot::Machine::under(&paths.root)
             .state()

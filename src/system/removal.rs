@@ -83,6 +83,46 @@ fn loader_without_archix(text: &str, default: &str) -> String {
     lines.join("\n") + "\n"
 }
 
+/// On a machine `loader` (GRUB or Limine) boots, the ESP stays as that loader has it: only archix's own systemd-boot entries go, loader.conf and the other loader's files are left, and what archix leaves behind is named for the user to remove once they don't boot from it.
+pub fn leave_for_other_loader(root: &Path, esp: &Path, loader: super::boot::Loader) -> Result<Vec<String>> {
+    let mut gone = Vec::new();
+    for (_, name) in super::menu::on_esp(esp) {
+        let path = esp.join("loader/entries").join(&name);
+        fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        gone.push(name);
+    }
+    if !gone.is_empty() {
+        crate::durable::sync_esp(esp)?;
+    }
+    let mut lines = vec![format!(
+        "boot.loader is {}, so the ESP stays as it boots: loader.conf and that loader's files are untouched{}",
+        match loader {
+            super::boot::Loader::Grub => "grub",
+            super::boot::Loader::Limine => "limine",
+            super::boot::Loader::SystemdBoot => "systemd-boot",
+        },
+        match gone.is_empty() {
+            true => String::new(),
+            false => format!(", and archix's own entries {} are gone", gone.join(", ")),
+        }
+    )];
+    let images = esp.join(super::menu::IMAGES);
+    if images.is_dir() {
+        lines.push(format!(
+            "left on the ESP: archix's boot images in {}; remove them once no entry of your loader starts one",
+            images.display()
+        ));
+    }
+    let menu = root.join(super::grub::MENU);
+    if menu.is_file() {
+        lines.push(format!(
+            "left: archix's GRUB menu {}; remove it and run grub-mkconfig once you don't boot archix's snapshots any more",
+            menu.display()
+        ));
+    }
+    Ok(lines)
+}
+
 /// Hands the ESP at `esp` to plain systemd-boot: each installed kernel's preset writes a UKI to EFI/Linux, which is built now in the root (signed with sbctl when `sign`), the main kernel's becomes loader.conf's default, and archix's entries, images and rescue entry go. Fails, leaving archix's entries as they are, when a UKI can't be built or signed.
 pub fn hand_over(paths: &Paths, esp: &Path, main: &str, sign: bool) -> Result<Vec<String>> {
     let root = super::live::Root::new(&paths.root);
@@ -160,6 +200,48 @@ pub fn hand_over(paths: &Paths, esp: &Path, main: &str, sign: bool) -> Result<Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn on_grub_or_limine_only_archixs_own_entries_go_and_the_rest_is_named() {
+        for loader in [super::super::boot::Loader::Grub, super::super::boot::Loader::Limine] {
+            let tmp = tempfile::tempdir().unwrap();
+            let (root, esp) = (tmp.path().join("root"), tmp.path().join("esp"));
+            for dir in ["loader/entries", "EFI/archix", "EFI/limine", "EFI/BOOT"] {
+                fs::create_dir_all(esp.join(dir)).unwrap();
+            }
+            fs::write(esp.join("loader/loader.conf"), "timeout 3\n").unwrap();
+            fs::write(esp.join("loader/entries/archix-current.conf"), "title t\n").unwrap();
+            fs::write(esp.join("loader/entries/other.conf"), "title o\n").unwrap();
+            fs::write(esp.join("EFI/archix/a.efi"), "a").unwrap();
+            fs::write(esp.join("EFI/limine/BOOTX64.EFI"), "l").unwrap();
+            fs::write(esp.join("EFI/BOOT/BOOTX64.EFI"), "l").unwrap();
+            fs::write(esp.join("limine.conf"), "/Arch\n").unwrap();
+            fs::create_dir_all(root.join("boot/grub")).unwrap();
+            fs::write(root.join(super::super::grub::MENU), "menuentry\n").unwrap();
+            let lines = leave_for_other_loader(&root, &esp, loader).unwrap();
+            assert!(
+                !esp.join("loader/entries/archix-current.conf").exists(),
+                "{loader:?}: archix's own entry goes"
+            );
+            for kept in [
+                "loader/loader.conf",
+                "loader/entries/other.conf",
+                "EFI/limine/BOOTX64.EFI",
+                "EFI/BOOT/BOOTX64.EFI",
+                "limine.conf",
+                "EFI/archix/a.efi",
+            ] {
+                assert!(esp.join(kept).exists(), "{loader:?}: {kept} stays");
+            }
+            assert_eq!(
+                fs::read_to_string(esp.join("loader/loader.conf")).unwrap(),
+                "timeout 3\n",
+                "{loader:?}: loader.conf untouched"
+            );
+            let said = lines.join("\n");
+            assert!(said.contains("EFI/archix"), "{loader:?}: says what was left: {said}");
+        }
+    }
 
     #[test]
     fn a_preset_gets_a_uki_line_once() {
