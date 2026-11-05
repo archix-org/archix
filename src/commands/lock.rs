@@ -420,6 +420,10 @@ pub(super) fn pending(
 
 /// Warnings for an fstab or crypttab in /etc that differs from what archix wrote there.
 fn fstab_drift(target: &Target) -> Result<Vec<String>> {
+    // A try boot's fstab is the snapshot's, edited for the overlay, not the current generation's.
+    if system::initrd::trying().is_some() {
+        return Ok(Vec::new());
+    }
     let paths = Paths::system();
     let store = Store::new(&paths);
     let Some(generation) = store.current()?.map(|n| store.get(n)).transpose()? else {
@@ -523,8 +527,10 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
 pub fn status(target: &Target, all: bool) -> Result<()> {
     let paths = Paths::system();
     let store = Store::new(&paths);
-    if let Some(trying) = archix::system::initrd::trying() {
-        println!("{}", archix::system::initrd::notice(&trying));
+    if let Some(notes) = super::switch::try_notes(&paths) {
+        for note in notes {
+            println!("{note}");
+        }
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         println!("warning: {why}");
     }

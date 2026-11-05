@@ -76,6 +76,75 @@ fn status_says_when_systemd_boot_is_too_old_to_count_boots() {
 
 #[test]
 #[ignore]
+fn status_in_the_fallbacks_try_boot_says_why_the_current_entry_failed_its_tries() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = on_btrfs(ROLLBACKS);
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    setup.set_body(
+        &[],
+        &format!(r#"{ROLLBACKS}, files = {{ ["/etc/archix-boot-test"] = {{ text = "2" }} }}"#),
+    );
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let run = tempfile::tempdir().unwrap();
+    let trying = archix::system::initrd::Trying {
+        snapshot: 2,
+        why: None,
+        layer: "file".into(),
+        size: 1 << 30,
+    };
+    fs::write(run.path().join("try"), serde_json::to_string(&trying).unwrap()).unwrap();
+    let boot = machine.root.join(".archix/boot");
+    fs::create_dir_all(&boot).unwrap();
+    let missing = archix::system::emergency::MountFailure {
+        entry: "archix-current.conf".into(),
+        mounts: vec![archix::system::emergency::Unmounted {
+            point: "/home".into(),
+            device: "UUID=h".into(),
+            attached: false,
+        }],
+        at: 1_700_000_000,
+    };
+    fs::write(boot.join("mount-failed.json"), serde_json::to_string(&missing).unwrap()).unwrap();
+    let fstab = machine.root.join("etc/fstab");
+    let wrote = fs::read_to_string(&fstab).unwrap();
+    fs::write(&fstab, format!("{wrote}/swap/swapfile none swap nofail 0 0\n")).unwrap();
+    let env = [COUNTING, ("ARCHIX_TEST_RUN", run.path().to_str().unwrap())];
+    let status = setup.ok_env(&env, &["status"]);
+    checks.check(
+        !status.contains("/etc/fstab was edited"),
+        format!("the try boot's fstab, the snapshot's edited for the overlay, isn't drift: {status}"),
+    );
+    checks.check(
+        status.contains("this boot is snapshot 2, read-only"),
+        format!("status names the try boot: {status}"),
+    );
+    checks.check(
+        status.contains(
+            "archix-current.conf failed its boot tries because /home (UUID=h) was missing, not because of the system",
+        ),
+        format!("and blames the missing disk, as the login note does: {status}"),
+    );
+    fs::remove_file(boot.join("mount-failed.json")).unwrap();
+    let failed = archix::system::health::Failure {
+        entry: "archix-current.conf".into(),
+        target: "\"no unit failed since the last good boot\"".into(),
+        why: "archix-secrets.service failed".into(),
+        at: 1_700_000_000,
+    };
+    fs::write(boot.join("health-failed.json"), serde_json::to_string(&failed).unwrap()).unwrap();
+    let status = setup.ok_env(&env, &["status"]);
+    checks.check(
+        status.contains("the boot of archix-current.conf failed the health check")
+            && status.contains("archix-secrets.service failed"),
+        format!("or the health check that failed: {status}"),
+    );
+    checks.finish();
+}
+
+#[test]
+#[ignore]
 fn a_switch_gives_the_current_entry_its_tries_and_shares_one_image_until_the_initramfs_changes() {
     let _system = lock_system();
     let checks = Checks::default();

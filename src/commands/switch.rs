@@ -739,6 +739,19 @@ fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// In a try boot, its notice and why the entry it fell back from failed (a health check, or a required mount missing), for the login notes and `archix status`; None outside one.
+pub(super) fn try_notes(paths: &Paths) -> Option<Vec<String>> {
+    let trying = system::initrd::trying()?;
+    let mut notes = vec![system::initrd::notice(&trying)];
+    if let Some(failure) = system::health::read_failure(paths) {
+        notes.push(system::health::fallback_note(&failure));
+    }
+    if let Some(failure) = system::emergency::read(paths) {
+        notes.push(system::emergency::fallback_note(&failure));
+    }
+    Some(notes)
+}
+
 /// What's wrong with archix's pacman hooks, once a switch has written them: masked, shadowed, missing or changed.
 pub(super) fn hook_warnings(paths: &Paths) -> Vec<String> {
     if Store::new(paths).current().ok().flatten().is_none() {
@@ -1934,14 +1947,8 @@ pub fn boot_check() -> Result<()> {
         println!("archix: couldn't record which snapshot entries failed: {e:#}");
     }
     let mut notices = recovered;
-    if let Some(trying) = system::initrd::trying() {
-        notices.push(system::initrd::notice(&trying));
-        if let Some(failure) = system::health::read_failure(&paths) {
-            notices.push(system::health::fallback_note(&failure));
-        }
-        if let Some(failure) = system::emergency::read(&paths) {
-            notices.push(system::emergency::fallback_note(&failure));
-        }
+    if let Some(trying) = try_notes(&paths) {
+        notices.extend(trying);
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
         notices.push(format!("archix: {why}"));
     }
