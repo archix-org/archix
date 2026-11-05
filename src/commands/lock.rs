@@ -609,6 +609,14 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 if !entries.is_empty() {
                     println!("boot entries: {}", entries.join(" "));
                 }
+                let damaged = archix::captured::Applied::at(&paths.root, &paths.state).damaged();
+                if !damaged.is_empty() {
+                    let numbers: Vec<String> = damaged.iter().map(u32::to_string).collect();
+                    println!(
+                        "warning: generations {} have objects missing or damaged in root's config repository, as a power cut just after their switch can leave them; revert and keep to them are refused, switches keep working, and a switch to the same config tree stores it again",
+                        numbers.join(", ")
+                    );
+                }
                 let cap = generation.settings.rollback.as_ref().map_or(0, |policy| policy.entries);
                 let records = archix::snapshot::Store::open(&paths.root).list().unwrap_or_default();
                 let missing = archix::system::menu::missing_entries(&esp, &menu, &records, cap);

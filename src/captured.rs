@@ -530,20 +530,87 @@ impl Applied {
             .env("GIT_COMMITTER_NAME", "archix")
             .env("GIT_COMMITTER_EMAIL", "archix@localhost");
         let commit = text(run(commit, "git commit-tree")?);
+        // git fsyncs each object but not the objects/xx/ entry that names it, so on btrfs a ref could reach the disk before the objects it names.
+        crate::durable::sync_filesystems_checked(&[&self.git_dir])?;
         run(
             self.git(&["update-ref", &format!("refs/generations/{number}"), &commit]),
             "git update-ref",
         )?;
         run(self.git(&["update-ref", "refs/applied", &commit]), "git update-ref")?;
+        crate::durable::sync_filesystems_checked(&[&self.git_dir])?;
         Ok(Generation {
             commit,
             tree: tree.to_string(),
         })
     }
 
-    /// The generations whose objects are missing or unreadable, for `archix status`.
+    /// The generations whose objects are missing or unreadable, for `archix status`: a cut can leave a ref naming objects whose directory entries never reached the disk.
     pub fn damaged(&self) -> Vec<u32> {
-        Vec::new()
+        let Ok(listed) = run(
+            self.git(&[
+                "for-each-ref",
+                "--format=%(refname:lstrip=2) %(objectname)",
+                "refs/generations",
+            ]),
+            "git for-each-ref",
+        ) else {
+            return Vec::new();
+        };
+        let mut damaged: Vec<u32> = text(listed)
+            .lines()
+            .filter_map(|line| {
+                let (number, commit) = line.split_once(' ')?;
+                let number: u32 = number.parse().ok()?;
+                self.whole(commit).is_err().then_some(number)
+            })
+            .collect();
+        damaged.sort_unstable();
+        damaged
+    }
+
+    /// Fails unless every object `commit` reaches is there and reads: its tree, the config's files, the lock and the plan.
+    fn whole(&self, commit: &str) -> Result<()> {
+        let objects = text(run(
+            self.git(&["rev-list", "--objects", "--missing=error", commit]),
+            "git rev-list",
+        )?);
+        let ids: String = objects
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(|id| format!("{id}\n"))
+            .collect();
+        let mut child = self
+            .git(&["cat-file", "--batch-check"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        std::io::Write::write_all(&mut child.stdin.take().context("git's stdin")?, ids.as_bytes())?;
+        let output = child.wait_with_output()?;
+        let said = String::from_utf8_lossy(&output.stdout);
+        if !output.status.success() || said.lines().any(|line| line.ends_with(" missing")) || !output.stderr.is_empty()
+        {
+            bail!(
+                "git cat-file: {} {}",
+                said.trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        // --batch-check reads only headers; every object is read whole, as a torn one can keep a good header.
+        for id in ids.lines() {
+            let read = self
+                .git(&["cat-file", "-p", id])
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()?;
+            if !read.status.success() || !read.stderr.is_empty() {
+                bail!(
+                    "object {id} doesn't read: {}",
+                    String::from_utf8_lossy(&read.stderr).trim()
+                );
+            }
+        }
+        Ok(())
     }
 
     /// The config tree last applied, if any.
@@ -580,20 +647,10 @@ impl Applied {
         if found != commit {
             bail!("generation {number} in root's config repository is {found}, not the {commit} its record holds");
         }
-        run(
-            self.git(&[
-                "fsck",
-                "--full",
-                "--strict",
-                "--no-dangling",
-                "--no-progress",
-                "--no-reflogs",
-            ]),
-            "git fsck of root's config repository",
-        )
-        .with_context(|| {
+        // Only this generation's objects: another's that a cut damaged must not take every revert and keep down with it.
+        self.whole(commit).with_context(|| {
             format!(
-                "generation {number}'s objects in {} are damaged",
+                "generation {number}'s objects in {} are missing or damaged, as a power cut just after its switch can leave them; revert and keep to it are refused, and switches keep working",
                 self.git_dir.display()
             )
         })?;
