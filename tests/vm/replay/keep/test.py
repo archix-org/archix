@@ -15,11 +15,12 @@ def run(m, t):
     s = replay.Scenario(m, t, "keep")
     with t.step("0: a snapshot to keep, an account made after it, a boot that counts as good, the marks in place"):
         cut.common.boot()
+        # Before the switch, so the snapshot it takes, which becomes the root, has the marks too.
+        replay.install(m)
         bump(1)
         switch("a switch whose snapshot holds 0")
         kept = snapshots()[-1]
         m.succeed(f"useradd -m {USER}", what="adding an account after the snapshot")
-        replay.install(m)
         m.reboot()
         cut.settle()
         t.require(trying() is None and value() == "1", f"the boot before the run should be the current system holding 1: {trying()}, {value()}")
