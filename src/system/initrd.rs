@@ -207,8 +207,8 @@ const LOOP_INFO64: usize = 232;
 const LO_FLAGS_OFFSET: usize = 52;
 const LO_FLAGS_AUTOCLEAR: u32 = 4;
 
-/// Attaches `file` to a free loop device, which stays attached for the whole boot.
-fn attach_loop(file: &Path) -> Result<PathBuf> {
+/// Attaches `file` to a free loop device, returning it and the handle that keeps it attached: with autoclear, the device goes at its last close, so the caller holds the handle until the mount has its own.
+fn attach_loop(file: &Path) -> Result<(PathBuf, fs::File)> {
     let control = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -234,7 +234,7 @@ fn attach_loop(file: &Path) -> Result<PathBuf> {
     if unsafe { libc::ioctl(loop_device.as_raw_fd(), LOOP_SET_STATUS64 as _, info.as_ptr()) } != 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("setting up {}", device.display()));
     }
-    Ok(device)
+    Ok((device, loop_device))
 }
 
 /// Room a layer file needs beyond its own size, for the filesystem's metadata (btrfs writes into preallocated extents need it) and the root's own writes: a sixteenth of it, at least 64 MiB.
@@ -267,14 +267,6 @@ fn reads_back(path: &Path) -> Result<()> {
         bail!("{} holds no ext4 superblock", path.display());
     }
     Ok(())
-}
-
-const LOOP_CLR_FD: libc::c_ulong = 0x4C01;
-
-fn detach_loop(device: &Path) {
-    if let Ok(handle) = fs::File::open(device) {
-        unsafe { libc::ioctl(handle.as_raw_fd(), LOOP_CLR_FD as _) };
-    }
 }
 
 /// Makes the throwaway layer at `at`: a preallocated NOCOW file in `dir` (@archix/try) formatted ext4 and loop mounted, trying `sizes` largest first, else tmpfs; returns what it made and its size.
@@ -332,11 +324,8 @@ pub fn make_layer_with(
                 .and_then(|handle| handle.sync_all())
                 .context("flushing the formatted layer file")?;
             reads_back(&file).context("the formatted layer file didn't read back")?;
-            let device = attach_loop(&file)?;
-            if let Err(e) = reads_back(&device) {
-                detach_loop(&device);
-                return Err(e.context("the layer's loop device didn't read back"));
-            }
+            let (device, _attached) = attach_loop(&file)?;
+            reads_back(&device).context("the layer's loop device didn't read back")?;
             fs::create_dir_all(at)?;
             sys_mount(&device.to_string_lossy(), at, "ext4", 0, "")
         })();

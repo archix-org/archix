@@ -1263,6 +1263,8 @@ fn a_counted_boot_of_an_edited_entry_is_checked_as_any_other_and_a_cut_one_falls
     let setup = on_btrfs("3G", "rollback = { enable = true }, drift = \"keep\"");
     let machine = &setup.machine;
     setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    // Takes the container's own failed units as known, so only the edit could fail the check.
+    bless(&setup);
     let entry = machine.esp().join("loader/entries/archix-current+2.conf");
     let written = fs::read_to_string(&entry).unwrap();
     fs::write(&entry, written.replace("sort-key", "sort-key edited")).unwrap();

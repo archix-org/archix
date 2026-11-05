@@ -276,7 +276,7 @@ def run(machine, test):
     if BTRFS:
         with t.step("s3: an identity lost on a counted boot fails its health check and falls back to the slot, which decrypts"):
             m.succeed(f"{HOST} install tree --noconfirm", what="archix install tree")
-            t.require(ok("ls /efi/loader/entries/archix-current+2.conf"), "the current entry should count its tries after the switch")
+            t.require(ok("ls /efi/loader/entries/archix-current+2.conf /efi/loader/entries/archix-current+2-0.conf 2>/dev/null | grep -q ."), "the current entry should count its tries after the switch")
             slot = state_slot()
             t.log(f"the slot is snapshot {slot}")
             m.succeed("mv /var/lib/archix/secrets/identity /root/identity.lost")

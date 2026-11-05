@@ -457,6 +457,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     let esp = how.esp;
     let entries = esp.join("loader/entries");
     fs::create_dir_all(&entries).with_context(|| format!("creating {}", entries.display()))?;
+    super::esp::clean_esp(esp)?;
     drop_unwanted(esp, how.dir, planned)?;
     let existing = on_esp(esp);
     let names = entry_files(esp);

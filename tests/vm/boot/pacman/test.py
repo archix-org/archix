@@ -1,7 +1,7 @@
 # A plain pacman transaction that breaks the boot without touching the kernel: archix's hook snapshots the root before it and gives the current entry its tries again, the health check fails each counted boot, the default boot.unblessed_timeout reboots it with nobody there, and systemd-boot falls back to the slot, that snapshot.
 import time
 
-from boot.common import bind, boot, entries, entry, ok, out, snapshots, state, trying
+from boot.common import bind, boot, counts_tries, entries, entry, ok, out, snapshots, state, trying
 
 PKG = "/root/archix-test-broken-1-1-any.pkg.tar.zst"
 BUILD = (
@@ -29,7 +29,7 @@ def run(m, t):
         t.check("has 2 tries again" in installed, f"the step after should reset the current entry's tries: {installed}")
         t.check("building the boot images" not in installed, f"the kernel and initramfs didn't change, so no image is built: {installed}")
         t.check(state().get("slot") == slot, f"the snapshot after a good boot should be the slot: {state()}")
-        t.check(entry("archix-current.conf") == "archix-current+2.conf", f"the current entry should count two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"the current entry should count two tries: {entries()}")
         t.check(entry(f"archix-snapshot-{slot}.conf") == f"archix-snapshot-{slot}+1.conf", f"the slot should have an entry: {entries()}")
         t.check(ok(f"grep -q '^sort-key archix-1$' /efi/loader/entries/archix-snapshot-{slot}+1.conf"), "sorted right after the current entry")
         began = time.monotonic()

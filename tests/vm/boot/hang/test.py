@@ -1,7 +1,7 @@
 # The unattended fallback from a hang: a unit that never finishes keeps each counted boot from boot-complete.target, boot.unblessed_timeout reboots it with nobody there, and systemd-boot falls back to the slot.
 import time
 
-from boot.common import add_unit, bind, boot, edit_config, entries, entry, ok, snapshots, switch, trying, wait_fallback
+from boot.common import add_unit, bind, boot, counts_tries, edit_config, entries, entry, ok, snapshots, switch, trying, wait_fallback
 
 
 def run(m, t):
@@ -13,7 +13,7 @@ def run(m, t):
         m.succeed("touch /run/archix-test-no-hang", what="keeping the switch's start of the unit from hanging")
         switch("switch to a system whose boot hangs")
         slot = snapshots()[-1]
-        t.check(entry("archix-current.conf") == "archix-current+2.conf", f"two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"two tries: {entries()}")
         began = time.monotonic()
         m.reboot()
 

@@ -427,16 +427,10 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     let allowed = super::menu::load(&super::menu::dir(paths))
         .map(|state| state.blessed_failed_units)
         .unwrap_or_default();
-    let tampered = super::boot::tampered_selected_entry();
-    let failed = match (crate::pacman::hooks::unfinished(&paths.state), tampered) {
-        (Some(unfinished), _) => Some((unfinished.target().to_string(), unfinished.why())),
-        (None, Some(name)) => Some((
-            "entry".to_string(),
-            format!(
-                "{name} on the ESP isn't what archix wrote, as a cut while writing it or an edit leaves it, so this boot can't count as good"
-            ),
-        )),
-        (None, None) => {
+    // An edited entry isn't a failure by itself: a cut one has the mark, which goes only after the boot step is flushed.
+    let failed = match crate::pacman::hooks::unfinished(&paths.state) {
+        Some(unfinished) => Some((unfinished.target().to_string(), unfinished.why())),
+        None => {
             let targets = targets(check.as_ref(), &users, &allowed);
             let timeout = check.as_ref().map_or(120, |check| check.timeout);
             run(&paths.root, &targets, &users, timeout).map(|(target, why)| (target.to_string(), why))

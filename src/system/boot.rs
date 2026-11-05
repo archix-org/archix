@@ -751,7 +751,7 @@ pub fn bless_booted(paths: &Paths) -> Result<()> {
     }
     let Some(counted) = fs::read_dir(&dir).into_iter().flatten().flatten().find_map(|file| {
         let name = file.file_name().to_string_lossy().into_owned();
-        (name.contains('+') && entry_id(&name) == id).then_some(name)
+        (name.ends_with(".conf") && name.contains('+') && entry_id(&name) == id).then_some(name)
     }) else {
         return Ok(());
     };

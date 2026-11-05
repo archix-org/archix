@@ -51,6 +51,12 @@ def entry(name):
     return next((f for f in entries() if f == name or f.startswith(stem + "+")), None)
 
 
+def counts_tries(name, tries):
+    """Whether entry id name counts tries untouched boots, under either spelling: a rewrite renames +2 to +2-0."""
+    stem = name.removesuffix(".conf")
+    return entry(name) in (f"{stem}+{tries}.conf", f"{stem}+{tries}-0.conf")
+
+
 def selected():
     return out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
 

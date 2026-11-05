@@ -1,5 +1,5 @@
 # Boot counting and the slot: a kernel that panics gets its two tries, then systemd-boot falls back to the slot, the snapshot of how the system last booted fine, read-only in try mode.
-from boot.common import HOST, bind, boot, edit_config, entries, entry, ok, out, snapshots, switch, trying
+from boot.common import HOST, bind, boot, counts_tries, edit_config, entries, entry, ok, out, snapshots, switch, trying
 
 
 def run(m, t):
@@ -9,7 +9,7 @@ def run(m, t):
         edit_config("'s|\"console=ttyS0\" }|\"console=ttyS0\", \"init=/usr/bin/false\", \"panic=3\" }|'")
         switch("switch to a kernel command line that can't boot")
         slot = snapshots()[-1]
-        t.check(entry("archix-current.conf") == "archix-current+2.conf", f"the current entry should count two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"the current entry should count two tries: {entries()}")
         t.check(entry(f"archix-snapshot-{slot}.conf") == f"archix-snapshot-{slot}+1.conf", f"the snapshot taken before the switch should have an entry with a try of its own: {entries()}")
         t.check(ok(f"grep -q '^sort-key archix-1$' /efi/loader/entries/archix-snapshot-{slot}+1.conf"), "it's the slot, sorted right after the current entry")
         m.reboot()

@@ -1,5 +1,5 @@
 # The health check must not fall back where nothing broke: on a machine without a display manager, and with a unit that failed at the last blessed boot too and fails again.
-from boot.common import bind, boot, bump, edit_config, entries, entry, ok, out, state, switch, trying
+from boot.common import bind, boot, bump, counts_tries, edit_config, entries, entry, ok, out, state, switch, trying
 
 FAILING = "archix-test-failing.service"
 
@@ -8,7 +8,7 @@ def counted_boot(m, t, allowed=()):
     """A switch gives the current entry its tries; the boot after it must pass its check and be blessed, not fall back."""
     bump(int(out("cat /etc/archix-vmtest").strip()) + 1)
     switch()
-    t.check(entry("archix-current.conf") == "archix-current+2.conf", f"two tries: {entries()}")
+    t.check(counts_tries("archix-current.conf", 2), f"two tries: {entries()}")
     m.reboot()
     started = boot(allowed)
     t.check(started == "archix-current.conf" and trying() is None, f"the current entry should boot, not a fallback: {started} {trying()}")

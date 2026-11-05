@@ -351,7 +351,7 @@ fn a_snapshot_entry_boots_read_only_with_a_throwaway_layer_and_pacman_and_switch
     let _system = lock_system();
     let checks = Checks::default();
     let body = |n: u32| format!(r#"{ROLLBACKS}, files = {{ ["/etc/archix-boot-test"] = {{ text = "{n}" }} }}"#);
-    // 3 GiB: no room for the 4 GiB layer and its margin, and the 1 GiB one fits with room, where 2 GiB left it on the edge.
+    // No room for the 4 GiB layer and its margin, and the 1 GiB one fits with room.
     let disk = Machine::on_btrfs_of("3G");
     disk.btrfs.as_ref().unwrap().mount_archix();
     let setup = Setup::on(disk, &[], &body(1), &[]);
@@ -1272,11 +1272,12 @@ fn a_move_from_limine_cut_short_after_its_generation_is_recorded_is_taken_up_by_
 
 #[test]
 #[ignore]
+// The race lost 8 of 2000 attaches here before the fix, so a short loop wouldn't see it.
 fn a_layer_file_mounts_every_time_as_nothing_tears_its_loop_device_down_first() {
     let _system = lock_system();
     let scratch = Scratch::new(128);
     let (dir, at) = (scratch.0.path().join("try"), scratch.0.path().join("layer"));
-    for attempt in 0..30 {
+    for attempt in 0..400 {
         let (kind, size, notes) = archix::system::initrd::make_layer_with(&dir, &at, &[16 << 20], &|_, _| {});
         assert_eq!(
             (kind.as_str(), size),

@@ -1,5 +1,5 @@
 # The ext4 lane, rollbacks off (config management only): switches apply live, `archix revert` goes back to an older generation live, the boot after a switch is counted and blessed through the health check, and nothing offers a rollback.
-from boot.common import HOST, bind, boot, bump, entries, entry, ok, out, switch
+from boot.common import HOST, bind, boot, bump, counts_tries, entries, entry, ok, out, switch
 
 
 def run(m, t):
@@ -27,7 +27,7 @@ def run(m, t):
     with t.step("3: the boot after a switch is counted and blessed"):
         bump(3)
         switch()
-        t.check(entry("archix-current.conf") == "archix-current+2.conf", f"the switch gives the current entry two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"the switch gives the current entry two tries: {entries()}")
         m.reboot()
         started = boot()
         t.check(started == "archix-current.conf", f"the current entry boots: {started}")

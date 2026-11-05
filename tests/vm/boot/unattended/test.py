@@ -1,7 +1,7 @@
 # The unattended fallback: a required mount that's missing stops each counted boot in emergency mode, which with nobody logged in reboots itself after boot.unblessed_timeout, until systemd-boot falls back to the slot.
 import time
 
-from boot.common import bind, boot, edit_config, entries, entry, snapshots, switch, trying
+from boot.common import bind, boot, counts_tries, edit_config, entries, entry, snapshots, switch, trying
 
 
 def run(m, t):
@@ -11,7 +11,7 @@ def run(m, t):
         edit_config("'s|  boot = { loader = \"systemd-boot\" },|  boot = { loader = \"systemd-boot\", unblessed_timeout = 1 },\\n  file_systems = { [\"/mnt/archix-missing\"] = { device = \"UUID=0badc0de-0000-4000-8000-000000000000\", fs_type = \"ext4\", required = true } },|'")
         switch("switch to a system whose boot stops in emergency mode")
         slot = snapshots()[-1]
-        t.check(entry("archix-current.conf") == "archix-current+2.conf", f"two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"two tries: {entries()}")
         began = time.monotonic()
         m.reboot()
 
