@@ -44,6 +44,8 @@ def run(m, t):
                 reached = cut.reset_on_cut(timeout=900)
             except Exception:
                 cut.disarm()
+                t.log("archix processes: " + out("ps -eo pid,etime,stat,wchan:20,args | grep -E '[a]rchix|[e]fibootmgr|[p]acman' | head -20"))
+                t.log("journal: " + out("journalctl -b --no-pager | tail -60"))
                 t.require(False, f"the switch never reached {point}: {out('tail -c 2000 /root/switch.log')}")
             cut.disarm()
             boots, took = settle(reached)
