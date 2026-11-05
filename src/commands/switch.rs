@@ -429,11 +429,20 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             current.number, lock.date
         );
         let mut failures = Vec::new();
-        // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here, its menu first.
-        if let Some(plan) = &boot
-            && system::limine::pending(&paths, plan)
-        {
-            failures.extend(write_boot(&paths, &rollbacks, Some(plan), &current.packages));
+        // A switch to this generation that a cut stopped after its record, in the boot step, leaves its mark; the system matches it, so the boot step is done again and the mark dropped.
+        let cut_short = archix::pacman::hooks::unfinished(&paths.state).filter(|u| u.switch == Some(current.number));
+        // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here too, its menu first.
+        let limine = boot.as_ref().is_some_and(|plan| system::limine::pending(&paths, plan));
+        if cut_short.is_some() || limine {
+            failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &current.packages));
+        }
+        if cut_short.is_some() && failures.is_empty() {
+            archix::durable::sync_filesystems(&[&paths.root]);
+            archix::pacman::hooks::finished(&paths.state)?;
+            println!(
+                "the switch to generation {} that was cut off after applying is finished now: its boot images and menu are written, and the next boot counts as usual",
+                current.number
+            );
         }
         if !system_change.to.hooks.is_empty() {
             eprintln!(":: running hooks");
