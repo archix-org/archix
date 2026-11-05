@@ -517,7 +517,31 @@ fn services(change: &SystemChange) -> Vec<String> {
     for (verb, unit) in unit_actions(change, &active) {
         systemctl(&[verb, &unit], &mut failures);
     }
+    if udev_changed(change) {
+        for argv in udev_commands() {
+            let done = Command::new(argv[0]).args(&argv[1..]).status();
+            if !done.is_ok_and(|status| status.success()) {
+                failures.push(format!("{} failed", argv.join(" ")));
+            }
+        }
+    }
     failures
+}
+
+/// Whether the switch added, changed or dropped one of archix's udev rules, which udev reads only when told to.
+fn udev_changed(change: &SystemChange) -> bool {
+    change
+        .changed_paths()
+        .iter()
+        .any(|path| path.starts_with("/etc/udev/rules.d/") && path.ends_with(".rules"))
+}
+
+/// Reloads udev's rules and replays a change event for every device, as which subsystems a rule matches can't be told from its text reliably.
+fn udev_commands() -> [Vec<&'static str>; 2] {
+    [
+        vec!["udevadm", "control", "--reload"],
+        vec!["udevadm", "trigger", "--action=change"],
+    ]
 }
 
 /// What a switch does to units on the running system, given which are `active`: stops the disabled or dropped, starts the newly enabled, try-restarts those whose unit file it rewrote, reloads those whose RELOADS file changed and restarts systemd-sysctl for new sysctl settings.
@@ -617,6 +641,40 @@ mod unit_tests {
             to: with_rules("a"),
         };
         assert!(unit_actions(&same, &|_| true).is_empty());
+    }
+
+    #[test]
+    fn changed_or_dropped_udev_rules_reload_udev_and_retrigger_devices() {
+        let with = |name: &str, sha: &str| {
+            let mut state = SystemState::default();
+            state.files.insert(format!("/etc/udev/rules.d/{name}.rules"), file(sha));
+            state.files.insert("/etc/hostname".to_string(), file("h"));
+            state
+        };
+        let change = |from, to| SystemChange { from, to };
+        assert!(
+            udev_changed(&change(with("70-mouse", "a"), with("70-mouse", "b"))),
+            "a changed rule"
+        );
+        assert!(
+            udev_changed(&change(SystemState::default(), with("70-mouse", "a"))),
+            "a new rule"
+        );
+        assert!(
+            udev_changed(&change(with("70-mouse", "a"), SystemState::default())),
+            "a dropped rule"
+        );
+        assert!(
+            !udev_changed(&change(with("70-mouse", "a"), with("70-mouse", "a"))),
+            "the same rules"
+        );
+        assert_eq!(
+            udev_commands(),
+            [
+                vec!["udevadm", "control", "--reload"],
+                vec!["udevadm", "trigger", "--action=change"]
+            ]
+        );
     }
 
     #[test]
