@@ -53,7 +53,7 @@ return {
     capabilities = archix.option {
       type = t.attrs_of(t.str),
       default = {},
-      description = "File capabilities, keyed by the path of a file a package installs (or the config declares) in /usr or /opt, in setcap's text form, such as cap_sys_nice+ep. They're set by the switch once packages and files are in place, and `archix verify` checks them; a path that isn't there is refused. Dropping one gives the file back what its package or install script left it.",
+      description = "File capabilities, keyed by the path of a file a package installs (or the config declares) in /usr or /opt, in setcap's text form, such as cap_sys_nice+ep. Every switch sets them once packages and files are in place, so one a plain pacman update dropped comes back at the next switch; a path that isn't there is refused. Dropping one gives the file back what its package or install script left it.",
     },
     units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd system units, keyed by file name such as foo.service." },
     user_units = archix.option { type = t.attrs_of(t.lines), default = {}, description = "systemd user units for every user, keyed by file name." },

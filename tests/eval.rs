@@ -102,6 +102,37 @@ fn option_descriptions_say_what_a_switch_applies_in_place_and_what_waits_for_the
             .collect();
         assert!(found.is_empty(), "{found:?} still say {stale:?}");
     }
+    let help = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    let commands: Vec<&str> = help
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| line.starts_with(' '))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(|name| name.trim_end_matches(','))
+        .collect();
+    assert!(commands.contains(&"switch"), "{help}");
+    let mut unknown = Vec::new();
+    for option in &options {
+        let text = option["description"].as_str().unwrap_or_default();
+        for (at, _) in text.match_indices("`archix ") {
+            let word: String = text[at + "`archix ".len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                .collect();
+            if !word.is_empty() && !commands.contains(&word.as_str()) {
+                unknown.push(format!("{}: archix {word}", option["path"]));
+            }
+        }
+    }
+    assert!(
+        unknown.is_empty(),
+        "option descriptions name commands `archix --help` doesn't list: {unknown:?}"
+    );
     for (path, says) in [
         ("hooks", "end of every switch"),
         ("hooks.<name>.user", "no session bus"),
