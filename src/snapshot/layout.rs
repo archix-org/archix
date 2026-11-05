@@ -292,9 +292,131 @@ pub fn mount_all(device: &str, target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The partition type GUID of an EFI system partition.
+const ESP_TYPE: &str = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
+
+/// The device spec and mount point of the ESP in an fstab's text: the line mounting `point` (boot.esp, as archix recorded it), else the first vfat line.
+fn esp_in_fstab(fstab: &str, point: Option<&str>) -> Option<(String, String)> {
+    let lines: Vec<Vec<String>> = fstab
+        .lines()
+        .filter_map(crate::system::fstab::fields)
+        .filter(|f| f.len() >= 3)
+        .collect();
+    let found = match point {
+        Some(point) => lines
+            .iter()
+            .find(|f| f[1].trim_end_matches('/') == point.trim_end_matches('/')),
+        None => lines.iter().find(|f| f[2] == "vfat"),
+    }?;
+    Some((found[0].clone(), found[1].clone()))
+}
+
+/// The partitions `lsblk -p -P -o NAME,PARTTYPE` lists with the ESP's type.
+fn esp_partitions(lsblk: &str) -> Vec<String> {
+    let value = |line: &str, key: &str| {
+        let start = line.find(&format!("{key}=\""))? + key.len() + 2;
+        Some(line[start..].split('"').next()?.to_string())
+    };
+    lsblk
+        .lines()
+        .filter(|line| value(line, "PARTTYPE").is_some_and(|t| t.eq_ignore_ascii_case(ESP_TYPE)))
+        .filter_map(|line| value(line, "NAME"))
+        .collect()
+}
+
+/// The one ESP among `found`, or a refusal naming them.
+fn pick_esp(found: &[String]) -> Result<String> {
+    match found {
+        [one] => Ok(one.clone()),
+        [] => bail!(
+            "the root's fstab has no ESP line and no EFI system partition was found; mount it yourself, or name it with --esp DEVICE"
+        ),
+        many => bail!(
+            "the root's fstab has no ESP line and there are {} EFI system partitions ({}); name the root's with --esp DEVICE",
+            many.len(),
+            many.join(", ")
+        ),
+    }
+}
+
+/// Mounts the ESP of the root laid out at `target` where it boots: `esp` if given, else the device the root's fstab names for boot.esp (as archix's state records it, /efi by default), else the only EFI system partition there is. Returns where it went.
+pub fn mount_esp(target: &Path, esp: Option<&str>) -> Result<PathBuf> {
+    let recorded = fs::read_to_string(target.join(ON_ROOT).join("archix/boot/esp")).ok();
+    let recorded = recorded.as_deref().map(str::trim).filter(|p| p.starts_with('/'));
+    let fstab = fs::read_to_string(target.join("etc/fstab")).unwrap_or_default();
+    let (device, point) = match (esp, esp_in_fstab(&fstab, recorded)) {
+        (Some(device), found) => (
+            device.to_string(),
+            found
+                .map(|(_, point)| point)
+                .or(recorded.map(str::to_string))
+                .unwrap_or_else(|| "/efi".to_string()),
+        ),
+        (None, Some(found)) => found,
+        (None, None) => {
+            let output = Command::new("lsblk")
+                .args(["-p", "-P", "-o", "NAME,PARTTYPE"])
+                .output()
+                .context("running lsblk")?;
+            let device = pick_esp(&esp_partitions(&String::from_utf8_lossy(&output.stdout)))?;
+            (device, recorded.unwrap_or("/efi").to_string())
+        }
+    };
+    let at = target.join(point.trim_start_matches('/'));
+    fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
+    let output = Command::new("mount")
+        .args(["-o", "umask=0077"])
+        .arg(&device)
+        .arg(&at)
+        .output()
+        .context("running mount")?;
+    if !output.status.success() {
+        bail!(
+            "couldn't mount the ESP {device} at {}: {}",
+            at.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_esp_is_where_the_roots_fstab_mounts_boot_esp_else_its_vfat_line() {
+        let fstab = "# comment\nUUID=abcd / btrfs rw,subvol=/@ 0 0\nUUID=ESP1 /efi vfat umask=0077,noauto,x-systemd.automount 0 2\nUUID=DATA /boot/x vfat defaults 0 2\n";
+        assert_eq!(
+            esp_in_fstab(fstab, Some("/efi")),
+            Some(("UUID=ESP1".to_string(), "/efi".to_string()))
+        );
+        assert_eq!(
+            esp_in_fstab(fstab, Some("/boot/x")),
+            Some(("UUID=DATA".to_string(), "/boot/x".to_string())),
+            "boot.esp names it"
+        );
+        assert_eq!(
+            esp_in_fstab(fstab, None),
+            Some(("UUID=ESP1".to_string(), "/efi".to_string())),
+            "without archix's record, the first vfat line"
+        );
+        assert_eq!(esp_in_fstab("UUID=abcd / ext4 rw 0 1\n", None), None);
+    }
+
+    #[test]
+    fn one_esp_partition_is_taken_and_several_are_refused_naming_them() {
+        let lsblk = "NAME=\"/dev/sda1\" PARTTYPE=\"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\"\nNAME=\"/dev/sda2\" PARTTYPE=\"0fc63daf-8483-4772-8e79-3d69d8477de4\"\nNAME=\"/dev/nvme0n1p1\" PARTTYPE=\"C12A7328-F81F-11D2-BA4B-00A0C93EC93B\"\n";
+        let found = esp_partitions(lsblk);
+        assert_eq!(found, ["/dev/sda1", "/dev/nvme0n1p1"]);
+        assert_eq!(pick_esp(&found[1..]).unwrap(), "/dev/nvme0n1p1");
+        let error = format!("{:#}", pick_esp(&found).unwrap_err());
+        assert!(
+            error.contains("/dev/sda1") && error.contains("/dev/nvme0n1p1") && error.contains("--esp"),
+            "{error}"
+        );
+        assert!(format!("{:#}", pick_esp(&[]).unwrap_err()).contains("no EFI system partition"));
+    }
 
     #[test]
     fn the_layout_mounts_its_subvolumes_with_the_roots_options_and_binds_what_rolls_back() {

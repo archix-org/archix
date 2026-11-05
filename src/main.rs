@@ -236,10 +236,13 @@ enum Command {
     /// The root's btrfs snapshots: taking, listing and deleting them, and laying the root out for rollbacks
     #[command(subcommand)]
     Snapshot(SnapshotAction),
-    /// Repair from a live USB: mount the root on a device as it boots, @archix, @varlib and the binds from /var/rollback included, and arch-chroot into it
+    /// Repair from a live USB: mount the root on a device as it boots, @archix, @varlib, the binds from /var/rollback and the ESP included, and arch-chroot into it
     Chroot {
         /// The root's btrfs device, such as /dev/nvme0n1p2 or an opened /dev/mapper/root
         device: String,
+        /// The ESP's device, when the root's fstab doesn't say and there's more than one EFI system partition
+        #[arg(long, value_name = "DEVICE")]
+        esp: Option<String>,
         /// The command to run inside, a shell by default
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
@@ -598,11 +601,11 @@ fn run() -> Result<ExitCode> {
             archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Chroot { device, command } => {
+        Command::Chroot { device, esp, command } => {
             if !is_root() {
                 anyhow::bail!("`archix chroot` mounts filesystems; run it as root");
             }
-            commands::snapshot::chroot(&device, &command)?;
+            commands::snapshot::chroot(&device, esp.as_deref(), &command)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::SplitVarLib => {

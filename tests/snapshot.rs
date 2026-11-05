@@ -633,17 +633,37 @@ fn setup_leaves_var_lib_to_the_next_boot_whose_split_keeps_what_rolls_back_on_th
         "the bound database has no lock of its own"
     );
     let chroot = disk.top.parent().unwrap().join("chroot");
+    let esp_image = disk.top.parent().unwrap().join("esp.img");
+    sh(&format!(
+        "truncate -s 40M {0} && mkfs.vfat -n ESP {0} > /dev/null",
+        esp_image.display()
+    ));
+    let without_esp = fs::read_to_string(disk.root.join("etc/fstab")).unwrap_or_default();
+    fs::write(
+        disk.root.join("etc/fstab"),
+        format!("{without_esp}{} /efi vfat umask=0077 0 2\n", esp_image.display()),
+    )
+    .unwrap();
     layout::mount_all(&device, &chroot).unwrap();
+    let esp = layout::mount_esp(&chroot, None);
     let mounted = (
         fs::read_to_string(chroot.join("var/lib/postgres/data/PG_VERSION")),
         chroot.join("var/lib/pacman/local").is_dir(),
         chroot.join("var/lib/dkms/nvidia/source").is_file(),
         layout::subvolume_of(&chroot.join(".archix")),
+        sh(&format!("findmnt -n -o FSTYPE {}/efi || true", chroot.display())),
     );
     sh(&format!("umount -R {}", chroot.display()));
+    fs::write(disk.root.join("etc/fstab"), without_esp).unwrap();
     assert_eq!(mounted.0.unwrap(), "17", "archix chroot mounts @varlib");
     assert!(mounted.1 && mounted.2, "and the binds");
     assert_eq!(mounted.3.as_deref(), Some("/@archix"));
+    assert_eq!(esp.unwrap(), chroot.join("efi"));
+    assert_eq!(
+        mounted.4.trim(),
+        "vfat",
+        "and the ESP the root's fstab names, where it boots"
+    );
     let store = Store::open(&disk.root);
     disk.mount_archix();
     store.create(&disk.root, Kind::Manual, Meta::default()).unwrap();

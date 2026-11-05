@@ -316,10 +316,10 @@ pub fn split_var_lib() -> Result<()> {
     layout::split_var_lib(Path::new("/"), &top.dir.join(layout::VAR_LIB))
 }
 
-/// Mounts the root on `device` with its layout and binds, runs arch-chroot there with `command`, and unmounts it all again.
-pub fn chroot(device: &str, command: &[String]) -> Result<()> {
+/// Mounts the root on `device` with its layout, binds and ESP, runs arch-chroot there with `command`, and unmounts it all again.
+pub fn chroot(device: &str, esp: Option<&str>, command: &[String]) -> Result<()> {
     let target = PathBuf::from(format!("/run/archix/chroot-{}", std::process::id()));
-    let mounted = layout::mount_all(device, &target);
+    let mounted = layout::mount_all(device, &target).and_then(|()| layout::mount_esp(&target, esp).map(|_| ()));
     let ran = mounted.and_then(|()| {
         let status = Command::new("arch-chroot")
             .arg(&target)
