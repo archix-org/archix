@@ -31,6 +31,7 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: tests/ci/archive-proxy-test.py
       - run: tests/vm/boot/checks.py
+      - run: tests/vm/replay/writelog.py check
 
   image:
     runs-on: ubuntu-latest

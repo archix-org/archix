@@ -16,13 +16,15 @@ BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/
 BOOT_TESTS = ["counting", "try", "guard", "unattended", "pacman", "keep", "hang", "glibc", "order", "health", "hook", "layer", "records", "strict", "ptrace", "accounts", "revoke", "secureboot", "entry-edit", "file-systems", "removal", "ext4"]
 POWERCUT_TESTS = ["pacman", "keep", "varlib", "rootmove", "switch"]
 LIMINE_TESTS = ["keep", "resync", "migration"]
+REPLAY_TESTS = ["pacman", "install", "keep", "switch", "varlib", "rootmove"]
 # The suites with an image of their own (tests/vm/run.sh's suite_tests), which share only boot/common.py with the boot tests.
 OWN_TESTS = ["selfupgrade", "dkms2", "nvidia", "cachyos", "churn", "pcr", "firewall", "rescue", "recovery", "secrets"]
 SUITES = ({f"boot-{name}": BOOT_SHARED + [f"tests/vm/boot/{name}"] for name in BOOT_TESTS}
           | {f"powercut-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", f"tests/vm/powercut/{name}"] for name in POWERCUT_TESTS}
           | {f"limine-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/limine/base.py", f"tests/vm/limine/{name}"] for name in LIMINE_TESTS}
+          | {f"replay-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/replay/writelog.py", "tests/vm/replay/fat.py", "tests/vm/replay/replay.py", f"tests/vm/replay/{name}"] + (["tests/vm/powercut/switch"] if name == "switch" else []) for name in REPLAY_TESTS}
           | {name: ["tests/vm/boot/common.py", "tests/vm/suite.py", f"tests/vm/{name}"] for name in OWN_TESTS})
-ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": ""}
+ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": "", "REPLAY_SUBSETS": "", "REPLAY_EVERY": "", "REPLAY_ONLY": "", "REPLAY_SEED": "", "REPLAY_WINDOW": "", "REPLAY_ESP_ONLY": "", "REPLAY_JOBS": ""}
 IMAGE = "archix-arch-test"
 KEEP = 500
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test, and `run.sh SUITE` each of suite_tests, a test with an image of its own (tests/vm/SUITE: config.lua, image.env, test.py; ext4_tests also run with FS=ext4): selfupgrade the upgrade from a deployments system (ARCHIX_OLD) refused, dkms2 DKMS with two kernels, nvidia NVIDIA's DKMS drivers (TO_DATE, 2026-10-10 by default), cachyos CachyOS on Limine and its move to systemd-boot, churn a year of weekly switches, pcr signed PCR policies with swtpm, firewall the firewall over ssh and a second NIC, rescue the rescue entry, recovery a live-USB recovery, secrets declared secrets on real boots.
+# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh replay [TEST...]` the write replay of a logged run at every flush, mark and ESP subset (replay_tests, FS=btrfs, built like the power-cut suite; the REPLAY_* settings in tests/vm/replay/replay.py), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test, and `run.sh SUITE` each of suite_tests, a test with an image of its own (tests/vm/SUITE: config.lua, image.env, test.py; ext4_tests also run with FS=ext4): selfupgrade the upgrade from a deployments system (ARCHIX_OLD) refused, dkms2 DKMS with two kernels, nvidia NVIDIA's DKMS drivers (TO_DATE, 2026-10-10 by default), cachyos CachyOS on Limine and its move to systemd-boot, churn a year of weekly switches, pcr signed PCR policies with swtpm, firewall the firewall over ssh and a second NIC, rescue the rescue entry, recovery a live-USB recovery, secrets declared secrets on real boots.
 set -euo pipefail
 suite=${1:-boot}
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -10,18 +10,19 @@ boot_tests=(counting try guard unattended pacman keep hang glibc order health ho
 powercut_tests=(pacman keep varlib rootmove switch)
 # A machine Limine boots (FS=btrfs, built with the test hooks): keep refused across a kernel change, a root replaced as limine-snapper-restore does, and the move to systemd-boot with cuts at each step.
 limine_tests=(keep resync migration)
+replay_tests=(pacman install keep switch varlib rootmove)
 suite_tests=(selfupgrade dkms2 nvidia cachyos churn pcr firewall rescue recovery secrets)
 # Those of suite_tests that also apply with FS=ext4, rollbacks off; the release gate runs them on both.
 ext4_tests=(selfupgrade dkms2 nvidia churn pcr firewall rescue secrets)
 case $suite in
-  boot | powercut | limine) driver=$suite ;;
-  *) [[ " ${suite_tests[*]} " == *" $suite "* ]] || { echo "unknown suite $suite; run.sh takes boot, powercut, limine or one of: ${suite_tests[*]}" >&2; exit 2; } ;;
+  boot | powercut | limine | replay) driver=$suite ;;
+  *) [[ " ${suite_tests[*]} " == *" $suite "* ]] || { echo "unknown suite $suite; run.sh takes boot, powercut, limine, replay or one of: ${suite_tests[*]}" >&2; exit 2; } ;;
 esac
 # The last commit of the deployments model, which selfupgrade lays the system out with.
 export ARCHIX_OLD=${ARCHIX_OLD:-505fc7b}
-# The split suites, boot and powercut, run their tests side by side from one base.
+# The split suites, boot, powercut, limine and replay, run their tests side by side from one base.
 split=
-case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; limine) split=("${limine_tests[@]}") ;; esac
+case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; limine) split=("${limine_tests[@]}") ;; replay) split=("${replay_tests[@]}") ;; esac
 for arg in "${@:2}"; do
   case $arg in
     --interactive) interactive=1 ;;
@@ -90,8 +91,8 @@ target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
 [ -n "$split" ] || mounts+=(-e IMAGE_DIR="/vm/$suite")
-# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut suite builds its own, with the test hooks' debug assertions.
-if [ "$suite" = powercut ] || [ "$suite" = limine ]; then
+# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut, Limine and replay suites build their own, with the test hooks' debug assertions.
+if [ "$suite" = powercut ] || [ "$suite" = limine ] || [ "$suite" = replay ]; then
   docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
     cargo build --locked --release && cp /target/powercut/release/archix /work/archix
     cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/powercut/x86_64-unknown-linux-musl/release/archix /work/archix-static'
@@ -122,21 +123,21 @@ archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 loader=systemd-boot
 [ "$suite" != limine ] || loader=limine
 docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e LOADER="$loader" archix-arch-test /vm/build-image.sh
-# The power-cut tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
-if [ "$suite" = powercut ]; then
-  [[ " ${pending[*]} " != *" powercut-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
-  [[ " ${pending[*]} " != *" powercut-rootmove "* ]] || docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e IMG=/work/top.img -e ROOT_AT_TOP=1 archix-arch-test /vm/build-image.sh
+# The power-cut and replay tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
+if [ "$suite" = powercut ] || [ "$suite" = replay ]; then
+  [[ " ${pending[*]} " != *" $suite-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
+  [[ " ${pending[*]} " != *" $suite-rootmove "* ]] || docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e IMG=/work/top.img -e ROOT_AT_TOP=1 archix-arch-test /vm/build-image.sh
 fi
 tty=() args=()
 [ -z "$interactive" ] || tty=(-it) args=(--interactive)
-vm=(docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS archix-arch-test)
+vm=(docker run --rm "${tty[@]}" --network host --device /dev/kvm "${mounts[@]}" -e PYTHONPATH=/vm -e VM_TIMEOUT -e VM_MEM -e VM_CPUS -e REPLAY_SUBSETS -e REPLAY_EVERY -e REPLAY_ONLY -e REPLAY_SEED -e REPLAY_WINDOW -e REPLAY_ESP_ONLY -e REPLAY_JOBS -e GITHUB_RUN_ID archix-arch-test)
 # Records each pass whose inputs didn't change while it ran, as a file edited meanwhile may not be what it tested, with its logs.
 record() {
   local name=$1 seconds=$2 dir=$3 now
   [ -z "$interactive" ] || return 0
   now=$(python3 "$cache_py" keys "$name")
   if [ "${now#* }" = "${keys[$name]}" ]; then
-    python3 "$cache_py" record "$name" "${keys[$name]}" "$seconds" "$dir/timeline.log" "$dir/serial.log" "$dir/output.log"
+    python3 "$cache_py" record "$name" "${keys[$name]}" "$seconds" "$dir/timeline.log" "$dir/serial.log" "$dir/output.log" "$dir/replay.log" "$dir/pacman.tar.gz"
   else
     echo "$name: the inputs changed during the run; not recording the pass. What changed:"
     diff <(printf '%s\n' "${inputs[$name]}") <(python3 "$cache_py" inputs "$name") | sed 's/^/  /' || true

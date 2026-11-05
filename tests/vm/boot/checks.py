@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: checks.py; fails unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX, and its suite_tests each have a test.py and a cache key, with ci.yml's suites job naming only them.
+# Usage: checks.py; fails unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX, and its suite_tests each have a test.py and a cache key, with ci.yml's suites job naming only them, and its powercut and replay tests each a test.py and a cache key too.
 import json
 import re
 import sys
@@ -55,10 +55,22 @@ def suite_problems(suites, ext4, ci):
     return found
 
 
+def split_problems():
+    """What's wrong with run.sh's powercut and replay tests against their directories and cache.py's lists."""
+    found = []
+    for suite in ("powercut", "replay"):
+        tests = listed(f"{suite}_tests")
+        found += [f"run.sh's {suite} test {name} has no tests/vm/{suite}/{name}/test.py" for name in tests if not (ROOT / "tests/vm" / suite / name / "test.py").is_file()]
+        cached = re.search(rf"^{suite.upper()}_TESTS = (\[.*\])$", (ROOT / "tests/vm/driver/cache.py").read_text(), re.M)
+        if not tests or not cached or sorted(json.loads(cached.group(1))) != sorted(tests):
+            found.append(f"tests/vm/driver/cache.py's {suite.upper()}_TESTS isn't run.sh's {suite}_tests ({' '.join(tests)}), so a test would have no cache key")
+    return found
+
+
 def main():
     tests = boot_tests()
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
-    found = problems(tests, ci, (ROOT / "tests/ci/boot-results.sh").read_text()) + suite_problems(listed("suite_tests"), listed("ext4_tests"), ci)
+    found = problems(tests, ci, (ROOT / "tests/ci/boot-results.sh").read_text()) + suite_problems(listed("suite_tests"), listed("ext4_tests"), ci) + split_problems()
     if found:
         print("\n".join(found))
         return 1

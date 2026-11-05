@@ -38,9 +38,10 @@ remove_work() {
       kept=${ARCHIX_VM_LOGS:-${XDG_CACHE_HOME:-$HOME/.cache}/archix-vm-logs}/$(basename "$work")$(dirname "${serial#"$work"}" | tr / .).serial.log
       kept=${kept/..serial/.serial}
       mkdir -p "$(dirname "$kept")" && cp "$serial" "$kept" && echo "kept the failed run's console: $kept"
-      for log in timeline output; do
+      for log in timeline output replay; do
         [ ! -s "$(dirname "$serial")/$log.log" ] || { cp "$(dirname "$serial")/$log.log" "${kept%.serial.log}.$log.log" && echo "and its $log: ${kept%.serial.log}.$log.log"; }
       done
+      [ ! -s "$(dirname "$serial")/pacman.tar.gz" ] || { cp "$(dirname "$serial")/pacman.tar.gz" "${kept%.serial.log}.pacman.tar.gz" && echo "and its pacman outputs: ${kept%.serial.log}.pacman.tar.gz"; }
     done
   fi
   if [ -n "${ARCHIX_VM_KEEP:-}" ]; then
