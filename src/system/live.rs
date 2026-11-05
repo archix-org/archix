@@ -528,12 +528,12 @@ fn services(change: &SystemChange) -> Vec<String> {
     failures
 }
 
-/// Whether the switch added, changed or dropped one of archix's udev rules, which udev reads only when told to.
+/// Whether the switch added, changed or dropped a udev rule, archix's or one the config declares, which udev reads only when told to.
 fn udev_changed(change: &SystemChange) -> bool {
     change
         .changed_paths()
         .iter()
-        .any(|path| path.starts_with("/etc/udev/rules.d/") && path.ends_with(".rules"))
+        .any(|path| UDEV_DIRS.iter().any(|dir| path.starts_with(dir)) && path.ends_with(".rules"))
 }
 
 /// Reloads udev's rules and replays a change event for every device, as which subsystems a rule matches can't be told from its text reliably.
@@ -588,7 +588,13 @@ pub fn unit_actions(change: &SystemChange, active: &dyn Fn(&str) -> bool) -> Vec
             actions.push(("try-reload-or-restart", unit.clone()));
         }
     }
-    if change.to.files.contains_key(SYSCTL) && changed.contains(SYSCTL) {
+    // Any sysctl file the switch wrote, archix's own or one the config declares; a dropped one keeps its values until the next boot, as sysctl can't unset one.
+    let sysctl = changed.iter().any(|path| {
+        SYSCTL_DIRS.iter().any(|dir| path.starts_with(dir))
+            && path.ends_with(".conf")
+            && change.to.files.contains_key(*path)
+    });
+    if sysctl {
         actions.push(("restart", "systemd-sysctl.service".to_string()));
     }
     actions
@@ -596,6 +602,10 @@ pub fn unit_actions(change: &SystemChange, active: &dyn Fn(&str) -> bool) -> Vec
 
 /// The file `sysctl` renders, which systemd-sysctl applies at boot; restarting it applies a change at once.
 pub const SYSCTL: &str = "/etc/sysctl.d/90-archix.conf";
+/// Where systemd-sysctl reads the files a switch may write.
+const SYSCTL_DIRS: [&str; 2] = ["/etc/sysctl.d/", "/usr/lib/sysctl.d/"];
+/// Where udev reads the rules a switch may write.
+const UDEV_DIRS: [&str; 2] = ["/etc/udev/rules.d/", "/usr/lib/udev/rules.d/"];
 
 /// Units archix writes whose running service reads a file the switch may change on its own: reloaded when only that file changed.
 const RELOADS: &[(&str, &str)] = &[(super::firewall::UNIT, super::firewall::RULES)];
@@ -675,6 +685,30 @@ mod unit_tests {
                 vec!["udevadm", "trigger", "--action=change"]
             ]
         );
+    }
+
+    #[test]
+    fn any_sysctl_file_or_udev_rule_the_switch_writes_applies_at_once() {
+        for path in ["/etc/sysctl.d/80-swappiness.conf", "/usr/lib/sysctl.d/50-tuning.conf"] {
+            let mut to = SystemState::default();
+            to.files.insert(path.to_string(), file("b"));
+            let change = SystemChange {
+                from: SystemState::default(),
+                to,
+            };
+            assert_eq!(
+                unit_actions(&change, &|_| true),
+                vec![("restart", "systemd-sysctl.service".to_string())],
+                "{path}"
+            );
+        }
+        let mut to = SystemState::default();
+        to.files
+            .insert("/usr/lib/udev/rules.d/70-mine.rules".to_string(), file("b"));
+        assert!(udev_changed(&SystemChange {
+            from: SystemState::default(),
+            to
+        }));
     }
 
     #[test]
