@@ -1269,3 +1269,57 @@ fn a_move_from_limine_cut_short_after_its_generation_is_recorded_is_taken_up_by_
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_layer_file_mounts_every_time_as_nothing_tears_its_loop_device_down_first() {
+    let _system = lock_system();
+    let scratch = Scratch::new(128);
+    let (dir, at) = (scratch.0.path().join("try"), scratch.0.path().join("layer"));
+    for attempt in 0..30 {
+        let (kind, size, notes) = archix::system::initrd::make_layer_with(&dir, &at, &[16 << 20], &|_, _| {});
+        assert_eq!(
+            (kind.as_str(), size),
+            ("file", 16 << 20),
+            "attempt {attempt}: {notes:?}"
+        );
+        sh(&format!("umount {}", at.display()));
+    }
+}
+
+#[test]
+#[ignore]
+fn blessing_renames_the_entry_this_boot_counted_on_not_a_temporary_file_a_cut_left() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let entries = machine.esp().join("loader/entries");
+    let text = fs::read_to_string(entries.join("archix-current+2.conf")).unwrap();
+    fs::rename(
+        entries.join("archix-current+2.conf"),
+        entries.join("archix-current+1-1.conf"),
+    )
+    .unwrap();
+    // Sorts first, and fs::read_dir on a plain directory may return it first too; what a cut in the menu's write leaves.
+    fs::write(entries.join("archix-current+2-0.conf.tmp"), "torn").unwrap();
+    let out = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_ENTRY", "archix-current+1-1.conf")],
+        &["bless"],
+    );
+    checks.check(
+        out.status.success(),
+        format!("{}", String::from_utf8_lossy(&out.stderr)),
+    );
+    checks.eq(
+        fs::read_to_string(entries.join("archix-current.conf")).ok(),
+        Some(text),
+        "the blessed name holds the entry, not the temporary file",
+    );
+    checks.check(
+        !entries.join("archix-current+1-1.conf").exists(),
+        format!("and no second name is left: {:?}", machine.entries()),
+    );
+    checks.finish();
+}

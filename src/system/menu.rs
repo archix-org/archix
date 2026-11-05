@@ -1131,6 +1131,30 @@ mod tests {
     }
 
     #[test]
+    fn writing_the_menu_clears_a_temporary_entry_a_cut_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, dir) = (tmp.path().join("esp"), tmp.path().join("state"));
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        fs::write(esp.join("loader/entries/archix-current+2-0.conf.tmp"), "torn").unwrap();
+        let how = Write {
+            esp: &esp,
+            dir: &dir,
+            counted: true,
+            tries: 2,
+            reset: true,
+            signed: false,
+        };
+        write(&how, &[planned(Entry::Current, "a.efi")]).unwrap();
+        let names: Vec<String> = fs::read_dir(esp.join("loader/entries"))
+            .unwrap()
+            .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["archix-current+2.conf"]);
+    }
+
+    #[test]
     fn a_counted_name_has_a_second_spelling_systemd_boot_reads_alike() {
         assert_eq!(
             alternate("archix-snapshot-1+1.conf").as_deref(),
