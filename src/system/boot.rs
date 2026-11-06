@@ -538,10 +538,18 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
         in_view(&["rm", "-f", &initramfs], "removing the initramfs")?;
     }
     if secure_boot {
+        let cert = super::secureboot::own_db_cert();
         for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
             let path = esp.join(loader);
-            if path.exists() {
+            let ours = cert
+                .as_deref()
+                .is_some_and(|cert| super::secureboot::signed_with(&path, cert).unwrap_or(false));
+            // A rename over the loader's fixed FAT name, so only when a loader update left it unsigned, as a step flushed on both sides.
+            if path.exists() && !ours {
+                crate::durable::sync_esp(esp)?;
+                crate::testhooks::mark("loader-sign");
                 sign_replacing(esp, &path)?;
+                crate::durable::sync_esp(esp)?;
             }
         }
     }

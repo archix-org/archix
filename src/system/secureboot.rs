@@ -166,8 +166,57 @@ impl Default for Machine {
     }
 }
 
-/// Whether a PE image (a UKI, a boot loader) carries an Authenticode signature.
-pub fn is_signed(path: &Path) -> Result<bool> {
+/// sbctl's db certificate in DER, which it puts in each signature it makes.
+pub fn own_db_cert() -> Option<Vec<u8>> {
+    let pem = ["/var/lib/sbctl/keys/db/db.pem", "/usr/share/secureboot/keys/db/db.pem"]
+        .iter()
+        .find_map(|path| fs::read_to_string(path).ok())?;
+    let body: String = pem
+        .lines()
+        .skip_while(|line| !line.starts_with("-----BEGIN CERTIFICATE"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("-----END"))
+        .collect();
+    base64_decode(&body)
+}
+
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let digits: Vec<u8> = text
+        .bytes()
+        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
+        .map(value)
+        .collect::<Option<_>>()?;
+    let mut out = Vec::with_capacity(digits.len() * 3 / 4);
+    for chunk in digits.chunks(4) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, d)| n | (u32::from(*d) << (18 - 6 * i)));
+        out.extend(n.to_be_bytes()[1..chunk.len()].iter());
+    }
+    Some(out)
+}
+
+/// Whether the PE image at `path` carries a signature holding `cert`, as each one sbctl makes with that key does.
+pub fn signed_with(path: &Path, cert: &[u8]) -> Result<bool> {
+    let Some((offset, size)) = security_directory(path)? else {
+        return Ok(false);
+    };
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let table = bytes.get(offset..offset.saturating_add(size)).unwrap_or_default();
+    Ok(!cert.is_empty() && table.windows(cert.len()).any(|window| window == cert))
+}
+
+/// The file offset and size of a PE image's certificate table, if it has one.
+fn security_directory(path: &Path) -> Result<Option<(usize, usize)>> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let u16_at = |at: usize| bytes.get(at..at + 2).map(|b| u16::from_le_bytes([b[0], b[1]]));
     let u32_at = |at: usize| {
@@ -187,7 +236,14 @@ pub fn is_signed(path: &Path) -> Result<bool> {
         Some(0x10b) => optional + 96,
         _ => bail!("{} has an unknown PE optional header", path.display()),
     };
-    Ok(u32_at(directories + 4 * 8 + 4).unwrap_or(0) > 0)
+    let offset = u32_at(directories + 4 * 8).unwrap_or(0) as usize;
+    let size = u32_at(directories + 4 * 8 + 4).unwrap_or(0) as usize;
+    Ok((size > 0).then_some((offset, size)))
+}
+
+/// Whether a PE image (a UKI, a boot loader) carries an Authenticode signature.
+pub fn is_signed(path: &Path) -> Result<bool> {
+    Ok(security_directory(path)?.is_some())
 }
 
 /// Creates sbctl keys if needed and enrolls them, with Microsoft's unless told otherwise, while the firmware is in setup mode.
@@ -244,6 +300,15 @@ mod tests {
             bytes[security + 4..security + 8].copy_from_slice(&0x40u32.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn base64_decodes_as_pem_bodies_need() {
+        assert_eq!(base64_decode("TWFu").unwrap(), b"Man");
+        assert_eq!(base64_decode("TWE=").unwrap(), b"Ma");
+        assert_eq!(base64_decode("TQ==").unwrap(), b"M");
+        assert_eq!(base64_decode("aGVs\nbG8=").unwrap(), b"hello");
+        assert!(base64_decode("a*b").is_none());
     }
 
     #[test]
