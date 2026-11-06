@@ -14,4 +14,6 @@ def run(m, t):
     def after():
         t.require(out("uname -r").startswith("7.2.11"), f"the boot after the update should be its new kernel: {out('uname -r')}")
 
-    replay.transaction(m, t, "pacman", download, "pacman -Syu --noconfirm --noprogressbar", after)
+    # Mid-extraction points all fall back the same way, each sitting out the timeout twice, as the torn root can't mount the ESP to mark its entry bad.
+    sample = ([(None, "unfinished-marked"), ("boot-image-built", "bless-done")], 5)
+    replay.transaction(m, t, "pacman", download, "pacman -Syu --noconfirm --noprogressbar", after, sample)

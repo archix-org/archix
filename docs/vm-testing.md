@@ -85,7 +85,7 @@ The uncut baselines are booted and judged the same way first. Each point prints 
 
 | Test | Logged run |
 | --- | --- |
-| `pacman` | the `powercut pacman` update (`pacman -Syu`, 2026-10-10 to 2026-10-24, linux and systemd) and the boot after it: the snapshot, tries and mark before the transaction, the extraction, the boot images built and copied, the menu written and its counter reset, the root flushed and the mark dropped, the reboot, systemd-boot's count and the blessing |
+| `pacman` | sampled, `REPLAY-SAMPLE`: every point before the extraction starts and from the first mark after it through the blessing, every 5th otherwise; the `powercut pacman` update (`pacman -Syu`, 2026-10-10 to 2026-10-24, linux and systemd) and the boot after it: the snapshot, tries and mark before the transaction, the extraction, the boot images built and copied, the menu written and its counter reset, the root flushed and the mark dropped, the reboot, systemd-boot's count and the blessing |
 | `install` | `pacman -S vim`, which changes neither kernel nor initramfs, so only archix's flush makes the extracted files durable before the mark goes, and the boot after it |
 | `switch` | `powercut switch`'s switch (its `declare()`): `tree` installed and the initramfs changed, through switch-snapshot, switch-marked, the packages, files, apply and record steps, the boot images, switch-flushed and switch-finished, root's config.git store, and the boot after it with its bless rename |
 | `keep` | an in-place switch, `archix rollback N`, `archix rollback --cancel`, `archix rollback N` again and the boot into N; a try boot only while the switch's mark is on @, into the switch's snapshot, the root holding one of the run's values, the account made before it kept |

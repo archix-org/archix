@@ -183,7 +183,8 @@ class Scenario:
         """Unfiltered `pacman -Dk` and `pacman -Qkk`, and `pacman -Q`, on the booted system, each kept in the test's pacman/ directory."""
         state = {}
         for kind, cmd, timeout in (("Dk", "pacman -Dk", 600), ("Qkk", "pacman -Qkk", 1800), ("Q", "pacman -Q", 120)):
-            text = common.m.execute(f"{cmd} 2>&1; echo \"exit $?\"", timeout, quiet=True)[1]
+            # Apart, as pacman buffers stdout and not stderr, which splits lines where a difference shifts the buffer.
+            text = common.m.execute(f"{cmd} > /run/replay-out 2> /run/replay-err; status=$?; cat /run/replay-err /run/replay-out; echo \"exit $status\"", timeout, quiet=True)[1]
             (self.outputs / f"{file_name(label)}.{kind}.txt").write_text(text)
             state[kind] = text if kind != "Q" else "\n".join(line for line in text.splitlines() if not line.startswith("exit "))
         return state
@@ -366,14 +367,14 @@ class Scenario:
         ranges = [window_range(self.entries, start, end) for start, end in WINDOWS]
         for (start, end), (first, last) in zip(WINDOWS, ranges):
             self.note(f"REPLAY-WINDOW test={self.name} {start}..{end} is entries {first} through {last}")
-        whole = window_range(self.entries, spec.sample[0], spec.sample[1]) if spec.sample else None
+        whole = [window_range(self.entries, start, end) for start, end in spec.sample[0]] if spec.sample else []
         if whole:
-            self.note(f"REPLAY-SAMPLE test={self.name} not a full run: every point of {spec.sample[0]}..{spec.sample[1]} (entries {whole[0]} through {whole[1]}), every {spec.sample[2]}th elsewhere")
+            self.note(f"REPLAY-SAMPLE test={self.name} not a full run: every point of {', '.join(f"{a or 'the start'}..{b} (entries {first} through {last})" for (a, b), (first, last) in zip(spec.sample[0], whole))}, 1 point in {spec.sample[1]} elsewhere")
         tasks = []
         for p in self.points:
             if ranges and not any(first <= p.upto <= last for first, last in ranges):
                 continue
-            if whole and not whole[0] <= p.upto <= whole[1] and (p.number - 1) % spec.sample[2]:
+            if whole and not any(first <= p.upto <= last for first, last in whole) and (p.number - 1) % spec.sample[1]:
                 continue
             if ESP_ONLY and not p.window:
                 continue
@@ -384,7 +385,7 @@ class Scenario:
                     tasks.append((p.floor, 0, p, (k, picks)))
         tasks.sort(key=lambda task: (task[0], task[1]))
         subsets = sum(1 for task in tasks if task[3])
-        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'} sample={'/'.join(map(str, spec.sample)) if spec.sample else '-'}")
+        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'} sample={','.join(f"{a or 'start'}..{b}" for a, b in spec.sample[0]) + f"/{spec.sample[1]}" if spec.sample else '-'}")
         order = [e.mark.split(" ", 1)[-1] for e in self.entries if e.mark and e.mark.split(" ", 1)[-1] in ("menu-synced", "unfinished-marked", "unfinished-cleared")]
         self.note(f"REPLAY-ORDER test={self.name} {' '.join(order) or 'no unfinished mark in this run'}")
         if "unfinished-marked" in order and "menu-synced" not in order[: order.index("unfinished-marked")]:
@@ -611,7 +612,7 @@ def window_range(entries, start, end):
             raise ValueError(f"the log has {len(hits)} mark(s) {name} after entry {after}, not a #{k}: {sorted({e.mark.split(' ', 1)[-1] for e in entries if e.mark})}")
         return hits[k - 1]
 
-    first = find(start)
+    first = find(start) if start else -1
     last = find(end, first)
     flush = next((e.index for e in entries[last:] if e.flags & (writelog.FLUSH | writelog.FUA)), len(entries) - 1)
     return first, flush
@@ -701,7 +702,7 @@ def package_diff(state, baselines):
 
 
 class Spec:
-    """What a test allows: fallback, whether a try boot is right for a root marked unfinished; identify(scenario, state, tried), which baseline the booted system is, or None; extra(), the test's own problems with the booted system; held, the driver's marks around the command that runs pacman, which holds db.lck from the first until the flush after the second; sample, (start, end, n) for a test too long to check whole: every point from mark start through the flush after mark end, every nth elsewhere."""
+    """What a test allows: fallback, whether a try boot is right for a root marked unfinished; identify(scenario, state, tried), which baseline the booted system is, or None; extra(), the test's own problems with the booted system; held, the driver's marks around the command that runs pacman, which holds db.lck from the first until the flush after the second; sample, ([(start, end), ...], n) for a test too long to check whole: every point from mark start (None: the log's start) through the flush after mark end, every nth elsewhere."""
 
     def __init__(self, identify, fallback, extra=lambda: [], held=None, sample=None):
         self.identify, self.fallback, self.extra, self.held, self.sample = identify, fallback, extra, held, sample
@@ -714,13 +715,13 @@ def by_packages(scenario, state, tried):
     return next((name for name, base in scenario.baselines.items() if name != "try" and base["Q"] == state["Q"]), None)
 
 
-def transaction(m, t, name, download, command, after=lambda: None):
-    """A pacman transaction's scenario: a two-minute unblessed timeout and a reboot on a failed health check, download run first, a boot that counts as good; then command and the boot after it logged, with baselines before, after and of the slot in try mode, and every point replayed."""
+def transaction(m, t, name, download, command, after=lambda: None, sample=None):
+    """A pacman transaction's scenario: a one-minute unblessed timeout and a reboot on a failed health check, download run first, a boot that counts as good; then command and the boot after it logged, with baselines before, after and of the slot in try mode, and every point replayed."""
     s = Scenario(m, t, name)
     with t.step("0: the transaction downloaded, a boot that counts as good, the marks in place"):
         common.boot()
-        edit_config("'s|  boot = { loader = \"systemd-boot\" },|  boot = { loader = \"systemd-boot\", unblessed_timeout = 2, health_check = { reboot_on_failure = true } },|'")
-        switch("switch to a two-minute unblessed timeout and a reboot on a failed health check")
+        edit_config("'s|  boot = { loader = \"systemd-boot\" },|  boot = { loader = \"systemd-boot\", unblessed_timeout = 1, health_check = { reboot_on_failure = true } },|'")
+        switch("switch to a one-minute unblessed timeout and a reboot on a failed health check")
         download()
         install(m)
         # A boot that counts as good arms the slot, so the transaction's snapshot becomes it.
@@ -745,7 +746,7 @@ def transaction(m, t, name, download, command, after=lambda: None):
 
     with t.step("1: the transaction and the boot after it, logged"):
         s.record(body)
-    spec = Spec(by_packages, fallback=True, held=("pacman-start", "pacman-done"))
+    spec = Spec(by_packages, fallback=True, held=("pacman-start", "pacman-done"), sample=sample)
     with t.step("2: the uncut systems' baselines: before the transaction, after it, and the slot in try mode"):
         s.boot(s.overlay("before", s.base), s.pristine_vars, "the system before the transaction")
         s.capture("before")

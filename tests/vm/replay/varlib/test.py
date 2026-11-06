@@ -13,7 +13,7 @@ def run(m, t):
         s.start_from("/work/plain.img")
         cut.common.boot()
         t.require(not ok("[ -d /.archix/snapshots ]"), "the image should boot as a plain install, without rollbacks yet")
-        # The config's one package the image lacks, so the logged switch runs no transaction, which archix doesn't mark unfinished yet.
+        # The config's efitools, which the image lacks, so the logged switch has less to install.
         m.succeed("pacman -S --noconfirm --noprogressbar efitools > /root/efitools.log 2>&1", timeout=900, what="installing efitools")
         m.succeed(f"mkdir -p {SENTINEL}/dir && head -c 64M /dev/urandom > {SENTINEL}/big && echo small > {SENTINEL}/dir/small && sha256sum {SENTINEL}/big {SENTINEL}/dir/small > /root/sentinel.sum", what="filling /var/lib")
         replay.install(m)
@@ -48,7 +48,7 @@ def run(m, t):
         return found
 
     # The first switch and the boot after it flush per package, about 2000 points, most of them outside the move.
-    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra, sample=("split-entry-copied", "split-binds-ready", 10))
+    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra, sample=([("split-entry-copied", "split-binds-ready")], 10))
     with t.step("2: the uncut systems' baselines: the plain install and the laid-out system"):
         s.boot(s.overlay("before", s.base), s.pristine_vars, "the plain install")
         s.capture("before")
