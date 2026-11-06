@@ -575,6 +575,14 @@ pub fn status(target: &Target, all: bool) -> Result<()> {
                 .map(|applied| format!("tree {}, ", &applied.tree[..applied.tree.len().min(12)]))
                 .unwrap_or_default();
             println!("current generation: {number} ({tree}snapshot {})", generation.date);
+            let plan = generation.settings.boot.as_ref();
+            if super::switch::boot_step_pending(&paths) == Some(number) {
+                println!(
+                    "warning: a power cut stopped this generation's boot step, so the boot menu may not start it; `archix switch` finishes it"
+                );
+            } else if let Some(what) = plan.and_then(|plan| archix::system::menu::boot_step_missing(&paths, plan)) {
+                println!("warning: this generation's boot step isn't whole: {what}; `archix switch` writes it again");
+            }
             let moved = archix::snapshot::varlib::size(&paths.root.join("var/lib"));
             if moved > 0 {
                 println!(

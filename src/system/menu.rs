@@ -625,6 +625,29 @@ pub fn pinned(paths: &Paths, cap: u32) -> BTreeSet<u32> {
     pinned
 }
 
+/// What's missing of the boot step's work for the current generation on the ESP, if it can tell: the image, its entry, the rescue entry. An edited entry isn't missing, and a directory that isn't the ESP's content or can't be read says nothing.
+pub fn boot_step_missing(paths: &Paths, plan: &BootPlan) -> Option<String> {
+    if plan.loader != Loader::SystemdBoot {
+        return None;
+    }
+    let esp = Path::new(&plan.esp);
+    fs::read_dir(esp.join("EFI")).ok()?;
+    let Some(image) = load(&dir(paths)).ok()?.current.main else {
+        return Some("no boot image is recorded for it".to_string());
+    };
+    if !fs::metadata(esp.join(IMAGES).join(&image.name)).is_ok_and(|meta| meta.len() > 0) {
+        return Some(format!("its boot image {} isn't on the ESP", image.name));
+    }
+    let entries = on_esp(esp);
+    if !entries.contains_key(&Entry::Current.id()) {
+        return Some("its boot entry isn't on the ESP".to_string());
+    }
+    if plan.rescue && !esp.join("loader/entries").join(super::rescue::ENTRY).is_file() {
+        return Some("the rescue entry isn't on the ESP".to_string());
+    }
+    None
+}
+
 /// Checked before a switch changes anything: the ESP must have room for a new image the size of the current one, beside the images the current system and the slot keep.
 pub fn precheck(paths: &Paths, plan: &BootPlan) -> Result<()> {
     if plan.loader == Loader::Limine {
@@ -751,6 +774,42 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_boot_step_is_whole_with_the_current_image_and_entry_and_the_rescue_entry_if_wanted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path().join("esp");
+        let paths = Paths::under(&tmp.path().join("root"));
+        let plan = |rescue: bool| -> BootPlan {
+            serde_json::from_value(serde_json::json!({
+                "esp": esp, "kernel": "linux", "microcode": [], "cmdline": "", "secure_boot": false, "rescue": rescue,
+            }))
+            .unwrap()
+        };
+        assert_eq!(boot_step_missing(&paths, &plan(true)), None, "not an ESP with content");
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("no boot image")));
+        let state = State {
+            current: Images {
+                main: Some(Image {
+                    name: "a.efi".into(),
+                    version: "1".into(),
+                }),
+                extras: Vec::new(),
+            },
+            ..Default::default()
+        };
+        save(&dir(&paths), &state).unwrap();
+        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("a.efi")));
+        fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
+        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("boot entry")));
+        fs::write(esp.join("loader/entries/archix-current+2-0.conf"), "edited").unwrap();
+        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("rescue")));
+        assert_eq!(boot_step_missing(&paths, &plan(false)), None);
+        fs::write(esp.join("loader/entries").join(crate::system::rescue::ENTRY), "r").unwrap();
+        assert_eq!(boot_step_missing(&paths, &plan(true)), None);
+    }
 
     fn record(number: u32, kind: Kind) -> Record {
         Record {

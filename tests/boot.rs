@@ -1324,3 +1324,97 @@ fn blessing_renames_the_entry_this_boot_counted_on_not_a_temporary_file_a_cut_le
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one_and_a_lost_image_or_entry_comes_back()
+{
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let crash = [COUNTING, ("ARCHIX_TEST_CRASH", "switch-recorded")];
+    let cut = setup.run_env(&crash, &["switch", "--noconfirm"]);
+    assert!(!cut.status.success(), "the cut happens: {cut:?}");
+    assert!(machine.entries().is_empty(), "no menu yet: {:?}", machine.entries());
+    let status = setup.ok_env(&[COUNTING], &["status"]);
+    assert!(status.contains("boot step"), "status says so: {status}");
+    let finished = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(finished.contains("is finished now"), "{finished}");
+    let first = image_of(machine, "archix-current.conf");
+    assert_eq!(images(machine), vec![first.clone()], "its image is on the ESP");
+    let status = setup.ok_env(&[COUNTING], &["status"]);
+    assert!(!status.contains("boot step"), "and status is quiet: {status}");
+    let again = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        again.contains("nothing to do") && !again.contains("is finished now") && !again.contains("isn't whole"),
+        "and the next has nothing to do: {again}"
+    );
+
+    setup.set_body(
+        &[],
+        r#"files = { ["/etc/archix-boot-test"] = { text = "one" }, ["/etc/mkinitcpio.conf.d/zz-archix-test.conf"] = { text = "FILES=(/etc/archix-boot-test)" } }"#,
+    );
+    let cut = setup.run_env(&crash, &["switch", "--noconfirm"]);
+    assert!(!cut.status.success(), "the second cut happens: {cut:?}");
+    assert_eq!(
+        image_of(machine, "archix-current.conf"),
+        first,
+        "the entry still starts the old image"
+    );
+    let finished = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(finished.contains("is finished now"), "{finished}");
+    let second = image_of(machine, "archix-current.conf");
+    assert_ne!(
+        second, first,
+        "an entry and image that are there but stale are built again"
+    );
+
+    fs::remove_file(machine.esp().join("EFI/archix").join(&second)).unwrap();
+    let back = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(back.contains("isn't whole"), "{back}");
+    assert!(
+        machine.esp().join("EFI/archix").join(&second).is_file(),
+        "the image is back: {back}"
+    );
+    let entries = machine.esp().join("loader/entries");
+    for name in machine.entries() {
+        fs::remove_file(entries.join(name)).unwrap();
+    }
+    let back = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(back.contains("isn't whole"), "{back}");
+    assert!(
+        machine.entries().iter().any(|name| name.starts_with("archix-current")),
+        "the entry is back: {back}"
+    );
+    setup.set_body(&[], r#"files = { ["/etc/archix-boot-test"] = { text = "two" } }"#);
+    let cut = setup.run_env(
+        &[COUNTING, ("ARCHIX_TEST_CRASH", "switch-boot-done")],
+        &["switch", "--noconfirm"],
+    );
+    assert!(!cut.status.success(), "the third cut happens: {cut:?}");
+    let status = setup.ok_env(&[COUNTING], &["status"]);
+    assert!(
+        !status.contains("(tree "),
+        "this generation's config isn't recorded yet: {status}"
+    );
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let status = setup.ok_env(&[COUNTING], &["status"]);
+    assert!(status.contains("(tree "), "the next switch records it: {status}");
+    let name = machine
+        .entries()
+        .into_iter()
+        .find(|n| n.starts_with("archix-current"))
+        .unwrap();
+    let written = fs::read_to_string(entries.join(&name)).unwrap();
+    fs::write(entries.join(&name), written.replace("sort-key", "sort-key edited")).unwrap();
+    let edited = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        !edited.contains("isn't whole"),
+        "an edited entry is left as it is: {edited}"
+    );
+    assert!(
+        fs::read_to_string(entries.join(&name))
+            .unwrap()
+            .contains("sort-key edited")
+    );
+}

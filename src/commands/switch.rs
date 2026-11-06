@@ -431,18 +431,40 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         let mut failures = Vec::new();
         // A switch to this generation that a cut stopped after its record, in the boot step, leaves its mark; the system matches it, so the boot step is done again and the mark dropped.
         let cut_short = archix::pacman::hooks::unfinished(&paths.state).filter(|u| u.switch == Some(current.number));
+        let cut_before_boot = boot_step_pending(&paths) == Some(current.number);
+        let missing = boot
+            .as_ref()
+            .and_then(|plan| system::menu::boot_step_missing(&paths, plan));
+        if let Some(what) = &missing {
+            println!(
+                "the boot step of generation {} isn't whole: {what}; doing it again",
+                current.number
+            );
+        }
         // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here too, its menu first.
         let limine = boot.as_ref().is_some_and(|plan| system::limine::pending(&paths, plan));
-        if cut_short.is_some() || limine {
+        if cut_short.is_some() || cut_before_boot || missing.is_some() || limine {
             failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &current.packages));
         }
-        if cut_short.is_some() && failures.is_empty() {
+        if (cut_short.is_some() || cut_before_boot) && failures.is_empty() {
             archix::durable::sync_filesystems(&[&paths.root]);
-            archix::pacman::hooks::finished(&paths.state)?;
+            if cut_short.is_some() {
+                archix::pacman::hooks::finished(&paths.state)?;
+            }
+            boot_step_done(&paths);
             println!(
                 "the switch to generation {} that was cut off after applying is finished now: its boot images and menu are written, and the next boot counts as usual",
                 current.number
             );
+        }
+        // A cut after the boot step, before the generation's config was recorded, leaves it without one.
+        if current.applied.is_none()
+            && let Err(e) = record_applied(target, &paths, &store, current.number)
+        {
+            failures.push(format!(
+                "recording generation {}'s config in root's repository: {e:#}",
+                current.number
+            ));
         }
         if !system_change.to.hooks.is_empty() {
             eprintln!(":: running hooks");
@@ -679,12 +701,20 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     }
     generation.package_capabilities = applied.package_capabilities;
     store.save(&generation)?;
+    if let Err(e) = archix::durable::write(&boot_step_path(&paths), number.to_string().as_bytes()) {
+        eprintln!("warning: a power cut before the boot step finishes may go unnoticed by the next switch: {e:#}");
+    }
     store.set_current(number)?;
     archix::testhooks::mark("switch-recorded");
-    soft_failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &generation.packages));
+    let boot_failures = write_boot(&paths, &rollbacks, boot.as_ref(), &generation.packages);
+    // Each is on disk before what says it's done goes.
+    archix::durable::sync_filesystems(&[&paths.root]);
+    if boot_failures.is_empty() {
+        boot_step_done(&paths);
+    }
+    archix::testhooks::mark("switch-boot-done");
+    soft_failures.extend(boot_failures);
     if marked {
-        // The mark goes only once the boot step is on disk too.
-        archix::durable::sync_filesystems(&[&paths.root]);
         archix::testhooks::mark("switch-flushed");
         if let Err(e) = archix::pacman::hooks::finished(&paths.state) {
             soft_failures.push(format!(
@@ -833,6 +863,22 @@ fn write_boot(
         failures.push(format!("recording boot.unblessed_timeout: {e:#}"));
     }
     failures
+}
+
+/// Holds the number of a generation recorded current whose boot step hasn't finished, which a switch without the unfinished mark, such as the first one or one without rollbacks, leaves when a cut stops it there.
+fn boot_step_path(paths: &Paths) -> PathBuf {
+    paths.state.join("boot-step-pending")
+}
+
+pub(super) fn boot_step_pending(paths: &Paths) -> Option<u32> {
+    fs::read_to_string(boot_step_path(paths)).ok()?.trim().parse().ok()
+}
+
+fn boot_step_done(paths: &Paths) {
+    let path = boot_step_path(paths);
+    if fs::remove_file(&path).is_ok() {
+        let _ = archix::durable::sync_dir(&paths.state);
+    }
 }
 
 /// Before the apply, with rollbacks on: gives the current entry its tries and the slot its entry, so a boot this switch breaks part way falls back, then marks the switch unfinished so such a boot doesn't count as good; returns whether it marked it.
