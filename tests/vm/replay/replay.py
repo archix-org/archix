@@ -368,13 +368,13 @@ class Scenario:
         for (start, end), (first, last) in zip(WINDOWS, ranges):
             self.note(f"REPLAY-WINDOW test={self.name} {start}..{end} is entries {first} through {last}")
         whole = [window_range(self.entries, start, end) for start, end in spec.sample[0]] if spec.sample else []
-        if whole:
+        if whole and not ranges:
             self.note(f"REPLAY-SAMPLE test={self.name} not a full run: every point of {', '.join(f"{a or 'the start'}..{b} (entries {first} through {last})" for (a, b), (first, last) in zip(spec.sample[0], whole))}, 1 point in {spec.sample[1]} elsewhere")
         tasks = []
         for p in self.points:
             if ranges and not any(first <= p.upto <= last for first, last in ranges):
                 continue
-            if whole and not any(first <= p.upto <= last for first, last in whole) and (p.number - 1) % spec.sample[1]:
+            if whole and not ranges and not any(first <= p.upto <= last for first, last in whole) and (p.number - 1) % spec.sample[1]:
                 continue
             if ESP_ONLY and not p.window:
                 continue
@@ -385,7 +385,7 @@ class Scenario:
                     tasks.append((p.floor, 0, p, (k, picks)))
         tasks.sort(key=lambda task: (task[0], task[1]))
         subsets = sum(1 for task in tasks if task[3])
-        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'} sample={','.join(f"{a or 'start'}..{b}" for a, b in spec.sample[0]) + f"/{spec.sample[1]}" if spec.sample else '-'}")
+        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'} sample={','.join(f"{a or 'start'}..{b}" for a, b in spec.sample[0]) + f"/{spec.sample[1]}" if spec.sample and not ranges else '-'}")
         order = [e.mark.split(" ", 1)[-1] for e in self.entries if e.mark and e.mark.split(" ", 1)[-1] in ("menu-synced", "unfinished-marked", "unfinished-cleared")]
         self.note(f"REPLAY-ORDER test={self.name} {' '.join(order) or 'no unfinished mark in this run'}")
         if "unfinished-marked" in order and "menu-synced" not in order[: order.index("unfinished-marked")]:

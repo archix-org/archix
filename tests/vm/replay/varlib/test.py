@@ -48,7 +48,7 @@ def run(m, t):
         return found
 
     # The first switch and the boot after it flush per package, about 2000 points, most of them outside its boot step and the move.
-    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra, sample=([("switch-recorded", "menu-synced"), ("split-entry-copied", "split-binds-ready")], 10))
+    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra, sample=([("switch-recorded", "switch-boot-done"), ("split-entry-copied", "split-binds-ready")], 10))
     with t.step("2: the uncut systems' baselines: the plain install and the laid-out system"):
         s.boot(s.overlay("before", s.base), s.pristine_vars, "the plain install")
         s.capture("before")
