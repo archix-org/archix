@@ -612,6 +612,16 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    #[test]
+    fn a_counted_boot_stuck_in_emergency_mode_reboots_after_two_minutes_not_the_unblessed_timeout() {
+        let ten = 10 * 60;
+        assert!(should_reboot(true, 150, ten, false, true, false).is_some(), "stuck past two minutes");
+        assert!(should_reboot(true, 100, ten, false, true, false).is_none(), "not two minutes yet");
+        assert!(should_reboot(true, 150, ten, false, true, true).is_none(), "someone logged in at the prompt");
+        assert!(should_reboot(true, 150, ten, false, false, false).is_none(), "a boot still coming up keeps the unblessed timeout");
+        assert!(should_reboot(true, 150, 60, false, true, false).is_some(), "a shorter unblessed timeout still holds");
+    }
+
     fn user(shell: &str) -> User {
         User {
             uid: None,
