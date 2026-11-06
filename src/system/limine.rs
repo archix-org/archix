@@ -228,7 +228,9 @@ fn systemd_boot_binary(root: &Path) -> PathBuf {
 fn copy_loader(paths: &Paths, plan: &boot::BootPlan, to: &Path) -> Result<()> {
     let esp = Path::new(&plan.esp);
     crate::durable::copy_esp(&systemd_boot_binary(&paths.root), to)?;
-    if plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys) {
+    let ours =
+        super::secureboot::own_db_cert().is_some_and(|cert| super::secureboot::signed_with(to, &cert).unwrap_or(false));
+    if plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys) && !ours {
         boot::sign_replacing(esp, to)?;
     }
     crate::durable::sync_esp(esp)

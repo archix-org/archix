@@ -354,6 +354,19 @@ fn snapshot_before(paths: &Paths, current: &Generation) {
 fn post(paths: &Paths, pacman: u32, targets: &[String]) {
     if system::initrd::trying().is_none() {
         system::running::Running::new(&paths.root).restore(paths);
+        // A systemd update leaves systemd-boot's source unsigned; signing it here lets systemd-boot-update.service put a signed loader on the ESP at the next boot.
+        let secure_boot = current(paths)
+            .and_then(|generation| generation.settings.boot)
+            .is_some_and(|plan| plan.secure_boot.unwrap_or_else(system::boot::sbctl_has_keys));
+        if secure_boot {
+            match system::boot::sign_loader_source(&paths.root.join(system::boot::SYSTEMD_BOOT_SOURCE)) {
+                Ok(true) => println!("archix: signed systemd-boot's new loader, which the next boot puts on the ESP"),
+                Ok(false) => {}
+                Err(e) => println!(
+                    "archix: warning: couldn't sign systemd-boot's new loader: {e:#}; under Secure Boot the next loader update on the ESP won't start"
+                ),
+            }
+        }
     }
     // pacman doesn't flush what it extracted, so a power cut while the images build would lose it.
     archix::durable::sync_filesystems(&[&paths.root]);

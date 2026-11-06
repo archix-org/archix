@@ -346,6 +346,34 @@ pub fn sbctl_has_keys() -> bool {
         })
 }
 
+/// systemd-boot's loader as its package installs it, relative to the root; bootctl install and update copy `<it>.signed` instead when that's there.
+pub const SYSTEMD_BOOT_SOURCE: &str = "usr/lib/systemd/boot/efi/systemd-bootx64.efi";
+
+/// Signs systemd-boot's source into `<source>.signed` unless that's already a signature by archix's key of it as it is now, so bootctl install and update, and systemd-boot-update.service at boot, put a signed loader on the ESP and archix needn't sign it there; returns whether it signed.
+pub fn sign_loader_source(source: &Path) -> Result<bool> {
+    let signed = PathBuf::from(format!("{}.signed", source.display()));
+    let Some(cert) = super::secureboot::own_db_cert() else {
+        return Ok(false);
+    };
+    if !source.is_file() {
+        return Ok(false);
+    }
+    let newer = |a: &Path, b: &Path| -> bool {
+        let time = |p: &Path| fs::metadata(p).and_then(|m| m.modified()).ok();
+        matches!((time(a), time(b)), (Some(a), Some(b)) if a >= b)
+    };
+    if newer(&signed, source) && super::secureboot::signed_with(&signed, &cert).unwrap_or(false) {
+        return Ok(false);
+    }
+    let tmp = PathBuf::from(format!("{}.archix-new", signed.display()));
+    run(
+        Command::new("sbctl").arg("sign").arg("-o").arg(&tmp).arg(source),
+        "sbctl sign",
+    )?;
+    crate::durable::rename(&tmp, &signed)?;
+    Ok(true)
+}
+
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
     let output = cmd
         .output()
@@ -538,6 +566,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
         in_view(&["rm", "-f", &initramfs], "removing the initramfs")?;
     }
     if secure_boot {
+        sign_loader_source(&root.read_path(&Path::new("/").join(SYSTEMD_BOOT_SOURCE))?)?;
         let cert = super::secureboot::own_db_cert();
         for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
             let path = esp.join(loader);
