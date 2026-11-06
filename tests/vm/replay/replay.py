@@ -38,7 +38,8 @@ ESP_ONLY = os.environ.get("REPLAY_ESP_ONLY") == "1"
 JOBS = max(1, int(os.environ.get("REPLAY_JOBS") or 1))
 IO_PRESSURE = 10.0
 # What a batch leaves free of the host's memory: QEMU takes a guest's memory as it touches it, so a VM just started counts for little yet.
-MEMORY_SPARE_MIB = 8192
+MEMORY_SPARE_MIB = 16384
+STAGGER = 3
 SEED = os.environ.get("REPLAY_SEED") or os.environ.get("GITHUB_RUN_ID") or time.strftime("%Y%m%d")
 SETTLE = 1500
 SUMMARY = re.compile(r"^\S+: \d+ total files, \d+ (altered|missing) files$")
@@ -280,17 +281,26 @@ class Scenario:
                 found.append(f"/efi/{key} has no name holding a version archix wrote there: {self.esp_detail(key)}")
         return found, verdict
 
-    def check(self, label, what, spec, locked=False):
-        """Judges the booted point as a step of its own, recording its verdict; a failed one is listed at the end rather than stopping the points after it."""
+    def check(self, label, what, spec, locked, boot):
+        """Boots the point with boot() and judges it as a step of its own, recording its verdict; a failed one is listed at the end rather than stopping the points after it, and a QEMU that dies under the check, as earlyoom kills one, is no verdict, so the point boots once more."""
         began = time.monotonic()
-        found, verdict, failed = [], {}, None
-        try:
-            with common.t.step(f"{label}: {what}"):
-                found, verdict = self.judge(label, spec, locked)
-                common.t.check(not found, f"consistent at {label}: {found}")
-        except Exception as e:
-            failed = f"{label}: {e}"
+        for attempt in (1, 2):
+            boot()
+            found, verdict, failed = [], {}, None
+            try:
+                with common.t.step(f"{label}: {what}"):
+                    found, verdict = self.judge(label, spec, locked)
+                    common.t.check(not found, f"consistent at {label}: {found}")
+            except Exception as e:
+                failed = f"{label}: {e}"
+            killed = bool(failed) and "QEMU exited" in failed
+            if not killed or attempt == 2:
+                break
+            self.note(f"REPLAY-RETRY test={self.name} point={label} QEMU died under the check, which is no verdict: {failed[-200:]!r}")
+        if failed:
             self.failed.append(failed)
+        if killed:
+            verdict = {**verdict, "booted": "killed"}
         line = f"REPLAY test={self.name} point={label} " + " ".join(f"{k}={v}" for k, v in verdict.items()) + f" checked={time.monotonic() - began:.0f}s consistent={'yes' if not failed else 'NO'} at={what!r}"
         if failed and not found:
             line += f" error={failed[-400:]!r}"
@@ -311,8 +321,7 @@ class Scenario:
 
     def control(self, label, drive, vars_from, spec):
         """Judges an uncut system as a point, so the checks are seen passing where nothing was cut."""
-        use(self.m, drive, vars_from, f"the uncut {label}")
-        self.check(label, "the uncut system", spec)
+        self.check(label, "the uncut system", spec, False, lambda: use(self.m, drive, vars_from, f"the uncut {label}"))
 
     def harvest(self):
         """Every version of archix's ESP files the run wrote: the log's ESP writes alone, applied to a copy of the ESP, read at each of archix's own marks, where what it wrote is flushed and whole."""
@@ -357,9 +366,14 @@ class Scenario:
         ranges = [window_range(self.entries, start, end) for start, end in WINDOWS]
         for (start, end), (first, last) in zip(WINDOWS, ranges):
             self.note(f"REPLAY-WINDOW test={self.name} {start}..{end} is entries {first} through {last}")
+        whole = window_range(self.entries, spec.sample[0], spec.sample[1]) if spec.sample else None
+        if whole:
+            self.note(f"REPLAY-SAMPLE test={self.name} not a full run: every point of {spec.sample[0]}..{spec.sample[1]} (entries {whole[0]} through {whole[1]}), every {spec.sample[2]}th elsewhere")
         tasks = []
         for p in self.points:
             if ranges and not any(first <= p.upto <= last for first, last in ranges):
+                continue
+            if whole and not whole[0] <= p.upto <= whole[1] and (p.number - 1) % spec.sample[2]:
                 continue
             if ESP_ONLY and not p.window:
                 continue
@@ -370,7 +384,7 @@ class Scenario:
                     tasks.append((p.floor, 0, p, (k, picks)))
         tasks.sort(key=lambda task: (task[0], task[1]))
         subsets = sum(1 for task in tasks if task[3])
-        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'}")
+        self.note(f"REPLAY-PLAN test={self.name} seed={SEED} points={len(self.points)} checked={len(tasks) - subsets} subsets={subsets} every={EVERY} only={','.join(ONLY) or '-'} window={os.environ.get('REPLAY_WINDOW') or '-'} esp-only={'yes' if ESP_ONLY else 'no'} sample={'/'.join(map(str, spec.sample)) if spec.sample else '-'}")
         order = [e.mark.split(" ", 1)[-1] for e in self.entries if e.mark and e.mark.split(" ", 1)[-1] in ("menu-synced", "unfinished-marked", "unfinished-cleared")]
         self.note(f"REPLAY-ORDER test={self.name} {' '.join(order) or 'no unfinished mark in this run'}")
         if "unfinished-marked" in order and "menu-synced" not in order[: order.index("unfinished-marked")]:
@@ -403,9 +417,13 @@ class Scenario:
                         engine.revert()
                         continue
                     seen[p.number][digest] = label
-                qemu_img("create", "-q", "-f", "qcow2", "-b", self.image, "-F", "raw", overlay)
-                use(self.m, PLAIN.format(disk=overlay), self.pristine_vars, f"replayed {label}")
-                self.check(label, what, spec, window[0] < position <= window[1])
+
+                def boot():
+                    overlay.unlink(missing_ok=True)
+                    qemu_img("create", "-q", "-f", "qcow2", "-b", self.image, "-F", "raw", overlay)
+                    use(self.m, PLAIN.format(disk=overlay), self.pristine_vars, f"replayed {label}")
+
+                self.check(label, what, spec, window[0] < position <= window[1], boot)
                 overlay.unlink(missing_ok=True)
                 if subset:
                     engine.revert()
@@ -454,15 +472,20 @@ class Scenario:
                     batch.append((index, position, label, what, list(range(base + 1, position + 1)) + picks))
                 threads = []
                 for (index, position, label, what, writes), (machine, test, work) in zip(batch, workers):
-                    disk = self.point_overlay(work, writes)
 
-                    def job(index=index, position=position, label=label, what=what, machine=machine, test=test, disk=disk):
+                    def job(index=index, position=position, label=label, what=what, writes=writes, machine=machine, test=test, work=work):
                         local_m.set(machine)
                         local_t.set(test)
-                        use(machine, PLAIN.format(disk=disk), self.pristine_vars, f"replayed {label}")
-                        lines[index] = self.check(label, what, spec, window[0] < position <= window[1])
-                        disk.unlink(missing_ok=True)
 
+                        def boot():
+                            use(machine, PLAIN.format(disk=self.point_overlay(work, writes)), self.pristine_vars, f"replayed {label}")
+
+                        lines[index] = self.check(label, what, spec, window[0] < position <= window[1], boot)
+                        (work / "point.qcow2").unlink(missing_ok=True)
+
+                    if threads:
+                        time.sleep(STAGGER)
+                    wait_for_room(threads)
                     threads.append(threading.Thread(target=job))
                     threads[-1].start()
                 for thread in threads:
@@ -533,8 +556,9 @@ class Scenario:
             tar.add(self.outputs, arcname="pacman")
         booted = [line for line in self.results if " booted=yes " in line]
         tried = [line for line in booted if " try=- " not in line]
+        killed = sum(1 for line in self.results if " booted=killed" in line)
         bad = [line for line in self.results if "consistent=NO" in line]
-        self.note(f"REPLAY-SUMMARY test={self.name} checked={len(self.results)} subsets={sum(1 for line in self.results if re.search(r' point=P[0-9]+/', line))} booted={len(booted)} fell-back={len(tried)} unbootable={len(self.results) - len(booted)} inconsistent={len(bad)} pacman-differs={sum(1 for line in self.results if re.search(r' (Dk|Qkk)=\+([1-9]|0/-[1-9])', line))}")
+        self.note(f"REPLAY-SUMMARY test={self.name} checked={len(self.results)} subsets={sum(1 for line in self.results if re.search(r' point=P[0-9]+/', line))} booted={len(booted)} fell-back={len(tried)} unbootable={sum(1 for line in self.results if " booted=NO " in line)} killed={killed} inconsistent={len(bad)} pacman-differs={sum(1 for line in self.results if re.search(r' (Dk|Qkk)=\+([1-9]|0/-[1-9])', line))}")
         print("POINTS:", flush=True)
         for line in self.results:
             print("  " + line, flush=True)
@@ -624,15 +648,22 @@ def io_pressure():
     return 0.0
 
 
-def memory_room():
-    """How many VMs of VM_MEM fit in the host's available memory beyond MEMORY_SPARE_MIB, at least one."""
+def memory_room(least=1):
+    """How many VMs of VM_MEM fit in the host's available memory beyond MEMORY_SPARE_MIB, at least least."""
     try:
         for line in open("/proc/meminfo"):
             if line.startswith("MemAvailable:"):
-                return max(1, (int(line.split()[1]) // 1024 - MEMORY_SPARE_MIB) // int(os.environ.get("VM_MEM") or 3072))
+                return max(least, (int(line.split()[1]) // 1024 - MEMORY_SPARE_MIB) // int(os.environ.get("VM_MEM") or 3072))
     except (OSError, ValueError):
         pass
     return JOBS
+
+
+def wait_for_room(threads):
+    """Holds a VM's start until the host has room for it: while this batch's others run, or for 5 minutes if none does, as another test's VMs may be what fills it."""
+    deadline = time.monotonic() + 300
+    while memory_room(0) < 1 and (any(thread.is_alive() for thread in threads) or time.monotonic() < deadline):
+        time.sleep(2)
 
 
 def file_name(label):
@@ -670,10 +701,10 @@ def package_diff(state, baselines):
 
 
 class Spec:
-    """What a test allows: fallback, whether a try boot is right for a root marked unfinished; identify(scenario, state, tried), which baseline the booted system is, or None; extra(), the test's own problems with the booted system; held, the driver's marks around the command that runs pacman, which holds db.lck from the first until the flush after the second."""
+    """What a test allows: fallback, whether a try boot is right for a root marked unfinished; identify(scenario, state, tried), which baseline the booted system is, or None; extra(), the test's own problems with the booted system; held, the driver's marks around the command that runs pacman, which holds db.lck from the first until the flush after the second; sample, (start, end, n) for a test too long to check whole: every point from mark start through the flush after mark end, every nth elsewhere."""
 
-    def __init__(self, identify, fallback, extra=lambda: [], held=None):
-        self.identify, self.fallback, self.extra, self.held = identify, fallback, extra, held
+    def __init__(self, identify, fallback, extra=lambda: [], held=None, sample=None):
+        self.identify, self.fallback, self.extra, self.held, self.sample = identify, fallback, extra, held, sample
 
 
 def by_packages(scenario, state, tried):
