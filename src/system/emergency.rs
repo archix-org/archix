@@ -136,15 +136,18 @@ pub fn forget(paths: &Paths) {
 pub fn run(paths: &Paths, rescue_entry: bool) {
     let read = |file: &str| fs::read_to_string(paths.root.join("etc").join(file)).unwrap_or_default();
     let found = unmounted(&paths.root, &read("fstab"), &read("crypttab"));
+    // By name, from the EFI variable: reading the entry's text would wait on the ESP's automount, whose mount emergency mode may hold back, while sulogin waits for this.
     let counted = crate::testhooks::counted_boot()
-        .then(super::boot::booted)
+        .then(super::boot::booted_by_name)
         .flatten()
         .map(|entry| entry.id());
-    println!();
-    for line in hint(&found, counted.as_deref(), rescue_entry) {
-        println!("{line}");
+    let text = format!("\n{}\n\n", hint(&found, counted.as_deref(), rescue_entry).join("\n"));
+    {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        let _ = out.write_all(text.as_bytes());
+        let _ = out.flush();
     }
-    println!();
     if let Some(entry) = counted
         && !found.is_empty()
     {
