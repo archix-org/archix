@@ -1234,8 +1234,11 @@ fn a_move_from_limine_cut_short_after_its_generation_is_recorded_is_taken_up_by_
     let esp = machine.esp();
     fs::create_dir_all(esp.join("EFI/limine")).unwrap();
     fs::create_dir_all(esp.join("EFI/BOOT")).unwrap();
-    fs::write(esp.join("EFI/limine/BOOTX64.EFI"), "limine").unwrap();
-    fs::write(esp.join("EFI/BOOT/BOOTX64.EFI"), "limine").unwrap();
+    // Real PE files, as Limine's are: with Secure Boot keys in the container, which the Secure Boot tests leave, archix signs the fallback loader.
+    for loader in ["EFI/limine/BOOTX64.EFI", "EFI/BOOT/BOOTX64.EFI"] {
+        fs::copy("/usr/lib/systemd/boot/efi/linuxx64.efi.stub", esp.join(loader)).unwrap();
+    }
+    sbctl_keys(&esp);
     let vars = tempfile::TempDir::new().unwrap();
     efivar(
         vars.path(),
