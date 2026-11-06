@@ -1,5 +1,5 @@
 # Power cuts in the move of /var/lib into @varlib, which the first switch schedules and archix-split-var-lib.service makes at the next boot: after the copy of an entry, after its removal from the root, and once the binds are ready. Each cut starts from the plain image; nobody touches the machine until a boot settles, which must have every file of /var/lib whole in @varlib and pacman's database bound from the root.
-from boot.common import HOST, bind, boot, out, switch
+from boot.common import HOST, bind, boot, entries, out, switch
 from powercut import cut
 
 POINTS = ["split-entry-copied#1", "split-entry-removed#1", "split-entry-copied#3", "split-entry-removed#4", "split-binds-ready"]
@@ -82,6 +82,57 @@ def run(m, t):
         cut.record(reached, True, boots, took, cut.common.selected(), None, found)
         t.check(not found, f"the next switch finishes the move after the cut at {reached}: {found}")
 
+    def whole(what):
+        """What keeps the system the rerun left from being an uncut first switch's after its boot: the menu, the layout, pacman's database and files."""
+        found = cut.problems()
+        if not any(name.startswith("archix-current") for name in entries()):
+            found.append(f"no current entry on the ESP: {entries()}")
+        if out("findmnt -no FSROOT /var/lib").strip() != "/@varlib":
+            found.append(f"/var/lib isn't @varlib: {out('findmnt /var/lib')}")
+        if out("findmnt -no FSROOT /var/lib/pacman").strip() != "/@/var/rollback/pacman":
+            found.append(f"pacman's database isn't bound from the root: {out('findmnt /var/lib/pacman')}")
+        if cut.common.ok("[ -e /var/rollback/.split-pending ]"):
+            found.append("the move of /var/lib is still pending")
+        status = out(f"{HOST} status 2>&1")
+        if "boot step" in status:
+            found.append(f"archix status says the boot step isn't done {what}: {status[-400:]}")
+        return found
+
+    with t.step("first: an uncut first switch and its boot, the baseline of the reruns"):
+        cut.fresh("/work/plain.img")
+        boot()
+        t.require(not cut.common.ok("pacman -Q efitools"), "the plain image lacks efitools, so the first switch runs a transaction")
+        switch("the uncut first switch")
+        m.reboot()
+        cut.settle()
+        cut.baseline("an uncut first switch after its boot")
+        found = whole("after an uncut first switch")
+        t.require(not found, f"the uncut first switch should be whole: {found}")
+
+    def rerun(point):
+        cut.fresh("/work/plain.img")
+        boot()
+        if point != "extract":
+            cut.arm(point)
+        cut.background(f"{HOST} switch --noconfirm", "/root/switch.log")
+        if point == "extract":
+            m.wait_for_console_text(r"installing efitools\.\.\.", timeout=1800)
+            m.crash()
+            reached = "extract"
+        else:
+            reached = cut.reset_on_cut(timeout=1800)
+            t.check(reached == f"{point}#1", f"the cut should be at {point}, not {reached}")
+        cut.disarm()
+        boots, took = cut.settle()
+        said = m.succeed(f"{HOST} switch --noconfirm 2>&1", timeout=1800, what="the user's switch after the cut")
+        m.reboot()
+        cut.settle()
+        found = whole("after the rerun")
+        cut.record(reached, True, boots, took, cut.common.selected(), None, found, f"the rerun said: {said.strip().splitlines()[-1][:200] if said.strip() else ''}")
+        t.check(not found, f"a rerun after the cut at {reached} ends whole: {found}")
+
+    for point in ["extract", "switch-packages", "layout-split-armed", "switch-recorded", "boot-image-copied", "menu-entry-written", "switch-boot-done"]:
+        cut.point(f"{point}: cut in the first switch, then the user switches again", lambda point=point: rerun(point))
     for point in ["layout-subvolumes", "layout-split-armed", "layout-fstab-written"]:
         cut.point(f"{point}: cut in the first switch's layout", lambda point=point: layout(point))
     for point in POINTS:
