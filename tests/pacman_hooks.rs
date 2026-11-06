@@ -1269,12 +1269,16 @@ fn a_counted_boot_of_an_edited_entry_is_checked_as_any_other_and_a_cut_one_falls
     let entry = machine.esp().join("loader/entries/archix-current+2.conf");
     let written = fs::read_to_string(&entry).unwrap();
     fs::write(&entry, written.replace("sort-key", "sort-key edited")).unwrap();
+    let rebooted = tempfile::tempdir().unwrap();
+    let rebooted = rebooted.path().join("rebooted");
     let env = [
         COUNTING,
         ("ARCHIX_TEST_COUNTED_BOOT", "1"),
         ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
+        ("ARCHIX_TEST_REBOOT", rebooted.to_str().unwrap()),
     ];
     let check = setup.run_env(&env, &["health-check"]);
+    checks.check(!rebooted.exists(), "a healthy boot doesn't reboot");
     checks.check(
         check.status.success() && text(&check).contains("passed its health check"),
         format!(
@@ -1306,6 +1310,13 @@ fn a_counted_boot_of_an_edited_entry_is_checked_as_any_other_and_a_cut_one_falls
         format!(
             "and its entry is marked bad, so the next boot falls back: {:?}",
             machine.entries()
+        ),
+    );
+    checks.check(
+        rebooted.exists() && text(&check).contains("reboots into the fallback now"),
+        format!(
+            "a boot the mark says is torn reboots into the fallback at once, without reboot_on_failure: {}",
+            text(&check)
         ),
     );
     checks.finish();
