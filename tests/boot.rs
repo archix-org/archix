@@ -731,6 +731,17 @@ fn under_secure_boot_an_image_is_signed_once_and_shared_by_the_entries_that_boot
     switch(1);
     let first_loaders = loaders();
     checks.eq(loader_signs(), 2, "the unsigned loaders were signed, each once");
+    let source = setup
+        .machine
+        .system_file("usr/lib/systemd/boot/efi/systemd-bootx64.efi.signed");
+    let ours = || {
+        archix::system::secureboot::own_db_cert()
+            .is_some_and(|cert| archix::system::secureboot::signed_with(&source, &cert).unwrap_or(false))
+    };
+    checks.check(
+        ours(),
+        "systemd-boot's own file is signed beside it, for bootctl install and update to copy",
+    );
     let image = image_of(&setup.machine, "archix-current.conf");
     let signed = |name: &str| archix::system::secureboot::is_signed(&esp.join("EFI/archix").join(name)).unwrap();
     checks.check(signed(&image), "the image is signed");
