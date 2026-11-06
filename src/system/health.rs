@@ -428,7 +428,9 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
         .map(|state| state.blessed_failed_units)
         .unwrap_or_default();
     // An edited entry isn't a failure by itself: a cut one has the mark, which goes only after the boot step is flushed.
-    let failed = match crate::pacman::hooks::unfinished(&paths.state) {
+    let unfinished = crate::pacman::hooks::unfinished(&paths.state);
+    let torn = unfinished.is_some();
+    let failed = match unfinished {
         Some(unfinished) => Some((unfinished.target().to_string(), unfinished.why())),
         None => {
             let targets = targets(check.as_ref(), &users, &allowed);
@@ -451,7 +453,8 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
         Some(esp) => super::boot::mark_bad(&esp, &entry.id())?,
         None => false,
     };
-    let reboot = check.as_ref().is_some_and(|check| check.reboot_on_failure);
+    // A root the mark says is torn reboots at once, as nothing on it is worth waiting for; each reboot uses a try even unmarked.
+    let reboot = torn || check.as_ref().is_some_and(|check| check.reboot_on_failure);
     let note = format!(
         "archix: {} failed its health check {} ({}); {}",
         failure.entry,
@@ -460,11 +463,12 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
         match (marked, reboot) {
             (true, true) => "its entry is marked bad, and the machine reboots into the fallback now",
             (true, false) => "its entry is marked bad, so the next boot falls back",
-            (false, _) => "but its entry couldn't be marked bad, so the next boot starts it again",
+            (false, true) => "its entry couldn't be marked bad, so the machine reboots now, using up its tries",
+            (false, false) => "but its entry couldn't be marked bad, so the next boot starts it again",
         }
     );
     super::boot::add_login_note(paths, &note);
-    if marked && reboot {
+    if reboot && (marked || torn) {
         if cfg!(debug_assertions)
             && let Some(record) = std::env::var_os("ARCHIX_TEST_REBOOT")
         {
