@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[3]
 COMMON = ["src", "Cargo.toml", "Cargo.lock", "tests/arch/Dockerfile", "tests/arch/image.sh", "tests/vm/run.sh", "tests/vm/build-image.sh", "tests/vm/driver"]
 BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/boot/base.py"]
 BOOT_TESTS = ["counting", "try", "guard", "unattended", "pacman", "keep", "hang", "glibc", "order", "health", "hook", "layer", "records", "strict", "ptrace", "accounts", "revoke", "secureboot", "entry-edit", "file-systems", "removal", "ext4"]
-POWERCUT_TESTS = ["pacman", "keep", "varlib", "rootmove", "switch"]
+POWERCUT_TESTS = ["pacman", "keep", "varlib", "rootmove", "switch", "esp"]
 LIMINE_TESTS = ["keep", "resync", "migration"]
 REPLAY_TESTS = ["pacman", "install", "keep", "switch", "varlib", "rootmove"]
 # The suites with an image of their own (tests/vm/run.sh's suite_tests), which share only boot/common.py with the boot tests.

@@ -7,7 +7,7 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
 boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace accounts revoke secureboot entry-edit file-systems removal ext4)
-powercut_tests=(pacman keep varlib rootmove switch)
+powercut_tests=(pacman keep varlib rootmove switch esp)
 # A machine Limine boots (FS=btrfs, built with the test hooks): keep refused across a kernel change, a root replaced as limine-snapper-restore does, and the move to systemd-boot with cuts at each step.
 limine_tests=(keep resync migration)
 replay_tests=(pacman install keep switch varlib rootmove)
