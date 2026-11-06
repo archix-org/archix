@@ -1563,3 +1563,43 @@ fn a_loader_conf_a_cut_left_empty_comes_back_with_the_users_lines() {
         "and so does the next switch"
     );
 }
+
+#[test]
+#[ignore]
+fn a_try_boot_writes_again_a_rescue_entry_a_cut_left_empty() {
+    let _system = lock_system();
+    let _keys = NoSbctlKeys::new();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let esp = machine.esp();
+    setup.set_body(
+        &[],
+        &boot_body(machine).replace("rescue_entry = false", "rescue_entry = true"),
+    );
+    // The container can't build a rescue image, so its entry, image and record are made by hand, as a switch leaves them.
+    let _ = setup.run_env(&[COUNTING], &["switch", "--noconfirm"]);
+    fs::create_dir_all(esp.join("EFI/archix-rescue")).unwrap();
+    fs::write(esp.join("EFI/archix-rescue/rescue-abc.efi"), "uki").unwrap();
+    fs::write(
+        "/var/lib/archix/boot/rescue.json",
+        r#"{"kernel": "7.2.9-arch1-1", "key": "k", "uki": "rescue-abc.efi"}"#,
+    )
+    .unwrap();
+    let entry = esp.join("loader/entries/archix-rescue.conf");
+    fs::write(&entry, "").unwrap();
+    let run = tempfile::tempdir().unwrap();
+    fs::write(
+        run.path().join("try"),
+        r#"{"snapshot": 1, "layer": "tmpfs", "size": 0}"#,
+    )
+    .unwrap();
+    let boot = setup.ok_env(
+        &[COUNTING, ("ARCHIX_TEST_RUN", run.path().to_str().unwrap())],
+        &["boot-check"],
+    );
+    assert_eq!(
+        fs::read_to_string(&entry).unwrap(),
+        "title archix rescue (kernel 7.2.9-arch1-1)\nsort-key archix-rescue\nefi /EFI/archix-rescue/rescue-abc.efi\n",
+        "a try boot, when rescue may be wanted, writes it again: {boot}"
+    );
+}
