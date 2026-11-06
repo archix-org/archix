@@ -532,7 +532,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     if planned.is_empty() {
         return Ok(());
     }
-    boot::point_loader(esp, PREFERRED, CURRENT, how.signed)
+    boot::point_loader(esp, PREFERRED, CURRENT, how.signed, Some(&loader_copy(how.dir)))
 }
 
 /// Takes the snapshot entries whose image is neither on the ESP nor in `built` out of `planned`, as after a cut between recording a new image and copying it, when a try boot or keep refreshes the menu from another root; returns them. The current system's and the fallback slot's entries stay: the slot's missing image fails the refresh here, naming it, as a menu without it would leave a broken boot nowhere to fall back to.
@@ -662,15 +662,25 @@ fn loader_points_here(esp: &Path) -> bool {
 }
 
 /// At boot: writes loader.conf's lines again when the current entry is on the ESP but loader.conf doesn't name it, as a cut while it was written over leaves it, so the next boot is archix's and counted; returns whether it did.
-pub fn repair_loader(plan: &BootPlan) -> Result<bool> {
+pub fn repair_loader(paths: &Paths, plan: &BootPlan) -> Result<bool> {
     let esp = Path::new(&plan.esp);
-    if plan.loader != Loader::SystemdBoot || !on_esp(esp).contains_key(&Entry::Current.id()) || loader_points_here(esp)
-    {
+    if plan.loader != Loader::SystemdBoot || !on_esp(esp).contains_key(&Entry::Current.id()) {
+        return Ok(false);
+    }
+    let copy = loader_copy(&dir(paths));
+    if loader_points_here(esp) {
+        // The user's edits since the last switch go into the copy too.
+        boot::keep_loader_copy(esp, &copy)?;
         return Ok(false);
     }
     let signed = plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys);
-    boot::point_loader(esp, PREFERRED, CURRENT, signed)?;
+    boot::point_loader(esp, PREFERRED, CURRENT, signed, Some(&copy))?;
     Ok(true)
+}
+
+/// The last loader.conf archix wrote or saw whole, beside the menu's state.
+fn loader_copy(dir: &Path) -> PathBuf {
+    dir.join("loader.conf")
 }
 
 /// Checked before a switch changes anything: the ESP must have room for a new image the size of the current one, beside the images the current system and the slot keep.

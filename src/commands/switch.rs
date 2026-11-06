@@ -1991,8 +1991,9 @@ pub fn boot_check() -> Result<()> {
         .flatten()
         .and_then(|number| store.get(number).ok())
         .and_then(|generation| generation.settings.boot);
+    // The rescue entry in a try boot too, when rescue may be wanted; loader.conf only from the current system, whose menu it is.
     if let Some(plan) = plan.as_ref().filter(|_| system::initrd::trying().is_none()) {
-        match system::menu::repair_loader(plan) {
+        match system::menu::repair_loader(&paths, plan) {
             Ok(true) => println!(
                 "archix: loader.conf on the ESP didn't point systemd-boot at archix's entries, as a power cut while it was written leaves it; wrote it again, so the next boot is archix's"
             ),
@@ -2001,6 +2002,8 @@ pub fn boot_check() -> Result<()> {
                 "archix: loader.conf on the ESP doesn't point at archix's entries, and writing it again failed: {e:#}"
             ),
         }
+    }
+    if let Some(plan) = plan.as_ref() {
         match system::rescue::repair_entry(&paths, plan) {
             Ok(true) => println!(
                 "archix: the rescue entry on the ESP wasn't whole, as a power cut while it was written leaves it; wrote it again from its record"

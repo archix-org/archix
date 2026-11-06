@@ -645,9 +645,14 @@ fn lock_editor(esp: &Path) -> Result<()> {
 }
 
 /// Points loader.conf at archix's menu: `preferred` the glob systemd-boot walks in sort-key order past entries without tries, `default` the entry it starts when every one is bad; the editor goes off when the images are signed. Clears the EFI variables that would override it.
-pub fn point_loader(esp: &Path, preferred: &str, default: &str, signed: bool) -> Result<()> {
+pub fn point_loader(esp: &Path, preferred: &str, default: &str, signed: bool, copy: Option<&Path>) -> Result<()> {
     let conf = esp.join("loader/loader.conf");
-    let old = fs::read_to_string(&conf).unwrap_or_default();
+    let on_esp = fs::read_to_string(&conf).unwrap_or_default();
+    // A loader.conf a cut left empty comes back from the copy, with the user's own lines.
+    let old = match copy.and_then(|copy| fs::read_to_string(copy).ok()) {
+        Some(kept) if on_esp.trim().is_empty() => kept,
+        _ => on_esp.clone(),
+    };
     let mut lines: Vec<String> = old
         .lines()
         .filter(|line| !matches!(line.split_whitespace().next(), Some("default" | "preferred")))
@@ -656,15 +661,27 @@ pub fn point_loader(esp: &Path, preferred: &str, default: &str, signed: bool) ->
     lines.push(format!("default {default}"));
     lines.push(format!("preferred {preferred}"));
     let text = lines.join("\n") + "\n";
-    if text != old {
+    if text != on_esp {
         crate::durable::write_esp(&conf, text.as_bytes())?;
     }
     if signed {
         lock_editor(esp)?;
     }
     crate::durable::sync_esp(esp)?;
+    if let Some(copy) = copy {
+        keep_loader_copy(esp, copy)?;
+    }
     clear_overrides(Some(default));
     Ok(())
+}
+
+/// Keeps loader.conf as it is on the ESP at `copy`, for a cut that empties it.
+pub fn keep_loader_copy(esp: &Path, copy: &Path) -> Result<()> {
+    let text = fs::read_to_string(esp.join("loader/loader.conf")).unwrap_or_default();
+    if fs::read_to_string(copy).ok().as_deref() == Some(text.as_str()) {
+        return Ok(());
+    }
+    crate::durable::write(copy, text.as_bytes())
 }
 
 pub(crate) const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
@@ -1241,13 +1258,13 @@ mod tests {
         let loader = || fs::read_to_string(esp.path().join("loader/loader.conf")).unwrap();
         lock_editor(esp.path()).unwrap();
         assert_eq!(loader(), "timeout 2\ndefault archix-2.conf\neditor no\n");
-        point_loader(esp.path(), "archix-*", "archix-current.conf", false).unwrap();
+        point_loader(esp.path(), "archix-*", "archix-current.conf", false, None).unwrap();
         assert_eq!(
             loader(),
             "timeout 2\neditor no\ndefault archix-current.conf\npreferred archix-*\n",
             "the line outlives a new default"
         );
-        point_loader(esp.path(), "archix-*", "archix-current.conf", true).unwrap();
+        point_loader(esp.path(), "archix-*", "archix-current.conf", true, None).unwrap();
         assert_eq!(
             loader(),
             "timeout 2\neditor no\ndefault archix-current.conf\npreferred archix-*\n",
