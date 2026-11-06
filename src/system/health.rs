@@ -550,6 +550,9 @@ fn uptime() -> u64 {
 }
 
 /// Why an unblessed boot should reboot itself now, if it should: counted, past `timeout_secs` without boot-complete.target or in emergency or rescue mode, and nobody logged in.
+/// How long a counted boot stuck in emergency or rescue mode waits for someone to log in before it reboots.
+pub const STUCK_SECS: u64 = 120;
+
 pub fn should_reboot(
     counted: bool,
     uptime: u64,
@@ -558,6 +561,11 @@ pub fn should_reboot(
     stuck: bool,
     logged_in: bool,
 ) -> Option<String> {
+    // A boot stuck in emergency or rescue mode won't count as good by itself, so it needn't wait the whole timeout.
+    let timeout_secs = match stuck {
+        true => timeout_secs.min(STUCK_SECS),
+        false => timeout_secs,
+    };
     if !counted || timeout_secs == 0 || uptime < timeout_secs || logged_in {
         return None;
     }
@@ -615,11 +623,26 @@ mod tests {
     #[test]
     fn a_counted_boot_stuck_in_emergency_mode_reboots_after_two_minutes_not_the_unblessed_timeout() {
         let ten = 10 * 60;
-        assert!(should_reboot(true, 150, ten, false, true, false).is_some(), "stuck past two minutes");
-        assert!(should_reboot(true, 100, ten, false, true, false).is_none(), "not two minutes yet");
-        assert!(should_reboot(true, 150, ten, false, true, true).is_none(), "someone logged in at the prompt");
-        assert!(should_reboot(true, 150, ten, false, false, false).is_none(), "a boot still coming up keeps the unblessed timeout");
-        assert!(should_reboot(true, 150, 60, false, true, false).is_some(), "a shorter unblessed timeout still holds");
+        assert!(
+            should_reboot(true, 150, ten, false, true, false).is_some(),
+            "stuck past two minutes"
+        );
+        assert!(
+            should_reboot(true, 100, ten, false, true, false).is_none(),
+            "not two minutes yet"
+        );
+        assert!(
+            should_reboot(true, 150, ten, false, true, true).is_none(),
+            "someone logged in at the prompt"
+        );
+        assert!(
+            should_reboot(true, 150, ten, false, false, false).is_none(),
+            "a boot still coming up keeps the unblessed timeout"
+        );
+        assert!(
+            should_reboot(true, 150, 60, false, true, false).is_some(),
+            "a shorter unblessed timeout still holds"
+        );
     }
 
     fn user(shell: &str) -> User {
@@ -769,7 +792,7 @@ mod tests {
             None,
             "it counted as good"
         );
-        assert_eq!(should_reboot(true, 599, ten, false, true, false), None, "not yet");
+        assert_eq!(should_reboot(true, 599, ten, false, false, false), None, "not yet");
         assert_eq!(
             should_reboot(true, 601, ten, false, true, true),
             None,

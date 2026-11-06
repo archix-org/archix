@@ -104,7 +104,7 @@ pub fn hint(unmounted: &[Unmounted], counted: Option<&str>, rescue_entry: bool) 
     }
     if let Some(entry) = counted {
         lines.push(format!(
-            "archix: this is one of {entry}'s counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; with nobody logged in, it reboots by itself after boot.unblessed_timeout"
+            "archix: this is one of {entry}'s counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; it restarts after 2 minutes with nobody logged in"
         ));
     }
     lines
@@ -247,7 +247,7 @@ mod tests {
             [
                 "archix: this boot stopped in emergency mode because required mounts in /etc/fstab didn't mount:",
                 "archix:   /srv/x (UUID=s): its device is there, but it didn't mount; `journalctl -b -u srv-x.mount` says why",
-                "archix: this is one of archix-current.conf's counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; with nobody logged in, it reboots by itself after boot.unblessed_timeout",
+                "archix: this is one of archix-current.conf's counted boot tries: each boot that stops here uses one, then systemd-boot falls back to how the system last booted fine; it restarts after 2 minutes with nobody logged in",
             ]
         );
         assert!(hint(&[], None, true)[0].contains("every required mount in /etc/fstab is mounted"));
