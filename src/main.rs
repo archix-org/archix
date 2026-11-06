@@ -545,22 +545,40 @@ fn try_lock(file: &fs::File) -> bool {
 /// The lock that keeps two archix runs from changing the system at once; held until the process exits.
 static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
 
-fn hold_exclusive() -> Result<()> {
+/// The boot units' runs, each over in seconds, which another run waits for rather than failing.
+const SHORT_RUNS: [&str; 5] = ["unblessed", "bless", "boot-check", "boot-complete", "health-check"];
+
+/// Takes the lock, waiting out a boot unit's short run; false when another run holds it and `skip_busy` says to give up at once.
+fn hold_exclusive(skip_busy: bool) -> Result<bool> {
     use std::io::Write as _;
     let path = archix::paths::Paths::system().state.join("running");
     let mut file = running_file()?;
-    if !try_lock(&file) {
+    let mut waited = std::time::Duration::ZERO;
+    while !try_lock(&file) {
         let who = fs::read_to_string(&path).unwrap_or_default();
-        anyhow::bail!(
-            "another archix is already running ({}); wait for it to finish",
-            who.trim()
-        );
+        let short = SHORT_RUNS
+            .iter()
+            .any(|run| who.trim_end().trim_end_matches('`').ends_with(&format!("archix {run}")));
+        if skip_busy {
+            return Ok(false);
+        }
+        if !short || waited >= std::time::Duration::from_secs(120) {
+            anyhow::bail!(
+                "another archix is already running ({}); wait for it to finish",
+                who.trim()
+            );
+        }
+        if waited.is_zero() {
+            eprintln!("archix: waiting for {} to finish", who.trim());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        waited += std::time::Duration::from_millis(200);
     }
     file.set_len(0)?;
     let args: Vec<String> = std::env::args().collect();
     write!(file, "pid {}, `{}`", std::process::id(), args.join(" "))?;
     let _ = RUNNING.set(file);
-    Ok(())
+    Ok(true)
 }
 
 fn run() -> Result<ExitCode> {
@@ -656,8 +674,9 @@ fn run() -> Result<ExitCode> {
     if needs_root(&command).is_some() {
         leave_login_session();
     }
-    if changes_things {
-        hold_exclusive()?;
+    // The minutely unblessed check skips a minute another run holds; the next one looks again.
+    if changes_things && !hold_exclusive(matches!(command, Command::Unblessed))? {
+        return Ok(ExitCode::SUCCESS);
     }
     match command {
         Command::Rollback {
