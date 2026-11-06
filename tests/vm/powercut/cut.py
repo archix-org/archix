@@ -150,7 +150,8 @@ def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=
         state = json.loads(out(f"cat {common.STATE} 2>/dev/null || echo {{}}"))
         main = ((state.get("current") or {}).get("main") or {}).get("name")
         # A try boot can't see the image the current root built and recorded before a cut kept it from the ESP; back_to checks again after the keep.
-        if state and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")) and not common.ok("[ -s /run/archix/try ]"):
+        # Nor does it count on a boot from a non-archix entry, as a cut in the first switch's boot step leaves one: no entry starts that image, and the next switch writes the step again.
+        if state and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")) and not common.ok("[ -s /run/archix/try ]") and common.selected().startswith("archix-"):
             found.append(f"the boot state's current image {main} isn't on the ESP")
     except ValueError as e:
         found.append(f"the boot state doesn't parse: {e}")
