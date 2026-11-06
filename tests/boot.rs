@@ -1385,7 +1385,10 @@ fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one
     let status = setup.ok_env(&[COUNTING], &["status"]);
     assert!(status.contains("boot step"), "status says so: {status}");
     let finished = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
-    assert!(finished.contains("is finished now"), "{finished}");
+    assert!(
+        finished.contains("is finished now") && !finished.contains("nothing to do"),
+        "a switch that finishes another's boot step says that, not \"nothing to do\": {finished}"
+    );
     let first = image_of(machine, "archix-current.conf");
     assert_eq!(images(machine), vec![first.clone()], "its image is on the ESP");
     let status = setup.ok_env(&[COUNTING], &["status"]);
@@ -1408,7 +1411,10 @@ fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one
         "the entry still starts the old image"
     );
     let finished = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
-    assert!(finished.contains("is finished now"), "{finished}");
+    assert!(
+        finished.contains("is finished now") && !finished.contains("nothing to do"),
+        "a switch that finishes another's boot step says that, not \"nothing to do\": {finished}"
+    );
     let second = image_of(machine, "archix-current.conf");
     assert_ne!(
         second, first,
@@ -1417,7 +1423,10 @@ fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one
 
     fs::remove_file(machine.esp().join("EFI/archix").join(&second)).unwrap();
     let back = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
-    assert!(back.contains("isn't whole"), "{back}");
+    assert!(
+        back.contains("isn't whole") && !back.contains("nothing to do"),
+        "a switch that repairs the boot step says that, not \"nothing to do\": {back}"
+    );
     assert!(
         machine.esp().join("EFI/archix").join(&second).is_file(),
         "the image is back: {back}"
@@ -1427,7 +1436,10 @@ fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one
         fs::remove_file(entries.join(name)).unwrap();
     }
     let back = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
-    assert!(back.contains("isn't whole"), "{back}");
+    assert!(
+        back.contains("isn't whole") && !back.contains("nothing to do"),
+        "a switch that repairs the boot step says that, not \"nothing to do\": {back}"
+    );
     assert!(
         machine.entries().iter().any(|name| name.starts_with("archix-current")),
         "the entry is back: {back}"
