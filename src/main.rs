@@ -548,8 +548,19 @@ static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
 /// The boot units' runs, each over in seconds, which another run waits for rather than failing.
 const SHORT_RUNS: [&str; 5] = ["unblessed", "bless", "boot-check", "boot-complete", "health-check"];
 
-/// Takes the lock, waiting out a boot unit's short run; false when another run holds it and `skip_busy` says to give up at once.
-fn hold_exclusive(skip_busy: bool) -> Result<bool> {
+/// How a run that finds archix's lock held waits for it.
+#[derive(Clone, Copy, PartialEq)]
+enum Busy {
+    /// The minutely unblessed check: gives up at once and looks again a minute later.
+    Skip,
+    /// A boot unit, whose failure would fail a healthy boot: waits for any run, however long it takes.
+    Wait,
+    /// A user's run: waits out a boot unit's short run, and refuses for any other.
+    Short,
+}
+
+/// Takes the lock as `busy` says; false when another run holds it and `busy` is Skip.
+fn hold_exclusive(busy: Busy) -> Result<bool> {
     use std::io::Write as _;
     let path = archix::paths::Paths::system().state.join("running");
     let mut file = running_file()?;
@@ -559,10 +570,10 @@ fn hold_exclusive(skip_busy: bool) -> Result<bool> {
         let short = SHORT_RUNS
             .iter()
             .any(|run| who.trim_end().trim_end_matches('`').ends_with(&format!("archix {run}")));
-        if skip_busy {
+        if busy == Busy::Skip {
             return Ok(false);
         }
-        if !short || waited >= std::time::Duration::from_secs(120) {
+        if busy == Busy::Short && (!short || waited >= std::time::Duration::from_secs(120)) {
             anyhow::bail!(
                 "another archix is already running ({}); wait for it to finish",
                 who.trim()
@@ -675,7 +686,12 @@ fn run() -> Result<ExitCode> {
         leave_login_session();
     }
     // The minutely unblessed check skips a minute another run holds; the next one looks again.
-    if changes_things && !hold_exclusive(matches!(command, Command::Unblessed))? {
+    let busy = match command {
+        Command::Unblessed => Busy::Skip,
+        Command::BootCheck | Command::BootComplete | Command::Bless | Command::HealthCheck => Busy::Wait,
+        _ => Busy::Short,
+    };
+    if changes_things && !hold_exclusive(busy)? {
         return Ok(ExitCode::SUCCESS);
     }
     match command {
