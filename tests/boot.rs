@@ -1442,3 +1442,40 @@ fn a_switch_cut_between_its_record_and_its_boot_step_is_finished_by_the_next_one
             .contains("sort-key edited")
     );
 }
+
+#[test]
+#[ignore]
+fn a_loader_conf_a_cut_left_empty_is_written_again_at_boot_and_by_the_next_switch() {
+    let _system = lock_system();
+    let _keys = NoSbctlKeys::new();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let conf = machine.esp().join("loader/loader.conf");
+    let written = fs::read_to_string(&conf).unwrap();
+    assert!(written.contains("default archix-current.conf\n"), "{written}");
+    // What reordered writes leave of a rename over loader.conf's FAT name.
+    fs::write(&conf, "").unwrap();
+    let status = setup.ok_env(&[COUNTING], &["status"]);
+    assert!(status.contains("loader.conf"), "status says so: {status}");
+    let boot = setup.ok_env(&[COUNTING], &["boot-check"]);
+    assert_eq!(
+        fs::read_to_string(&conf).unwrap(),
+        written,
+        "the boot writes it again: {boot}"
+    );
+    assert!(boot.contains("loader.conf"), "and says so: {boot}");
+    fs::write(&conf, "timeout 3\n").unwrap();
+    let again = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        again.contains("isn't whole") && again.contains("loader.conf"),
+        "{again}"
+    );
+    let now = fs::read_to_string(&conf).unwrap();
+    assert!(
+        now.contains("timeout 3\n")
+            && now.contains("default archix-current.conf\n")
+            && now.contains("preferred archix-*\n"),
+        "the next switch points it at archix's entries again, keeping the user's lines: {now}"
+    );
+}

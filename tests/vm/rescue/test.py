@@ -62,6 +62,17 @@ def run(m, t):
         switch(m, t, "another switch")
         check_menu(t)
 
+    with t.step("1b: a rescue entry a cut left empty or took away is written again at boot and by the next switch, without a rebuild"):
+        entry = "/efi/loader/entries/archix-rescue.conf"
+        written = out(f"cat {entry}")
+        m.succeed(f": > {entry} && sync -f {entry}", what="emptying the rescue entry, as reordered writes of its rename leave it")
+        said = m.succeed(f"{HOST} boot-check 2>&1", what="the boot's check")
+        t.check(out(f"cat {entry}") == written and "rescue entry" in said, f"the boot's check writes it again and says so: {said}")
+        m.succeed(f"rm {entry} && sync -f /efi", what="taking the rescue entry away")
+        said = m.succeed(f"{HOST} switch --noconfirm 2>&1", what="a switch with nothing else to do")
+        t.check("isn't whole" in said and "building the rescue entry" not in said, f"the next switch notices and writes it without building: {said}")
+        t.check(out(f"cat {entry}") == written, f"the entry is as it was: {out(f'cat {entry}')}")
+
     if BTRFS:
         with t.step(f"2: a root whose init is broken is rolled back to snapshot {good} from the rescue entry"):
             m.succeed("printf 'broken\\n' > /usr/lib/systemd/systemd.new && mv /usr/lib/systemd/systemd.new /usr/lib/systemd/systemd && sync -f /usr/lib/systemd", what="breaking the root's systemd")
