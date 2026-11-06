@@ -356,7 +356,11 @@ impl Machine {
 
     /// The environment that points archix at this machine.
     pub fn env(&self) -> Vec<(String, String)> {
-        vec![("ARCHIX_TEST_ROOT".into(), self.root.display().to_string())]
+        // A health check that fails reboots, which in the test container would stop the container; tests that look at it set their own record.
+        vec![
+            ("ARCHIX_TEST_ROOT".into(), self.root.display().to_string()),
+            ("ARCHIX_TEST_REBOOT".into(), "/dev/null".into()),
+        ]
     }
 
     /// The generation the machine was last switched or rolled back to.
