@@ -1501,3 +1501,37 @@ fn a_loader_conf_a_cut_left_empty_is_written_again_at_boot_and_by_the_next_switc
         "the next switch points it at archix's entries again, keeping the user's lines: {now}"
     );
 }
+
+#[test]
+#[ignore]
+fn a_switch_waits_for_the_boot_units_short_runs_and_the_minutely_unblessed_check_skips_a_busy_minute() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let hold = |seconds: u32| {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "echo 'pid 1, `/usr/bin/archix unblessed`' > /var/lib/archix/running && exec flock /var/lib/archix/running sleep {seconds}"
+            ))
+            .spawn()
+            .unwrap()
+    };
+    let mut held = hold(5);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let began = std::time::Instant::now();
+    let out = setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert!(
+        began.elapsed().as_secs() >= 3,
+        "it waited for the unblessed check: {out}"
+    );
+    held.wait().unwrap();
+    let mut held = hold(5);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let skipped = setup.run_env(&[COUNTING], &["unblessed"]);
+    held.wait().unwrap();
+    assert!(
+        skipped.status.success(),
+        "the unblessed check skips a minute another run holds: {skipped:?}"
+    );
+}
