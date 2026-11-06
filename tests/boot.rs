@@ -1603,3 +1603,27 @@ fn a_try_boot_writes_again_a_rescue_entry_a_cut_left_empty() {
         "a try boot, when rescue may be wanted, writes it again: {boot}"
     );
 }
+
+#[test]
+#[ignore]
+fn the_boot_units_wait_for_a_users_run_however_long_it_takes_rather_than_fail() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    for unit in ["health-check", "boot-check", "bless", "boot-complete"] {
+        let mut held = Command::new("sh")
+            .arg("-c")
+            .arg("echo 'pid 1, `/usr/bin/archix switch --noconfirm`' > /var/lib/archix/running && exec flock /var/lib/archix/running sleep 5")
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let began = std::time::Instant::now();
+        let run = setup.run_env(&[COUNTING], &[unit]);
+        held.wait().unwrap();
+        let said = format!("{run:?}");
+        assert!(
+            !said.contains("already running") && began.elapsed().as_secs() >= 3,
+            "{unit} waits for the user's switch: {said}"
+        );
+    }
+}
