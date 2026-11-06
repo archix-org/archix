@@ -816,3 +816,46 @@ fn a_generation_whose_tree_a_cut_lost_is_refused_alone_and_switches_keep_working
         .expect("storing the same tree again repairs the generation that lost it");
     assert!(applied.damaged().is_empty());
 }
+
+/// The largest resident size of any waited-for child so far, in bytes.
+fn children_max_rss() -> u64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+    usage.ru_maxrss as u64 * 1024
+}
+
+#[test]
+fn rlimit_as_stops_a_config_that_allocates_past_it_which_runs_to_the_end_without_it() {
+    let owner = setup();
+    // Doubling a string passes Lua's own size checks, unlike string.rep(2^40): 2 GiB, with the copy, over 3 GiB at once.
+    let grow = "local s = 'x' for _ = 1, 31 do s = s .. s end return { packages = { 'size-' .. #s } }";
+    let unlimited = Limits {
+        cpu_seconds: 60,
+        memory_bytes: libc::RLIM_INFINITY,
+        wall: Duration::from_secs(60),
+    };
+    let began = std::time::Instant::now();
+    let config = evaluate(&owner, "grow-free", grow, &unlimited).expect("without a limit it runs to the end");
+    let rss = children_max_rss();
+    println!(
+        "EVIDENCE limits: doubling a string to 2 GiB with no RLIMIT_AS ran to the end in {:.1} s, the evaluation's peak resident size {} MiB: {config}",
+        began.elapsed().as_secs_f64(),
+        rss >> 20
+    );
+    assert!(config.contains("size-2147483648"), "{config}");
+    assert!(rss > 1 << 30, "it did use more than 1 GiB: {} MiB", rss >> 20);
+    let limited = Limits {
+        memory_bytes: 1 << 30,
+        ..unlimited
+    };
+    let began = std::time::Instant::now();
+    let error = evaluate(&owner, "grow-limited", grow, &limited).unwrap_err();
+    println!(
+        "EVIDENCE limits: the same script with RLIMIT_AS 1 GiB stopped after {:.1} s: {error}",
+        began.elapsed().as_secs_f64()
+    );
+    assert!(
+        error.contains("not enough memory") || error.contains("MiB"),
+        "stopped for memory, not something else: {error}"
+    );
+}
