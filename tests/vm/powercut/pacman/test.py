@@ -45,7 +45,7 @@ def back_to(m, t, number, why):
     found = cut.problems()
     t.check(not found, f"consistent after keeping snapshot {number}: {found}")
     if replaced:
-        m.execute(f"{HOST} snapshot delete {replaced.group(1)} --noconfirm 2>&1")
+        m.succeed(f"{HOST} snapshot delete {replaced.group(1)} 2>&1", what="deleting the root the keep replaced")
     t.require(out("pacman -Q linux").split()[-1].startswith("7.2.9"), f"after the keep the system should be the one before the update: {out('pacman -Q linux systemd')}")
 
 
@@ -124,7 +124,8 @@ def run(m, t):
             return
         m.succeed("pgrep -x pacman > /dev/null || rm -f /var/lib/pacman/db.lck")
         for number in added:
-            m.execute(f"{HOST} snapshot delete {number} --noconfirm 2>&1")
+            # The step's own snapshot may be the slot, which archix may keep.
+            t.log(f"deleting snapshot {number}: {m.execute(f'{HOST} snapshot delete {number} 2>&1')}")
 
     def extract(k):
         before = start()

@@ -52,7 +52,7 @@ def run(m, t):
         found = cut.problems()
         t.check(not found, f"consistent after keeping snapshot {number}: {found}")
         if replaced:
-            m.execute(f"{HOST} snapshot delete {replaced.group(1)} --noconfirm 2>&1")
+            m.succeed(f"{HOST} snapshot delete {replaced.group(1)} 2>&1", what="deleting the root the keep replaced")
 
     def cycle(point):
         now = value()
