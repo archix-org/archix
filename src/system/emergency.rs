@@ -147,6 +147,8 @@ pub fn run(paths: &Paths, rescue_entry: bool) {
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(text.as_bytes());
         let _ = out.flush();
+        // sulogin flushes the console's queue as it takes it over, and a slow serial console still held the hint's tail.
+        unsafe { libc::tcdrain(1) };
     }
     if let Some(entry) = counted
         && !found.is_empty()
