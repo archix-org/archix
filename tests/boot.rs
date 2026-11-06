@@ -1535,3 +1535,31 @@ fn a_switch_waits_for_the_boot_units_short_runs_and_the_minutely_unblessed_check
         "the unblessed check skips a minute another run holds: {skipped:?}"
     );
 }
+
+#[test]
+#[ignore]
+fn a_loader_conf_a_cut_left_empty_comes_back_with_the_users_lines() {
+    let _system = lock_system();
+    let _keys = NoSbctlKeys::new();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    let conf = machine.esp().join("loader/loader.conf");
+    let with_users = format!("timeout 3\nconsole-mode max\n{}", fs::read_to_string(&conf).unwrap());
+    fs::write(&conf, &with_users).unwrap();
+    setup.ok_env(&[COUNTING], &["boot-check"]);
+    fs::write(&conf, "").unwrap();
+    let boot = setup.ok_env(&[COUNTING], &["boot-check"]);
+    assert_eq!(
+        fs::read_to_string(&conf).unwrap(),
+        with_users,
+        "the boot writes it again as it was: {boot}"
+    );
+    fs::write(&conf, "").unwrap();
+    setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
+    assert_eq!(
+        fs::read_to_string(&conf).unwrap(),
+        with_users,
+        "and so does the next switch"
+    );
+}
