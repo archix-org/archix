@@ -1309,3 +1309,56 @@ fn a_counted_boot_of_an_edited_entry_is_checked_as_any_other_and_a_cut_one_falls
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn a_first_switch_cut_while_laying_out_never_leaves_fstab_lines_without_the_split_and_the_next_one_finishes() {
+    let _system = lock_system();
+    for point in ["layout-subvolumes", "layout-split-armed", "layout-fstab-written"] {
+        let machine = Machine::on_btrfs_of("1G");
+        bind_pacman_db(&machine.root);
+        let setup = Setup::on(machine, &[], "rollback = { enable = true }, drift = \"keep\"", &[]);
+        let root = setup.machine.root.clone();
+        let parts = || {
+            let fstab = fs::read_to_string(root.join("etc/fstab")).unwrap_or_default();
+            let unit = root.join("etc/systemd/system/archix-split-var-lib.service").exists();
+            let link = root
+                .join("etc/systemd/system/var-lib.mount.requires/archix-split-var-lib.service")
+                .symlink_metadata()
+                .is_ok();
+            let pending = root.join("var/rollback/.split-pending").exists();
+            (fstab.contains(" /var/lib "), unit, link, pending)
+        };
+        let cut = setup.run_env(&[("ARCHIX_TEST_CRASH", point)], &["snapshot", "setup"]);
+        assert!(!cut.status.success(), "{point}: the cut happens: {}", text(&cut));
+        let (lines, unit, link, pending) = parts();
+        assert!(
+            !lines || (unit && link && pending),
+            "{point}: fstab lines bind an empty database unless the split is armed: {:?}",
+            parts()
+        );
+        setup.ok_env(&[], &["snapshot", "setup"]);
+        assert_eq!(parts(), (true, true, true, true), "{point}: the next run finishes it");
+    }
+}
+
+#[test]
+#[ignore]
+fn a_switch_flushes_what_it_applied_before_recording_it_even_when_it_isnt_marked() {
+    let _system = lock_system();
+    let machine = Machine::on_btrfs_of("1G");
+    bind_pacman_db(&machine.root);
+    let setup = Setup::on(machine, &[], "drift = \"keep\"", &[]);
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    let (program, seen) = (dir.path().join("mark"), dir.path().join("seen"));
+    fs::write(&program, format!("#!/bin/sh\necho \"$1\" >> {}\n", seen.display())).unwrap();
+    fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    setup.ok_env(&[("ARCHIX_TEST_MARK", program.to_str().unwrap())], &["switch", "--noconfirm"]);
+    let marks = fs::read_to_string(&seen).unwrap();
+    let at = |mark: &str| marks.lines().position(|line| line == mark);
+    assert!(at("switch-marked").is_none(), "this switch isn't marked: {marks}");
+    assert!(
+        at("switch-files-flushed").is_some() && at("switch-files-flushed") < at("generation-save"),
+        "the flush comes before the generation's record: {marks}"
+    );
+}

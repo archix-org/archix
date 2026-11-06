@@ -227,6 +227,7 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
             }
         }
     }
+    crate::testhooks::mark("layout-subvolumes");
     fs::create_dir_all(root.join(super::MOUNT))?;
     let archix = top.join(ARCHIX);
     super::record_root(&archix, top)?;
@@ -236,6 +237,7 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
     if new != old {
         crate::durable::write(&fstab, new.as_bytes())?;
     }
+    crate::testhooks::mark("layout-fstab-written");
     if split {
         return Ok(Setup::Done);
     }
@@ -250,6 +252,7 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
     }
     fs::create_dir_all(root.join(ON_ROOT))?;
     crate::durable::write(&pending, b"")?;
+    crate::testhooks::mark("layout-split-armed");
     Ok(Setup::AtNextBoot)
 }
 
