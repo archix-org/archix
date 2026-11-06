@@ -1955,6 +1955,10 @@ pub fn gc() -> Result<()> {
 /// Run early at boot by archix-boot.service: the hibernation guard, and a login note when the entry systemd-boot started names a generation but isn't what archix wrote.
 pub fn boot_check() -> Result<()> {
     let paths = Paths::system();
+    // A cut after a transaction replaced the running kernel boots its old image on a root without its modules, and the ESP's vfat is one of them.
+    if system::initrd::trying().is_none() {
+        system::running::Running::new(&paths.root).restore(&paths);
+    }
     let recovered = super::keep::recover_after_cut(&paths).unwrap_or_else(|e| {
         vec![format!(
             "archix: couldn't finish a rollback a power cut stopped half way: {e:#}"

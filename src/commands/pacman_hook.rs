@@ -130,6 +130,18 @@ fn policy(paths: &Paths, current: &Generation) -> Option<Policy> {
 }
 
 fn pre(paths: &Paths, pacman: u32, targets: &[String]) -> ExitCode {
+    let code = pre_steps(paths, pacman, targets);
+    // After the snapshot, which then doesn't hold the copy; flushed, as a cut after pacman deletes them boots the old image on this root.
+    if code == ExitCode::SUCCESS
+        && system::initrd::trying().is_none()
+        && system::running::Running::new(&paths.root).keep_for_targets(paths, targets)
+    {
+        archix::durable::sync_filesystems(&[&paths.root]);
+    }
+    code
+}
+
+fn pre_steps(paths: &Paths, pacman: u32, targets: &[String]) -> ExitCode {
     let invocation = Invocation::parse(&fs::read(format!("/proc/{pacman}/cmdline")).unwrap_or_default());
     let triggers = hooks::initramfs_triggers(&paths.root);
     let pending = Pending {
@@ -340,6 +352,9 @@ fn snapshot_before(paths: &Paths, current: &Generation) {
 }
 
 fn post(paths: &Paths, pacman: u32, targets: &[String]) {
+    if system::initrd::trying().is_none() {
+        system::running::Running::new(&paths.root).restore(paths);
+    }
     // pacman doesn't flush what it extracted, so a power cut while the images build would lose it.
     archix::durable::sync_filesystems(&[&paths.root]);
     match archix::integration::record(paths, targets.to_vec()) {

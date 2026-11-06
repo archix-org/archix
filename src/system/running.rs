@@ -75,6 +75,25 @@ impl Running {
         }
     }
 
+    /// Before a plain pacman transaction whose `targets` name the running kernel's package: keeps its modules aside, as `keep` does for a switch; returns whether it took a copy.
+    pub fn keep_for_targets(&self, paths: &Paths, targets: &[String]) -> bool {
+        let Some(release) = &self.release else { return false };
+        self.drop_stale(paths, release);
+        let (Some(dir), Some(package)) = (self.dir(), self.package()) else {
+            return false;
+        };
+        if !targets.contains(&package) || Running::copy(paths, release).exists() {
+            return false;
+        }
+        let taken = self.take_copy(paths, release, &dir);
+        if !taken {
+            eprintln!(
+                "archix: warning: couldn't keep a copy of the running kernel's modules; modules it hasn't loaded yet won't load until a new image boots"
+            );
+        }
+        taken
+    }
+
     /// Drops the copies of kernels other than `release`, and the modules `restore` put back for them unless their package owns that release again.
     fn drop_stale(&self, paths: &Paths, release: &str) {
         let Some(kernels) = Running::copy(paths, release).parent().map(Path::to_path_buf) else {
@@ -117,7 +136,7 @@ impl Running {
         let _ = fs::remove_dir_all(&tmp);
         let restored = clone_tree(&copy, &tmp) && crate::durable::rename(&tmp, &dir).is_ok();
         match restored {
-            true => eprintln!(":: kept the running kernel's modules, so they still load until you reboot"),
+            true => eprintln!(":: put the running kernel's modules back, so they still load until a new image boots"),
             false => eprintln!(
                 "warning: couldn't put the running kernel's modules back; modules it hasn't loaded yet won't load until you reboot"
             ),
@@ -135,6 +154,23 @@ impl Running {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transaction_naming_the_running_kernel_keeps_its_modules_and_a_boot_that_lost_them_gets_them_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::under(tmp.path());
+        let running = running(tmp.path(), "7.2.9-arch1-1");
+        let dir = kernel_dir(tmp.path(), "7.2.9-arch1-1", "linux");
+        assert!(
+            !running.keep_for_targets(&paths, &["systemd".to_string()]),
+            "not its package"
+        );
+        assert!(running.keep_for_targets(&paths, &["systemd".to_string(), "linux".to_string()]));
+        assert!(!running.keep_for_targets(&paths, &["linux".to_string()]), "kept once");
+        fs::remove_dir_all(&dir).unwrap();
+        running.restore(&paths);
+        assert_eq!(fs::read_to_string(dir.join("kernel/a.ko")).unwrap(), "module");
+    }
 
     fn running(root: &Path, release: &str) -> Running {
         Running {
