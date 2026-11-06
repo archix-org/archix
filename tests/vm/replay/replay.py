@@ -354,6 +354,9 @@ class Scenario:
                         # Nothing archix writes there is empty or all NULs, which is what a directory entry written before its data names.
                         if whole and not path.endswith(".tmp") and data.strip(b"\0"):
                             self.esp.setdefault(esp_key(path), set()).add(hashlib.sha256(data).hexdigest())
+                            # The boot check writes a loader.conf that doesn't point at archix's entries again, from what a cut left of it.
+                            if path == "loader/loader.conf":
+                                self.esp[path] |= {hashlib.sha256(pointed(text)).hexdigest() for text in (data, b"")}
         finally:
             os.close(log)
             os.close(disk)
@@ -595,6 +598,12 @@ def config_repository():
     if status:
         found.append(f"git fsck of root's config repository exits {status}: {said[-400:]}")
     return found
+
+
+def pointed(data):
+    """loader.conf as boot::point_loader leaves data: its default and preferred lines replaced by archix's."""
+    lines = [line for line in data.decode(errors="replace").splitlines() if (line.split() or [""])[0] not in ("default", "preferred")]
+    return ("\n".join(lines + ["default archix-current.conf", "preferred archix-*"]) + "\n").encode()
 
 
 def esp_key(path):
