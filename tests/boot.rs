@@ -714,7 +714,23 @@ fn under_secure_boot_an_image_is_signed_once_and_shared_by_the_entries_that_boot
             &["switch", "--noconfirm"],
         )
     };
+    // Unsigned loaders, as a systemd-boot update leaves them.
+    for loader in ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"] {
+        fs::create_dir_all(esp.join(loader).parent().unwrap()).unwrap();
+        fs::copy("/usr/lib/systemd/boot/efi/linuxx64.efi.stub", esp.join(loader)).unwrap();
+    }
+    let loaders = || {
+        ["EFI/systemd/systemd-bootx64.efi", "EFI/BOOT/BOOTX64.EFI"].map(|loader| fs::read(esp.join(loader)).unwrap())
+    };
+    let loader_signs = || {
+        fs::read_to_string(&log)
+            .unwrap_or_default()
+            .matches("loader-sign")
+            .count()
+    };
     switch(1);
+    let first_loaders = loaders();
+    checks.eq(loader_signs(), 2, "the unsigned loaders were signed, each once");
     let image = image_of(&setup.machine, "archix-current.conf");
     let signed = |name: &str| archix::system::secureboot::is_signed(&esp.join("EFI/archix").join(name)).unwrap();
     checks.check(signed(&image), "the image is signed");
@@ -748,6 +764,12 @@ fn under_secure_boot_an_image_is_signed_once_and_shared_by_the_entries_that_boot
         "nothing new was recorded as signed",
     );
     checks.eq(signs(), 1, "the image was signed once, at the first switch");
+    checks.eq(
+        loader_signs(),
+        2,
+        "the next builds left the loaders signed by its key alone",
+    );
+    checks.check(loaders() == first_loaders, "and their bytes as they were");
     checks.finish();
 }
 
