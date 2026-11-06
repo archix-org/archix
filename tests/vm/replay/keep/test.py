@@ -1,5 +1,5 @@
 # Write replay of an in-place `archix switch`, then keep (`archix rollback N`), its `--cancel`, the keep again and the boot into the kept snapshot: every flush and mark, and subsets of each flush's ESP writes, must boot by itself, never as a try, into a root holding one of the values the run gave /etc/archix-vmtest, with the account made before the run, pacman's database and files as uncut and no db.lck.
-from boot.common import HOST, bind, bump, ok, out, snapshots, switch, trying
+from boot.common import HOST, bind, bump, edit_config, ok, out, snapshots, switch, trying
 from powercut import cut
 from replay import replay
 
@@ -17,6 +17,8 @@ def run(m, t):
         cut.common.boot()
         # Before the switch, so the snapshot it takes, which becomes the root, has the marks too.
         replay.install(m)
+        edit_config("'s|  boot = { loader = \"systemd-boot\" },|  boot = { loader = \"systemd-boot\", unblessed_timeout = 2, health_check = { reboot_on_failure = true } },|'")
+        switch("switch to a two-minute unblessed timeout and a reboot on a failed health check, which the kept snapshot holds too")
         bump(1)
         switch("a switch whose snapshot holds 0")
         kept = snapshots()[-1]
@@ -26,11 +28,14 @@ def run(m, t):
         t.require(trying() is None and value() == "1", f"the boot before the run should be the current system holding 1: {trying()}, {value()}")
     s.freeze()
 
+    taken = []
+
     def body():
         cut.settle()
         replay.mark(m, "switch-start")
         bump(2)
         switch("a switch whose snapshot holds 1")
+        taken.append(snapshots()[-1])
         replay.mark(m, "keep-start")
         t.log(m.succeed(f"{HOST} rollback {kept} --noconfirm 2>&1", what=f"keeping snapshot {kept}"))
         replay.mark(m, "cancel-start")
@@ -56,16 +61,23 @@ def run(m, t):
         return found
 
     def identify(scenario, state, tried):
-        """The kept root, holding 0, is the uncut system after the run; the root before the keep, holding 1 or 2, the one before it."""
+        """A try boot is the switch's snapshot, while the switch's mark is on @; the kept root, holding 0, is the uncut system after the run; the root before the keep, holding 1 or 2, the one before it."""
+        if tried is not None:
+            return "try"
         name = "after" if value() == "0" else "before"
-        return name if tried is None and scenario.baselines[name]["Q"] == state["Q"] else None
+        return name if scenario.baselines[name]["Q"] == state["Q"] else None
 
-    spec = replay.Spec(identify, fallback=False, extra=extra)
+    spec = replay.Spec(identify, fallback=True, extra=extra)
     with t.step("2: the uncut systems' baselines: before the run and after it"):
         s.boot(s.overlay("before", s.base), s.pristine_vars, "the system before the run")
         s.capture("before")
         s.boot(s.overlay("after", s.ran), s.end_vars, "the system after the run")
         s.capture("after")
+        m.select_entry(f"archix-snapshot-{taken[0]}.conf")
+        m.reboot()
+        cut.settle()
+        t.require(str((trying() or {}).get("snapshot")) == str(taken[0]), f"the switch's snapshot's entry should start snapshot {taken[0]} in try mode: {trying()}")
+        s.capture("try")
     s.control("before", s.overlay("before", s.base), s.pristine_vars, spec)
     s.control("after", s.overlay("after", s.ran), s.end_vars, spec)
     s.replay(spec)

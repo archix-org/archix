@@ -47,7 +47,8 @@ def run(m, t):
             found.append(f"/var/lib is @varlib, but pacman's database isn't bound from the root: {out('findmnt /var/lib/pacman')}")
         return found
 
-    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra)
+    # The first switch and the boot after it flush per package, about 2000 points, most of them outside the move.
+    spec = replay.Spec(replay.by_packages, fallback=False, extra=extra, sample=("split-entry-copied", "split-binds-ready", 10))
     with t.step("2: the uncut systems' baselines: the plain install and the laid-out system"):
         s.boot(s.overlay("before", s.base), s.pristine_vars, "the plain install")
         s.capture("before")
