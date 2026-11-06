@@ -642,10 +642,35 @@ pub fn boot_step_missing(paths: &Paths, plan: &BootPlan) -> Option<String> {
     if !entries.contains_key(&Entry::Current.id()) {
         return Some("its boot entry isn't on the ESP".to_string());
     }
-    if plan.rescue && !esp.join("loader/entries").join(super::rescue::ENTRY).is_file() {
+    if !loader_points_here(esp) {
+        return Some("loader.conf doesn't point systemd-boot at archix's entries".to_string());
+    }
+    if plan.rescue && !super::rescue::entry_whole(esp) {
         return Some("the rescue entry isn't on the ESP".to_string());
     }
     None
+}
+
+/// Whether loader.conf has the default and preferred lines point_loader writes, which a cut while it was written over can leave out.
+fn loader_points_here(esp: &Path) -> bool {
+    let text = fs::read_to_string(esp.join("loader/loader.conf")).unwrap_or_default();
+    let has = |key: &str, value: &str| {
+        text.lines()
+            .any(|line| line.split_whitespace().collect::<Vec<_>>() == [key, value])
+    };
+    has("default", CURRENT) && has("preferred", PREFERRED)
+}
+
+/// At boot: writes loader.conf's lines again when the current entry is on the ESP but loader.conf doesn't name it, as a cut while it was written over leaves it, so the next boot is archix's and counted; returns whether it did.
+pub fn repair_loader(plan: &BootPlan) -> Result<bool> {
+    let esp = Path::new(&plan.esp);
+    if plan.loader != Loader::SystemdBoot || !on_esp(esp).contains_key(&Entry::Current.id()) || loader_points_here(esp)
+    {
+        return Ok(false);
+    }
+    let signed = plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys);
+    boot::point_loader(esp, PREFERRED, CURRENT, signed)?;
+    Ok(true)
 }
 
 /// Checked before a switch changes anything: the ESP must have room for a new image the size of the current one, beside the images the current system and the slot keep.
@@ -805,9 +830,21 @@ mod tests {
         fs::write(esp.join(IMAGES).join("a.efi"), "a").unwrap();
         assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("boot entry")));
         fs::write(esp.join("loader/entries/archix-current+2-0.conf"), "edited").unwrap();
+        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("loader.conf")));
+        fs::write(
+            esp.join("loader/loader.conf"),
+            "timeout 3\ndefault archix-current.conf\npreferred archix-*\n",
+        )
+        .unwrap();
         assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("rescue")));
         assert_eq!(boot_step_missing(&paths, &plan(false)), None);
-        fs::write(esp.join("loader/entries").join(crate::system::rescue::ENTRY), "r").unwrap();
+        fs::create_dir_all(esp.join(crate::system::rescue::DIR)).unwrap();
+        fs::write(esp.join(crate::system::rescue::DIR).join("r.efi"), "r").unwrap();
+        fs::write(
+            esp.join("loader/entries").join(crate::system::rescue::ENTRY),
+            crate::system::rescue::entry_text("r.efi", "1"),
+        )
+        .unwrap();
         assert_eq!(boot_step_missing(&paths, &plan(true)), None);
     }
 

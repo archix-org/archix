@@ -108,6 +108,29 @@ pub fn entry_text(uki: &str, kernel: &str) -> String {
     format!("title archix rescue (kernel {kernel})\nsort-key {SORT_KEY}\nefi /{DIR}/{uki}\n")
 }
 
+/// Whether the rescue entry is whole: a title and an efi line whose image is on the ESP, unlike what a cut while it was written over can leave.
+pub fn entry_whole(esp: &Path) -> bool {
+    let text = fs::read_to_string(entry_path(esp)).unwrap_or_default();
+    text.lines().any(|line| line.starts_with("title ")) && uki(esp).is_some_and(|uki| uki.is_file())
+}
+
+/// Writes the rescue entry again from its record when the image it names is still on the ESP but the entry isn't whole; returns whether it did.
+pub fn repair_entry(paths: &Paths, plan: &BootPlan) -> Result<bool> {
+    let esp = Path::new(&plan.esp);
+    if !plan.rescue || plan.loader == boot::Loader::Limine || entry_whole(esp) {
+        return Ok(false);
+    }
+    let Some(record) = read_record(paths) else {
+        return Ok(false);
+    };
+    if !esp.join(DIR).join(&record.uki).is_file() {
+        return Ok(false);
+    }
+    crate::durable::write_esp(&entry_path(esp), entry_text(&record.uki, &record.kernel).as_bytes())?;
+    crate::durable::sync_esp(esp)?;
+    Ok(true)
+}
+
 /// The UKI the rescue entry starts, if the entry is there.
 pub fn uki(esp: &Path) -> Option<PathBuf> {
     let text = fs::read_to_string(entry_path(esp)).ok()?;
@@ -346,9 +369,13 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, root: &dyn boot::BootRoot) -> Res
     let name = format!("rescue-{}.efi", &key[..12]);
     if let Some(record) = read_record(paths)
         && record.key == key
-        && uki(esp).is_some_and(|uki| uki == esp.join(DIR).join(&record.uki) && uki.is_file())
+        && esp.join(DIR).join(&record.uki).is_file()
     {
-        return Ok(String::new());
+        if uki(esp).is_some_and(|uki| uki == esp.join(DIR).join(&record.uki)) && entry_whole(esp) {
+            return Ok(String::new());
+        }
+        repair_entry(paths, plan)?;
+        return Ok("rescue     wrote the rescue entry again; its image was still on the ESP".to_string());
     }
     eprintln!(":: building the rescue entry from kernel {kernel}");
     let built = build(paths, esp, root, &kernel, &cmdline, &name, signed)?;
@@ -392,6 +419,44 @@ mod tests {
             fs::write(dir.path().join("loader/entries").join(name), "title t\n").unwrap();
         }
         dir
+    }
+
+    #[test]
+    fn a_rescue_entry_left_empty_is_written_again_from_its_record_while_its_image_is_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path().join("esp");
+        let paths = Paths::under(&tmp.path().join("root"));
+        let plan: BootPlan = serde_json::from_value(serde_json::json!({
+            "esp": esp, "kernel": "linux", "microcode": [], "cmdline": "", "secure_boot": false, "rescue": true,
+        }))
+        .unwrap();
+        fs::create_dir_all(esp.join(DIR)).unwrap();
+        fs::create_dir_all(esp.join("loader/entries")).unwrap();
+        fs::write(esp.join(DIR).join("rescue-abc.efi"), "uki").unwrap();
+        let record = Record {
+            kernel: "7.2.9-arch1-1".into(),
+            key: "k".into(),
+            uki: "rescue-abc.efi".into(),
+        };
+        fs::create_dir_all(record_path(&paths).parent().unwrap()).unwrap();
+        fs::write(record_path(&paths), serde_json::to_string(&record).unwrap()).unwrap();
+        fs::write(entry_path(&esp), "").unwrap();
+        assert!(!entry_whole(&esp));
+        assert!(repair_entry(&paths, &plan).unwrap());
+        assert_eq!(
+            fs::read_to_string(entry_path(&esp)).unwrap(),
+            entry_text("rescue-abc.efi", "7.2.9-arch1-1")
+        );
+        assert!(
+            entry_whole(&esp) && !repair_entry(&paths, &plan).unwrap(),
+            "a whole entry is left alone"
+        );
+        fs::remove_file(esp.join(DIR).join("rescue-abc.efi")).unwrap();
+        fs::write(entry_path(&esp), "").unwrap();
+        assert!(
+            !repair_entry(&paths, &plan).unwrap(),
+            "without its image, the next switch builds it"
+        );
     }
 
     #[test]
