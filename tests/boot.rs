@@ -655,6 +655,25 @@ fn a_root_archix_didnt_produce_is_reported_and_refuses_switches() {
     setup.ok(&["switch", "--noconfirm"]);
 }
 
+/// Moves the container's Secure Boot keys aside while it lives, which the Secure Boot tests leave there, for a test of a machine without Secure Boot.
+struct NoSbctlKeys(Option<PathBuf>);
+
+impl NoSbctlKeys {
+    fn new() -> NoSbctlKeys {
+        let keys = Path::new("/var/lib/sbctl/keys");
+        let aside = PathBuf::from("/var/lib/sbctl/keys.aside");
+        NoSbctlKeys(keys.exists().then(|| fs::rename(keys, &aside).map(|()| aside).unwrap()))
+    }
+}
+
+impl Drop for NoSbctlKeys {
+    fn drop(&mut self) {
+        if let Some(aside) = &self.0 {
+            fs::rename(aside, "/var/lib/sbctl/keys").unwrap();
+        }
+    }
+}
+
 fn sbctl_keys(esp: &Path) {
     if !Path::new("/var/lib/sbctl/keys/db/db.key").exists() {
         let made = Command::new("sbctl")
@@ -823,6 +842,8 @@ fn a_limine_machine_moves_to_systemd_boot_only_once_a_boot_through_it_counted_as
     const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
     const LOADER: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
     let _system = lock_system();
+    // Its loaders are text, and its checks are of a machine without Secure Boot, so no keys the Secure Boot tests left may sign them.
+    let _keys = NoSbctlKeys::new();
     let checks = Checks::default();
     let setup = Setup::new(&[], "");
     let machine = &setup.machine;
