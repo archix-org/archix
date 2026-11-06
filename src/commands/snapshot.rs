@@ -311,6 +311,12 @@ pub(super) fn schedule_root_move(root: &Path) -> Result<()> {
 
 /// Run at boot by archix-split-var-lib.service, before /var/lib is mounted.
 pub fn split_var_lib() -> Result<()> {
+    if !layout::split_is_due(&std::fs::read_to_string("/etc/fstab").unwrap_or_default()) {
+        println!(
+            "archix: /etc/fstab doesn't mount /var/lib yet, so it stays where it is until a switch finishes laying the root out"
+        );
+        return Ok(());
+    }
     let (uuid, _) = root_device(Path::new("/"))?;
     let top = Top::mount(&uuid)?;
     layout::split_var_lib(Path::new("/"), &top.dir.join(layout::VAR_LIB))

@@ -40,7 +40,8 @@ def run(m, t):
         found = []
         if not ok("sha256sum -c --quiet /root/sentinel.sum"):
             found.append("the files put in /var/lib before the switch changed")
-        if ok("[ -e /var/rollback/.split-pending ]"):
+        # A cut before the fstab's lines leaves the marker on a plain system, for the next switch to finish.
+        if ok("[ -e /var/rollback/.split-pending ] && grep -q '[[:space:]]/var/lib[[:space:]]' /etc/fstab"):
             found.append("the move of /var/lib is still pending after the boot settled")
         if out("findmnt -no FSROOT /var/lib").strip() == "/@varlib" and out("findmnt -no FSROOT /var/lib/pacman").strip() != "/@/var/rollback/pacman":
             found.append(f"/var/lib is @varlib, but pacman's database isn't bound from the root: {out('findmnt /var/lib/pacman')}")

@@ -210,6 +210,11 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
     }
     let pending = root.join(ON_ROOT).join(PENDING);
     let split = top.join(VAR_LIB).exists() && !pending.exists();
+    // Before @varlib, whose existence without this marker means the split is done.
+    if !split {
+        fs::create_dir_all(root.join(ON_ROOT))?;
+        crate::durable::write(&pending, b"")?;
+    }
     for subvolume in [ARCHIX, VAR_LIB] {
         let path = top.join(subvolume);
         if !path.exists() {
@@ -231,6 +236,20 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
     fs::create_dir_all(root.join(super::MOUNT))?;
     let archix = top.join(ARCHIX);
     super::record_root(&archix, top)?;
+    if !split {
+        let unit = root.join("etc/systemd/system").join(SPLIT_UNIT);
+        fs::create_dir_all(unit.parent().unwrap_or(root))?;
+        crate::durable::write(&unit, split_unit().as_bytes())?;
+        let wants = root.join("etc/systemd/system/var-lib.mount.requires");
+        fs::create_dir_all(&wants)?;
+        let link = wants.join(SPLIT_UNIT);
+        if link.symlink_metadata().is_err() {
+            std::os::unix::fs::symlink(format!("../{SPLIT_UNIT}"), &link)?;
+        }
+    }
+    // The fstab comes last and after a flush: its lines without the split bind an empty database over pacman's.
+    crate::durable::sync_filesystems_checked(&[root, top])?;
+    crate::testhooks::mark("layout-split-armed");
     let fstab = root.join("etc/fstab");
     let old = fs::read_to_string(&fstab).unwrap_or_default();
     let new = with_lines(&old, &fstab_lines(uuid, root_options));
@@ -238,22 +257,15 @@ pub fn setup(root: &Path, top: &Path, uuid: &str, root_options: &str) -> Result<
         crate::durable::write(&fstab, new.as_bytes())?;
     }
     crate::testhooks::mark("layout-fstab-written");
-    if split {
-        return Ok(Setup::Done);
-    }
-    let unit = root.join("etc/systemd/system").join(SPLIT_UNIT);
-    fs::create_dir_all(unit.parent().unwrap_or(root))?;
-    crate::durable::write(&unit, split_unit().as_bytes())?;
-    let wants = root.join("etc/systemd/system/var-lib.mount.requires");
-    fs::create_dir_all(&wants)?;
-    let link = wants.join(SPLIT_UNIT);
-    if link.symlink_metadata().is_err() {
-        std::os::unix::fs::symlink(format!("../{SPLIT_UNIT}"), &link)?;
-    }
-    fs::create_dir_all(root.join(ON_ROOT))?;
-    crate::durable::write(&pending, b"")?;
-    crate::testhooks::mark("layout-split-armed");
-    Ok(Setup::AtNextBoot)
+    Ok(if split { Setup::Done } else { Setup::AtNextBoot })
+}
+
+/// Whether `fstab` mounts /var/lib, without which there's nothing for the split to move it under.
+pub fn split_is_due(fstab: &str) -> bool {
+    fstab
+        .lines()
+        .filter_map(crate::system::fstab::fields)
+        .any(|fields| fields.get(1).is_some_and(|point| point == "/var/lib"))
 }
 
 /// Mounts the root on `device` at `target` as it boots: `@`, then @archix and @varlib, then the binds from /var/rollback; for repair from a live USB.
@@ -386,6 +398,14 @@ pub fn mount_esp(target: &Path, esp: Option<&str>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_split_is_due_only_once_the_fstab_mounts_var_lib() {
+        assert!(!split_is_due(
+            "UUID=a / btrfs rw,subvol=/@ 0 0\n# UUID=a /var/lib btrfs rw 0 0\n"
+        ));
+        assert!(split_is_due("UUID=a /var/lib btrfs rw,subvol=/@varlib 0 0\n"));
+    }
 
     #[test]
     fn the_esp_is_where_the_roots_fstab_mounts_boot_esp_else_its_vfat_line() {

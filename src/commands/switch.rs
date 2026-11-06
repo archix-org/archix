@@ -667,6 +667,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         ))
     })?;
     archix::testhooks::mark("switch-applied");
+    // pacman doesn't flush what it extracted, nor the apply what it wrote; a generation's record or a boot entry mustn't outlive them, marked or not.
+    archix::durable::sync_filesystems(&[&paths.root]);
+    archix::testhooks::mark("switch-files-flushed");
     system::credentials::forget_overrides(&paths.state, &passwords);
     let mut soft_failures = applied.failures;
     if !prepared.values.is_empty()
@@ -680,7 +683,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     archix::testhooks::mark("switch-recorded");
     soft_failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &generation.packages));
     if marked {
-        // pacman doesn't flush what it extracted, nor the apply what it wrote; the mark goes only once they're on disk.
+        // The mark goes only once the boot step is on disk too.
         archix::durable::sync_filesystems(&[&paths.root]);
         archix::testhooks::mark("switch-flushed");
         if let Err(e) = archix::pacman::hooks::finished(&paths.state) {

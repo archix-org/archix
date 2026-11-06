@@ -1353,7 +1353,10 @@ fn a_switch_flushes_what_it_applied_before_recording_it_even_when_it_isnt_marked
     let (program, seen) = (dir.path().join("mark"), dir.path().join("seen"));
     fs::write(&program, format!("#!/bin/sh\necho \"$1\" >> {}\n", seen.display())).unwrap();
     fs::set_permissions(&program, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    setup.ok_env(&[("ARCHIX_TEST_MARK", program.to_str().unwrap())], &["switch", "--noconfirm"]);
+    setup.ok_env(
+        &[("ARCHIX_TEST_MARK", program.to_str().unwrap())],
+        &["switch", "--noconfirm"],
+    );
     let marks = fs::read_to_string(&seen).unwrap();
     let at = |mark: &str| marks.lines().position(|line| line == mark);
     assert!(at("switch-marked").is_none(), "this switch isn't marked: {marks}");
