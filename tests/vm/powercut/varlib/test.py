@@ -44,6 +44,46 @@ def run(m, t):
         m.reboot()
         cut.common.boot()
 
+    def layout(point):
+        cut.fresh("/work/plain.img")
+        boot()
+        m.succeed(f"mkdir -p {SENTINEL}/dir && echo small > {SENTINEL}/dir/small && sha256sum {SENTINEL}/dir/small > /root/sentinel.sum && sync -f /root/sentinel.sum", what="files in /var/lib, on disk before the cut")
+        packages = set(out("pacman -Qq").split())
+        cut.arm(point)
+        cut.background(f"{HOST} switch --noconfirm", "/root/switch.log")
+        reached = cut.reset_on_cut(timeout=900)
+        t.check(reached == f"{point}#1", f"the cut should be at {point}, not {reached}")
+        boots, took = cut.settle()
+        found = []
+        if not packages <= set(out("pacman -Qq").split()):
+            found.append("packages went missing from pacman's database after the cut")
+        lines = cut.common.ok("grep -q '[[:space:]]/var/lib[[:space:]]' /etc/fstab")
+        if point == "layout-fstab-written":
+            if not lines or out("findmnt -no FSROOT /var/lib").strip() != "/@varlib":
+                found.append(f"the fstab's lines were on disk, so this boot should have moved /var/lib: {out('findmnt /var/lib')}")
+        else:
+            if lines or not cut.common.ok("[ -e /var/rollback/.split-pending ]"):
+                found.append("a cut before the fstab's lines should leave the marker and no lines")
+            if cut.common.ok("findmnt /var/lib"):
+                found.append(f"/var/lib should still be on the root: {out('findmnt /var/lib')}")
+        switch("the next switch, which finishes laying the root out")
+        m.reboot()
+        cut.settle()
+        if out("findmnt -no FSROOT /var/lib").strip() != "/@varlib":
+            found.append(f"/var/lib isn't @varlib after the next switch's boot: {out('findmnt /var/lib')}")
+        if out("findmnt -no FSROOT /var/lib/pacman").strip() != "/@/var/rollback/pacman":
+            found.append(f"pacman's database isn't bound from the root: {out('findmnt /var/lib/pacman')}")
+        if cut.common.ok("[ -e /var/rollback/.split-pending ]"):
+            found.append("the move is still marked pending after the next switch's boot")
+        if not packages <= set(out("pacman -Qq").split()):
+            found.append("packages went missing from pacman's database after the next switch")
+        if not cut.common.ok("sha256sum -c --quiet /root/sentinel.sum"):
+            found.append("the files put in /var/lib before the cut changed")
+        cut.record(reached, True, boots, took, cut.common.selected(), None, found)
+        t.check(not found, f"the next switch finishes the move after the cut at {reached}: {found}")
+
+    for point in ["layout-subvolumes", "layout-split-armed", "layout-fstab-written"]:
+        cut.point(f"{point}: cut in the first switch's layout", lambda point=point: layout(point))
     for point in POINTS:
         cut.point(f"{point}: cut in the move of /var/lib", lambda point=point: split(point))
     cut.summary()

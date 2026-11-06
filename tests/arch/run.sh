@@ -61,6 +61,8 @@ start() {
     ${out:+-v "$out":/out} ${ARCHIX_PREBUILT:+-v "$ARCHIX_PREBUILT":/prebuilt:ro} archix-arch-test /usr/lib/systemd/systemd)
   cids+=("$cid")
   until state=$(docker exec "$cid" systemctl is-system-running 2>/dev/null); [[ $state == running || $state == degraded ]]; do sleep 1; done
+  # A container's /dev holds only the loop nodes that existed when it started, and a free device past them fails `mount -o loop` while other runs hold the low ones.
+  docker exec "$cid" bash -c 'for i in {0..255}; do [ -e /dev/loop$i ] || mknod -m 660 /dev/loop$i b 7 $i; done'
   [ -n "$proxy_port" ] || return 0
   local url=http://127.0.0.1:$proxy_port
   docker exec "$cid" systemd-run --quiet --unit=archive-relay --socket-property="ListenStream=127.0.0.1:$proxy_port" \

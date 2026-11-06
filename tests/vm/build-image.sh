@@ -4,6 +4,8 @@ set -euo pipefail
 archive=${ARCHIVE:-https://archive.archlinux.org}
 dir=/vm/boot date=2026-10-10 size=8G packages=(base linux mkinitcpio systemd-ukify sbctl git e2fsprogs) archix=/work/archix
 fs=${FS:-ext4}
+# This container's /dev holds only the loop nodes that existed when it started, and a free device past them fails losetup while other runs hold the low ones.
+for i in {0..255}; do [ -e /dev/loop$i ] || mknod -m 660 /dev/loop$i b 7 $i; done
 # IMAGE_DIR=/vm/SUITE takes that suite's config.lua; its image.env may change the variables above and define before_pacstrap, after_pacstrap, install_archix and after_image.
 [ -z "${IMAGE_DIR:-}" ] || dir=$IMAGE_DIR
 [ ! -f "$dir/image.env" ] || . "$dir/image.env"
