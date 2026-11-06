@@ -424,10 +424,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         integration::write_all(&paths, &integration::own_path()?, &|path: &Path| {
             Ok(root.join(path.strip_prefix("/").unwrap_or(path)))
         })?;
-        println!(
-            "nothing to do: the system matches generation {} (snapshot {})",
-            current.number, lock.date
-        );
         let mut failures = Vec::new();
         // A switch to this generation that a cut stopped after its record, in the boot step, leaves its mark; the system matches it, so the boot step is done again and the mark dropped.
         let cut_short = archix::pacman::hooks::unfinished(&paths.state).filter(|u| u.switch == Some(current.number));
@@ -435,14 +431,26 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         let missing = boot
             .as_ref()
             .and_then(|plan| system::menu::boot_step_missing(&paths, plan));
+        // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here too, its menu first.
+        let limine = boot.as_ref().is_some_and(|plan| system::limine::pending(&paths, plan));
+        let left = cut_short.is_some() || cut_before_boot || missing.is_some() || limine || current.applied.is_none();
+        match left {
+            false => println!(
+                "nothing to do: the system matches generation {} (snapshot {})",
+                current.number, lock.date
+            ),
+            true => println!(
+                "the system matches generation {} (snapshot {}); finishing what's left of it:",
+                current.number, lock.date
+            ),
+        }
         if let Some(what) = &missing {
             println!(
                 "the boot step of generation {} isn't whole: {what}; doing it again",
                 current.number
             );
         }
-        // A move from Limine that a cut or a failure stopped after its generation was recorded is taken up here too, its menu first.
-        let limine = boot.as_ref().is_some_and(|plan| system::limine::pending(&paths, plan));
+
         if cut_short.is_some() || cut_before_boot || missing.is_some() || limine {
             failures.extend(write_boot(&paths, &rollbacks, boot.as_ref(), &current.packages));
         }
@@ -458,13 +466,17 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             );
         }
         // A cut after the boot step, before the generation's config was recorded, leaves it without one.
-        if current.applied.is_none()
-            && let Err(e) = record_applied(target, &paths, &store, current.number)
-        {
-            failures.push(format!(
-                "recording generation {}'s config in root's repository: {e:#}",
-                current.number
-            ));
+        if current.applied.is_none() {
+            match record_applied(target, &paths, &store, current.number) {
+                Ok(()) => println!(
+                    "recorded generation {}'s config, which a cut after its boot step left unrecorded",
+                    current.number
+                ),
+                Err(e) => failures.push(format!(
+                    "recording generation {}'s config in root's repository: {e:#}",
+                    current.number
+                )),
+            }
         }
         if !system_change.to.hooks.is_empty() {
             eprintln!(":: running hooks");

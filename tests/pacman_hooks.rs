@@ -1135,8 +1135,13 @@ fn a_switch_cut_off_after_its_generation_is_recorded_is_finished_by_the_next_swi
     );
     let out = setup.run_env(&[COUNTING], &["switch", "--noconfirm"]);
     checks.check(
-        out.status.success() && text(&out).contains("nothing to do"),
-        format!("the next switch finds the system applied: {}", text(&out)),
+        out.status.success()
+            && text(&out).contains("the system matches generation")
+            && text(&out).contains("is finished now"),
+        format!(
+            "the next switch finds the system applied and finishes it: {}",
+            text(&out)
+        ),
     );
     let left = archix::pacman::hooks::unfinished(&setup.paths.state);
     checks.check(
