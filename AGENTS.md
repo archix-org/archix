@@ -1,7 +1,8 @@
 # Agent instructions
 
 - Any change to behaviour, CLI, config syntax or options needs a matching docs PR in archix-org/archix.dev (`src/content/docs/docs/`).
-- Run the full suite, `tests/arch/run.sh --jobs 2` (two containers, both heavy slots; without `--jobs 2` it takes one), before pushing anything outside `tests/vm/` and `.github/`, and always before pushing a change to `src/`; it runs every test, including the pacman and network tests, inside Arch.
+- Run the full suite, `tests/arch/run.sh --jobs 2` (two test VMs, both heavy slots; without `--jobs 2` it takes one), before pushing anything outside `tests/vm/` and `.github/`, and always before pushing a change to `src/`; it runs every test, including the pacman and network tests, inside an Arch test VM.
+- Tests touch the host only through QEMU VMs given `/dev/kvm`, which keeps the host's devices (its hardware watchdog, ttys) out of reach; a `--privileged` container once armed the watchdog and reset the machine, and `tests/vm/boot/checks.py` fails on one.
 - While iterating, run `tests/arch/run.sh --quick` (the unit tests plus the test files `tests/quick.tsv` maps your change since `main`, or `ARCHIX_QUICK_BASE`, to; it lists what it skipped), `tests/arch/run.sh <cargo test args>` for one test, or one VM suite on one filesystem.
 - A push to `main` isn't done until `ci.yml` on that commit is green: wait for it (`gh run watch`) before reporting the change as merged or pushing the next one, and fix a red `main` before anything else.
 - Confirm long VM suites wherever they finish first: locally in the two heavy slots (a power-cut run takes about 76 min per filesystem here, hours on GitHub's nested VMs), or on the release gate (`gh workflow run release-gate.yml --ref <branch> -f suites=<suite,...>`); don't wait on a slow GitHub queue, cancel superseded runs, and run the full gate once, for the commit being released.
