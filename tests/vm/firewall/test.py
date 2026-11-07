@@ -81,8 +81,8 @@ def run(m, t):
     if not shutil.which("ssh"):
         subprocess.run(["pacman", "-S", "--noconfirm", "--needed", "openssh"], check=True, capture_output=True)
     # The forward's NIC on a subnet of its own: on net0's, the guest would answer it through net0.
-    m.extra = ["-netdev", f"user,id=net2,net=10.0.3.0/24,hostfwd=tcp:127.0.0.1:{PORT}-:22", "-device", "virtio-net-pci,netdev=net2,romfile=",
-               "-netdev", "stream,id=net1,server=on,addr.type=unix,addr.path=/work/l2.sock", "-device", "virtio-net-pci,netdev=net1,mac=52:54:00:12:34:77,romfile="]
+    m.extra = ["-netdev", f"user,id=net2,net=10.0.3.0/24,hostfwd=tcp:127.0.0.1:{PORT}-:22", "-device", "virtio-net-pci,netdev=net2,romfile=,status=off",
+               "-netdev", "stream,id=net1,server=on,addr.type=unix,addr.path=/work/l2.sock", "-device", "virtio-net-pci,netdev=net1,mac=52:54:00:12:34:77,romfile=,status=off"]
     lay_out(m, t)
     with t.step("1: with ssh allowed, the host logs in, and ports answer by their services' sources"):
         m.wait_until_succeeds("systemctl is-active -q sshd.service", timeout=60)

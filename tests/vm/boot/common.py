@@ -194,3 +194,11 @@ def settled(allowed=()):
             network(wait=False)
         t.require(False, f"units failed at this boot: {' '.join(failed)}")
     network()
+    reporting = link_status_nics()
+    t.check(not reporting, f"a NIC reports its link status, so its carrier comes up only as networkd brings the link up, which networkd can miss (docs/CI.md#the-networkd-carrier-race): {reporting}")
+
+
+def link_status_nics():
+    """The NICs whose virtio device offers link status (VIRTIO_NET_F_STATUS, feature bit 16): virtio-net then holds the carrier off until the link is opened, while without it (QEMU's status=off) the carrier is up from the probe, before networkd starts."""
+    text = out("for nic in /sys/class/net/en*; do [ -e $nic/device/features ] && echo \"$(basename $nic) $(cut -c17 $nic/device/features)\"; done; true")
+    return [line.split()[0] for line in text.splitlines() if line.split()[1:] == ["1"]]

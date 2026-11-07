@@ -1,12 +1,11 @@
 # A year of weekly switches, each with archix-churn's next version and a new kernel command line (so a new boot image), and a reboot: the ESP, the menu, snapshots (on btrfs), generation records and archix's state stay bounded, every entry starts an image there and every image there is started, dbx is untouched while revocation is off and stops at archix's 128-entry cap once on, and every invariant holds every week.
 import re
 
-from boot.common import HOST, bind, boot, edit_config, entries, ok, out, settled, snapshots, trying
+from boot.common import HOST, bind, boot, edit_config, entries, ok, out, snapshots, trying
 from suite import BTRFS, images_consistent, lay_out, update
 
 MACHINE = {"global_timeout": 14400}
 WEEKS = 52
-CARRIER_RACES_ALLOWED = 3
 DBX = "/sys/firmware/efi/efivars/dbx-d719b2cb-3d3a-4596-a3bc-dad00e67656f"
 KEK = "/var/lib/sbctl/keys/KEK"
 OWNER = "c6825be8dae8eb40b968e918df35dec1"
@@ -79,27 +78,11 @@ def invariants(t, week, seen):
         t.check(ours_in_dbx() == 0, f"with revoke_unused off, archix should never write dbx: {ours_in_dbx()} entries")
 
 
-def week_boot(t, week, races):
-    """boot(), carrying on after docs/CI.md's networkd carrier race once the link is back, up to CARRIER_RACES_ALLOWED times: a year of boots meets it often, and it isn't what churn tests."""
-    try:
-        boot()
-    except AssertionError:
-        if "networkd-carrier-race" not in (t.verdict or ""):
-            raise
-        t.verdict = None
-        races.append(week)
-        t.log(f"week {week}: carrying on after networkd carrier race {len(races)} of at most {CARRIER_RACES_ALLOWED} (weeks {races})")
-        t.require(len(races) <= CARRIER_RACES_ALLOWED, f"the networkd carrier race came {len(races)} times in a run, at weeks {races}, more than the {CARRIER_RACES_ALLOWED} allowed")
-        # The race can stop boot() before it judged the other units, and wait-online's failure is the race's own.
-        settled(allowed=("systemd-networkd-wait-online.service",))
-
-
 def run(m, t):
     bind(m, t)
     lay_out(m, t)
     seen = {}
     capped = None
-    races = []
     for week in range(1, WEEKS + 1):
         with t.step(f"week {week}"):
             t.log(f"week {week}: records {records()}, snapshots {snapshots() if BTRFS else '-'}, ESP {out('du -sm /efi | cut -f1').strip()} MiB, /var/lib/archix {out('du -sk /var/lib/archix | cut -f1').strip()} KiB, dbx {ours_in_dbx()}, efivars free {out('stat -f -c %f /sys/firmware/efi/efivars').strip()}")
@@ -136,7 +119,7 @@ def run(m, t):
                     t.check(ok("grep -q '^revoked ' /root/switch.log"), f"with revoke_unused on, the switch should revoke the image it dropped: {said[-1000:]}")
             t.check(week < 42 or capped is not None, "the cap should have been reached by week 42")
             m.reboot()
-            week_boot(t, week, races)
+            boot()
     with t.step("after a year"):
         invariants(t, WEEKS + 1, seen)
         kib = int(out("du -sk /var/lib/archix | cut -f1").strip())

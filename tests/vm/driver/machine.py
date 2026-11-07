@@ -103,7 +103,7 @@ class Machine:
         cmd += self.extra
         if self.tpm:
             cmd += ["-chardev", f"socket,id=chrtpm,path={self.work}/swtpm/sock", "-tpmdev", "emulator,id=tpm0,chardev=chrtpm", "-device", "tpm-tis,tpmdev=tpm0"]
-        cmd += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,romfile=",
+        cmd += ["-netdev", "user,id=net0", "-device", "virtio-net-pci,netdev=net0,romfile=,status=off",
                 "-device", "virtio-serial-pci", "-chardev", f"socket,id=shell,path={self.shell_path}",
                 "-device", "virtserialport,chardev=shell,name=archix.shell",
                 "-display", "none", *self.serial_args(),
