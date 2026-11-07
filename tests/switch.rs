@@ -1425,3 +1425,53 @@ fn on_btrfs_the_first_switch_with_rollbacks_lays_the_root_out_itself_and_snapsho
     );
     checks.finish();
 }
+
+#[test]
+#[ignore]
+fn on_btrfs_a_switch_that_lays_the_root_out_and_changes_packages_stops_before_them_until_the_reboot() {
+    let _system = lock_system();
+    let setup = Setup::on(Machine::on_btrfs(), &["tree"], ROLLBACKS, &[]);
+    let checks = Checks::default();
+    let tree = || setup.machine.system_file("usr/bin/tree").exists();
+    let generations = || {
+        fs::read_dir("/var/lib/archix/generations")
+            .map(|dir| {
+                dir.flatten()
+                    .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let out = setup.first_switch();
+    checks.check(
+        out.contains("set up     rollbacks first") && out.contains("reboot, then run `archix switch` again"),
+        format_args!("the preview and the end say the packages wait for the reboot: {out}"),
+    );
+    checks.check(
+        !tree(),
+        "tree isn't installed before the reboot, when no snapshot could hold the system before it",
+    );
+    let fstab = fs::read_to_string(setup.machine.system_file("etc/fstab")).unwrap_or_default();
+    checks.check(
+        fstab.contains("subvol=/@archix") && fstab.contains("/var/rollback/pacman /var/lib/pacman none bind"),
+        format_args!("the root is laid out: {fstab}"),
+    );
+    checks.check(
+        setup
+            .machine
+            .system_file("etc/systemd/system/archix-health-check.service")
+            .exists(),
+        "with archix's boot units, so the layout boot is checked",
+    );
+    checks.eq(
+        generations(),
+        0,
+        "no generation is recorded for a switch that applied none of it",
+    );
+    let again = setup.first_switch();
+    checks.check(
+        again.contains("reboot, then run `archix switch` again") && !tree(),
+        format_args!("a switch before the reboot stops there too: {again}"),
+    );
+    checks.finish();
+}

@@ -2,6 +2,7 @@
 import os
 import time
 
+from boot import common
 from boot.common import HOST, boot, edit_config, entries, ok, out, snapshots
 
 BTRFS = os.environ.get("FS", "ext4") == "btrfs"
@@ -15,9 +16,9 @@ def lay_out(m, t, timeout=1800, allowed=()):
         t.check(not ok("[ -d /.archix/snapshots ]"), "the image should boot as a plain install")
         if not BTRFS:
             edit_config("'/  rollback = { enable = true },/d'")
-        status, _ = m.execute(f"set -o pipefail; timeout {timeout - 100} {HOST} switch --noconfirm 2>&1 | tee /root/first-switch.log > /dev/console", timeout)
+        status = common.first_switch("/root/first-switch.log", timeout, allowed)
         t.require(status == 0, f"the first switch exited {status}: {out('tail -c 3000 /root/first-switch.log')}")
-        t.check("archix-current+2.conf" in entries(), f"the first switch should write the current entry with two tries: {entries()}")
+        t.check(common.counts_tries("archix-current.conf", 2), f"the first switch should write the current entry with two tries: {entries()}")
         m.succeed("bootctl set-timeout 0")
         m.reboot()
     with t.step("plain: the switched system boots and counts as good"):
@@ -32,6 +33,8 @@ def switch(m, t, what, timeout=3600):
     """A switch whose output goes to the console and /root/switch.log; returns its output's tail."""
     status, said = m.execute(f"set -o pipefail; timeout {timeout - 60} {HOST} switch --noconfirm 2>&1 | tee /root/switch.log | tail -c 4000", timeout)
     t.require(status == 0, f"{what} exited {status}: {said[-3000:]}")
+    if common.LAID_OUT_FIRST in said:
+        said += common.finish_layout(what)[-4000:]
     return said
 
 

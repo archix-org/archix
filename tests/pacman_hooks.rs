@@ -1329,6 +1329,55 @@ fn a_counted_boot_of_an_edited_entry_is_checked_as_any_other_and_a_cut_one_falls
 
 #[test]
 #[ignore]
+fn plain_pacman_refuses_while_a_laid_out_root_waits_for_the_reboot_that_mounts_archix() {
+    let _system = lock_system();
+    let checks = Checks::default();
+    let packages = Packages::new();
+    let file = packages.build("archix-test-plain", "");
+    let setup = Setup::on(
+        Machine::on_btrfs_of("2G"),
+        &[],
+        "rollback = { enable = true }, drift = \"keep\"",
+        &[],
+    );
+    let machine = &setup.machine;
+    setup.ok(&["switch", "--noconfirm"]);
+    checks.check(
+        fs::read_to_string(machine.root.join("etc/fstab")).is_ok_and(|fstab| fstab.contains("subvol=/@archix")),
+        "the first switch laid the root out",
+    );
+    let refused = pacman(machine, &[], &["-U", "--noconfirm", file.to_str().unwrap()], None);
+    checks.check(
+        !refused.status.success()
+            && text(&refused).contains("the root is laid out for rollbacks and waits for a reboot")
+            && !machine.root.join("usr/share/archix-test-plain").exists(),
+        format!(
+            "before the reboot a plain pacman run has no snapshot to fall back to, so it's refused: {}",
+            text(&refused)
+        ),
+    );
+    let device = sh(&format!(
+        "findmnt -n -o SOURCE {} | cut -d[ -f1",
+        machine.btrfs.as_ref().unwrap().top.display()
+    ));
+    sh(&format!(
+        "mount -o subvol=/@archix {} {}/.archix",
+        device.trim(),
+        machine.root.display()
+    ));
+    let after = pacman(machine, &[], &["-U", "--noconfirm", file.to_str().unwrap()], None);
+    checks.check(
+        !text(&after).contains("waits for a reboot"),
+        format!(
+            "once @archix is mounted, as after the reboot, the refusal is gone: {}",
+            text(&after)
+        ),
+    );
+    checks.finish();
+}
+
+#[test]
+#[ignore]
 fn a_first_switch_cut_while_laying_out_never_leaves_fstab_lines_without_the_split_and_the_next_one_finishes() {
     let _system = lock_system();
     for point in ["layout-subvolumes", "layout-split-armed", "layout-fstab-written"] {

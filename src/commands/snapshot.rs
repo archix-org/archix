@@ -150,6 +150,21 @@ impl Rollbacks {
         }
     }
 
+    /// Whether the switch lays the root out for rollbacks, before which no snapshot can be taken.
+    pub(super) fn lays_out(&self) -> bool {
+        matches!(self, Rollbacks::Setup)
+    }
+
+    /// The preview line for a switch with `packages` package changes: one that lays the root out stops there, and its packages wait for the switch after the reboot.
+    pub(super) fn line_with(&self, packages: usize) -> Option<&'static str> {
+        match self {
+            Rollbacks::Setup if packages > 0 => Some(
+                "set up     rollbacks first: the @archix and @varlib subvolumes, their fstab lines and the boot menu, then this switch stops; the package changes above wait for the switch after the next reboot, which snapshots the system before them",
+            ),
+            _ => self.line(),
+        }
+    }
+
     /// The policy, when rollbacks are on.
     pub(super) fn policy(&self) -> Option<&Policy> {
         match self {

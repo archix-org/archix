@@ -1,7 +1,7 @@
 # The split boot tests' base, run once per run with this run's archix: the image boots as a plain install, the first switch sets the root up for rollbacks and writes the boot menu, the boot after counts as good, and the VM powers off; each test boots a copy-on-write overlay of the disk and a copy of the vars.
 import os
 
-from boot.common import HOST, bind, boot, edit_config, entries, has_line, loader, ok, out, state
+from boot.common import HOST, bind, boot, counts_tries, edit_config, entries, first_switch, has_line, loader, ok, out, state
 
 # On ext4 rollbacks are off: the base and the ext4 lane's test manage the config only.
 BTRFS = os.environ.get("FS", "ext4") == "btrfs"
@@ -15,10 +15,10 @@ def run(m, t):
         t.check(not ok("[ -d /.archix/snapshots ]"), "the image should boot as a plain install, without rollbacks yet")
         if not BTRFS:
             edit_config("'/  rollback = { enable = true },/d'")
-        status, _ = m.execute(f"set -o pipefail; timeout 800 {HOST} switch --noconfirm 2>&1 | tee /root/first-switch.log > /dev/console", 900)
+        status = first_switch("/root/first-switch.log", 900)
         t.log("first switch: " + out("tail -c 3000 /root/first-switch.log; ps -ef --forest | tail -15"))
         t.require(status == 0, f"the first switch on the booted system exited {status}")
-        t.check("archix-current+2.conf" in entries(), f"the first switch should write the current system's entry with two tries: {entries()}")
+        t.check(counts_tries("archix-current.conf", 2), f"the first switch should write the current system's entry with two tries: {entries()}")
         t.check(ok("ls /efi/EFI/archix/*.efi"), f"and its image: {out('ls /efi/EFI/archix')}")
         t.check(ok("[ -f /efi/loader/entries/archix-rescue.conf ]"), "and the rescue entry")
         text = loader()

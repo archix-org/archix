@@ -86,8 +86,33 @@ def state():
     return json.loads(text) if text.strip() else {}
 
 
+# What a switch that lays the root out for rollbacks says when it stops there, its package changes left to the switch after the reboot that mounts @archix.
+LAID_OUT_FIRST = "reboot, then run `archix switch` again"
+
+
 def switch(what="a switch"):
-    m.succeed(f"{HOST} switch --noconfirm", what=what)
+    """A switch; one that lays the root out and stops for the reboot gets it, and the switch after it."""
+    said = m.succeed(f"{HOST} switch --noconfirm", what=what)
+    if LAID_OUT_FIRST in said:
+        said += finish_layout(what)
+    return said
+
+
+def finish_layout(what, allowed=()):
+    """After a switch that laid the root out and stopped: the reboot that mounts @archix, then the switch that applies the rest; returns its output."""
+    t.log(f"{what} laid the root out and stopped for the reboot; rebooting and switching again")
+    m.succeed("bootctl set-timeout 0")
+    m.reboot()
+    boot(allowed)
+    return m.succeed(f"{HOST} switch --noconfirm", 3600, what=f"{what}, after the layout's reboot")
+
+
+def first_switch(log, timeout=1800, allowed=()):
+    """The first switch on a plain image, its output in log and on the console, and if it laid the root out and stopped, the reboot and the switch after it; returns the first one's exit status."""
+    status, _ = m.execute(f"set -o pipefail; timeout {timeout - 100} {HOST} switch --noconfirm 2>&1 | tee {log} > /dev/console", timeout)
+    if status == 0 and ok(f"grep -qF '{LAID_OUT_FIRST}' {log}"):
+        t.log("after the layout's reboot: " + finish_layout("the first switch", allowed)[-1500:])
+    return status
 
 
 def add_unit(name, body, enable=True):

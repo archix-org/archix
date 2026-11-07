@@ -81,7 +81,7 @@ pub fn files(archix: &Path, state: &Path) -> Vec<(PathBuf, String)> {
     ]
 }
 
-/// The strict hook's script: refuses while a keep waits for its reboot, and while strict mode is on unless archix runs the transaction or it removes archix; lets everything through once archix, its strict flag or the config that turned it on is gone.
+/// The strict hook's script: refuses while a keep waits for its reboot, or a root laid out for rollbacks for the one that mounts @archix, before which no snapshot can be taken (archix's own transactions aside), and while strict mode is on unless archix runs the transaction or it removes archix; lets everything through once archix, its strict flag or the config that turned it on is gone.
 fn strict_script(archix: &str, state: &Path) -> String {
     format!(
         r#"#!/bin/sh
@@ -93,6 +93,10 @@ if [ -s {KEEP_PENDING} ]; then
   echo "archix: rollback to snapshot $n is pending; reboot, or \`archix rollback --cancel\`" >&2
   exit 1
 fi
+if [ -z "$ARCHIX_TRANSACTION" ] && grep -qs '[[:space:]]/{mount}[[:space:]]' /etc/fstab && [ "$(stat -c %d /{mount} 2>/dev/null)" = "$(stat -c %d /)" ]; then
+  echo "archix: the root is laid out for rollbacks and waits for a reboot, which mounts @archix; until then this transaction would have no snapshot to fall back to, so reboot first" >&2
+  exit 1
+fi
 flag={flag}
 [ -f "$flag" ] || exit 0
 [ -n "$ARCHIX_TRANSACTION" ] && exit 0
@@ -101,7 +105,8 @@ config=$(cat "$flag")
 echo "archix: strict mode is on, so packages change only through archix (\`archix install\`, \`archix remove\`, \`archix upgrade\`); set strict = false and switch to turn it off, or remove archix with pacman -R archix" >&2
 exit 1
 "#,
-        flag = state.join(STRICT_FLAG).display()
+        flag = state.join(STRICT_FLAG).display(),
+        mount = crate::snapshot::MOUNT
     )
 }
 

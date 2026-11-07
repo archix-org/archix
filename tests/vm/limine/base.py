@@ -1,5 +1,5 @@
 # The Limine tests' base, run once per run: the image boots through Limine from the ESP (its kernel and initramfs there, no systemd-boot), the first switch with boot.loader = "limine" sets the root up for rollbacks and writes no boot entries, the boot after comes up through Limine on the new layout, and the VM powers off; each test boots an overlay of the disk.
-from boot.common import HOST, bind, boot, ok, out
+from boot.common import HOST, bind, boot, first_switch, ok, out
 
 # systemd-boot's LoaderInfo, which only it sets; Limine sets LimineInfo-like variables of its own or none.
 LOADER_INFO = "/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
@@ -20,7 +20,7 @@ def run(m, t):
         boot()
         t.require(through_limine(), f"the image should boot through Limine, not {loader_info()}")
         t.check(not ok("[ -d /.archix/snapshots ]"), "the image should boot as a plain install, without rollbacks yet")
-        status, said = m.execute(f"set -o pipefail; timeout 800 {HOST} switch --noconfirm 2>&1 | tee /root/first-switch.log > /dev/console", 900)
+        status = first_switch("/root/first-switch.log", 900)
         t.log("first switch: " + out("tail -c 3000 /root/first-switch.log"))
         t.require(status == 0, f"the first switch on the booted system exited {status}")
         t.check(not ok("ls /efi/loader/entries/archix-* 2>/dev/null"), f"on Limine archix writes no boot entries: {out('ls -R /efi')}")

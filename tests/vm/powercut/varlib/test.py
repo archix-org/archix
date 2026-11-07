@@ -1,5 +1,7 @@
 # Power cuts in the move of /var/lib into @varlib, which the first switch schedules and archix-split-var-lib.service makes at the next boot: after the copy of an entry, after its removal from the root, and once the binds are ready. Each cut starts from the plain image; nobody touches the machine until a boot settles, which must have every file of /var/lib whole in @varlib and pacman's database bound from the root.
-from boot.common import HOST, bind, boot, entries, out, switch
+import time
+
+from boot.common import HOST, LAID_OUT_FIRST, bind, boot, entries, finish_layout, out, snapshots, switch, trying
 from powercut import cut
 
 POINTS = ["split-entry-copied#1", "split-entry-removed#1", "split-entry-copied#3", "split-entry-removed#4", "split-binds-ready"]
@@ -14,7 +16,7 @@ def run(m, t):
         cut.fresh("/work/plain.img")
         boot()
         m.succeed(f"mkdir -p {SENTINEL}/dir && head -c 64M /dev/urandom > {SENTINEL}/big && echo small > {SENTINEL}/dir/small && sha256sum {SENTINEL}/big {SENTINEL}/dir/small > /root/sentinel.sum", what="filling /var/lib")
-        switch("the first switch, which schedules the move")
+        m.succeed(f"{HOST} switch --noconfirm", timeout=1800, what="the first switch, which schedules the move and stops for its reboot")
         before = out(SUM).strip()
         listed = out("ls -A /var/lib").split()
         cut.baseline(f"before the cut at {point}")
@@ -98,11 +100,15 @@ def run(m, t):
             found.append(f"archix status says the boot step isn't done {what}: {status[-400:]}")
         return found
 
-    with t.step("first: an uncut first switch and its boot, the baseline of the reruns"):
+    with t.step("first: an uncut first switch, which lays the root out and stops before its packages, then the switch after its reboot, the baseline of the reruns"):
         cut.fresh("/work/plain.img")
         boot()
-        t.require(not cut.common.ok("pacman -Q efitools"), "the plain image lacks efitools, so the first switch runs a transaction")
-        switch("the uncut first switch")
+        t.require(not cut.common.ok("pacman -Q efitools"), "the plain image lacks efitools, so the first switch has a package to install")
+        said = m.succeed(f"{HOST} switch --noconfirm 2>&1", timeout=1800, what="the uncut first switch")
+        t.check(LAID_OUT_FIRST in said and not cut.common.ok("pacman -Q efitools"), f"the first switch lays the root out and leaves efitools to the switch after the reboot: {said[-1500:]}")
+        t.check(any(name.startswith("archix-current+") for name in entries()), f"with a counted entry for the layout's boot: {entries()}")
+        finish_layout("the uncut first switch")
+        t.check(cut.common.ok("pacman -Q efitools"), "the switch after the reboot installs efitools")
         m.reboot()
         cut.settle()
         cut.baseline("an uncut first switch after its boot")
@@ -112,6 +118,30 @@ def run(m, t):
     def rerun(point):
         cut.fresh("/work/plain.img")
         boot()
+        cut.arm(point)
+        cut.background(f"{HOST} switch --noconfirm", "/root/switch.log")
+        reached = cut.reset_on_cut(timeout=1800)
+        t.check(reached == f"{point}#1", f"the cut should be at {point}, not {reached}")
+        cut.disarm()
+        boots, took = cut.settle()
+        said = switch("the user's switch after the cut")
+        m.reboot()
+        cut.settle()
+        found = whole("after the rerun")
+        cut.record(reached, True, boots, took, cut.common.selected(), None, found, f"the rerun said: {said.strip().splitlines()[-1][:200] if said.strip() else ''}")
+        t.check(not found, f"a rerun after the cut at {reached} ends whole: {found}")
+
+    def falls_back(point):
+        """A cut in the package transaction of the switch after the layout's reboot, the first that applies packages: unattended, the torn root fails its check and the slot boots."""
+        cut.fresh("/work/plain.img")
+        boot()
+        cut.common.edit_config("'s|  boot = { loader = \"systemd-boot\" },|  boot = { loader = \"systemd-boot\", unblessed_timeout = 1, health_check = { reboot_on_failure = true } },|'")
+        said = m.succeed(f"{HOST} switch --noconfirm 2>&1", timeout=1800, what="the first switch, which lays the root out")
+        t.require(LAID_OUT_FIRST in said, f"the first switch should stop for the layout's reboot: {said[-1200:]}")
+        m.succeed("bootctl set-timeout 0")
+        m.reboot()
+        boot()
+        before = snapshots()
         if point != "extract":
             cut.arm(point)
         cut.background(f"{HOST} switch --noconfirm", "/root/switch.log")
@@ -122,17 +152,23 @@ def run(m, t):
         else:
             reached = cut.reset_on_cut(timeout=1800)
             t.check(reached == f"{point}#1", f"the cut should be at {point}, not {reached}")
+        began = time.monotonic()
+        took = cut.common.wait_fallback(began)
         cut.disarm()
-        boots, took = cut.settle()
-        said = m.succeed(f"{HOST} switch --noconfirm 2>&1", timeout=1800, what="the user's switch after the cut")
-        m.reboot()
-        cut.settle()
-        found = whole("after the rerun")
-        cut.record(reached, True, boots, took, cut.common.selected(), None, found, f"the rerun said: {said.strip().splitlines()[-1][:200] if said.strip() else ''}")
-        t.check(not found, f"a rerun after the cut at {reached} ends whole: {found}")
+        new = [n for n in snapshots() if n not in before]
+        tried = (trying() or {}).get("snapshot")
+        found = []
+        if not new or str(tried) != str(new[0]):
+            found.append(f"the slot should be the switch's snapshot {new}, and boot in try mode: {trying()}")
+        if cut.common.ok("pacman -Q efitools"):
+            found.append("the slot's system should be the one before the switch, without efitools")
+        cut.record(reached, True, 0, took, cut.common.selected(), tried, found)
+        t.check(not found, f"the cut at {reached} falls back to the slot: {found}")
 
-    for point in ["extract", "switch-packages", "layout-split-armed", "switch-recorded", "boot-image-copied", "menu-entry-written", "switch-boot-done"]:
+    for point in ["layout-split-armed", "boot-image-copied", "menu-entry-written"]:
         cut.point(f"{point}: cut in the first switch, then the user switches again", lambda point=point: rerun(point))
+    for point in ["extract", "switch-packages"]:
+        cut.point(f"{point}: cut in the transaction of the switch after the layout's reboot, which falls back", lambda point=point: falls_back(point))
     for point in ["layout-subvolumes", "layout-split-armed", "layout-fstab-written"]:
         cut.point(f"{point}: cut in the first switch's layout", lambda point=point: layout(point))
     for point in POINTS:

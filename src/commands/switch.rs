@@ -495,7 +495,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         .iter()
         .chain(&flatpak_lines)
         .map(String::as_str)
-        .chain(rollbacks.line())
+        .chain(rollbacks.line_with(changes.len()))
     {
         println!("{line}");
     }
@@ -509,8 +509,19 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     show_plan_diff(current.as_ref(), &lock.packages, &rendered.state);
     show_config_diff(target, &paths)?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + 1;
-    if !noconfirm && !confirm(&format!("apply {}?", count(total, "change", "changes")))? {
+    let first = rollbacks.lays_out() && !changes.is_empty();
+    let question = match first {
+        true => format!(
+            "set rollbacks up and stop for a reboot? ({} wait for the switch after it)",
+            count(changes.len(), "package change", "package changes")
+        ),
+        false => format!("apply {}?", count(total, "change", "changes")),
+    };
+    if !noconfirm && !confirm(&question)? {
         bail!("aborted; nothing was changed");
+    }
+    if first {
+        return lay_out_first(&paths, &rollbacks, boot.as_ref(), changes.len());
     }
     system::blobs::ensure(&paths, &archive, &rendered)?;
 
@@ -928,6 +939,28 @@ fn count_before_switch(
     }
     archix::testhooks::mark("switch-marked");
     true
+}
+
+/// A switch that has to lay the root out for rollbacks and would change packages does only the layout, archix's own files and the boot menu: before the reboot that mounts @archix no snapshot can hold the system as it was, so a cut during the transaction would have nothing to fall back to. The next switch, after that reboot, applies everything with a snapshot first.
+fn lay_out_first(
+    paths: &Paths,
+    rollbacks: &Rollbacks,
+    boot: Option<&system::boot::BootPlan>,
+    packages: usize,
+) -> Result<()> {
+    rollbacks
+        .before(paths, None, String::new())
+        .map_err(|e| e.context("nothing was changed"))?;
+    let root = paths.root.clone();
+    integration::write_all(paths, &integration::own_path()?, &|path: &Path| {
+        Ok(root.join(path.strip_prefix("/").unwrap_or(path)))
+    })?;
+    let failures = write_boot(paths, rollbacks, boot, &BTreeMap::new());
+    println!(
+        "{} wait: reboot, then run `archix switch` again, which takes a snapshot before them, so a boot they break falls back to it",
+        count(packages, "package change", "package changes")
+    );
+    report_soft_failures(&failures, "the root is laid out for rollbacks")
 }
 
 /// Where the state before a failed apply is, for its error.
