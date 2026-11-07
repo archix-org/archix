@@ -230,6 +230,26 @@ fn key(vmlinuz: &str, kernel: &str, cmdline: &str, signed: bool) -> String {
     crate::fetch::sha256_bytes(parts.join("\n").as_bytes())
 }
 
+/// The tools INSTALL_HOOK adds when the root has them, in its order.
+const TOOLS: [&str; 6] = ["e2fsck", "fsck.fat", "btrfs", "cryptsetup", "lvm", "bsdtar"];
+
+/// The image's key with the tools the root has, as the image holds only those.
+fn key_for(vmlinuz: &str, kernel: &str, cmdline: &str, signed: bool, tools: &[&str]) -> String {
+    let base = key(vmlinuz, kernel, cmdline, signed);
+    crate::fetch::sha256_bytes(format!("{base}\n{}", tools.join(" ")).as_bytes())
+}
+
+/// The tools of TOOLS the root at `root` has in /usr/bin.
+fn tools_in(root: &dyn boot::BootRoot) -> Vec<&'static str> {
+    TOOLS
+        .into_iter()
+        .filter(|tool| {
+            root.read_path(&Path::new("/usr/bin").join(tool))
+                .is_ok_and(|path| path.is_file())
+        })
+        .collect()
+}
+
 /// Where the rescue image is built in the root.
 const BUILT: &str = "/var/tmp/archix-rescue";
 
@@ -365,7 +385,13 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, root: &dyn boot::BootRoot) -> Res
     }
     let cmdline = rescue_cmdline(&plan.cmdline);
     let vmlinuz = root.read_path(&Path::new(boot::MODULES).join(&kernel).join("vmlinuz"))?;
-    let key = key(&crate::fetch::sha256(&vmlinuz)?, &kernel, &cmdline, signed);
+    let key = key_for(
+        &crate::fetch::sha256(&vmlinuz)?,
+        &kernel,
+        &cmdline,
+        signed,
+        &tools_in(root),
+    );
     let name = format!("rescue-{}.efi", &key[..12]);
     if let Some(record) = read_record(paths)
         && record.key == key
@@ -411,6 +437,21 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, root: &dyn boot::BootRoot) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_installed_after_the_rescue_image_was_built_builds_it_again() {
+        let without = key_for("v", "6.1", "rw", false, &["e2fsck", "btrfs"]);
+        assert_ne!(
+            without,
+            key_for("v", "6.1", "rw", false, &["e2fsck", "fsck.fat", "btrfs"]),
+            "the image built before dosfstools has no fsck.fat"
+        );
+        assert_eq!(without, key_for("v", "6.1", "rw", false, &["e2fsck", "btrfs"]));
+        assert!(
+            INSTALL_HOOK.contains(&format!("for tool in {}; do", TOOLS.join(" "))),
+            "the hook adds the tools the key names"
+        );
+    }
 
     fn esp_with(entries: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
