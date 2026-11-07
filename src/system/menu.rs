@@ -1147,7 +1147,11 @@ mod tests {
             .unwrap()
             .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names, ["archix-current+2.conf"]);
+        // Which old name the write starts from goes by the directory's order, which ext4's hashing varies, and either spelling counts two tries.
+        assert!(
+            names == ["archix-current+2.conf"] || names == ["archix-current+2-0.conf"],
+            "{names:?}"
+        );
     }
 
     fn whole(esp: &Path) -> String {
