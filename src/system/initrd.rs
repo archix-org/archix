@@ -657,6 +657,20 @@ mod tests {
     }
 
     #[test]
+    fn a_versioned_entry_name_boots_the_snapshot_its_record_names_as_an_unversioned_one_did() {
+        let store = tempfile::tempdir().unwrap();
+        let store = store.path();
+        snapshot(store, 3, true);
+        assert_eq!(
+            choose(store, Some("archix-snapshot-3~2.conf"), ""),
+            Choice::Try { snapshot: 3, why: None },
+            "the record an earlier archix wrote, without a version, still maps the entry"
+        );
+        assert_eq!(choose(store, Some("archix-current~5.conf"), ""), Choice::Current);
+        assert_eq!(choose(store, Some("archix-snapshot-4~1.conf"), ""), Choice::Current);
+    }
+
+    #[test]
     fn a_missing_snapshot_boots_the_newest_survivor_whose_entry_never_failed_else_rescue() {
         let store = tempfile::tempdir().unwrap();
         let store = store.path();

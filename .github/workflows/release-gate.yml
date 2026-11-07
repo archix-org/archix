@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       suites:
-        description: Tests to run, comma-separated, as suite-test (powercut-pacman, powercut-keep, powercut-varlib, powercut-rootmove, replay-pacman, replay-install, replay-keep, replay-switch, replay-varlib, replay-rootmove, limine-keep, boot-counting, ...), suite-NAME for a suite with an image of its own on btrfs (suite-nvidia, suite-selfupgrade, ...) and ext4-NAME for it on ext4; empty runs the power-cut and Limine tests and every suite-NAME and ext4-NAME
+        description: Tests to run, comma-separated, as suite-test (powercut-pacman, powercut-keep, powercut-varlib, powercut-rootmove, replay-pacman, replay-install, replay-keep, replay-switch, replay-varlib, replay-rootmove, replay-uncounted, limine-keep, boot-counting, ...), suite-NAME for a suite with an image of its own on btrfs (suite-nvidia, suite-selfupgrade, ...) and ext4-NAME for it on ext4; empty runs the power-cut and Limine tests and every suite-NAME and ext4-NAME
         default: ""
       repeat:
         description: How many times to run each test job, side by side, to catch an intermittent failure

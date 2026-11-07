@@ -166,7 +166,7 @@ fn a_switch_gives_the_current_entry_its_tries_and_shares_one_image_until_the_ini
     );
     let loader = fs::read_to_string(machine.esp().join("loader/loader.conf")).unwrap_or_default();
     checks.check(
-        loader.contains("preferred archix-*\n") && loader.contains("default archix-current.conf\n"),
+        loader.contains("preferred archix-*\n") && loader.contains("default archix-current[.~]*\n"),
         format_args!("loader.conf prefers archix's entries in sort-key order: {loader}"),
     );
     checks.eq(
@@ -1498,7 +1498,7 @@ fn a_loader_conf_a_cut_left_empty_is_written_again_at_boot_and_by_the_next_switc
     setup.ok_env(&[COUNTING], &["switch", "--noconfirm"]);
     let conf = machine.esp().join("loader/loader.conf");
     let written = fs::read_to_string(&conf).unwrap();
-    assert!(written.contains("default archix-current.conf\n"), "{written}");
+    assert!(written.contains("default archix-current[.~]*\n"), "{written}");
     // What reordered writes leave of a rename over loader.conf's FAT name.
     fs::write(&conf, "").unwrap();
     let status = setup.ok_env(&[COUNTING], &["status"]);
@@ -1519,7 +1519,7 @@ fn a_loader_conf_a_cut_left_empty_is_written_again_at_boot_and_by_the_next_switc
     let now = fs::read_to_string(&conf).unwrap();
     assert!(
         now.contains("timeout 3\n")
-            && now.contains("default archix-current.conf\n")
+            && now.contains("default archix-current[.~]*\n")
             && now.contains("preferred archix-*\n"),
         "the next switch points it at archix's entries again, keeping the user's lines: {now}"
     );

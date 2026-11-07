@@ -553,6 +553,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
             let image = super::menu::Image {
                 name,
                 version: version.clone(),
+                versioned_names: true,
             };
             match suffix.is_empty() {
                 true => images.main = Some(image),
@@ -1137,12 +1138,25 @@ pub fn recorded_uki(text: &str) -> Option<&str> {
         })
 }
 
-/// The id systemd-boot reports for an entry file: its name without the boot counters.
+/// The entry an entry file's name, or the id systemd-boot reports for it, stands for: without the boot counters (+1-1) or the version an uncounted name carries (~3).
 pub fn entry_id(name: &str) -> String {
-    match name.split_once('+') {
-        Some((stem, _)) => format!("{stem}.conf"),
-        None => name.to_string(),
+    if let Some((stem, _)) = name.split_once('+') {
+        return format!("{stem}.conf");
     }
+    match name.strip_suffix(".conf").and_then(|stem| stem.rsplit_once('~')) {
+        Some((stem, version)) if !version.is_empty() && version.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{stem}.conf")
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// The version of an uncounted entry file's name, archix-current~3.conf's 3; 0 for one without.
+pub fn entry_version(name: &str) -> u32 {
+    name.strip_suffix(".conf")
+        .and_then(|stem| stem.rsplit_once('~'))
+        .and_then(|(_, version)| version.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Whether the entry systemd-boot reports by `id` is still what archix recorded writing.
@@ -1154,6 +1168,10 @@ fn entry_unchanged(paths: &Paths, id: &str) -> bool {
         return false;
     };
     let dir = entries_dir(Path::new(esp.trim()));
+    // An uncounted id is the file's own name, which a cut can leave beside another version of the entry.
+    if let Ok(text) = fs::read(dir.join(id)) {
+        return text == record;
+    }
     fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -1233,6 +1251,24 @@ pub fn mount_efivars() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_entry_id_drops_boot_counters_and_a_version_alike() {
+        use super::entry_id;
+        assert_eq!(entry_id("archix-current+1-1.conf"), "archix-current.conf");
+        assert_eq!(entry_id("archix-current~3.conf"), "archix-current.conf");
+        assert_eq!(
+            entry_id("archix-current-protected~12.conf"),
+            "archix-current-protected.conf"
+        );
+        assert_eq!(entry_id("archix-snapshot-4~1.conf"), "archix-snapshot-4.conf");
+        assert_eq!(entry_id("archix-current.conf"), "archix-current.conf");
+        assert_eq!(
+            entry_id("arch~linux.conf"),
+            "arch~linux.conf",
+            "only digits make a version"
+        );
+    }
 
     #[test]
     fn counted_images_reboot_after_a_panic_unless_the_command_line_says_otherwise() {

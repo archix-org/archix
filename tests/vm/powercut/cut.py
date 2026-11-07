@@ -128,7 +128,7 @@ def unfinished_on_root():
     return {"present": True, "absent": False}.get(text.strip().splitlines()[-1] if text.strip() else "", None)
 
 
-def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=None, compare=True):
+def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=None, compare=True, image_pending=False):
     """What's inconsistent on the booted system: archix status, the snapshot store, the menu's images, the boot state, pacman's database and files against the baseline, db.lck (present only if lock), the unfinished mark in the booted root (only if mark) and on @ (mark_on_root, unless None); snapshot must exist (its entry goes once a boot is blessed, as it's no longer the slot)."""
     global last
     found = []
@@ -142,7 +142,7 @@ def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=
     missing = out(f"cd {ENTRIES} && for f in archix-*.conf; do awk '$1 == \"uki\" || $1 == \"efi\" {{ print $2 }}' $f | while read -r image; do [ -f \"/efi$image\" ] || echo \"$f -> $image\"; done; done")
     if missing.strip():
         found.append(f"entries start images that aren't there: {missing.strip()}")
-    ids = [re.sub(r"\+[0-9-]+\.conf$", ".conf", name) for name in common.entries()]
+    ids = [common.entry_id(name) for name in common.entries()]
     twice = sorted({i for i in ids if ids.count(i) > 1})
     if twice:
         found.append(f"entries on the ESP under two names: {twice} in {common.entries()}")
@@ -151,7 +151,8 @@ def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=
         main = ((state.get("current") or {}).get("main") or {}).get("name")
         # A try boot can't see the image the current root built and recorded before a cut kept it from the ESP; back_to checks again after the keep.
         # Nor does it count on a boot from a non-archix entry, as a cut in the first switch's boot step leaves one: no entry starts that image, and the next switch writes the step again.
-        if state and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")) and not common.ok("[ -s /run/archix/try ]") and common.selected().startswith("archix-"):
+        # Nor where the caller judges it, as an uncounted boot that a cut between recording the image and copying it leaves on the old entry.
+        if state and not image_pending and (not main or not common.ok(f"[ -f /efi/EFI/archix/{main} ]")) and not common.ok("[ -s /run/archix/try ]") and common.selected().startswith("archix-"):
             found.append(f"the boot state's current image {main} isn't on the ESP")
     except ValueError as e:
         found.append(f"the boot state doesn't parse: {e}")
@@ -182,7 +183,7 @@ def problems(snapshot=None, packages=True, lock=False, mark=False, mark_on_root=
         found.append(f"db.lck is {'present' if held else 'absent'} on the booted root; expected {'present' if lock else 'absent'}")
     marked = common.ok(f"[ -e /{MARK} ]")
     counts.append(f"mark={'present' if marked else 'absent'}")
-    if marked != mark:
+    if mark is not None and marked != mark:
         found.append(f"the unfinished mark is {'present' if marked else 'absent'} on the booted root; expected {'present' if mark else 'absent'}")
     if mark_on_root is not None:
         on_root = unfinished_on_root()

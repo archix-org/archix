@@ -22,7 +22,7 @@ def run(m, t):
         t.check(ok("ls /efi/EFI/archix/*.efi"), f"and its image: {out('ls /efi/EFI/archix')}")
         t.check(ok("[ -f /efi/loader/entries/archix-rescue.conf ]"), "and the rescue entry")
         text = loader()
-        t.check(has_line(text, "preferred archix-*") and has_line(text, "default archix-current.conf"), f"loader.conf should prefer archix's entries in sort-key order: {text}")
+        t.check(has_line(text, "preferred archix-*") and has_line(text, "default archix-current[.~]*"), f"loader.conf should prefer archix's entries in sort-key order: {text}")
         # LoaderConfigTimeout, not loader.conf: no test waits on the menu.
         m.succeed("bootctl set-timeout 0")
         m.reboot()

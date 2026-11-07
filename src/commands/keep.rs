@@ -142,6 +142,7 @@ fn kept_images(
             main: Some(menu::Image {
                 name: name.clone(),
                 version,
+                versioned_names: state.versioned.contains(name),
             }),
             extras: Vec::new(),
         });
@@ -396,7 +397,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
         let dir = menu::dir(&paths);
         let updated = menu::load(&dir).and_then(|mut state| {
             if let Some(main) = &previous.current.main {
-                state.snapshots.insert(replaced, main.name.clone());
+                state.boots(replaced, main);
             }
             state.current = images;
             menu::save(&dir, &state)?;

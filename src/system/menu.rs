@@ -17,6 +17,8 @@ const CURRENT_STEM: &str = "archix-current";
 const SNAPSHOT_STEM: &str = "archix-snapshot-";
 /// loader.conf's `preferred`: systemd-boot starts the first entry in sort-key order that matches and still has tries.
 pub const PREFERRED: &str = "archix-*";
+/// loader.conf's `default`: the current system's entry under any name, archix-current.conf or archix-current~3.conf, but not archix-current-protected.conf.
+pub const DEFAULT: &str = "archix-current[.~]*";
 /// Where the shared boot images live on the ESP, outside EFI/Linux so systemd-boot lists them only through entries.
 pub const IMAGES: &str = "EFI/archix";
 const STATE: &str = "state.json";
@@ -67,6 +69,9 @@ pub struct Image {
     pub name: String,
     /// The kernel release it starts.
     pub version: String,
+    /// Its initramfs maps an entry name with a version (archix-snapshot-3~2.conf) to its entry; an older archix's took one for no snapshot and booted the current root.
+    #[serde(default)]
+    pub versioned_names: bool,
 }
 
 /// The images of the current system: the main one, then each extra one with the suffix and title of its entry.
@@ -99,6 +104,19 @@ pub struct State {
     /// The units that had failed at the last boot that counted as good, which the health check allows.
     #[serde(default)]
     pub blessed_failed_units: Vec<String>,
+    /// The images among `snapshots` whose initramfs maps versioned entry names, as `Image::versioned_names` says.
+    #[serde(default)]
+    pub versioned: BTreeSet<String>,
+}
+
+impl State {
+    /// Records that snapshot `number` boots `image`.
+    pub fn boots(&mut self, number: u32, image: &Image) {
+        self.snapshots.insert(number, image.name.clone());
+        if image.versioned_names {
+            self.versioned.insert(image.name.clone());
+        }
+    }
 }
 
 /// Where the menu's state and entry records are: @archix's boot directory when `root`/.archix is a subvolume of its own, else the archix state's.
@@ -138,10 +156,12 @@ pub fn load(dir: &Path) -> Result<State> {
 }
 
 pub fn save(dir: &Path, state: &State) -> Result<()> {
-    let state = State {
+    let mut state = State {
         format: FORMAT,
         ..state.clone()
     };
+    let booted: BTreeSet<String> = state.snapshots.values().cloned().collect();
+    state.versioned.retain(|image| booted.contains(image));
     crate::durable::write(&dir.join(STATE), serde_json::to_string_pretty(&state)?.as_bytes())
 }
 
@@ -154,8 +174,8 @@ pub fn snapshot_taken(paths: &Paths, number: u32) -> Result<()> {
 }
 
 fn taken(state: &mut State, number: u32) {
-    if let Some(image) = &state.current.main {
-        state.snapshots.insert(number, image.name.clone());
+    if let Some(image) = state.current.main.clone() {
+        state.boots(number, &image);
     }
     if state.slot.is_none() || state.armed {
         state.slot = Some(number);
@@ -180,6 +200,8 @@ pub struct Planned {
     pub title: String,
     pub sort_key: String,
     pub version: String,
+    /// Its file may get a versioned name: an older initramfs takes one for the current system, which only a snapshot's entry mustn't boot.
+    pub versioned: bool,
 }
 
 /// The sort keys: the current system first, then the slot, then the other snapshots newest first (by version), then the current system's extra images; the rescue entry's comes after them all.
@@ -232,6 +254,7 @@ pub fn plan(state: &State, records: &[Record], cap: u32) -> Vec<Planned> {
             title: "Arch Linux (archix)".to_string(),
             sort_key: SORT_CURRENT.to_string(),
             version: main.version.clone(),
+            versioned: true,
         });
     }
     let mut snapshots: Vec<u32> = with_entries(state, records, cap);
@@ -248,6 +271,7 @@ pub fn plan(state: &State, records: &[Record], cap: u32) -> Vec<Planned> {
                 false => SORT_SNAPSHOT.to_string(),
             },
             version: number.to_string(),
+            versioned: state.versioned.contains(&state.snapshots[&number]),
         });
     }
     for (suffix, title, image) in &state.current.extras {
@@ -257,6 +281,7 @@ pub fn plan(state: &State, records: &[Record], cap: u32) -> Vec<Planned> {
             title: title.clone(),
             sort_key: SORT_EXTRA.to_string(),
             version: image.version.clone(),
+            versioned: true,
         });
     }
     planned
@@ -339,7 +364,7 @@ pub fn drop_second_names(esp: &Path, booted: Option<&str>) -> Result<Vec<String>
         let Some(keep) = booted
             .and_then(|booted| whole.iter().find(|name| ***name == booted))
             .or_else(|| whole.iter().find(|name| name.contains('+')))
-            .or_else(|| whole.first())
+            .or_else(|| whole.iter().max_by_key(|name| boot::entry_version(name)))
             .map(|name| name.to_string())
         else {
             eprintln!(
@@ -381,6 +406,7 @@ fn file_name(planned: &Planned, existing: Option<&String>, counted: bool, tries:
     };
     match (&planned.entry, existing) {
         (Entry::Current, _) if reset => fresh(tries),
+        (Entry::Extra(_), Some(name)) if !name.contains('+') => name.clone(),
         (Entry::Extra(_), _) => id.clone(),
         (_, Some(name)) if counted || !name.contains('+') => name.clone(),
         (Entry::Current, _) => fresh(tries),
@@ -485,6 +511,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
             name = match alternate(&name) {
                 Some(other) => other,
                 None if counted && tries > 0 => format!("{stem}+{tries}.conf"),
+                None if planned.versioned => format!("{stem}~{}.conf", boot::entry_version(&name) + 1),
                 None => {
                     in_place.push(name.clone());
                     name
@@ -501,7 +528,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     if !changed.is_empty() {
         crate::durable::sync_esp(esp)?;
     }
-    // Only with counting off has an entry no second name; its old file goes first, leaving that entry briefly unbootable rather than renamed over.
+    // Only a snapshot entry whose image an older archix built has no second name; its old file goes first, leaving that entry briefly unbootable rather than renamed over.
     for name in &in_place {
         fs::remove_file(entries.join(name)).with_context(|| format!("removing {name}"))?;
     }
@@ -532,7 +559,7 @@ pub fn write(how: &Write, planned: &[Planned]) -> Result<()> {
     if planned.is_empty() {
         return Ok(());
     }
-    boot::point_loader(esp, PREFERRED, CURRENT, how.signed, Some(&loader_copy(how.dir)))
+    boot::point_loader(esp, PREFERRED, DEFAULT, how.signed, Some(&loader_copy(how.dir)))
 }
 
 /// Takes the snapshot entries whose image is neither on the ESP nor in `built` out of `planned`, as after a cut between recording a new image and copying it, when a try boot or keep refreshes the menu from another root; returns them. The current system's and the fallback slot's entries stay: the slot's missing image fails the refresh here, naming it, as a menu without it would leave a broken boot nowhere to fall back to.
@@ -658,7 +685,7 @@ fn loader_points_here(esp: &Path) -> bool {
         text.lines()
             .any(|line| line.split_whitespace().collect::<Vec<_>>() == [key, value])
     };
-    has("default", CURRENT) && has("preferred", PREFERRED)
+    has("default", DEFAULT) && has("preferred", PREFERRED)
 }
 
 /// At boot: writes loader.conf's lines again when the current entry is on the ESP but loader.conf doesn't name it, as a cut while it was written over leaves it, so the next boot is archix's and counted; returns whether it did.
@@ -674,7 +701,7 @@ pub fn repair_loader(paths: &Paths, plan: &BootPlan) -> Result<bool> {
         return Ok(false);
     }
     let signed = plan.secure_boot.unwrap_or_else(boot::sbctl_has_keys);
-    boot::point_loader(esp, PREFERRED, CURRENT, signed, Some(&copy))?;
+    boot::point_loader(esp, PREFERRED, DEFAULT, signed, Some(&copy))?;
     Ok(true)
 }
 
@@ -830,6 +857,7 @@ mod tests {
                 main: Some(Image {
                     name: "a.efi".into(),
                     version: "1".into(),
+                    versioned_names: true,
                 }),
                 extras: Vec::new(),
             },
@@ -843,7 +871,7 @@ mod tests {
         assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("loader.conf")));
         fs::write(
             esp.join("loader/loader.conf"),
-            "timeout 3\ndefault archix-current.conf\npreferred archix-*\n",
+            "timeout 3\ndefault archix-current[.~]*\npreferred archix-*\n",
         )
         .unwrap();
         assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("rescue")));
@@ -877,6 +905,7 @@ mod tests {
         Image {
             name: name.to_string(),
             version: "6.17.1-arch1-1".to_string(),
+            versioned_names: true,
         }
     }
 
@@ -992,6 +1021,7 @@ mod tests {
             title: "t".into(),
             sort_key: SORT_SNAPSHOT.into(),
             version: "1".into(),
+            versioned: true,
         }
     }
 
@@ -1099,7 +1129,7 @@ mod tests {
         let loader = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
         assert!(loader.contains("timeout 3"), "{loader}");
         assert!(
-            loader.contains("preferred archix-*\n") && loader.contains("default archix-current.conf\n"),
+            loader.contains("preferred archix-*\n") && loader.contains("default archix-current[.~]*\n"),
             "{loader}"
         );
         assert!(!loader.contains("windows"), "{loader}");
@@ -1423,5 +1453,171 @@ mod tests {
             planned.iter().any(|p| p.entry == Entry::Snapshot(4)),
             "the slot's entry stays planned"
         );
+    }
+
+    fn entry_names(esp: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(esp.join("loader/entries"))
+            .unwrap()
+            .map(|f| f.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn versioned_names_map_to_the_entry_their_version_is_stripped_from() {
+        assert_eq!(Entry::parse("archix-current~3.conf"), Some(Entry::Current));
+        assert_eq!(
+            Entry::parse("archix-current-protected~2.conf"),
+            Some(Entry::Extra("protected".into()))
+        );
+        assert_eq!(Entry::parse("archix-snapshot-12~1.conf"), Some(Entry::Snapshot(12)));
+        for other in [
+            "archix-current~.conf",
+            "archix-current~x.conf",
+            "archix-snapshot-~1.conf",
+        ] {
+            assert_eq!(Entry::parse(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn with_counting_off_a_changed_entry_gets_the_next_version_unless_an_older_initramfs_boots_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (esp, dir) = (tmp.path().join("esp"), tmp.path().join("state"));
+        fs::create_dir_all(esp.join(IMAGES)).unwrap();
+        for image in ["a.efi", "b.efi", "c.efi"] {
+            fs::write(esp.join(IMAGES).join(image), image).unwrap();
+        }
+        let how = Write {
+            esp: &esp,
+            dir: &dir,
+            counted: false,
+            tries: 0,
+            reset: false,
+            signed: false,
+        };
+        let current = |image: &str| Planned {
+            sort_key: SORT_CURRENT.into(),
+            ..planned(Entry::Current, image)
+        };
+        let extra = |image: &str| Planned {
+            sort_key: SORT_EXTRA.into(),
+            ..planned(Entry::Extra("protected".into()), image)
+        };
+        let snapshot = |n: u32, title: &str, versioned: bool| Planned {
+            title: title.into(),
+            versioned,
+            ..planned(Entry::Snapshot(n), "a.efi")
+        };
+        write(
+            &how,
+            &[
+                current("a.efi"),
+                extra("a.efi"),
+                snapshot(1, "t", true),
+                snapshot(2, "t", false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            entry_names(&esp),
+            [
+                "archix-current-protected.conf",
+                "archix-current.conf",
+                "archix-snapshot-1.conf",
+                "archix-snapshot-2.conf"
+            ]
+        );
+        write(
+            &how,
+            &[
+                current("b.efi"),
+                extra("b.efi"),
+                snapshot(1, "label", true),
+                snapshot(2, "label", false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            entry_names(&esp),
+            [
+                "archix-current-protected~1.conf",
+                "archix-current~1.conf",
+                "archix-snapshot-1~1.conf",
+                "archix-snapshot-2.conf"
+            ],
+            "snapshot 2's image is an older archix's, whose initramfs would boot the current root for a versioned name"
+        );
+        assert!(
+            fs::read_to_string(esp.join("loader/entries/archix-snapshot-2.conf"))
+                .unwrap()
+                .contains("title label\n")
+        );
+        write(
+            &how,
+            &[
+                current("c.efi"),
+                extra("b.efi"),
+                snapshot(1, "label", true),
+                snapshot(2, "label", false),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            entry_names(&esp),
+            [
+                "archix-current-protected~1.conf",
+                "archix-current~2.conf",
+                "archix-snapshot-1~1.conf",
+                "archix-snapshot-2.conf"
+            ]
+        );
+        let loader = fs::read_to_string(esp.join("loader/loader.conf")).unwrap();
+        assert!(loader.contains("default archix-current[.~]*\n"), "{loader}");
+        assert!(loader_points_here(&esp));
+    }
+
+    #[test]
+    fn of_two_versions_of_one_entry_the_newer_whole_one_stays_unless_the_other_booted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let esp = tmp.path();
+        let entries = esp.join("loader/entries");
+        fs::create_dir_all(&entries).unwrap();
+        let text = whole(esp);
+        for name in ["archix-current~9.conf", "archix-current~10.conf"] {
+            fs::write(entries.join(name), &text).unwrap();
+        }
+        assert_eq!(drop_second_names(esp, None).unwrap(), ["archix-current~9.conf"]);
+        fs::write(entries.join("archix-current~9.conf"), &text).unwrap();
+        assert_eq!(
+            drop_second_names(esp, Some("archix-current~9.conf")).unwrap(),
+            ["archix-current~10.conf"]
+        );
+    }
+
+    #[test]
+    fn a_snapshot_boots_with_versioned_names_only_when_its_image_maps_them() {
+        let mut state = State {
+            current: Images {
+                main: Some(Image {
+                    versioned_names: false,
+                    ..image("old.efi")
+                }),
+                extras: Vec::new(),
+            },
+            ..Default::default()
+        };
+        taken(&mut state, 1);
+        state.current.main = Some(image("new.efi"));
+        taken(&mut state, 2);
+        let records = vec![record(1, Kind::Switch), record(2, Kind::Switch)];
+        let versioned: Vec<(Entry, bool)> = plan(&state, &records, 5)
+            .into_iter()
+            .map(|p| (p.entry, p.versioned))
+            .collect();
+        assert!(versioned.contains(&(Entry::Snapshot(1), false)), "{versioned:?}");
+        assert!(versioned.contains(&(Entry::Snapshot(2), true)), "{versioned:?}");
+        assert!(versioned.contains(&(Entry::Current, true)), "{versioned:?}");
     }
 }

@@ -45,10 +45,18 @@ def entries():
     return out(f"ls {ENTRIES} | grep '^archix-' || true").split()
 
 
-def entry(name):
-    """The file of entry id name (archix-snapshot-3.conf), whatever its counters, or None."""
+def entry_id(name):
+    """What boot::entry_id makes of an entry file's name: without its counters (+1-1) or the version an uncounted one carries (~3)."""
     stem = name.removesuffix(".conf")
-    return next((f for f in entries() if f == name or f.startswith(stem + "+")), None)
+    if "+" in stem:
+        return stem.split("+", 1)[0] + ".conf"
+    base, _, version = stem.rpartition("~")
+    return base + ".conf" if base and version.isdigit() else name
+
+
+def entry(name):
+    """The file of entry id name (archix-snapshot-3.conf), whatever its counters or version, or None."""
+    return next((f for f in entries() if entry_id(f) == name), None)
 
 
 def counts_tries(name, tries):
@@ -58,7 +66,8 @@ def counts_tries(name, tries):
 
 
 def selected():
-    return out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
+    """The entry id systemd-boot started this boot from, an uncounted entry's version left out as its counters are."""
+    return entry_id(out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip())
 
 
 def trying():

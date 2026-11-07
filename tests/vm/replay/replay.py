@@ -200,7 +200,7 @@ class Scenario:
 
     def esp_detail(self, key):
         """Each name of the ESP file key with its size, whether it reads, and its first bytes."""
-        text = out(f"cd /efi && for f in {shlex.quote(key)} {shlex.quote(key.removesuffix('.conf'))}+*.conf; do [ -f \"$f\" ] || continue; if cat \"$f\" > /dev/null 2>&1; then r=reads; else r=unreadable; fi; echo \"$f size=$(stat -c %s \"$f\") $r: $(head -c 200 \"$f\" 2>/dev/null | tr -c '[:print:]' '.')\"; done")
+        text = out(f"cd /efi && for f in {shlex.quote(key)} {shlex.quote(key.removesuffix('.conf'))}+*.conf {shlex.quote(key.removesuffix('.conf'))}~*.conf; do [ -f \"$f\" ] || continue; if cat \"$f\" > /dev/null 2>&1; then r=reads; else r=unreadable; fi; echo \"$f size=$(stat -c %s \"$f\") $r: $(head -c 200 \"$f\" 2>/dev/null | tr -c '[:print:]' '.')\"; done")
         return text.strip()[:600]
 
     def peek(self):
@@ -234,13 +234,13 @@ class Scenario:
         else:
             lock = held if locked else False
         laid_out = common.ok("mountpoint -q /.archix")
-        found += cut.problems(packages=False, lock=lock, mark=False, mark_on_root=(tried is not None) if laid_out else None)
+        found += cut.problems(packages=False, lock=lock, mark=None if spec.mark_any else False, mark_on_root=None if spec.mark_any or not laid_out else (tried is not None), image_pending=spec.mark_any)
         seen = self.peek()
         if seen is None:
             found.append("couldn't mount the top level read-only to see @'s mark")
         else:
             verdict["mark"] = "present" if seen["mark"] else "absent"
-        if tried is None and seen and seen["mark"]:
+        if tried is None and seen and seen["mark"] and not spec.mark_any:
             found.append("the current system booted with @ marked unfinished; its health check: " + " | ".join(out("journalctl -b -u archix-health-check.service -u archix-unblessed.service -u systemd-bless-boot.service --no-pager -o cat 2>&1 | tail -12; systemctl list-dependencies --plain --no-pager boot-complete.target 2>&1 | head -12; systemctl is-enabled archix-health-check.service 2>&1; ls -la /etc/systemd/system/archix-health-check.service /etc/systemd/system/boot-complete.target.requires 2>&1").split("\n"))[:1500])
         if tried is not None and not spec.fallback:
             found.append(f"the boot fell back to snapshot {tried}, a try boot")
@@ -603,12 +603,12 @@ def config_repository():
 def pointed(data):
     """loader.conf as boot::point_loader leaves data: its default and preferred lines replaced by archix's."""
     lines = [line for line in data.decode(errors="replace").splitlines() if (line.split() or [""])[0] not in ("default", "preferred")]
-    return ("\n".join(lines + ["default archix-current.conf", "preferred archix-*"]) + "\n").encode()
+    return ("\n".join(lines + ["default archix-current[.~]*", "preferred archix-*"]) + "\n").encode()
 
 
 def esp_key(path):
-    """An ESP file's path, an entry's boot counter left out."""
-    return re.sub(r"\+\d+(-\d+)?(\.conf)$", r"\2", path)
+    """An ESP file's path, an entry's boot counter or version left out."""
+    return re.sub(r"(\+\d+(-\d+)?|~\d+)(\.conf)$", r"\3", path)
 
 
 def window_range(entries, start, end):
@@ -713,8 +713,8 @@ def package_diff(state, baselines):
 class Spec:
     """What a test allows: fallback, whether a try boot is right for a root marked unfinished; identify(scenario, state, tried), which baseline the booted system is, or None; extra(), the test's own problems with the booted system; held, the driver's marks around the command that runs pacman, which holds db.lck from the first until the flush after the second; sample, ([(start, end), ...], n) for a test too long to check whole: every point from mark start (None: the log's start) through the flush after mark end, every nth elsewhere."""
 
-    def __init__(self, identify, fallback, extra=lambda: [], held=None, sample=None):
-        self.identify, self.fallback, self.extra, self.held, self.sample = identify, fallback, extra, held, sample
+    def __init__(self, identify, fallback, extra=lambda: [], held=None, sample=None, mark_any=False):
+        self.identify, self.fallback, self.extra, self.held, self.sample, self.mark_any = identify, fallback, extra, held, sample, mark_any
 
 
 def by_packages(scenario, state, tried):

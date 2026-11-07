@@ -79,6 +79,7 @@ mod tests {
                 title: "Arch Linux (archix)".into(),
                 sort_key: super::super::menu::SORT_CURRENT.into(),
                 version: "6.17".into(),
+                versioned: true,
             },
             Planned {
                 entry: Entry::Snapshot(4),
@@ -86,6 +87,7 @@ mod tests {
                 title: "archix snapshot 4, read-only: it's old".into(),
                 sort_key: super::super::menu::SORT_SLOT.into(),
                 version: "4".into(),
+                versioned: true,
             },
         ];
         let text = menu(&planned, "AB12-CD34", "root=UUID=x rw ");
