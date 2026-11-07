@@ -290,10 +290,11 @@ impl Machine {
             Machine::mounts_under(&self.root).is_empty(),
             "the old root is still mounted"
         );
+        // uuid=off: on an ext4 lower, as in the test VM, an upper a keep moved into another subvolume fails overlay's origin check with ESTALE.
         sh(&format!(
             r#"r={root}; t={template}; d="$(findmnt -n -o SOURCE {top} | cut -d'[' -f1)"
             mount -o subvol=/@ "$d" $r; mount -o subvol=/@archix "$d" $r/.archix; mount -o subvol=/@varlib "$d" $r/var/lib
-            mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work" "$r/usr"
+            mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work,uuid=off,index=off" "$r/usr"
             mount --bind -o ro "$t/target" "$r/target"
             for d in var/cache/archix var/cache/pacman/pkg; do mount --bind "/$d" "$r/$d"; done
             mount -t proc proc "$r/proc"; mount --rbind /dev "$r/dev""#,
@@ -309,7 +310,7 @@ impl Machine {
             false => r#"cp -al "$t/usr" "$r/usr"; cp -al "$t/target" "$r/target""#,
             true => {
                 r#"mkdir -p "$r/usr" "$r/target" "$r/.usr-upper" "$r/.usr-work"
-                mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work" "$r/usr"
+                mount -t overlay overlay -o "lowerdir=$t/usr,upperdir=$r/.usr-upper,workdir=$r/.usr-work,uuid=off,index=off" "$r/usr"
                 mount --bind -o ro "$t/target" "$r/target""#
             }
         };

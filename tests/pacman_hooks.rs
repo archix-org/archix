@@ -131,7 +131,8 @@ fn a_plain_pacman_run_takes_a_snapshot_of_the_root_before_it_with_pacmans_lock_i
     let checks = Checks::default();
     let packages = Packages::new();
     packages.build("archix-test-synced", "");
-    let setup = on_btrfs("2G", "rollback = { enable = true }, drift = \"keep\"");
+    // Room past the 1 GiB keep reserve under the test VM's kernel, whose btrfs leaves less free on a small disk than the host's did.
+    let setup = on_btrfs("3G", "rollback = { enable = true }, drift = \"keep\"");
     let machine = &setup.machine;
     setup.ok(&["switch", "--noconfirm"]);
     let before = snapshots(machine).len();
@@ -1175,7 +1176,7 @@ fn pacman_removing_archix_takes_its_integration_off_and_hands_the_esp_to_plain_s
         &format!("install -Dm755 {binary} \"$pkgdir{binary}\"; install -Dm755 {binary} \"$pkgdir/usr/lib/archix/archix-static\""),
     );
     let setup = on_btrfs(
-        "3G",
+        "4G",
         "rollback = { enable = true }, drift = \"keep\", ignored_packages = { \"archix\" }",
     );
     let machine = &setup.machine;

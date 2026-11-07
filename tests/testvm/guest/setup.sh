@@ -4,7 +4,6 @@ set -euo pipefail
 r=$1
 echo "LABEL=archix-testvm / ext4 rw,noatime 0 1" > "$r/etc/fstab"
 : > "$r/etc/machine-id"
-echo archix-testvm > "$r/etc/hostname"
 rm -f "$r/etc/resolv.conf" && ln -s /run/systemd/resolve/stub-resolv.conf "$r/etc/resolv.conf"
 printf '[Match]\nName=en*\n\n[Network]\nDHCP=yes\n' > "$r/etc/systemd/network/20-wired.network"
 install -Dm755 /guest/run "$r/usr/lib/archix-testvm/run"

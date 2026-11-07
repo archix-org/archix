@@ -3,6 +3,8 @@
 ctl=/run/testvm
 mkdir -p "$ctl"
 mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 ctl "$ctl" || { echo "archix-testvm: no control share" > /dev/hvc0; poweroff -f; }
+# The job starts once the boot is done, as the tests expect a system that reached its default target.
+until state=$(systemctl is-system-running 2> /dev/null); [ "$state" = running ] || [ "$state" = degraded ]; do sleep 1; done
 (
   set -a
   [ ! -f "$ctl/env" ] || . "$ctl/env"
