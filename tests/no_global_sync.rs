@@ -32,7 +32,9 @@ fn nothing_on_the_host_calls_a_global_sync() {
         let Ok(text) = fs::read_to_string(&path) else { continue };
         let name = path.file_name().unwrap().to_string_lossy();
         // These run inside a test VM, where a sync only flushes the VM's own disks.
-        let in_vm = name == "vmtest.sh";
+        let in_vm = name == "vmtest.sh"
+            || path.components().any(|part| part.as_os_str() == "guest")
+                && path.to_string_lossy().contains("tests/testvm/");
         for (number, line) in text.lines().enumerate() {
             let rust = path.extension().is_some_and(|ext| ext == "rs") && line.contains(rust_sync);
             let shell = !in_vm && path.extension().is_none_or(|ext| ext == "sh") && bare_sync(line);

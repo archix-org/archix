@@ -122,11 +122,18 @@ fi
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}
 loader=systemd-boot
 [ "$suite" != limine ] || loader=limine
-docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e LOADER="$loader" archix-arch-test /vm/build-image.sh
+# The images are built in a test VM (tests/testvm), which reaches the host's 127.0.0.1 as 10.0.2.2, as the test VMs do.
+build_image() {
+  local image_env=(--env SUITE="$suite" --env FS="${FS:-ext4}" --env TO_DATE="${TO_DATE:-}" --env LOADER="$loader")
+  [ -n "$split" ] || image_env+=(--env IMAGE_DIR="/vm/$suite")
+  "$root/tests/testvm/run.sh" --share "work=$work" --mount 9p work /work rw --share "vm=$root/tests/vm:ro" --mount 9p vm /vm ro \
+    "${image_env[@]}" --env ARCHIVE="${archive/127.0.0.1/10.0.2.2}" --env VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" "$@" -- /vm/build-image.sh
+}
+build_image
 # The power-cut and replay tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
 if [ "$suite" = powercut ] || [ "$suite" = replay ]; then
   [[ " ${pending[*]} " != *" $suite-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
-  [[ " ${pending[*]} " != *" $suite-rootmove "* ]] || docker run --rm --privileged --network host "${mounts[@]}" -e ARCHIVE="$archive" -e VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" -e IMG=/work/top.img -e ROOT_AT_TOP=1 archix-arch-test /vm/build-image.sh
+  [[ " ${pending[*]} " != *" $suite-rootmove "* ]] || build_image --env IMG=/work/top.img --env ROOT_AT_TOP=1
 fi
 tty=() args=()
 [ -z "$interactive" ] || tty=(-it) args=(--interactive)

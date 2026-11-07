@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: checks.py; fails unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX, and its suite_tests each have a test.py and a cache key, with ci.yml's suites job naming only them, and its powercut and replay tests each a test.py and a cache key too.
+# Usage: checks.py; fails on any privileged container in tests/, scripts/ or .github/, and unless run.sh's boot tests each have a test.py and a cache key in cache.py, and ci.yml's boot groups run each exactly once, none larger than boot-results.sh's MAX, and its suite_tests each have a test.py and a cache key, with ci.yml's suites job naming only them, and its powercut and replay tests each a test.py and a cache key too.
 import json
 import re
 import sys
@@ -67,10 +67,31 @@ def split_problems():
     return found
 
 
+# Spelled in two pieces so this file doesn't match itself.
+PRIVILEGED = "--" + "privileged"
+
+
+def privileged_problems():
+    """Every privileged container in the test runners, scripts and CI: a privileged container sees the host's devices, as one arming the host's watchdog did."""
+    found = []
+    for top in ("tests", "scripts", ".github", "Makefile"):
+        base = ROOT / top
+        files = [base] if base.is_file() else sorted(p for p in base.rglob("*") if p.is_file()) if base.is_dir() else []
+        for path in files:
+            try:
+                text = path.read_text()
+            except (UnicodeDecodeError, OSError):
+                continue
+            for n, line in enumerate(text.splitlines(), 1):
+                if PRIVILEGED in line or re.search(r"privileged:\s*true", line):
+                    found.append(f"{path.relative_to(ROOT)}:{n}: a privileged container; run it in a test VM (tests/testvm) instead")
+    return found
+
+
 def main():
     tests = boot_tests()
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
-    found = problems(tests, ci, (ROOT / "tests/ci/boot-results.sh").read_text()) + suite_problems(listed("suite_tests"), listed("ext4_tests"), ci) + split_problems()
+    found = problems(tests, ci, (ROOT / "tests/ci/boot-results.sh").read_text()) + suite_problems(listed("suite_tests"), listed("ext4_tests"), ci) + split_problems() + privileged_problems()
     if found:
         print("\n".join(found))
         return 1

@@ -52,6 +52,8 @@ for attempt in 1 2 3; do pacstrap -C /tmp/pacstrap.conf -K /mnt "${packages[@]}"
 cp /tmp/pacman.conf /mnt/etc/pacman.conf
 cp /tmp/mirrorlist /mnt/etc/pacman.d/mirrorlist
 ! declare -F after_pacstrap > /dev/null || after_pacstrap
+# Defence in depth: the test systems' systemd never arms a hardware watchdog.
+mkdir -p /mnt/etc/systemd/system.conf.d && printf '[Manager]\nRuntimeWatchdogSec=0\nRebootWatchdogSec=0\nKExecWatchdogSec=0\n' > /mnt/etc/systemd/system.conf.d/archix-no-watchdog.conf
 # The filesystem package's resolv.conf is empty; the suites enable systemd-resolved, so point at its stub as an Arch install would.
 ln -sf /run/systemd/resolve/stub-resolv.conf /mnt/etc/resolv.conf
 if declare -F install_archix > /dev/null; then

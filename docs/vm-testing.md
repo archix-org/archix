@@ -2,6 +2,16 @@
 
 Read from nixpkgs `master` on 2026-10-27; paths are in nixpkgs.
 
+
+## Nothing runs privileged on the host
+
+No test runs a `--privileged` container: one sees the host's devices, and test containers' systemd armed the host's `/dev/watchdog0` and hard-reset it. `tests/vm/boot/checks.py` fails on one anywhere in `tests/`, `scripts/` or `.github/`. What needs root, loop devices, btrfs or systemd runs in a test VM instead (`tests/testvm/`): QEMU with `/dev/kvm` in a plain container, as the calling user, booting archix-arch-test's own tree directly with `-kernel`/`-initrd`.
+
+- `tests/testvm/image.sh` turns the archix-arch-test image into the VM's root without privileges: `docker export`, then `mke2fs -d` in a plain container, plus its kernel and an initramfs from `mkinitcpio`. It's cached in `~/.cache/archix-testvm` (`ARCHIX_TESTVM_CACHE`) by the image's id and `tests/testvm/guest/`.
+- `tests/testvm/run.sh` runs one job in a fresh VM: a throwaway overlay of that root, host directories over 9p (read-only ones as they are, writable ones with the guest's owners in xattrs, so the host's files stay the user's), qcow2 disks by serial, the job's output on its own console and its exit status returned. The host's 127.0.0.1 is the guest's 10.0.2.2, or 10.0.2.100 only (`--offline`). `ARCHIX_TESTVM_MEM` (12G) and `ARCHIX_TESTVM_CPUS` size it.
+- The VM suites' disk images: `tests/vm/build-image.sh` runs unchanged in a test VM, with `/work` and `/vm` shared. A builder VM rather than unprivileged tools (`mkfs.btrfs --rootdir`, mtools, `sgdisk` on a file), as the build needs root inside the new system: pacstrap with its hooks, `arch-chroot` for archix's update, `systemctl enable` and `mkinitcpio`, btrfs subvolumes, the Limine layout and the top-level image of the root move.
+- The container suite, `tests/arch/run.sh`: a VM builds into the checkout's build disk (`~/.cache/archix-testvm/disks/archix-target-<hash>.qcow2`, or `ARCHIX_TARGET_VOLUME`, a directory, over 9p), with the crate registry in `ARCHIX_CARGO_VOLUME` (default `~/.cache/archix-testvm/disks/cargo-registry`); the tests then run in one VM, or two with `--jobs 2`, each on a throwaway overlay of that disk. The heavy slots, the archive proxy and `--quick` are as before.
+
 ## What NixOS does
 
 | Practice | How | Where |

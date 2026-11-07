@@ -1,0 +1,29 @@
+#!/bin/bash
+# The test VM's job: mounts the host's control share, runs its job script with the output on the serial console, records the exit status there and powers off.
+ctl=/run/testvm
+mkdir -p "$ctl"
+mount -t 9p -o trans=virtio,version=9p2000.L,msize=524288 ctl "$ctl" || { echo "archix-testvm: no control share" > /dev/hvc0; poweroff -f; }
+(
+  set -a
+  [ ! -f "$ctl/env" ] || . "$ctl/env"
+  set +a
+  # Each line of mounts: kind (9p or disk), tag or serial, mount point, ro or rw.
+  while read -r kind name point mode; do
+    [ -n "$kind" ] || continue
+    mkdir -p "$point"
+    case $kind in
+      9p) mount -t 9p -o "trans=virtio,version=9p2000.L,msize=524288,cache=loose,$mode" "$name" "$point" ;;
+      disk)
+        dev=/dev/disk/by-id/virtio-$name
+        udevadm settle
+        blkid "$dev" > /dev/null 2>&1 || mkfs.ext4 -q -L "$name" "$dev"
+        mount -o "noatime,$mode" "$dev" "$point" ;;
+    esac || { echo "archix-testvm: couldn't mount $name at $point"; exit 1; }
+  done < "$ctl/mounts"
+  cd "${TESTVM_CWD:-/}"
+  bash "$ctl/job"
+) > /dev/hvc0 2>&1 < /dev/null
+status=$?
+echo "$status" > "$ctl/exit"
+sync
+poweroff -f

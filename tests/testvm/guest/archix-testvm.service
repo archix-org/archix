@@ -1,0 +1,9 @@
+[Unit]
+Description=archix test VM: the host's job
+Wants=network-online.target
+After=network-online.target systemd-resolved.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/archix-testvm/run
+StandardOutput=journal

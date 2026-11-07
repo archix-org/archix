@@ -60,7 +60,7 @@ jobs:
       - uses: ./.github/actions/vm-setup
         with:
           group: base
-          kvm: "false"
+          kvm: "true"
           need-gb: "10"
       - uses: ./.github/actions/build
       # The shards split every test cargo built, so a new test or test file can't fall outside them.
@@ -94,7 +94,7 @@ jobs:
       - uses: ./.github/actions/vm-setup
         with:
           group: base
-          kvm: "false"
+          kvm: "true"
           need-gb: "5"
       - uses: actions/download-artifact@v4
         with:
