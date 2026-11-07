@@ -955,7 +955,14 @@ fn lay_out_first(
     integration::write_all(paths, &integration::own_path()?, &|path: &Path| {
         Ok(root.join(path.strip_prefix("/").unwrap_or(path)))
     })?;
-    let failures = write_boot(paths, rollbacks, boot, &BTreeMap::new());
+    let mut failures = write_boot(paths, rollbacks, boot, &BTreeMap::new());
+    let dir = system::menu::dir(paths);
+    if let Err(e) = system::menu::load(&dir).and_then(|mut state| {
+        state.laid_out_check = boot.and_then(|plan| plan.health_check.clone());
+        system::menu::save(&dir, &state)
+    }) {
+        failures.push(format!("recording boot.health_check for the layout's boot: {e:#}"));
+    }
     println!(
         "{} wait: reboot, then run `archix switch` again, which takes a snapshot before them, so a boot they break falls back to it",
         count(packages, "package change", "package changes")

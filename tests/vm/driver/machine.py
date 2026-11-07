@@ -361,8 +361,11 @@ class Machine:
         self.new_boot("reset (system_reset)")
 
     def select_entry(self, name):
-        """Makes systemd-boot start entry name at the next boot only."""
-        self.succeed(f"bootctl set-oneshot {shlex.quote(name)}", what=f"bootctl set-oneshot {name}")
+        """Makes systemd-boot start entry name at the next boot only; an archix entry is named by its id (archix-current-linux-lts.conf), whose file may carry a version systemd-boot's id keeps (archix-current-linux-lts~2.conf)."""
+        listed = self.execute("ls /efi/loader/entries 2>/dev/null", 60, quiet=True)[1].split()
+        ids = {re.sub(r"\+[0-9-]+\.conf$", ".conf", f): f for f in listed if f.endswith(".conf")}
+        wanted = next((i for i in sorted(ids, key=lambda i: (len(i), i), reverse=True) if re.sub(r"~[0-9]+\.conf$", ".conf", i) == name), name)
+        self.succeed(f"bootctl set-oneshot {shlex.quote(wanted)}", what=f"bootctl set-oneshot {wanted}")
 
     def key(self, *names):
         """Presses each key, a QEMU qcode such as spc, down or ret, on the VM's keyboard."""

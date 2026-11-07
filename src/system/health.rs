@@ -400,6 +400,14 @@ fn unreachable_counted_entry(paths: &Paths) -> Option<String> {
     (crate::testhooks::counted_boot() && !reachable).then_some(selected)
 }
 
+/// The settings a counted boot is checked by: the current generation's, or with none yet, those of the config whose switch laid the root out and stopped for the reboot.
+fn chosen(from_generation: Option<Option<HealthCheck>>, laid_out: Option<HealthCheck>) -> Option<HealthCheck> {
+    match from_generation {
+        Some(check) => check,
+        None => laid_out,
+    }
+}
+
 /// archix-health-check.service: checks a boot systemd-boot is still counting, and on failure marks its entry bad, records why, and reboots if asked to.
 pub fn run_boot(paths: &Paths) -> Result<bool> {
     // By name, not by text: an entry a cut left torn is still archix's, and its counted boot is still checked.
@@ -419,14 +427,15 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     }
     let store = crate::generations::Store::new(paths);
     let generation = store.current()?.map(|number| store.get(number)).transpose()?;
-    let check = generation
-        .as_ref()
-        .and_then(|g| g.settings.boot.as_ref())
-        .and_then(|boot| boot.health_check.clone());
+    let menu = super::menu::load(&super::menu::dir(paths)).unwrap_or_default();
+    let check = chosen(
+        generation
+            .as_ref()
+            .map(|g| g.settings.boot.as_ref().and_then(|boot| boot.health_check.clone())),
+        menu.laid_out_check.clone(),
+    );
     let users = generation.as_ref().map(|g| g.system.users.clone()).unwrap_or_default();
-    let allowed = super::menu::load(&super::menu::dir(paths))
-        .map(|state| state.blessed_failed_units)
-        .unwrap_or_default();
+    let allowed = menu.blessed_failed_units;
     // An edited entry isn't a failure by itself: a cut one has the mark, which goes only after the boot step is flushed.
     let unfinished = crate::pacman::hooks::unfinished(&paths.state);
     let torn = unfinished.is_some();
@@ -619,6 +628,26 @@ pub fn unblessed() -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn the_layouts_boot_with_no_generation_yet_is_checked_as_the_config_that_laid_it_out_says() {
+        let off = HealthCheck {
+            failed_units: false,
+            ..HealthCheck::default()
+        };
+        assert_eq!(
+            chosen(None, Some(off.clone())),
+            Some(off.clone()),
+            "no generation: the layout's settings"
+        );
+        assert_eq!(
+            chosen(Some(None), Some(off.clone())),
+            None,
+            "a generation's own settings win, its defaults too"
+        );
+        assert_eq!(chosen(Some(Some(off.clone())), None), Some(off));
+        assert_eq!(chosen(None, None), None);
+    }
 
     #[test]
     fn a_counted_boot_stuck_in_emergency_mode_reboots_after_two_minutes_not_the_unblessed_timeout() {

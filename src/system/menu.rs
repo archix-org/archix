@@ -107,6 +107,9 @@ pub struct State {
     /// The images among `snapshots` whose initramfs maps versioned entry names, as `Image::versioned_names` says.
     #[serde(default)]
     pub versioned: BTreeSet<String>,
+    /// `boot.health_check` of a switch that laid the root out and stopped before recording a generation, which the layout's boot is checked by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laid_out_check: Option<super::health::HealthCheck>,
 }
 
 impl State {

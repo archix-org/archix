@@ -23,9 +23,13 @@ def run(m, t):
         tried = trying() or {}
         t.check(tried.get("snapshot") == older and f"snapshot {newer}" in (tried.get("why") or ""), f"the initramfs should boot snapshot {older} instead, saying why: {tried}")
         t.check(ok(f"grep -q 'snapshot {newer}, which the boot entry named, is gone' /run/motd.d/archix.motd"), f"the notice should say why: {out('cat /run/motd.d/archix.motd')}")
-        older_entry = entry(f"archix-snapshot-{older}.conf")
-        m.succeed(f"mv /efi/loader/entries/{older_entry} /efi/loader/entries/archix-snapshot-{older}+0-1.conf && archix boot-check > /dev/null", what="marking the survivor's entry as failed")
-        t.check(older in state().get("failed", []), f"archix should record the failed entry: {state()}")
+        # Every survivor with an entry, the base's own snapshot too: its first switch stops for the layout's reboot, and the switch after takes one.
+        survivors = [n for n in snapshots() if n != newer and entry(f"archix-snapshot-{n}.conf")]
+        for n in survivors:
+            name = entry(f"archix-snapshot-{n}.conf")
+            m.succeed(f"mv /efi/loader/entries/{name} /efi/loader/entries/archix-snapshot-{n}+0-1.conf", what=f"marking snapshot {n}'s entry as failed")
+        m.succeed("archix boot-check > /dev/null", what="recording the failed entries")
+        t.check(all(n in state().get("failed", []) for n in survivors), f"archix should record every failed entry {survivors}: {state()}")
         m.select_entry(f"archix-snapshot-{newer}.conf")
         m.reboot()
 
