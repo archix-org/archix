@@ -23,6 +23,8 @@ def run(m, t):
     with t.step("1: the cut once the transaction replaced the running kernel"):
         before = snapshots()
         armed, slot = state().get("armed"), state().get("slot")
+        # The torn boot reboots as soon as its check fails, which may be in the middle of a command, so it's judged from its console.
+        mark = len(m.console_since(0))
         cut.arm(POINT)
         cut.background(UPDATE, LOG)
         reached = cut.reset_on_cut(timeout=1800)
@@ -30,29 +32,21 @@ def run(m, t):
         t.check(reached == f"{POINT}#1", f"the cut should be at {POINT}: {reached}")
 
     with t.step("2: the torn root boots its old kernel, and unattended the machine falls back to the slot"):
-        m.wait_for_shell(timeout=900)
-        cut.disarm()
-        release = out("uname -r").strip()
-        t.log(f"booted {release} from {cut.common.selected()}")
-        mounted = cut.common.ok("ls /efi/loader/entries > /dev/null && findmnt -no FSTYPE /efi | grep -qx vfat")
-        modules = cut.common.ok(f"[ -e /usr/lib/modules/{release}/modules.dep ]")
-        efi = out("systemctl status efi.mount --no-pager 2>&1 | tail -3")
         tried = None
         while tried is None:
             t.require(time.monotonic() - began < 3600, f"no fallback within an hour of the cut: entries {entries()}")
             boots, _ = cut.settle(timeout=3600)
             tried = (trying() or {}).get("snapshot")
         took = time.monotonic() - began
-        # The torn boot reboots as soon as its check fails, so its line is read from the console.
-        said = ([line for line in m.console_since(0).splitlines() if "failed its health check" in line] or [""])[-1]
+        console = m.console_since(0)[mark:]
+        said = ([line for line in console.splitlines() if "failed its health check" in line] or [""])[-1]
+        restored = "put the running kernel's modules back" in console
         t.log(f"the health check: {said}")
         new = [n for n in snapshots() if n not in before]
         want = new[0] if armed and new else slot
-        t.log(f"FALLBACK-TIME default unblessed_timeout: {took:.0f} s from the cut to the slot's boot, snapshot {tried}, {boots} boot(s) after the first; ESP mounted on the torn boot: {mounted}")
-        t.check(release.startswith("7.2.9"), f"the old image should boot: {release}")
-        t.check(mounted, f"the ESP should mount on the torn boot: {efi}")
-        t.check(modules, f"the booted kernel's modules should be back on the torn boot: {release}")
-        t.check("marked bad" in said and "reboots into the fallback now" in said, f"the health check should mark the entry bad and reboot at once: {said}")
+        t.log(f"FALLBACK-TIME default unblessed_timeout: {took:.0f} s from the cut to the slot's boot, snapshot {tried}, {boots} boot(s) after the first; modules put back on the torn boot: {restored}")
+        t.check(restored, "the torn boot, of the old kernel, should put its modules back, so the ESP mounts")
+        t.check("marked bad" in said and "reboots into the fallback now" in said, f"the health check should mark the entry bad on the ESP and reboot at once: {said}")
         t.check(took < 300, f"a boot the mark says is torn should fall back in about a minute, not after boot.unblessed_timeout: {took:.0f} s")
         t.check(str(tried) == str(want), f"the fallback should be the slot, snapshot {want}: {tried}")
         found = cut.problems(snapshot=new[0] if new else None, lock=cut.kind(tried) == "pacman", mark_on_root=True)
