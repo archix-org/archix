@@ -272,6 +272,9 @@ pub fn delete(number: u32) -> Result<()> {
         bail!("there's no snapshot {number}");
     }
     store.delete(number)?;
+    if let Err(e) = store.settle() {
+        eprintln!("warning: snapshot {number} is deleted, but btrfs may not have freed its space yet: {e:#}");
+    }
     println!("snapshot {number} deleted");
     let paths = Paths::system();
     if let Some(generation) = current_generation(&paths)?

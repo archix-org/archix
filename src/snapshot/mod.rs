@@ -364,7 +364,7 @@ impl Store {
     }
 
     /// Waits until deleted snapshots' space is free and counted: btrfs frees it in the background and counts it only once committed.
-    fn settle(&self) -> Result<()> {
+    pub fn settle(&self) -> Result<()> {
         btrfs(
             Command::new("btrfs").args(["-q", "subvolume", "sync"]).arg(&self.dir),
             "wait for deleted snapshots to be cleaned up",
