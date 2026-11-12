@@ -720,11 +720,10 @@ fn an_old_lock_is_called_out() {
         status.contains("days old") && status.contains("archix update"),
         "{status}"
     );
-    setup.set_body(&["tree"], "");
-    assert!(
-        !setup.ok(&["status"]).contains("days old"),
-        "the default allows a month"
-    );
+    for body in ["lock_warn_after_days = 100000", "lock_warn_after_days = 0"] {
+        setup.set_body(&["tree"], body);
+        assert!(!setup.ok(&["status"]).contains("days old"), "{body}");
+    }
 }
 
 #[test]
