@@ -2065,6 +2065,9 @@ pub fn boot_check() -> Result<()> {
         }
     }
     if let Ok(esp) = fs::read_to_string(paths.state.join("boot").join("esp")) {
+        if let Err(e) = system::esp::clean_esp(Path::new(esp.trim())) {
+            println!("archix: couldn't remove the temporary files a power cut left on the ESP: {e:#}");
+        }
         match system::menu::drop_second_names(Path::new(esp.trim()), system::boot::boot_count_file().as_deref()) {
             Ok(dropped) if !dropped.is_empty() => {
                 println!(
