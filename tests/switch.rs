@@ -728,7 +728,7 @@ fn an_old_lock_is_called_out() {
 
 #[test]
 #[ignore]
-fn recover_is_gone_and_rescue_runs_only_from_the_rescue_boot() {
+fn recover_is_gone_and_rescue_names_no_root_on_a_machine_whose_disks_hold_none_but_its_own() {
     let _system = lock_system();
     let setup = Setup::new(&[], "");
     let err = setup.fails(&["recover", "--continue"]);
@@ -738,8 +738,12 @@ fn recover_is_gone_and_rescue_runs_only_from_the_rescue_boot() {
     );
     let err = setup.fails(&["rescue", "check"]);
     assert!(
-        err.contains("runs in the rescue boot") && err.contains("archix-rescue.conf"),
+        err.contains("no archix root was found on this machine's disks") && err.contains("--root DEVICE"),
         "{err}"
+    );
+    assert!(
+        !err.contains("the ESP"),
+        "without a root there's no ESP to look for: {err}"
     );
     let err = setup.fails(&["rescue", "--root-dir", "/", "check"]);
     assert!(err.contains("the running system"), "{err}");

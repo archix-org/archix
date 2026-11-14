@@ -176,7 +176,7 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Repair a machine from the rescue boot entry, which doesn't mount the root; with no command, the rescue prompt
+    /// Repair a machine from the rescue boot entry or a live USB: finds and mounts the root itself and runs none of its programs; with no command, the rescue prompt
     Rescue {
         #[command(flatten)]
         options: commands::rescue::Options,

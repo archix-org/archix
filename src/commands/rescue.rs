@@ -1,6 +1,9 @@
+use std::cell::OnceCell;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -8,30 +11,33 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use archix::paths::Paths;
-use archix::system::{boot, password, rescue, rescue_auth};
+use archix::snapshot::layout;
+use archix::system::{boot, mounts, password, rescue_auth};
 
-/// Where the rescue boot mounts the root, and the ESP when the root can't say where it goes.
+/// Where the rescue mounts the root, and the ESP when the root can't say where it goes.
 const ROOT_MOUNT: &str = "/run/archix-rescue/root";
 /// Where `rollback` mounts the root with its layout and binds, as it boots.
 const LAYOUT_MOUNT: &str = "/run/archix-rescue/layout";
 const ESP_MOUNT: &str = "/run/archix-rescue/esp";
 /// Where the login mounts the root read-only to read its /etc/shadow.
 const LOGIN_MOUNT: &str = "/run/archix-rescue/login";
+/// Where a filesystem is mounted read-only for a look at what it holds.
+const PROBE_MOUNT: &str = "/run/archix-rescue/probe";
 /// The name an encrypted root opens as when the kernel command line names none.
 const LUKS_NAME: &str = "rescue-root";
 
 #[derive(Args, Debug, Default, Clone)]
 pub struct Options {
-    /// The root filesystem's device, or UUID=, PARTUUID=, LABEL=; by default root= from the kernel command line
+    /// The root filesystem's device, or UUID=, PARTUUID=, LABEL=; by default root= from the kernel command line in the rescue boot, elsewhere the device mounted at --root-dir, else the only archix root on this machine's disks
     #[arg(long, value_name = "DEVICE", global = true)]
     pub root: Option<String>,
-    /// Mount options for the root, as rootflags= gives them (subvol=@ for a btrfs root in a subvolume)
+    /// Mount options for the root, as rootflags= gives them; by default rootflags= in the rescue boot, elsewhere subvol=@ on a btrfs that has that subvolume
     #[arg(long, value_name = "OPTIONS", global = true)]
     pub rootflags: Option<String>,
-    /// The ESP's device, or PARTUUID=; by default the partition systemd-boot started from
+    /// The ESP's device, or PARTUUID=; by default the partition systemd-boot started the rescue boot from, elsewhere the one the root's fstab mounts
     #[arg(long, value_name = "DEVICE", global = true)]
     pub esp: Option<String>,
-    /// A root already mounted here, as from a live USB, instead of the one rescue mounts
+    /// A root already mounted here, as from a live USB, instead of the one rescue mounts; `rollback` mounts its layout itself from that mount's device
     #[arg(long, value_name = "DIR", global = true)]
     pub root_dir: Option<PathBuf>,
     /// With --root-dir, where its ESP is mounted if not where boot.esp says under it
@@ -55,10 +61,15 @@ pub enum Action {
         #[arg(default_value = "rescue-data")]
         name: String,
     },
-    /// Open a shell; `exit` comes back to the prompt
+    /// Open the rescue environment's shell in the root's directory; `exit` comes back to the prompt
     Shell,
-    /// Roll back to snapshot N: `archix rollback N` on the root with its layout mounted; only with rollbacks on btrfs
-    Rollback { number: u32 },
+    /// Roll back to snapshot N: mounts the root's layout and keeps the snapshot with this archix alone, running none of the root's programs; only with rollbacks on btrfs
+    Rollback {
+        number: u32,
+        /// Don't ask before keeping the snapshot
+        #[arg(long)]
+        noconfirm: bool,
+    },
     /// Unmount everything and restart
     Reboot,
     /// Unmount everything and power off
@@ -79,18 +90,17 @@ const HELP: &str = "\
   check [--repair-btrfs]       check and repair the root filesystem and the ESP
   password USER                set USER's password in the root's /etc
   open DEVICE [NAME]           open a LUKS volume with its passphrase as /dev/mapper/NAME (never with a TPM)
-  shell                        a shell; the root is under /run/archix-rescue/root
+  shell                        this rescue environment's shell, in the root's directory (/run/archix-rescue/root)
   reboot, poweroff
   Before a command: --root DEVICE [--rootflags OPTIONS] for another root, such as /dev/mapper/NAME after `open`";
 
-/// Whether this runs in an initramfs: mkinitcpio's has /init and its hooks, systemd's /etc/initrd-release.
+/// Whether this runs in an initramfs, as the rescue entry's does: mkinitcpio's has /init and its hooks, systemd's /etc/initrd-release. Only there does the kernel command line describe the root to rescue; a live system's describes the live system.
 fn in_initrd() -> bool {
     Path::new("/etc/initrd-release").exists() || (Path::new("/init").is_file() && Path::new("/hooks").is_dir())
 }
 
-/// `key=`'s value on the kernel command line.
-fn cmdline_value(key: &str) -> Option<String> {
-    let cmdline = archix::testhooks::kernel_cmdline();
+/// `key=`'s value on a kernel command line.
+fn value_on(cmdline: &str, key: &str) -> Option<String> {
     cmdline
         .split_whitespace()
         .filter_map(|word| word.strip_prefix(key)?.strip_prefix('='))
@@ -98,22 +108,13 @@ fn cmdline_value(key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn mount_points() -> Vec<PathBuf> {
-    archix::conflicts::mount_points()
+/// The command line of the boot that is rescuing its own root, which only the rescue boot is.
+fn boot_cmdline() -> Option<String> {
+    in_initrd().then(archix::testhooks::kernel_cmdline)
 }
 
 fn is_mount_point(path: &Path) -> bool {
-    mount_points().iter().any(|point| point == path)
-}
-
-/// The device mounted at `dir`, from the mount table.
-fn mount_source(dir: &Path) -> Option<String> {
-    let text = fs::read_to_string("/proc/self/mountinfo").ok()?;
-    text.lines().find_map(|line| {
-        let (before, after) = line.split_once(" - ")?;
-        let point = before.split_whitespace().nth(4)?;
-        (Path::new(&point.replace("\\040", " ")) == dir).then(|| after.split_whitespace().nth(1).map(str::to_string))?
-    })
+    mounts::at(path).is_some()
 }
 
 /// Where `device` is mounted, by device number or by the name the mount table gives it.
@@ -135,20 +136,17 @@ fn mounted_at(device: &Path) -> Option<PathBuf> {
     })
 }
 
-/// The path a spec names: a path, or UUID=, PARTUUID=, LABEL= and PARTLABEL= through udev's /dev/disk links.
-fn spec_path(spec: &str) -> PathBuf {
-    match spec.split_once('=') {
-        Some(("UUID", value)) => Path::new("/dev/disk/by-uuid").join(value),
-        Some(("PARTUUID", value)) => Path::new("/dev/disk/by-partuuid").join(value.to_lowercase()),
-        Some(("LABEL", value)) => Path::new("/dev/disk/by-label").join(value),
-        Some(("PARTLABEL", value)) => Path::new("/dev/disk/by-partlabel").join(value),
-        _ => PathBuf::from(spec),
+/// Whether two paths name one block device.
+fn same_device(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.file_type().is_block_device() && b.file_type().is_block_device() && a.rdev() == b.rdev(),
+        _ => false,
     }
 }
 
 /// The block device a spec names, once udev has made it, looking `tries` times 200 ms apart.
 fn find(spec: &str, tries: u32) -> Option<PathBuf> {
-    let path = spec_path(spec);
+    let path = layout::device_path(spec);
     for _ in 0..tries {
         if path.exists() {
             return Some(path);
@@ -163,16 +161,21 @@ fn resolve(spec: &str) -> Result<PathBuf> {
     if let Some(path) = find(spec, 50) {
         return Ok(path);
     }
-    let encrypted = ["rd.luks", "cryptdevice=", "luks"]
-        .iter()
-        .any(|word| archix::testhooks::kernel_cmdline().contains(word));
+    let encrypted = boot_cmdline().is_some_and(|cmdline| {
+        ["rd.luks", "cryptdevice=", "luks"]
+            .iter()
+            .any(|word| cmdline.contains(word))
+    }) || !luks_devices().is_empty();
     let hint = match encrypted {
         true => {
-            "; it's on an encrypted disk, so open it first: `open /dev/<partition> root`, then `--root /dev/mapper/root list`"
+            "; it may be on an encrypted disk, so open that first: `open /dev/<partition> root`, then `--root /dev/mapper/root`"
         }
-        false => "; `shell` and `blkid` list the disks, then `--root DEVICE list` uses one",
+        false => "; `shell` and `blkid` list the disks, then `--root DEVICE` uses one",
     };
-    bail!("there's no device {spec} ({}){hint}", spec_path(spec).display())
+    bail!(
+        "there's no device {spec} ({}){hint}",
+        layout::device_path(spec).display()
+    )
 }
 
 /// Opens the LUKS volume on `device` as /dev/mapper/`name` with a passphrase typed at the console, unless it's open already.
@@ -189,37 +192,35 @@ fn open_luks(device: &Path, name: &str) -> Result<PathBuf> {
     let status = Command::new("cryptsetup")
         .args(&argv)
         .status()
-        .context("running cryptsetup; is it in this rescue image?")?;
+        .context("running cryptsetup; is it in this rescue image, or installed on this live system?")?;
     if !status.success() {
         bail!("cryptsetup didn't open {} ({status})", device.display());
     }
     Ok(mapped)
 }
 
-/// The LUKS volumes on this machine, from blkid.
+/// The LUKS volumes on this machine, by their headers.
 fn luks_devices() -> Vec<PathBuf> {
-    let output = Command::new("blkid")
-        .args(["-t", "TYPE=crypto_LUKS", "-o", "device"])
-        .output();
-    output
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .map(PathBuf::from)
-                .collect()
-        })
-        .unwrap_or_default()
+    mounts::block_devices()
+        .into_iter()
+        .filter(|device| mounts::probe(device).is_some_and(|probe| probe.fs_type == "crypto_LUKS"))
+        .collect()
 }
 
+/// The filesystem on `device` by its superblock, or as blkid names one archix doesn't know.
 fn fs_type(device: &Path) -> Result<String> {
+    if let Some(probe) = mounts::probe(device) {
+        return Ok(probe.fs_type.to_string());
+    }
     let output = Command::new("blkid")
         .args(["-p", "-o", "value", "-s", "TYPE"])
         .arg(device)
-        .output()
-        .context("running blkid")?;
-    let fs = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        .output();
+    let fs = output
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default();
     if fs.is_empty() {
-        bail!("{} holds no filesystem blkid recognizes", device.display());
+        bail!("{} holds no filesystem archix or blkid recognizes", device.display());
     }
     Ok(fs)
 }
@@ -235,17 +236,7 @@ fn rollbacks_on(root: &Path) -> bool {
 }
 
 fn run_mount(device: &Path, dir: &Path, fs: &str, options: &str) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let output = Command::new("mount")
-        .args(["-t", fs, "-o", options])
-        .arg(device)
-        .arg(dir)
-        .output()
-        .context("running mount")?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
-    }
-    Ok(())
+    mounts::mount(&device.to_string_lossy(), dir, fs, options)
 }
 
 fn unmount(dir: &Path) -> Result<()> {
@@ -253,19 +244,7 @@ fn unmount(dir: &Path) -> Result<()> {
         return Ok(());
     }
     archix::durable::sync_filesystems(&[dir]);
-    let output = Command::new("umount")
-        .arg("-R")
-        .arg(dir)
-        .output()
-        .context("running umount")?;
-    if !output.status.success() {
-        bail!(
-            "couldn't unmount {}: {}",
-            dir.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(())
+    mounts::unmount_under(dir).with_context(|| format!("couldn't unmount {}", dir.display()))
 }
 
 /// Remounts the filesystem at `dir` read-write when it's mounted read-only, as the busybox initramfs mounts the root.
@@ -290,26 +269,145 @@ fn writable(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// What the rescue works on: a root and ESP it mounts itself, or ones mounted already (--root-dir).
+/// What `look` sees on the filesystem on `device`, mounted read-only for it (a btrfs at its top level) without replaying a journal.
+fn peek<T>(device: &Path, fs: &str, look: impl FnOnce(&Path) -> T) -> Option<T> {
+    let options = match fs {
+        "btrfs" => "ro,subvolid=5",
+        "ext4" => "ro,noload",
+        _ => "ro",
+    };
+    let dir = Path::new(PROBE_MOUNT);
+    run_mount(device, dir, fs, options).ok()?;
+    let seen = look(dir);
+    let _ = mounts::unmount_under(dir);
+    Some(seen)
+}
+
+/// Whether the filesystem whose top is at `top` holds a root archix manages: its state, or the rollback layout's subvolumes.
+fn holds_archix(top: &Path) -> bool {
+    let root_in = |root: PathBuf| {
+        root.join("var/lib/archix/generations").is_dir() || root.join(layout::ON_ROOT).join("archix").is_dir()
+    };
+    top.join(layout::ARCHIX).join("snapshots").is_dir()
+        || root_in(top.to_path_buf())
+        || root_in(top.join(archix::snapshot::ROOT))
+}
+
+/// What this machine's disks hold that the rescue could work on.
+#[derive(Debug, Default, PartialEq)]
+struct Disks {
+    /// The filesystems holding an archix root, each by one of its devices.
+    roots: Vec<PathBuf>,
+    /// LUKS volumes nobody opened, which could hold one.
+    locked: Vec<PathBuf>,
+    /// Whether the running system's own root is one.
+    running: bool,
+}
+
+impl Disks {
+    /// Looks at every btrfs and ext4 filesystem among the block devices, read-only.
+    fn scan() -> Disks {
+        let running = mounts::of(Path::new("/")).map(|mount| PathBuf::from(mount.source));
+        let probed: Vec<(PathBuf, mounts::Probe)> = mounts::block_devices()
+            .into_iter()
+            .filter(|device| {
+                let name = device.file_name().unwrap_or_default().to_string_lossy();
+                !["fd", "sr", "ram", "zram"]
+                    .iter()
+                    .any(|skipped| name.starts_with(skipped))
+            })
+            .filter_map(|device| Some((device.clone(), mounts::probe(&device)?)))
+            .collect();
+        for (device, probe) in &probed {
+            if probe.fs_type == "btrfs" {
+                archix::system::btrfs::scan_device(device);
+            }
+        }
+        let mut disks = Disks::default();
+        let mut seen = BTreeSet::new();
+        for (device, probe) in probed {
+            let opened = fs::read_dir(
+                Path::new("/sys/class/block")
+                    .join(device.file_name().unwrap_or_default())
+                    .join("holders"),
+            )
+            .is_ok_and(|mut holders| holders.next().is_some());
+            match probe.fs_type {
+                "crypto_LUKS" if !opened => disks.locked.push(device),
+                "btrfs" | "ext4" => {
+                    if probe.uuid.as_ref().is_some_and(|uuid| !seen.insert(uuid.clone())) {
+                        continue;
+                    }
+                    if running.as_ref().is_some_and(|running| same_device(running, &device)) {
+                        disks.running = holds_archix(Path::new("/"));
+                        continue;
+                    }
+                    let holds = match (probe.fs_type, mounted_at(&device)) {
+                        ("ext4", Some(at)) => holds_archix(&at),
+                        _ => peek(&device, probe.fs_type, holds_archix).unwrap_or(false),
+                    };
+                    if holds {
+                        disks.roots.push(device);
+                    }
+                }
+                _ => {}
+            }
+        }
+        disks
+    }
+
+    /// The only archix root there is, or why there's none to pick.
+    fn only_root(&self) -> Result<PathBuf> {
+        let list = |devices: &[PathBuf]| {
+            let names: Vec<String> = devices.iter().map(|device| device.display().to_string()).collect();
+            names.join(", ")
+        };
+        match self.roots.as_slice() {
+            [one] => Ok(one.clone()),
+            [] => {
+                let mut why = "no archix root was found on this machine's disks".to_string();
+                if self.running {
+                    why.push_str(" besides the running system's, where `archix rollback` does what the rescue does");
+                }
+                if !self.locked.is_empty() {
+                    why.push_str(&format!(
+                        "; {} is encrypted and wasn't looked into: `archix rescue open DEVICE root` opens one with its passphrase, then pass --root /dev/mapper/root",
+                        list(&self.locked)
+                    ));
+                }
+                bail!("{why}; name the root filesystem with --root DEVICE")
+            }
+            many => bail!(
+                "{} archix roots were found ({}); pick one with --root DEVICE",
+                many.len(),
+                list(many)
+            ),
+        }
+    }
+}
+
+/// What the rescue works on: a root and ESP it finds and mounts itself, or ones mounted already (--root-dir).
 pub struct Session {
     options: Options,
+    /// The root's device, once it was found.
+    device: OnceCell<PathBuf>,
 }
 
 impl Session {
     pub fn new(options: Options) -> Result<Session> {
-        if options.root_dir.is_none() && options.root.is_none() && !in_initrd() {
-            bail!(
-                "`archix rescue` runs in the rescue boot: pick \"archix rescue\" in the boot menu, or `sudo bootctl set-oneshot {}` and restart. On a running system `archix rollback` does the same; from a live USB, mount the root and pass --root-dir",
-                rescue::ENTRY
-            );
-        }
         if options.root_dir.as_deref() == Some(Path::new("/")) {
             bail!("--root-dir / is the running system; `archix rollback` works on it");
         }
-        Ok(Session { options })
+        Ok(Session {
+            options,
+            device: OnceCell::new(),
+        })
     }
 
     fn merge(&mut self, options: Options) {
+        if options.root.is_some() || options.root_dir.is_some() {
+            self.device = OnceCell::new();
+        }
         let mine = &mut self.options;
         mine.root = options.root.or(mine.root.take());
         mine.rootflags = options.rootflags.or(mine.rootflags.take());
@@ -318,19 +416,49 @@ impl Session {
         mine.esp_dir = options.esp_dir.or(mine.esp_dir.take());
     }
 
-    fn root_spec(&self) -> Result<String> {
-        self.options
-            .root
-            .clone()
-            .or_else(|| cmdline_value("root"))
-            .context("the kernel command line has no root=; give the root with --root DEVICE")
+    /// The root filesystem's block device: --root's, else the one mounted at --root-dir, else in the rescue boot root= from its kernel command line, else the only archix root among the disks. A live system's command line names the live system's root, so it's never read there.
+    fn root_device(&self) -> Result<PathBuf> {
+        if let Some(device) = self.device.get() {
+            return Ok(device.clone());
+        }
+        let device = match (&self.options.root, &self.options.root_dir, boot_cmdline()) {
+            (Some(spec), _, _) => self.opened(spec)?,
+            (None, Some(dir), _) => {
+                let dir = fs::canonicalize(dir).with_context(|| format!("--root-dir {}", dir.display()))?;
+                let mount = mounts::at(&dir).filter(|mount| Path::new(&mount.source).is_absolute());
+                let Some(mount) = mount else {
+                    bail!(
+                        "no filesystem on a disk is mounted at {}, so it doesn't say which device the root is on; mount the root there, or name its device with --root DEVICE",
+                        dir.display()
+                    );
+                };
+                PathBuf::from(mount.source)
+            }
+            (None, None, cmdline) => match cmdline.and_then(|cmdline| value_on(&cmdline, "root")) {
+                Some(spec) => self.opened(&spec)?,
+                None => {
+                    let device = Disks::scan().only_root()?;
+                    println!("archix rescue: the archix root is on {}", device.display());
+                    device
+                }
+            },
+        };
+        let running = mounts::of(Path::new("/")).map(|mount| PathBuf::from(mount.source));
+        if running.is_some_and(|running| same_device(&running, &device)) {
+            bail!(
+                "{} holds the running system's root; `archix rollback` and `passwd` work on it",
+                device.display()
+            );
+        }
+        Ok(self.device.get_or_init(|| device).clone())
     }
 
-    /// The root filesystem's block device; on an encrypted root, the volume the kernel command line names (or each LUKS volume blkid finds) opened with its passphrase first.
-    fn root_device(&self) -> Result<PathBuf> {
-        let spec = self.root_spec()?;
-        if find(&spec, 25).is_none() {
-            let named = rescue_auth::luks_on_cmdline(&archix::testhooks::kernel_cmdline());
+    /// The block device `spec` names; on an encrypted root, the volume the rescue boot's command line names (or each LUKS volume there is) opened with its passphrase first.
+    fn opened(&self, spec: &str) -> Result<PathBuf> {
+        if find(spec, 25).is_none() {
+            let named = boot_cmdline()
+                .map(|cmdline| rescue_auth::luks_on_cmdline(&cmdline))
+                .unwrap_or_default();
             let volumes: Vec<(PathBuf, String)> = match named.is_empty() {
                 false => named
                     .iter()
@@ -346,16 +474,34 @@ impl Session {
             };
             for (device, name) in volumes {
                 open_luks(&device, &name)?;
-                if find(&spec, 25).is_some() {
+                if find(spec, 25).is_some() {
                     break;
                 }
             }
         }
-        let device = resolve(&spec)?;
+        let device = resolve(spec)?;
         if fs_type(&device).is_ok_and(|fs| fs == "crypto_LUKS") {
             return open_luks(&device, LUKS_NAME);
         }
         Ok(device)
+    }
+
+    /// The root's own mount options: --rootflags, else rootflags= in the rescue boot, else subvol=/@ on a btrfs whose top level has an `@` holding a root and none itself.
+    fn root_flags(&self, device: &Path, fs: &str) -> Option<String> {
+        let given = self
+            .options
+            .rootflags
+            .clone()
+            .or_else(|| value_on(&boot_cmdline()?, "rootflags"));
+        if given.is_some() || fs != "btrfs" {
+            return given;
+        }
+        let root = archix::snapshot::ROOT;
+        peek(device, fs, |top| {
+            !top.join("etc/passwd").is_file() && top.join(root).join("etc/passwd").is_file()
+        })
+        .filter(|in_subvolume| *in_subvolume)
+        .map(|_| format!("subvol=/{root}"))
     }
 
     /// The login before the rescue opens: the root's /etc/shadow, read from a read-only mount, must hold a password for root or a wheel user, and one of them must be typed.
@@ -367,7 +513,7 @@ impl Session {
                 let dir = PathBuf::from(LOGIN_MOUNT);
                 if !is_mount_point(&dir) {
                     let fs = fs_type(&device)?;
-                    let flags = self.options.rootflags.clone().or_else(|| cmdline_value("rootflags"));
+                    let flags = self.root_flags(&device, &fs);
                     let with = |options: &str| flags.as_ref().map_or(options.to_string(), |f| format!("{options},{f}"));
                     let fallback = match fs.as_str() {
                         "btrfs" => "ro,rescue=all",
@@ -410,7 +556,7 @@ impl Session {
         Ok(())
     }
 
-    /// The archix root, mounted read-write.
+    /// The archix root, mounted read-write: --root-dir, else the root's device mounted by the rescue itself.
     fn root(&self) -> Result<PathBuf> {
         let dir = match &self.options.root_dir {
             Some(dir) => {
@@ -421,15 +567,19 @@ impl Session {
                 let dir = PathBuf::from(ROOT_MOUNT);
                 if !is_mount_point(&dir) {
                     let device = self.root_device()?;
-                    if let Some(at) = mounted_at(&device) {
+                    let fs = fs_type(&device)?;
+                    // A btrfs mounts in several places at once; any other filesystem mounted elsewhere is someone else's to write.
+                    if fs != "btrfs"
+                        && let Some(at) = mounted_at(&device)
+                    {
                         bail!(
-                            "{} is mounted at {} already; unmount it first",
+                            "{} is mounted at {} already; unmount it first, or pass --root-dir {}",
                             device.display(),
+                            at.display(),
                             at.display()
                         );
                     }
-                    let fs = fs_type(&device)?;
-                    let flags = self.options.rootflags.clone().or_else(|| cmdline_value("rootflags"));
+                    let flags = self.root_flags(&device, &fs);
                     let options = flags.map_or("rw".to_string(), |flags| format!("rw,{flags}"));
                     run_mount(&device, &dir, &fs, &options).with_context(|| {
                         format!(
@@ -464,14 +614,22 @@ impl Session {
         under_root.unwrap_or_else(|| PathBuf::from(ESP_MOUNT))
     }
 
-    fn esp_device(&self) -> Result<PathBuf> {
+    /// The ESP's device: --esp's, else in the rescue boot the partition systemd-boot started it from, else `named`, the one the root's fstab mounts, else the only EFI system partition there is. A live system's loader started from the live system's own ESP, so its variables are never read there.
+    fn esp_device(&self, named: Option<String>) -> Result<PathBuf> {
         if let Some(spec) = &self.options.esp {
             return resolve(spec);
         }
-        boot::mount_efivars();
-        match boot::loader_partition() {
-            Some(uuid) => resolve(&format!("PARTUUID={uuid}")),
-            None => bail!("systemd-boot didn't say which partition it started from; give the ESP with --esp DEVICE"),
+        if in_initrd() {
+            boot::mount_efivars();
+            if let Some(uuid) = boot::loader_partition() {
+                return resolve(&format!("PARTUUID={uuid}"));
+            }
+        }
+        match named {
+            Some(spec) => resolve(&spec),
+            None => layout::only_esp()
+                .map(PathBuf::from)
+                .context("the ESP wasn't found; give it with --esp DEVICE"),
         }
     }
 
@@ -496,7 +654,7 @@ impl Session {
                 Ok(())
             }
             Action::Shell => self.shell(),
-            Action::Rollback { number } => self.rollback(number),
+            Action::Rollback { number, noconfirm } => self.rollback(number, noconfirm),
             Action::Reboot => self.power(libc::RB_AUTOBOOT),
             Action::Poweroff => self.power(libc::RB_POWER_OFF),
         }
@@ -513,45 +671,123 @@ impl Session {
             })
     }
 
-    fn rollback(&self, number: u32) -> Result<()> {
-        if !self.has_rollbacks() {
+    /// Mounts the ESP where the root laid out at `target` mounts it, which the keep's boot menu is written to; a root whose boot archix doesn't manage needs none.
+    fn mount_layout_esp(&self, target: &Path) -> Result<()> {
+        let recorded = fs::read_to_string(target.join("var/lib/archix/boot/esp")).unwrap_or_default();
+        let Some(point) = Some(recorded.trim()).filter(|point| point.starts_with('/')) else {
+            return Ok(());
+        };
+        let at = target.join(point.trim_start_matches('/'));
+        let theirs = match (&self.options.esp_dir, &self.options.root_dir) {
+            (Some(dir), _) => Some(dir.clone()),
+            (None, Some(root)) => fs::canonicalize(root.join(point.trim_start_matches('/')))
+                .ok()
+                .filter(|dir| is_mount_point(dir)),
+            (None, None) => None,
+        };
+        let mounted = match theirs {
+            Some(dir) => mounts::bind(&dir, &at, false),
+            None => {
+                let named = layout::esp_of(target).map(|(spec, _)| spec);
+                run_mount(&self.esp_device(named)?, &at, "vfat", "umask=0077")
+            }
+        };
+        mounted.context("mounting the ESP for the boot menu")
+    }
+
+    fn rollback(&self, number: u32, noconfirm: bool) -> Result<()> {
+        let device = self.root_device()?;
+        if !fs_type(&device).is_ok_and(|fs| fs == "btrfs") {
             bail!(
-                "this root has no rollbacks (it isn't btrfs, or rollbacks were never set up), so there's no snapshot to go back to"
+                "the root on {} isn't btrfs, so it has no snapshots to go back to",
+                device.display()
             );
         }
-        let device = self.root_device()?;
         self.unmount_all()?;
         let target = Path::new(LAYOUT_MOUNT);
-        let ran = archix::snapshot::layout::mount_all(&device.to_string_lossy(), target).and_then(|()| {
-            for (what, fs) in [("proc", "proc"), ("sys", "sysfs"), ("dev", "devtmpfs")] {
-                run_mount(Path::new(what), &target.join(what), fs, "rw")?;
-            }
-            // The keep points the boot menu at the kept root's kernel, so it needs the ESP where the root mounts it.
-            let esp = fs::read_to_string(target.join("var/lib/archix/boot/esp"));
-            if let (Ok(esp), Ok(device)) = (esp, self.esp_device()) {
-                run_mount(&device, &target.join(esp.trim().trim_start_matches('/')), "vfat", "rw")
-                    .context("mounting the ESP for the boot menu")?;
-            }
-            let status = Command::new("chroot")
-                .arg(target)
-                .args(["/usr/bin/archix", "rollback", &number.to_string()])
-                .status()
-                .context("running archix rollback in the root")?;
-            if !status.success() {
-                bail!("archix rollback {number} failed in the root");
-            }
-            Ok(())
-        });
-        let _ = Command::new("umount").arg("-R").arg(target).status();
-        ran
+        mounts::unmount_under(target)?;
+        let ran = layout::mount_all(&device.to_string_lossy(), target)
+            .with_context(|| {
+                format!(
+                    "the root on {} isn't laid out for rollbacks (the subvolumes @, @archix and @varlib), so there's no snapshot to go back to",
+                    device.display()
+                )
+            })
+            .and_then(|()| {
+                if !rollbacks_on(target) {
+                    bail!("this root's config has rollbacks turned off, so there's no snapshot to go back to");
+                }
+                for (what, fs) in [("proc", "proc"), ("sys", "sysfs"), ("dev", "devtmpfs")] {
+                    mounts::mount(what, &target.join(what), fs, "")?;
+                }
+                self.mount_layout_esp(target)?;
+                // This archix again, inside the root: a static binary needs nothing there, so the root's own programs and libraries can all be broken.
+                let root = target.to_path_buf();
+                let mut keep = Command::new("/proc/self/exe");
+                keep.args(["rollback", &number.to_string()]);
+                if noconfirm {
+                    keep.arg("--noconfirm");
+                }
+                unsafe {
+                    keep.pre_exec(move || {
+                        std::os::unix::fs::chroot(&root)?;
+                        std::env::set_current_dir("/")
+                    });
+                }
+                let status = keep.status().context(
+                    "starting archix inside the root; only the static build (the root's /usr/lib/archix/archix-static) starts there whatever the root has lost",
+                )?;
+                if !status.success() {
+                    bail!("the rollback to snapshot {number} failed ({status})");
+                }
+                Ok(())
+            });
+        archix::durable::sync_filesystems(&[target]);
+        let unmounted = mounts::unmount_under(target);
+        ran?;
+        unmounted?;
+        if let Some(dir) = &self.options.root_dir {
+            println!(
+                "{} still shows the root that was replaced; unmount it and restart to boot snapshot {number}",
+                dir.display()
+            );
+        }
+        Ok(())
     }
 
     fn check(&self, repair_btrfs: bool) -> Result<()> {
-        if self.options.root_dir.is_some() {
-            bail!("check needs the root and the ESP unmounted; unmount them and pass --root DEVICE and --esp DEVICE");
+        if let Some(dir) = &self.options.root_dir {
+            let device = self
+                .root_device()
+                .map_or("DEVICE".to_string(), |device| device.display().to_string());
+            bail!(
+                "check needs the root and the ESP unmounted, and {} is mounted: unmount it, then `archix rescue --root {device} check` (with --esp DEVICE if the root's fstab doesn't name its ESP)",
+                dir.display()
+            );
         }
-        let esp_mounted = mount_source(&self.esp_target()).or_else(|| mount_source(Path::new(ESP_MOUNT)));
+        // Outside the rescue boot the ESP is found through the root, so without one there's nothing to check.
+        if !in_initrd() && self.options.esp.is_none() {
+            self.root_device()?;
+        }
+        let esp_mounted = mounts::at(&self.esp_target())
+            .or_else(|| mounts::at(Path::new(ESP_MOUNT)))
+            .map(|mount| mount.source);
         self.unmount_all()?;
+        // Outside the rescue boot the root's fstab is what names the ESP, read from a read-only mount that replays no journal.
+        let named = match self.options.esp.is_some() || in_initrd() {
+            true => None,
+            false => self.root_device().ok().and_then(|device| {
+                let fs = fs_type(&device).ok()?;
+                let found = peek(&device, &fs, |top| {
+                    [top.join(archix::snapshot::ROOT), top.to_path_buf()]
+                        .iter()
+                        .find(|root| root.join("etc/fstab").is_file())
+                        .and_then(|root| layout::esp_of(root))
+                });
+                found.flatten().map(|(spec, _)| spec)
+            }),
+        };
+        let esp = self.esp_device(named);
         let mut failed = Vec::new();
         match self.root_device() {
             Ok(device) => {
@@ -561,7 +797,7 @@ impl Session {
             }
             Err(e) => failed.push(format!("the root: {e:#}")),
         }
-        let esp = match (self.esp_device(), esp_mounted) {
+        let esp = match (esp, esp_mounted) {
             (Ok(device), _) => Ok(device),
             (Err(_), Some(source)) => Ok(PathBuf::from(source)),
             (Err(e), None) => Err(e),
@@ -632,19 +868,25 @@ impl Session {
         Ok(())
     }
 
+    /// The rescue environment's own shell, never the root's, whose programs may not start; in the root's directory when it mounts.
     fn shell(&self) -> Result<()> {
-        let dir = match self.options.root_dir.clone() {
-            Some(dir) => dir,
-            None if is_mount_point(Path::new(ROOT_MOUNT)) => PathBuf::from(ROOT_MOUNT),
-            None => PathBuf::from("/"),
+        let dir = match self.root() {
+            Ok(dir) => dir,
+            Err(e) => {
+                println!("the root isn't mounted ({e:#}), so the shell starts in /");
+                PathBuf::from("/")
+            }
         };
-        println!("a shell in {}; `exit` comes back to the rescue prompt", dir.display());
+        println!(
+            "this rescue environment's shell in {}; `exit` comes back to the rescue prompt",
+            dir.display()
+        );
         Command::new("sh")
             .arg("-i")
             .env("PS1", "[rescue \\w]# ")
             .current_dir(&dir)
             .status()
-            .context("running sh")?;
+            .context("this environment has no `sh` on its PATH to start; the root's own shell is never run, as the root may be what's broken")?;
         Ok(())
     }
 
@@ -747,7 +989,12 @@ pub fn run(options: Options, action: Option<Action>) -> Result<()> {
         session.authenticate()?;
     }
     match action {
-        Some(action) => session.run(action),
+        Some(action) => {
+            let ran = session.run(action);
+            // One command from a live system leaves nothing mounted behind it.
+            let unmounted = session.unmount_all();
+            ran.and(unmounted)
+        }
         None => prompt(&mut session),
     }
 }
@@ -755,10 +1002,10 @@ pub fn run(options: Options, action: Option<Action>) -> Result<()> {
 fn prompt(session: &mut Session) -> Result<()> {
     // A handler, not SIG_IGN, which children would keep: Ctrl-C stops what runs, not the prompt.
     unsafe { libc::signal(libc::SIGINT, ignore as *const () as libc::sighandler_t) };
-    println!("\narchix rescue: this boot doesn't mount the root. Commands:\n{HELP}\n");
+    println!("\narchix rescue: nothing of the root is mounted until a command needs it. Commands:\n{HELP}\n");
     if session.has_rollbacks() {
         println!(
-            "  rollback N                   roll back to snapshot N from the next boot on (`archix rollback N`)\n"
+            "  rollback N                   roll back to snapshot N from the next boot on, with this archix alone\n"
         );
     }
     let stdin = io::stdin();
@@ -821,6 +1068,7 @@ mod tests {
                 root: Some("UUID=a".into()),
                 ..Options::default()
             },
+            device: OnceCell::new(),
         };
         session.merge(Options {
             rootflags: Some("subvol=@".into()),

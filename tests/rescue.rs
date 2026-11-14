@@ -243,7 +243,7 @@ fn the_rescue_opens_only_for_root_or_a_wheel_users_password_from_the_roots_shado
         "bob isn't in wheel, a wrong password and none fail, and the fourth try never comes:\n{out}"
     );
     assert!(
-        !out.contains("logged in") && !out.contains("SHELL-RAN") && !out.contains("a shell in"),
+        !out.contains("logged in") && !out.contains("SHELL-RAN") && !out.contains("shell in"),
         "{out}"
     );
     assert!(
@@ -272,5 +272,234 @@ fn the_rescue_opens_only_for_root_or_a_wheel_users_password_from_the_roots_shado
     assert!(
         !out.contains("rescue login"),
         "outside the rescue boot, as from a live USB, there's no login:\n{out}"
+    );
+}
+
+/// The static build, which is what the rescue entry's image and a live USB run.
+const STATIC: &str = "/target/x86_64-unknown-linux-musl/release/archix";
+
+fn sh(script: &str) -> String {
+    let output = Command::new("bash").args(["-ec", script]).output().unwrap();
+    assert!(output.status.success(), "{script}\n{}", text(&output));
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A btrfs on a loop device laid out as CachyOS's installer and then archix's rollbacks leave one (`@` and its siblings, @archix with snapshot 1 of a healthy root, @varlib), whose root then lost libz and every program with it; nothing of it is mounted.
+struct BrokenRoot {
+    dir: tempfile::TempDir,
+    device: Loop,
+    esp: Loop,
+}
+
+impl BrokenRoot {
+    fn new() -> BrokenRoot {
+        assert!(
+            Path::new(STATIC).is_file(),
+            "{STATIC} is missing; tests/arch/run.sh builds it"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (image, esp_image, top) = (
+            dir.path().join("disk.img"),
+            dir.path().join("esp.img"),
+            dir.path().join("top"),
+        );
+        fs::create_dir(&top).unwrap();
+        sh(&format!(
+            "truncate -s 1G {image} && mkfs.btrfs -q {image} && truncate -s 64M {esp} && mkfs.fat -F32 {esp} > /dev/null",
+            image = image.display(),
+            esp = esp_image.display()
+        ));
+        let (device, esp) = (Loop::new(&image), Loop::new(&esp_image));
+        sh(&format!(
+            r#"t={top}; mount {device} $t
+            for s in @ @home @root @srv @cache @tmp @log @archix @varlib; do btrfs -q subvolume create $t/$s; done
+            r=$t/@
+            mkdir -p $r/etc $r/usr/bin $r/usr/lib $r/var/lib $r/var/rollback/pacman/local $r/var/rollback/dkms \
+              $r/var/rollback/archix $r/.archix $r/proc $r/sys $r/dev $r/run $r/efi $r/home $t/@archix/snapshots/1 \
+              $t/@varlib/pacman $t/@varlib/dkms $t/@varlib/archix
+            printf 'root:x:0:0::/root:/usr/bin/bash\n' > $r/etc/passwd
+            printf 'root:!:20000::::::\n' > $r/etc/shadow; chmod 600 $r/etc/shadow
+            printf 'root:x:0:\nwheel:x:998:\n' > $r/etc/group
+            printf '{device} / btrfs rw,subvol=/@ 0 0\n{esp} /efi vfat umask=0077 0 2\n' > $r/etc/fstab
+            echo libz > $r/usr/lib/libz.so.1
+            for p in btrfs mount umount findmnt cp git sh bash chroot archix pacman; do printf '#!/bin/sh\necho ran\n' > $r/usr/bin/$p; chmod 755 $r/usr/bin/$p; done
+            echo healthy > $r/etc/archix-test
+            btrfs -q subvolume snapshot -r $r $t/@archix/snapshots/1/root
+            printf '{{"format": 1, "number": 1, "kind": "switch", "created": 1, "generation": 7, "commit": "0123456789abcdef0123456789abcdef01234567", "label": "before the swap that removed libz"}}\n' > $t/@archix/snapshots/1/record.json"#,
+            top = top.display(),
+            device = device.0,
+            esp = esp.0,
+        ));
+        archix::snapshot::record_root(&top.join("@archix"), &top).unwrap();
+        // The swap: libz is gone, so nothing on the root starts, and the pacman that died left its lock.
+        sh(&format!(
+            r#"r={top}/@; rm $r/usr/lib/libz.so.1
+            for p in $r/usr/bin/*; do echo 'error while loading shared libraries: libz.so.1' > $p; chmod 644 $p; done
+            echo broken > $r/etc/archix-test; : > $r/var/rollback/pacman/db.lck
+            umount {top}"#,
+            top = top.display()
+        ));
+        BrokenRoot { dir, device, esp }
+    }
+
+    /// What `look` sees at the top level, mounted read-only for it.
+    fn top<T>(&self, look: impl FnOnce(&Path) -> T) -> T {
+        let top = self.dir.path().join("top");
+        sh(&format!("mount -o ro,subvolid=5 {} {}", self.device.0, top.display()));
+        let seen = look(&top);
+        sh(&format!("umount {}", top.display()));
+        seen
+    }
+
+    /// Whether `@` is the healthy snapshot again and the broken root is filed as snapshot 2 of kind replaced.
+    fn assert_rolled_back(&self) {
+        let (root, libz, replaced, record) = self.top(|top| {
+            (
+                fs::read_to_string(top.join("@/etc/archix-test")).unwrap_or_default(),
+                top.join("@/usr/lib/libz.so.1").is_file(),
+                fs::read_to_string(top.join("@archix/snapshots/2/root/etc/archix-test")).unwrap_or_default(),
+                fs::read_to_string(top.join("@archix/snapshots/2/record.json")).unwrap_or_default(),
+            )
+        });
+        assert_eq!(root, "healthy\n", "@ is snapshot 1's content");
+        assert!(libz, "with its libz");
+        assert_eq!(replaced, "broken\n", "the broken root is snapshot 2");
+        assert!(record.contains("\"replaced\""), "of kind replaced: {record}");
+        let left: Vec<_> = archix::conflicts::mount_points()
+            .into_iter()
+            .filter(|point| point.starts_with("/run/archix-rescue"))
+            .collect();
+        assert!(left.is_empty(), "the rescue unmounts what it mounted: {left:?}");
+    }
+}
+
+/// The static archix with a PATH holding no program at all and the kernel command line of some other system, as a live USB's is, in a mount namespace of its own.
+fn rescue_static(args: &[&str]) -> Output {
+    use std::process::Stdio;
+    let cmdline = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        cmdline.path(),
+        "root=/dev/archix-test-live rootflags=subvol=live rw quiet\n",
+    )
+    .unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    let env = Command::new("which").arg("env").output().unwrap();
+    let mut child = Command::new("unshare")
+        .args(["-m", "sh", "-c"])
+        .arg(r#"mount --bind "$0" /proc/cmdline && exec "$@""#)
+        .arg(cmdline.path())
+        .args([String::from_utf8_lossy(&env.stdout).trim(), "-i"])
+        .arg(format!("PATH={}", empty.path().display()))
+        .args([STATIC, "rescue"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The keep asks before it changes anything.
+    let _ = std::io::Write::write_all(&mut child.stdin.take().unwrap(), b"y\n");
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+#[ignore]
+fn rescue_rolls_back_a_root_whose_every_program_is_broken_given_only_its_device() {
+    let _system = lock_system();
+    let broken = BrokenRoot::new();
+    let out = ok(rescue_static(&["--root", &broken.device.0, "rollback", "1"]));
+    assert!(out.contains("snapshot 1 is now @"), "{out}");
+    assert!(
+        out.contains("git doesn't start on this root") && out.contains("generation 7's record"),
+        "the root's git is garbage too, so the keep goes by the generation's record: {out}"
+    );
+    broken.assert_rolled_back();
+}
+
+#[test]
+#[ignore]
+fn rescue_rolls_back_a_root_mounted_by_hand_from_that_mounts_device_not_the_kernel_command_line() {
+    let _system = lock_system();
+    let broken = BrokenRoot::new();
+    let at = broken.dir.path().join("mnt");
+    fs::create_dir(&at).unwrap();
+    sh(&format!("mount -o subvol=/@ {} {}", broken.device.0, at.display()));
+    let rolled = rescue_static(&["--root-dir", at.to_str().unwrap(), "rollback", "1"]);
+    sh(&format!("umount {}", at.display()));
+    let out = ok(rolled);
+    assert!(
+        out.contains("snapshot 1 is now @") && out.contains("still shows the root that was replaced"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("archix-test-live"),
+        "the live system's root= is none of its business: {out}"
+    );
+    broken.assert_rolled_back();
+}
+
+#[test]
+#[ignore]
+fn rescue_with_no_flags_finds_the_only_archix_root_and_names_them_when_there_are_several() {
+    let _system = lock_system();
+    let none = rescue_static(&["rollback", "1"]);
+    assert!(
+        !none.status.success() && text(&none).contains("no archix root was found") && text(&none).contains("--root"),
+        "{}",
+        text(&none)
+    );
+    let broken = BrokenRoot::new();
+    {
+        let other = BrokenRoot::new();
+        let several = rescue_static(&["rollback", "1"]);
+        let out = text(&several);
+        assert!(!several.status.success(), "{out}");
+        assert!(
+            out.contains("2 archix roots were found")
+                && out.contains(&broken.device.0)
+                && out.contains(&other.device.0)
+                && out.contains("--root"),
+            "{out}"
+        );
+    }
+    let out = ok(rescue_static(&["rollback", "1"]));
+    assert!(
+        out.contains(&format!("the archix root is on {}", broken.device.0)) && out.contains("snapshot 1 is now @"),
+        "{out}"
+    );
+    broken.assert_rolled_back();
+}
+
+#[test]
+#[ignore]
+fn rescue_password_shell_and_check_find_and_mount_the_root_themselves() {
+    let _system = lock_system();
+    let broken = BrokenRoot::new();
+    let run = |input: &str, args: &[&str]| {
+        let mut child = Command::new(STATIC)
+            .arg("rescue")
+            .args(args)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut child.stdin.take().unwrap(), input.as_bytes()).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    ok(run("new pass\nnew pass\n", &["password", "root"]));
+    let shadow = broken.top(|top| fs::read_to_string(top.join("@/etc/shadow")).unwrap());
+    assert!(shadow.starts_with("root:$6$"), "the root's own shadow, in @: {shadow}");
+    let out = ok(run("cat etc/archix-test; exit\n", &["shell"]));
+    assert!(
+        out.contains("this rescue environment's shell in /run/archix-rescue/root") && out.contains("broken"),
+        "the environment's sh, in the root it mounted: {out}"
+    );
+    let out = ok(run("", &["check"]));
+    assert!(
+        out.contains(&format!("{} (btrfs) is clean", broken.device.0))
+            && out.contains(&format!("{} (vfat) is clean", broken.esp.0))
+            && out.contains("the root and the ESP are clean"),
+        "the root by looking at the disks, the ESP by the root's fstab: {out}"
     );
 }

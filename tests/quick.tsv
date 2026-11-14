@@ -55,10 +55,11 @@ src/paths.rs	test:switch
 src/testhooks.rs	test:switch test:boot
 src/secrets/	test:secrets test:credentials
 src/eval/modules/secrets.lua	test:secrets
-src/snapshot/	test:snapshot test:boot test:switch test:keep
+src/snapshot/	test:snapshot test:boot test:switch test:keep test:rescue
 src/commands/snapshot.rs	test:snapshot test:boot test:switch test:keep
-src/commands/keep.rs	test:keep
-src/system/btrfs.rs	test:system test:snapshot
+src/commands/keep.rs	test:keep test:rescue
+src/system/btrfs.rs	test:system test:snapshot test:keep test:rescue
+src/system/mounts.rs	test:rescue test:snapshot test:keep
 src/captured.rs	test:captured test:switch
 src/eval/isolated.rs	test:captured test:switch
 src/plan_diff.rs	test:switch
