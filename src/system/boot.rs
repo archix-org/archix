@@ -175,6 +175,25 @@ pub fn owned_version(local_db: &Path, kernel: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The system's name in boot entry titles: os-release's PRETTY_NAME, else its NAME, else Arch Linux.
+pub fn os_name(os_release: &str) -> String {
+    let value = |key: &str| {
+        os_release.lines().find_map(|line| {
+            let value = line.trim().strip_prefix(key)?.strip_prefix('=')?.trim();
+            let value = value.trim_matches(|c| c == '"' || c == '\'');
+            // The name goes back into an os-release value and a menu title, so what quoting would need escaped is left out.
+            let value: String = value
+                .chars()
+                .filter(|c| !c.is_control() && !['"', '\'', '\\', '$', '`'].contains(c))
+                .collect();
+            (!value.trim().is_empty()).then(|| value.trim().to_string())
+        })
+    };
+    value("PRETTY_NAME")
+        .or_else(|| value("NAME"))
+        .unwrap_or_else(|| "Arch Linux".to_string())
+}
+
 /// Every kernel package in pacman database `local_db`, by name, with the modules dir it owns.
 pub fn kernels_in(local_db: &Path) -> Vec<(String, String)> {
     let mut kernels: Vec<(String, String)> = fs::read_dir(local_db)
@@ -424,6 +443,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
     in_view(&["rm", "-rf", BUILT], "clearing the image build directory")?;
     in_view(&["mkdir", "-p", BUILT], "creating the image build directory")?;
     let os_release = in_view(&["cat", "/etc/os-release"], "reading /etc/os-release")?;
+    let os_name = os_name(&os_release);
     let release: Vec<String> = os_release
         .lines()
         .filter(|line| {
@@ -485,7 +505,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
         }
         for (title, extra_cmdline, title_kernel, suffix) in variants {
             let mut text = release.clone();
-            text.push(format!("PRETTY_NAME=\"Arch Linux ({title})\""));
+            text.push(format!("PRETTY_NAME=\"{os_name} ({title})\""));
             text.push("IMAGE_ID=archix".to_string());
             let release_text = text.join("\n") + "\n";
             let cmdline = with_panic_reboot(&format!("{}{extra_cmdline}", plan.cmdline.trim()), plan.tries);
@@ -559,7 +579,7 @@ pub fn build(paths: &Paths, plan: &BootPlan, root: &dyn BootRoot) -> Result<supe
                 true => images.main = Some(image),
                 false => images.extras.push((
                     suffix.trim_start_matches('-').to_string(),
-                    format!("Arch Linux ({title}{title_kernel})"),
+                    format!("{os_name} ({title}{title_kernel})"),
                     image,
                 )),
             }
@@ -1268,6 +1288,23 @@ mod tests {
             "arch~linux.conf",
             "only digits make a version"
         );
+    }
+
+    #[test]
+    fn entry_titles_carry_the_systems_own_name() {
+        let cachyos = "NAME=\"CachyOS Linux\"\nPRETTY_NAME=\"CachyOS\"\nID=cachyos\nID_LIKE=arch\nBUILD_ID=rolling\n";
+        assert_eq!(os_name(cachyos), "CachyOS");
+        assert_eq!(os_name("NAME=\"CachyOS Linux\"\nID=cachyos\n"), "CachyOS Linux");
+        assert_eq!(
+            os_name("NAME=\"Arch Linux\"\nPRETTY_NAME=\"Arch Linux\"\nID=arch\n"),
+            "Arch Linux"
+        );
+        assert_eq!(
+            os_name("ID=arch\nPRETTY_NAME=\"\"\n"),
+            "Arch Linux",
+            "only without a name of its own"
+        );
+        assert_eq!(os_name("PRETTY_NAME='Some \"$OS\" `x`'\n"), "Some OS x");
     }
 
     #[test]

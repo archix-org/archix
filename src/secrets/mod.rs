@@ -336,7 +336,7 @@ fn place_error(path: &[String]) -> String {
         ["files", _, "text"] => String::new(),
         ["users", _, "hashed_password"] => String::new(),
         ["files", file, "merge", ..] => format!(
-            "files.{file}.merge: a secret can't be merged into a file the app also writes, which is in a deployment's /etc; give the app the secret through an environment file or credential instead"
+            "files.{file}.merge: a secret can't be merged into a file the app also writes, which stays on disk in /etc; give the app the secret through an environment file or credential instead"
         ),
         ["units" | "user_units", unit, ..] => format!(
             "{}.{unit}: a unit file is loaded before any secret is decrypted, so it can't hold one; give the service EnvironmentFile= or LoadCredential=NAME:{RUN_DIR}/<secret> (archix.secret_path)",

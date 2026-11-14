@@ -251,13 +251,13 @@ pub fn activate(root: &Path) -> Result<Report> {
             Ok(_) => {
                 report
                     .missing
-                    .insert(name.clone(), "its ciphertext in the deployment is damaged".into());
+                    .insert(name.clone(), "its ciphertext on this system is damaged".into());
                 continue;
             }
             Err(e) => {
                 report.missing.insert(
                     name.clone(),
-                    format!("its ciphertext is missing from the deployment ({})", e.kind()),
+                    format!("its ciphertext is missing from this system ({})", e.kind()),
                 );
                 continue;
             }

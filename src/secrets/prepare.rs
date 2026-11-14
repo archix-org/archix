@@ -80,7 +80,7 @@ pub fn prepare(
     match mode {
         Mode::Chroot => {
             prepared.warnings.push(
-                "can't check secrets here: this runs in a chroot, so nothing is decrypted; the deployment's boot decrypts them and names any that fail".to_string(),
+                "can't check secrets here: this runs in a chroot, so nothing is decrypted; the next boot decrypts them and names any that fail".to_string(),
             );
             return Ok(prepared);
         }
@@ -96,7 +96,7 @@ pub fn prepare(
             }
             if !absent.is_empty() {
                 prepared.warnings.push(format!(
-                    "--without-secrets: {} can't be decrypted on this machine, so the new deployment leaves them out and what uses them fails until a switch after `archix secrets rekey`: {}",
+                    "--without-secrets: {} can't be decrypted on this machine, so this switch leaves them out and what uses them fails until a switch after `archix secrets rekey`: {}",
                     if absent.len() == 1 { "this secret" } else { "these secrets" },
                     absent.join(", ")
                 ));

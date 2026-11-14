@@ -76,7 +76,7 @@ mod tests {
             Planned {
                 entry: Entry::Current,
                 image: "6.17-abc.efi".into(),
-                title: "Arch Linux (archix)".into(),
+                title: "CachyOS (archix)".into(),
                 sort_key: super::super::menu::SORT_CURRENT.into(),
                 version: "6.17".into(),
                 versioned: true,
@@ -92,7 +92,7 @@ mod tests {
         ];
         let text = menu(&planned, "AB12-CD34", "root=UUID=x rw ");
         assert!(
-            text.contains("menuentry 'Arch Linux (archix)' {\n  search --no-floppy --fs-uuid --set=root AB12-CD34\n  chainloader /EFI/archix/6.17-abc.efi root=UUID=x rw\n}\n"),
+            text.contains("menuentry 'CachyOS (archix)' {\n  search --no-floppy --fs-uuid --set=root AB12-CD34\n  chainloader /EFI/archix/6.17-abc.efi root=UUID=x rw\n}\n"),
             "{text}"
         );
         assert!(

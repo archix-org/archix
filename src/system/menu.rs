@@ -248,13 +248,13 @@ pub fn with_entries(state: &State, records: &[Record], cap: u32) -> Vec<u32> {
 }
 
 /// The entries the menu should have, in the order systemd-boot sorts them.
-pub fn plan(state: &State, records: &[Record], cap: u32) -> Vec<Planned> {
+pub fn plan(state: &State, records: &[Record], cap: u32, os_name: &str) -> Vec<Planned> {
     let mut planned = Vec::new();
     if let Some(main) = &state.current.main {
         planned.push(Planned {
             entry: Entry::Current,
             image: main.name.clone(),
-            title: "Arch Linux (archix)".to_string(),
+            title: format!("{os_name} (archix)"),
             sort_key: SORT_CURRENT.to_string(),
             version: main.version.clone(),
             versioned: true,
@@ -337,7 +337,7 @@ fn whole_entry(esp: &Path, name: &str) -> bool {
 /// The snapshots the menu gives an entry whose file on the ESP is missing or not whole, for `archix status`; the next refresh writes them again.
 pub fn missing_entries(esp: &Path, state: &State, records: &[Record], cap: u32) -> Vec<u32> {
     let on = on_esp(esp);
-    plan(state, records, cap)
+    plan(state, records, cap, "")
         .iter()
         .filter_map(|planned| match planned.entry {
             Entry::Snapshot(number) => {
@@ -770,7 +770,8 @@ pub fn refresh(paths: &Paths, plan: &BootPlan, cap: Option<u32>, reset: bool) ->
     let existing: BTreeSet<u32> = records.iter().map(|record| record.number).collect();
     forget_missing(&mut state, &existing);
     let esp = Path::new(&plan.esp);
-    let mut planned = self::plan(&state, &records, cap.unwrap_or(0));
+    let os_release = fs::read_to_string(paths.root.join("etc/os-release")).unwrap_or_default();
+    let mut planned = self::plan(&state, &records, cap.unwrap_or(0), &boot::os_name(&os_release));
     let image_size = |name: &str| {
         [
             esp.join(IMAGES).join(name),
@@ -1002,7 +1003,11 @@ mod tests {
             "2 and 6 came before a new image, 3 and 7 didn't; 5 is manual; 8 has no image on record"
         );
         assert_eq!(with_entries(&state, &records, 2), [1, 4, 6], "the cap leaves the slot");
-        let planned = plan(&state, &records, 2);
+        let planned = plan(&state, &records, 2, "CachyOS");
+        assert_eq!(
+            planned[0].title, "CachyOS (archix)",
+            "the main entry is named after the system"
+        );
         let order: Vec<(Entry, &str)> = planned.iter().map(|p| (p.entry.clone(), p.sort_key.as_str())).collect();
         assert_eq!(
             order,
@@ -1615,7 +1620,7 @@ mod tests {
         state.current.main = Some(image("new.efi"));
         taken(&mut state, 2);
         let records = vec![record(1, Kind::Switch), record(2, Kind::Switch)];
-        let versioned: Vec<(Entry, bool)> = plan(&state, &records, 5)
+        let versioned: Vec<(Entry, bool)> = plan(&state, &records, 5, "Arch Linux")
             .into_iter()
             .map(|p| (p.entry, p.versioned))
             .collect();

@@ -347,9 +347,7 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
         }
         let templated = str_of(spec, "text").is_some_and(|text| !crate::secrets::placeholders(text).is_empty());
         if (templated || str_of(spec, "secret").is_some()) && path.starts_with("/usr/local/") {
-            bail!(
-                "files.{path}: a secret can't go into /usr/local, which every deployment shares; link it from /etc or /srv"
-            );
+            bail!("files.{path}: a secret can't go into /usr/local; link it from /etc or /srv");
         }
         if let Some(name) = str_of(spec, "secret") {
             let target = crate::secrets::add_link(&secrets, &mut uses, path, name)?;

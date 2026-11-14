@@ -165,7 +165,7 @@ fn new_clashes(file: &str, what: &str, merged: &str, theirs: &str, target: u32) 
                 .into_iter()
                 .partition(|name| theirs_entries.get(name).and_then(|f| f.get(2)) == Some(&id));
             format!(
-                "{what} {id} would be both {}'s, added or changed on the running system since the switch, and {}'s in deployment {target}'s /etc/{file}",
+                "{what} {id} would be both {}'s, added or changed on the running system since the switch, and {}'s in generation {target}'s /etc/{file}",
                 live_names.join(" and "),
                 theirs_names.join(" and ")
             )
@@ -616,7 +616,7 @@ mod tests {
         );
         let err = merge_all(&base, &live, &theirs, 3).unwrap_err();
         assert!(
-            err.contains("UID 960 would be both bob's, added or changed on the running system since the switch, and pkguser's in deployment 3's /etc/passwd"),
+            err.contains("UID 960 would be both bob's, added or changed on the running system since the switch, and pkguser's in generation 3's /etc/passwd"),
             "{err}"
         );
         assert!(err.contains("GID 960"), "{err}");

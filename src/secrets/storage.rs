@@ -175,7 +175,7 @@ mod tests {
         let both = crypto::encrypt(&[old.clone(), new.clone()], b"value-123456789").unwrap();
         assert!(
             collect_retired(state.path(), &[only_old.clone(), both.clone()]).is_empty(),
-            "a deployment still needs it"
+            "a kept generation still needs it"
         );
         assert_eq!(crypto::retired(state.path()).len(), 1);
         assert_eq!(

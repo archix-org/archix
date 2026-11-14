@@ -632,11 +632,11 @@ pub fn rotate(state: &Path, compromised: bool) -> Result<String> {
     );
     if compromised {
         text.push_str(
-            "\nthe old identity is deleted: deployments whose secrets only it decrypts lose them at boot until a switch replaces them. Its ciphertexts in the config's git history are readable by whoever has it, so change every credential it protected",
+            "\nthe old identity is deleted: a generation whose secrets only it decrypts loses them at boot until a switch replaces them. Its ciphertexts in the config's git history are readable by whoever has it, so change every credential it protected",
         );
     } else {
         text.push_str(&format!(
-            " (or `sudo archix secrets rekey --machine` here, which decrypts with the retired key)\n3. `archix switch` and reboot\nthe old key stays in {} while a kept deployment needs it, and gc deletes it after",
+            " (or `sudo archix secrets rekey --machine` here, which decrypts with the retired key)\n3. `archix switch` and reboot\nthe old key stays in {} while a kept generation needs it, and gc deletes it after",
             retired.parent().unwrap_or(&retired).display()
         ));
     }

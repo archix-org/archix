@@ -477,7 +477,7 @@ pub fn lockout(etc: &Path, live: &Path, allowed: bool, logins: &BTreeSet<String>
     let what = "root is locked and no wheel or sudo member has a yescrypt or SHA-512 password";
     if usable(live) {
         bail!(
-            "this config leaves no account that can log in with a password: {what} in the new deployment, though the running system has one. The rescue boot entry needs one, else recovering needs a live USB. Give root or a wheel user a password (users.<name>.hashed_password, or passwd), or set allow_no_password_login = true; nothing was changed"
+            "this config leaves no account that can log in with a password: {what} after this switch, though the running system has one. The rescue boot entry needs one, else recovering needs a live USB. Give root or a wheel user a password (users.<name>.hashed_password, or passwd), or set allow_no_password_login = true; nothing was changed"
         );
     }
     Ok(Some(format!(

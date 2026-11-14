@@ -93,13 +93,13 @@ pub const LAN_V6: [&str; 2] = ["fc00::/7", "fe80::/10"];
 /// Firewalls whose own tables would still drop what archix's opens.
 pub const OTHERS: [&str; 2] = ["ufw.service", "firewalld.service"];
 
-/// Refuses a deployment with archix's firewall that would also start ufw or firewalld, whether the config enables one or it's enabled here and the config doesn't disable it.
+/// Refuses a switch with archix's firewall that would also start ufw or firewalld, whether the config enables one or it's enabled here and the config doesn't disable it.
 pub fn check_others(services: &BTreeMap<String, bool>, enabled_here: impl Fn(&str) -> bool) -> Result<()> {
     for unit in OTHERS {
         let why = match services.get(unit) {
             Some(true) => "the config enables it",
             Some(false) => continue,
-            None if enabled_here(unit) => "it's enabled on this system, and the new deployment keeps it",
+            None if enabled_here(unit) => "it's enabled on this system, and the config doesn't turn it off",
             None => continue,
         };
         bail!(
