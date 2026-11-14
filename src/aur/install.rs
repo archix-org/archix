@@ -38,6 +38,7 @@ pub struct Installer<'a> {
     satisfiers: HashMap<String, String>,
     built: HashMap<String, Vec<(String, PathBuf)>>,
     building: BTreeSet<String>,
+    served: Vec<(String, crate::lock::Locked)>,
 }
 
 impl<'a> Installer<'a> {
@@ -94,6 +95,12 @@ impl<'a> Installer<'a> {
             satisfiers,
             built: HashMap::new(),
             building: BTreeSet::new(),
+            served: lock
+                .packages
+                .iter()
+                .filter(|(_, pkg)| pkg.build_dep)
+                .map(|(name, pkg)| (name.clone(), pkg.clone()))
+                .collect(),
         })
     }
 
@@ -186,6 +193,7 @@ impl<'a> Installer<'a> {
             on_host,
             locked: &locked,
             sources: &sources,
+            served: &self.served,
         };
         let files = self.builder.build(job).map_err(|error| {
             if error.is::<SetupFailed>() || error.is::<NotInCache>() {

@@ -73,6 +73,9 @@ pub struct Locked {
     /// Needed only to build other AUR packages, so it's built but never installed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub build_only: bool,
+    /// From a third-party repo and installed in the build chroot, which is served archix's kept copy of exactly this file.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub build_dep: bool,
     /// The AUR maintainer when locked, empty for an orphaned package; None in locks from before archix recorded it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintainer: Option<String>,
@@ -252,6 +255,9 @@ impl Lockfile {
                 if pkg.build_only {
                     fields.push("build_only = true".to_string());
                 }
+                if pkg.build_dep {
+                    fields.push("build_dep = true".to_string());
+                }
                 let _ = writeln!(out, "{} = {{ {} }}", key(name), fields.join(", "));
             }
             if !lock.recipes.is_empty() {
@@ -345,6 +351,18 @@ mod tests {
                 ..Default::default()
             },
         );
+        packages.insert(
+            "python-clickgen".to_string(),
+            Locked {
+                version: "2.2.5-1".into(),
+                repo: "cachyos".into(),
+                file: "python-clickgen-2.2.5-1-any.pkg.tar.zst".into(),
+                sha256: "ef".into(),
+                build_only: true,
+                build_dep: true,
+                ..Default::default()
+            },
+        );
         let host = HostLock {
             date: "2026-10-14".parse().unwrap(),
             repos: vec!["core".into(), "extra".into()],
@@ -390,6 +408,10 @@ mod tests {
         );
         assert!(
             text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", sources = { \"yay::git+https://example.org/yay.git\" = \"c0ffee\" }, explicit = false, build_only = true }"),
+            "{text}"
+        );
+        assert!(
+            text.contains("python-clickgen = { version = \"2.2.5-1\", repo = \"cachyos\", file = \"python-clickgen-2.2.5-1-any.pkg.tar.zst\", sha256 = \"ef\", explicit = false, build_only = true, build_dep = true }"),
             "{text}"
         );
     }

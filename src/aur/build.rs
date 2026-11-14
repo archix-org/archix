@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -12,11 +13,12 @@ use super::srcinfo::SrcInfo;
 use crate::archive::Archive;
 use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all};
+use crate::lock::Locked;
 use crate::packages::TRANSACTION_ENV;
 use crate::pacman::read_sync_db;
 use crate::paths::Paths;
 use crate::repos::{Repo, is_official};
-use crate::resolve::{pacman_conf, print_targets, snapshot_conf};
+use crate::resolve::{chroot_conf, print_targets, snapshot_conf};
 
 /// The unprivileged user AUR packages are built as; makepkg refuses to run as root.
 pub const BUILD_USER: &str = "archix-build";
@@ -30,6 +32,8 @@ pub struct Builder<'a> {
     pub skip_check: &'a BTreeSet<String>,
     /// Install only the builds archix.lock records, never one made here instead.
     pub require_locked: bool,
+    /// The config's repos, whose custom ones the chroot gets too.
+    pub repos: &'a [Repo],
 }
 
 /// One AUR base to build at a commit, against a snapshot, with these already-built AUR packages installed first.
@@ -49,6 +53,8 @@ pub struct Job<'a> {
     pub locked: &'a BTreeMap<String, String>,
     /// What archix.lock records the first build's sources were, which this build gets again.
     pub sources: &'a BTreeMap<String, String>,
+    /// The custom repos' packages archix.lock records for build chroots, which are served to the chroot as locked.
+    pub served: &'a [(String, Locked)],
 }
 
 /// The files one build produced, so the same commit and snapshot never needs building twice.
@@ -137,6 +143,7 @@ impl Builder<'_> {
             on_host,
             locked,
             sources,
+            served,
         } = job;
         let record = self.record(base, commit, date);
         if let Ok(text) = fs::read_to_string(&record)
@@ -201,7 +208,7 @@ impl Builder<'_> {
                 if on_host {
                     Ok(())
                 } else {
-                    self.ensure_chroot(date, repos)
+                    self.ensure_chroot(date, repos, served)
                         .and_then(|()| self.prefetch(date, repos, repo_deps))
                 }
             })
@@ -333,14 +340,19 @@ impl Builder<'_> {
         None
     }
 
-    /// Creates the chroot on first use and moves it to `date`'s snapshot when the lock needs another one.
-    fn ensure_chroot(&self, date: Date, repos: &[String]) -> Result<()> {
+    /// Creates the chroot on first use and moves it to `date`'s snapshot, or to other locked custom repo packages, when the lock needs that.
+    fn ensure_chroot(&self, date: Date, repos: &[String], served: &[(String, Locked)]) -> Result<()> {
         let chroot = self.chroot();
         let root = chroot.join("root");
         let marker = chroot.join("snapshot");
+        let served_marker = chroot.join("served");
         let conf = chroot.join("pacman.conf");
         fs::create_dir_all(&chroot)?;
-        fs::write(&conf, pacman_conf(self.archive, date, &official(repos)))?;
+        let chroot_repos = self.chroot_repos(repos)?;
+        let text = chroot_conf(self.archive, date, &chroot_repos, &self.served_dir());
+        let serving = format!("{text}{}", self.serve(&chroot_repos, served)?);
+        let serving = crate::fetch::sha256_bytes(serving.as_bytes());
+        fs::write(&conf, text)?;
         if let Some(wanted) = devtools_chroot_version()
             && fs::read_to_string(root.join(".arch-chroot")).is_ok_and(|have| have.trim() != wanted)
         {
@@ -352,7 +364,7 @@ impl Builder<'_> {
                 fs::remove_dir_all(&root)?;
             }
             eprintln!(":: creating the build chroot at the {date} snapshot");
-            self.prefetch(date, repos, &["base-devel".to_string()])?;
+            self.prefetch(date, repos, &[crate::resolve::BASE_DEVEL.to_string()])?;
             // pacstrap's pacman runs the host's /etc/pacman.d/hooks chrooted into the empty root, where a deployment's guard hook can't exec /bin/sh.
             let bootstrap = chroot.join("pacstrap.conf");
             fs::write(&bootstrap, bootstrap_conf(&fs::read_to_string(&conf)?, &root))?;
@@ -365,12 +377,17 @@ impl Builder<'_> {
                         .arg("-C")
                         .arg(&bootstrap)
                         .arg(&root)
-                        .arg("base-devel"),
+                        .arg(crate::resolve::BASE_DEVEL),
                     "mkarchroot",
                 )
             })?;
-        } else if fs::read_to_string(&marker).ok().as_deref() != Some(&date.to_string()) {
-            eprintln!(":: moving the build chroot to the {date} snapshot");
+        } else if fs::read_to_string(&marker).ok().as_deref() != Some(&date.to_string())
+            || fs::read_to_string(&served_marker).ok() != Some(serving.clone())
+        {
+            match fs::read_to_string(&marker).ok().as_deref() == Some(&date.to_string()) {
+                true => eprintln!(":: updating the build chroot's repos"),
+                false => eprintln!(":: moving the build chroot to the {date} snapshot"),
+            }
             let installed = crate::pacman::read_local_db(&root.join("var/lib/pacman/local")).unwrap_or_default();
             self.prefetch(date, repos, &installed.into_keys().collect::<Vec<_>>())?;
             with_retries("moving the build chroot", || {
@@ -385,7 +402,86 @@ impl Builder<'_> {
             })?;
         }
         crate::durable::write(&marker, date.to_string().as_bytes())?;
+        crate::durable::write(&served_marker, serving.as_bytes())?;
         Ok(())
+    }
+
+    /// Where the chroot's custom repos are served from, one directory each.
+    fn served_dir(&self) -> PathBuf {
+        self.chroot().join("repos")
+    }
+
+    /// The lock's repos as the config declares them, in the lock's order.
+    fn chroot_repos(&self, repos: &[String]) -> Result<Vec<Repo>> {
+        repos
+            .iter()
+            .map(|name| match is_official(name) {
+                true => Ok(Repo::official(name)),
+                false => match self.repos.iter().find(|repo| repo.name == *name) {
+                    Some(repo) => Ok(repo.clone()),
+                    None => {
+                        bail!("archix.lock names the repo {name}, which the config doesn't declare; run `archix lock`")
+                    }
+                },
+            })
+            .collect()
+    }
+
+    /// Makes a repo of each custom repo's locked build chroot packages, checked against their sha256, with the signatures the repo has; returns what it served.
+    fn serve(&self, repos: &[Repo], served: &[(String, Locked)]) -> Result<String> {
+        let dir = self.served_dir();
+        if dir.exists() {
+            fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
+        }
+        let mut listing = String::new();
+        for repo in repos.iter().filter(|repo| repo.custom.is_some()) {
+            let repo_dir = dir.join(&repo.name);
+            fs::create_dir_all(&repo_dir).with_context(|| format!("creating {}", repo_dir.display()))?;
+            let wanted: Vec<Wanted> = served
+                .iter()
+                .filter(|(_, pkg)| pkg.repo == repo.name)
+                .map(|(name, pkg)| Wanted {
+                    name: name.clone(),
+                    file: pkg.file.clone(),
+                    urls: repo.urls(&pkg.file),
+                    sha256: Some(pkg.sha256.clone()),
+                    size: None,
+                })
+                .collect();
+            let files = fetch_all(
+                self.archive,
+                &self.paths.packages(),
+                std::slice::from_ref(&self.paths.pacman_cache),
+                &wanted,
+            )?;
+            let mut added = Vec::new();
+            for file in &files {
+                let name = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let sig = file.with_file_name(format!("{name}.sig"));
+                for (from, to) in [(file, name.clone()), (&sig, format!("{name}.sig"))] {
+                    if from.is_file() {
+                        let to = repo_dir.join(to);
+                        fs::hard_link(from, &to)
+                            .or_else(|_| fs::copy(from, &to).map(|_| ()))
+                            .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+                    }
+                }
+                let _ = writeln!(listing, "{} {name} {}", repo.name, sig.is_file());
+                added.push(repo_dir.join(name));
+            }
+            match added.is_empty() {
+                // An empty tar archive, which pacman reads as a database without packages.
+                true => fs::write(repo_dir.join(format!("{}.db", repo.name)), [0u8; 1024])?,
+                false => run(
+                    Command::new("repo-add")
+                        .arg("--quiet")
+                        .arg(repo_dir.join(format!("{}.db.tar.gz", repo.name)))
+                        .args(&added),
+                    "repo-add",
+                )?,
+            }
+        }
+        Ok(listing)
     }
 
     /// Downloads what mkarchroot or makepkg will install in the chroot into pacman's cache, which devtools uses, so a slow archive connection gets archix's retries.
@@ -663,7 +759,7 @@ fn bootstrap_conf(conf: &str, root: &Path) -> String {
     conf.replacen("[options]\n", &hooks, 1)
 }
 
-/// The chroot only gets the official repos; custom repos would need their signing keys inside it too.
+/// The official repos, whose packages archix downloads from the archive for the chroot itself.
 fn official(repos: &[String]) -> Vec<Repo> {
     repos
         .iter()

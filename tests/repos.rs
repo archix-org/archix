@@ -501,3 +501,117 @@ fn third_party_packages_install_and_fall_back_down_the_chain() {
         "the repo's block goes too"
     );
 }
+
+#[test]
+#[ignore]
+fn an_aur_build_dependency_only_a_custom_repo_has_is_locked_from_it_and_the_chroot_gets_that_file() {
+    let _system = lock_system();
+    run(Command::new("pacman-key").arg("--init"));
+    let signer = TempDir::new().unwrap();
+    let gpg = |args: &[&str]| {
+        Command::new("gpg")
+            .arg("--homedir")
+            .arg(signer.path())
+            .args(["--batch", "--pinentry-mode", "loopback", "--passphrase", ""])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let made = gpg(&[
+        "--quick-gen-key",
+        "archix test packager <packager@archix.test>",
+        "ed25519",
+        "sign",
+        "never",
+    ]);
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+    let listing = String::from_utf8_lossy(&gpg(&["--with-colons", "--list-keys"]).stdout).into_owned();
+    let fingerprint = listing
+        .lines()
+        .find(|line| line.starts_with("fpr:"))
+        .and_then(|line| line.split(':').nth(9))
+        .unwrap()
+        .to_string();
+    let key = signer.path().join("packager.gpg");
+    fs::write(&key, gpg(&["--export"]).stdout).unwrap();
+    run(Command::new("pacman-key").arg("--add").arg(&key));
+    run(Command::new("pacman-key").args(["--lsign-key", &fingerprint]));
+    let tool = |version: &str| {
+        format!(
+            "install -Dm755 /dev/stdin \"$pkgdir/usr/bin/archix-test-tool\" <<'EOS'\n#!/bin/sh\necho tool-{version}\nEOS"
+        )
+    };
+    let repo = LocalRepo::new("archix-third");
+    repo.publish_full("archix-test-tool", "1.0", &tool("1.0"), "", Some(signer.path()));
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg {
+        package: "install -Dm755 /dev/stdin \"$pkgdir/usr/bin/archix-test-aurtool\" <<'EOS'\n#!/bin/sh\necho aurtool\nEOS",
+        ..TestPkg::new("archix-test-aurtool", "1.0")
+    });
+    aur.publish(TestPkg {
+        makedepends: &["archix-test-tool", "archix-test-aurtool"],
+        build: "{ archix-test-tool; archix-test-aurtool; } > \"$srcdir/marker\"",
+        package: "install -Dm644 \"$srcdir/marker\" \"$pkgdir/usr/share/archix-test-app/marker\"",
+        ..TestPkg::new("archix-test-app", "1.0")
+    });
+    let body = format!(
+        "custom_repos = {{ {{ name = \"archix-third\", servers = {{ {:?} }} }} }}, aur = {{ url = {:?} }}",
+        repo.server(),
+        aur.url()
+    );
+
+    let setup = Setup::new(&["archix-test-app"], &body);
+    let lock = setup.lock();
+    let locked = &lock.packages["archix-test-tool"];
+    assert_eq!(
+        (
+            locked.repo.as_str(),
+            locked.version.as_str(),
+            locked.build_only,
+            locked.build_dep
+        ),
+        ("archix-third", "1.0-1", true, true),
+        "a build dependency a configured repo has is locked from it"
+    );
+    let file = repo.dir.path().join("archix-test-tool-1.0-1-any.pkg.tar.zst");
+    assert_eq!(locked.sha256, archix::fetch::sha256(&file).unwrap());
+    let aurtool = &lock.packages["archix-test-aurtool"];
+    assert_eq!(
+        (aurtool.repo.as_str(), aurtool.build_only, aurtool.build_dep),
+        (AUR_REPO, true, false),
+        "one no configured repo has is built from the AUR"
+    );
+
+    let out = setup.run(&["switch", "--noconfirm"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{text}");
+    let marker = || fs::read_to_string(system_path("/usr/share/archix-test-app/marker")).unwrap();
+    assert_eq!(
+        marker(),
+        "tool-1.0\naurtool\n",
+        "the chroot verified and installed the repo's signed package"
+    );
+    assert!(installed("archix-test-tool").is_none() && installed("archix-test-aurtool").is_none());
+    let conf = fs::read_to_string("/var/lib/archix/chroot/root/etc/pacman.conf").unwrap();
+    assert!(
+        conf.contains("[archix-third]") && conf.contains("Server = file:///var/lib/archix/chroot/repos/archix-third"),
+        "{conf}"
+    );
+
+    repo.withdraw("archix-test-tool");
+    repo.publish_full("archix-test-tool", "2.0", &tool("2.0"), "", Some(signer.path()));
+    forget(&setup, "archix-test-app");
+    let _ = fs::remove_dir_all("/var/cache/archix/aur-builds/archix-test-app");
+    let out = setup.run(&["switch", "--noconfirm"]);
+    let text = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let _ = Command::new("pacman-key").args(["--delete", &fingerprint]).output();
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains(":: building archix-test-app"), "{text}");
+    assert_eq!(
+        marker(),
+        "tool-1.0\naurtool\n",
+        "a rebuild gets the locked file, not what the repo has since"
+    );
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+}

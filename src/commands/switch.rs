@@ -1492,6 +1492,7 @@ fn build_aur(
         snapshot_cache: &cache,
         skip_check: &declared.skip_check,
         require_locked: declared.require_locked_build,
+        repos: &declared.repos,
     };
     let recipes = recipes(target, declared)?;
     let mut moved = BTreeSet::new();

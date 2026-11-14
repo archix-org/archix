@@ -75,6 +75,15 @@ pub fn snapshot_conf(archive: &Archive, cache: &Path, date: Date, repos: &[Repo]
 
 /// The pacman.conf serving one archive snapshot of the official repos, plus custom repos as they are now.
 pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
+    conf_for(archive, date, repos, None)
+}
+
+/// The build chroot's pacman.conf: `pacman_conf`'s repos in its order, with each custom repo served from `served`/<name>, where archix puts the files the lock names.
+pub fn chroot_conf(archive: &Archive, date: Date, repos: &[Repo], served: &Path) -> String {
+    conf_for(archive, date, repos, Some(served))
+}
+
+fn conf_for(archive: &Archive, date: Date, repos: &[Repo], served: Option<&Path>) -> String {
     let mut text = format!(
         "[options]\nArchitecture = {}\nSigLevel = Required DatabaseOptional\nLocalFileSigLevel = Optional\n",
         crate::archive::architectures()
@@ -87,12 +96,19 @@ pub fn pacman_conf(archive: &Archive, date: Date, repos: &[Repo]) -> String {
                     let _ = writeln!(text, "Server = {url}");
                 }
             }
-            Some(custom) => {
-                let _ = writeln!(text, "SigLevel = {}", custom.sig_level);
-                for server in &custom.servers {
-                    let _ = writeln!(text, "Server = {server}");
+            Some(custom) => match served {
+                // The packages keep the repo's own level; the database is one archix wrote from files it checked against the lock.
+                Some(served) => {
+                    let _ = writeln!(text, "SigLevel = {} DatabaseNever", custom.sig_level);
+                    let _ = writeln!(text, "Server = file://{}", served.join(&repo.name).display());
                 }
-            }
+                None => {
+                    let _ = writeln!(text, "SigLevel = {}", custom.sig_level);
+                    for server in &custom.servers {
+                        let _ = writeln!(text, "Server = {server}");
+                    }
+                }
+            },
         }
     }
     text
@@ -173,20 +189,7 @@ pub fn resolve(
             .flat_map(|packages| packages.keys())
             .map(String::as_str)
             .collect();
-        // AUR builds run in a chroot with only the official repos (aur::build), so their build dependencies resolve against those.
-        let official_repos: Vec<Repo> = repos
-            .iter()
-            .filter(|repo| is_official(&repo.name))
-            .map(|repo| Repo::official(&repo.name))
-            .collect();
-        let build_conf = db.join(format!("pacman.{}.build.conf", std::process::id()));
-        fs::write(&build_conf, pacman_conf(archive, date, &official_repos))
-            .with_context(|| format!("writing {}", build_conf.display()))?;
-        let build = BuildRepos {
-            conf: &build_conf,
-            db: &db,
-        };
-        from_aur = aur_closure(aur, &conf, &db, &build, &not_in_repos, &newer, &in_repos)?;
+        from_aur = aur_closure(aur, &conf, &db, &not_in_repos, &newer, &in_repos)?;
     }
     let mut targets: Vec<String> = official.clone();
     targets.extend(from_aur.repo_deps.iter().map(|dep| provider(&sync, dep, prefer)));
@@ -242,6 +245,7 @@ pub fn resolve(
         }
     }
     let built = std::mem::take(&mut from_aur.meta);
+    let mut recipes_built = std::mem::take(&mut from_aur.infos);
     for (name, mut locked) in from_aur.packages {
         locked.explicit = not_in_repos.contains(&name);
         lock.packages.insert(name, locked);
@@ -258,8 +262,11 @@ pub fn resolve(
         },
     )?;
     if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
-        apply_patches(recipes, &sync, &mut lock)?;
+        recipes_built.extend(apply_patches(recipes, &sync, &mut lock)?);
         lock.recipes = recipes.fingerprints(&lock.local_recipes())?;
+    }
+    if repos.iter().any(|repo| repo.custom.is_some()) && lock.packages.values().any(Locked::is_built) {
+        lock_build_deps(&mut lock, &recipes_built, &conf, &db, &sync)?;
     }
     Ok(lock)
 }
@@ -309,7 +316,8 @@ fn apply_patches(
     recipes: &Recipes,
     sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
     lock: &mut HostLock,
-) -> Result<()> {
+) -> Result<BTreeMap<String, SrcInfo>> {
+    let mut infos = BTreeMap::new();
     let official = |name: &str| {
         sync.iter()
             .filter(|(repo, _)| is_official(repo))
@@ -352,8 +360,9 @@ fn apply_patches(
             };
             lock.packages.insert(member, patched);
         }
+        infos.insert(recipe.id.clone(), recipe.info);
     }
-    Ok(())
+    Ok(infos)
 }
 
 /// A concrete package for a dependency that may be a virtual name: the one listed in `prefer`, if any.
@@ -423,6 +432,8 @@ struct AurClosure {
     provides: Vec<String>,
     /// Each package's version, provides and depends from its .SRCINFO, for checking holds.
     meta: BTreeMap<String, crate::holds::Meta>,
+    /// The .SRCINFO of every base the closure builds.
+    infos: BTreeMap<String, SrcInfo>,
 }
 
 /// A snapshot's date with its pacman config and db directory.
@@ -476,17 +487,10 @@ impl<'a> Newer<'a> {
 }
 
 /// Walks AUR packages and their dependencies, installing runtime ones and only building make/check-only ones; `in_repos` names what the snapshot's repos ship, which an AUR package may stand in for only when declared.
-/// The official repos alone, as the build chroot has them.
-struct BuildRepos<'a> {
-    conf: &'a Path,
-    db: &'a Path,
-}
-
 fn aur_closure(
     aur: &Aur,
     conf: &Path,
     db: &Path,
-    build_repos: &BuildRepos,
     targets: &BTreeSet<String>,
     newer: &Newer,
     in_repos: &BTreeSet<&str>,
@@ -575,8 +579,8 @@ fn aur_closure(
         };
         let runtime_deps = pkg.depends.clone();
         let build_deps: Vec<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
-        let missing_from_repos = unsatisfied(conf, db, &runtime_deps)?;
-        let missing_from_build_repos = unsatisfied(build_repos.conf, build_repos.db, &build_deps)?;
+        // The build chroot has every configured repo (aur::build), so build dependencies resolve as runtime ones do.
+        let missing_from_repos = unsatisfied(conf, db, &[runtime_deps.clone(), build_deps.clone()].concat())?;
         for dep in runtime_deps {
             if !missing_from_repos.contains(&dep) {
                 if needed_at_runtime {
@@ -588,7 +592,7 @@ fn aur_closure(
             }
         }
         for dep in build_deps {
-            if missing_from_build_repos.contains(&dep) {
+            if missing_from_repos.contains(&dep) {
                 needed_by.entry(dep.clone()).or_insert_with(|| name.clone());
                 queue.push_back((dep, false));
             }
@@ -623,6 +627,7 @@ fn aur_closure(
     {
         let (commit, info) = &bases[&base];
         let pkg = info.package(&name).expect("checked while walking");
+        closure.infos.entry(base.clone()).or_insert_with(|| info.clone());
         let local = aur.recipes.is_some_and(|r| r.is_local(&base));
         let maintainer = match local {
             true => None,
@@ -789,9 +794,34 @@ pub fn print_targets(
     targets_only: bool,
     assume: &[String],
 ) -> Result<Vec<(String, String, String)>> {
+    match targets_or_unmet(conf, db, targets, targets_only, assume)? {
+        Ok(targets) => Ok(targets),
+        Err(unresolved) => bail!("{}", unresolved.message),
+    }
+}
+
+/// A package pacman would install: name, version and repo.
+pub type Target = (String, String, String);
+
+/// Why pacman couldn't resolve a set of targets.
+pub struct Unresolved {
+    /// Each dependency nothing satisfies, with the package that needs it.
+    pub unmet: Vec<(String, String)>,
+    pub message: String,
+}
+
+/// `print_targets`, with what pacman couldn't satisfy set apart from the failures to run it at all.
+pub fn targets_or_unmet(
+    conf: &Path,
+    db: &Path,
+    targets: &[String],
+    targets_only: bool,
+    assume: &[String],
+) -> Result<std::result::Result<Vec<Target>, Unresolved>> {
     let output = pacman_print(conf, db, targets, targets_only, assume)?;
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let errors: Vec<String> = stderr
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut errors: Vec<String> = stderr
         .lines()
         .filter_map(|line| line.strip_prefix("error: "))
         .map(|line| match line.strip_prefix("target not found: ") {
@@ -800,20 +830,165 @@ pub fn print_targets(
         })
         .collect();
     if !output.status.success() || !errors.is_empty() {
-        if errors.is_empty() {
-            bail!("pacman failed: {}", stderr.trim());
-        }
-        bail!("could not resolve packages:\n  {}", errors.join("\n  "));
+        let unmet = unmet_dependencies(&stdout);
+        errors.extend(
+            unmet
+                .iter()
+                .map(|(dep, by)| format!("{by} needs `{dep}`, which nothing provides")),
+        );
+        let message = match errors.is_empty() {
+            true => format!("pacman failed: {}", stderr.trim()),
+            false => format!("could not resolve packages:\n  {}", errors.join("\n  ")),
+        };
+        return Ok(Err(Unresolved { unmet, message }));
     }
-    String::from_utf8_lossy(&output.stdout)
+    stdout
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| match line.split(' ').collect::<Vec<_>>()[..] {
             [name, version, repo] => Ok((name.to_string(), version.to_string(), repo.to_string())),
             _ => bail!("unexpected pacman output: {line:?}"),
         })
+        .collect::<Result<Vec<_>>>()
+        .map(Ok)
+}
+
+/// The `(dependency, needed by)` pairs in pacman's "unable to satisfy dependency" lines, which it prints to stdout.
+fn unmet_dependencies(stdout: &str) -> Vec<(String, String)> {
+    stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(":: unable to satisfy dependency '"))
+        .filter_map(|rest| rest.split_once("' required by "))
+        .map(|(dep, by)| (dep.to_string(), by.trim().to_string()))
         .collect()
 }
+
+/// Why a build's dependencies can't be installed when a third-party package among them needs something the snapshot lacks; `third_party` gives such a package's version and repo.
+fn snapshot_too_old(
+    unmet: &[(String, String)],
+    date: Date,
+    third_party: impl Fn(&str) -> Option<(String, String)>,
+) -> Option<String> {
+    unmet.iter().find_map(|(dep, by)| {
+        let (version, repo) = third_party(by)?;
+        Some(format!(
+            "{by} {version} from {repo} needs `{dep}`, which the {date} snapshot of the official repos doesn't have: {repo} has no dated archive, so its {by} is newer than the snapshot archix.lock is at. Run `archix update` to lock a newer snapshot"
+        ))
+    })
+}
+
+/// Marks what the build chroot installs from third-party repos for base-devel and each built base, adding as build-only what the system doesn't install; the chroot is served exactly these files (aur::build).
+fn lock_build_deps(
+    lock: &mut HostLock,
+    infos: &BTreeMap<String, SrcInfo>,
+    conf: &Path,
+    db: &Path,
+    sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
+) -> Result<()> {
+    let mut satisfiers: HashMap<String, String> = HashMap::new();
+    let mut assume = Vec::new();
+    let mut depends: HashMap<String, Vec<String>> = HashMap::new();
+    for (name, pkg) in lock.packages.iter().filter(|(_, pkg)| pkg.is_built()) {
+        let source = pkg
+            .base
+            .as_ref()
+            .and_then(|base| infos.get(base))
+            .and_then(|info| info.package(name));
+        assume.push(format!("{name}={}", pkg.version));
+        satisfiers.insert(name.clone(), name.clone());
+        let Some(source) = source else { continue };
+        for provided in &source.provides {
+            assume.push(match provided.split_once('=') {
+                Some(_) => provided.clone(),
+                None => format!("{provided}={}", pkg.version),
+            });
+        }
+        depends.insert(name.clone(), source.depends.clone());
+    }
+    for (name, pkg) in lock.packages.iter().filter(|(_, pkg)| pkg.is_built()) {
+        let source = pkg.base.as_ref().and_then(|base| infos.get(base)?.package(name));
+        for provided in source.into_iter().flat_map(|source| &source.provides) {
+            satisfiers
+                .entry(srcinfo::dep_name(provided).to_string())
+                .or_insert_with(|| name.clone());
+        }
+    }
+    let third_party = |name: &str| {
+        sync.iter()
+            .filter(|(repo, _)| !is_official(repo))
+            .find_map(|(repo, packages)| Some((packages.get(name)?.version.clone(), repo.clone())))
+    };
+    let mut found = Vec::new();
+    let base_devel = [BASE_DEVEL.to_string()];
+    match targets_or_unmet(conf, db, &base_devel, false, &assume)? {
+        Ok(closure) => found.extend(closure),
+        Err(unresolved) => match snapshot_too_old(&unresolved.unmet, lock.date, third_party) {
+            Some(why) => bail!("the build chroot can't be set up: {why}; nothing was changed"),
+            None => bail!("the build chroot's {BASE_DEVEL}: {}", unresolved.message),
+        },
+    }
+    for (base, info) in infos {
+        let mut targets = BTreeSet::from(base_devel.clone());
+        let mut walked = BTreeSet::new();
+        let mut queue: Vec<String> = info
+            .makedepends
+            .iter()
+            .chain(&info.checkdepends)
+            .chain(info.packages.iter().flat_map(|pkg| &pkg.depends))
+            .cloned()
+            .collect();
+        while let Some(dep) = queue.pop() {
+            match satisfiers.get(srcinfo::dep_name(&dep)) {
+                Some(built) if walked.insert(built.clone()) => {
+                    queue.extend(depends.get(built).into_iter().flatten().cloned());
+                }
+                Some(_) => {}
+                None => {
+                    targets.insert(dep);
+                }
+            }
+        }
+        let targets: Vec<String> = targets.into_iter().collect();
+        match targets_or_unmet(conf, db, &targets, false, &assume)? {
+            Ok(closure) => found.extend(closure),
+            // Anything else the repos can't satisfy is the recipe's problem, which makepkg reports in the build itself.
+            Err(unresolved) => {
+                if let Some(why) = snapshot_too_old(&unresolved.unmet, lock.date, third_party) {
+                    bail!("{base} can't be built: {why}; nothing was changed");
+                }
+            }
+        }
+    }
+    for (name, version, repo) in found {
+        if is_official(&repo) {
+            continue;
+        }
+        let Some(pkg) = sync.get(&repo).and_then(|packages| packages.get(&name)) else {
+            bail!("pacman picked {name} {version} from {repo}, but it is missing from that repo's database");
+        };
+        match lock.packages.get_mut(&name) {
+            // At another version when pinned: the lock holds one version of a name, and the system's wins.
+            Some(locked) if locked.repo == repo => locked.build_dep = true,
+            Some(_) => {}
+            None => {
+                let locked = Locked {
+                    version,
+                    repo,
+                    file: pkg.filename.clone(),
+                    sha256: pkg.sha256.clone(),
+                    build_only: true,
+                    build_dep: true,
+                    ..Default::default()
+                };
+                lock.packages.insert(name, locked);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What every build chroot starts from.
+pub const BASE_DEVEL: &str = "base-devel";
 
 /// pacman package names: lowercase alphanumerics and `@._+-`, not starting with `-` or `.`.
 fn valid_name(name: &str) -> bool {
@@ -855,6 +1030,81 @@ mod tests {
             None,
             "a provider only when the AUR has nothing"
         );
+    }
+
+    fn custom(sig_level: &str, before_official: bool) -> Option<crate::repos::Custom> {
+        Some(crate::repos::Custom {
+            servers: vec!["https://mirror.example/$arch/$repo".into()],
+            keys: vec![],
+            keyserver: String::new(),
+            sig_level: sig_level.into(),
+            before_official,
+        })
+    }
+
+    #[test]
+    fn the_build_chroot_has_the_configured_repos_served_as_locked() {
+        let archive = Archive::new("https://archive.test");
+        let repos = [
+            Repo {
+                name: "cachyos".into(),
+                custom: custom("Required DatabaseOptional", true),
+            },
+            Repo::official("core"),
+            Repo::official("extra"),
+            Repo {
+                name: "late".into(),
+                custom: custom("Optional", false),
+            },
+        ];
+        let date: Date = "2026-11-01".parse().unwrap();
+        let text = chroot_conf(&archive, date, &repos, Path::new("/chroot/repos"));
+        let at = |section: &str| {
+            text.find(section)
+                .unwrap_or_else(|| panic!("{section} missing:\n{text}"))
+        };
+        assert!(
+            at("[cachyos]") < at("[core]") && at("[core]") < at("[extra]") && at("[extra]") < at("[late]"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "[cachyos]\nSigLevel = Required DatabaseOptional DatabaseNever\nServer = file:///chroot/repos/cachyos\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("[late]\nSigLevel = Optional DatabaseNever\nServer = file:///chroot/repos/late\n"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("mirror.example"),
+            "the chroot never reaches a custom repo's servers:\n{text}"
+        );
+        let core = &text[at("[core]")..at("[extra]")];
+        assert!(core.contains("Server = https://archive.test/"), "{core}");
+        assert_eq!(
+            pacman_conf(&archive, date, &repos).replace("Server = https://mirror.example/$arch/$repo\n", ""),
+            text.replace(" DatabaseNever", "")
+                .replace("Server = file:///chroot/repos/cachyos\n", "")
+                .replace("Server = file:///chroot/repos/late\n", ""),
+            "otherwise the chroot's conf is the one lock resolves with"
+        );
+    }
+
+    #[test]
+    fn unmet_dependencies_come_from_pacmans_output() {
+        let stdout = "warning: cannot resolve \"python-clickgen>=2.0.0\", a dependency of \"bibata\"\n\
+                      :: The following package cannot be upgraded due to unresolvable dependencies:\n\
+                      :: unable to satisfy dependency 'glibc>=2.43' required by cachyos-gcc\n";
+        assert_eq!(
+            unmet_dependencies(stdout),
+            [("glibc>=2.43".to_string(), "cachyos-gcc".to_string())]
+        );
+        let why = snapshot_too_old(&unmet_dependencies(stdout), "2026-11-01".parse().unwrap(), |name| {
+            (name == "cachyos-gcc").then(|| ("15.2-1".to_string(), "cachyos".to_string()))
+        });
+        assert!(why.is_some_and(|why| why.contains("cachyos-gcc 15.2-1 from cachyos needs `glibc>=2.43`")));
     }
 
     #[test]
