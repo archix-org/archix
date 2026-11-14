@@ -34,7 +34,7 @@ use super::lock::{current_lock, load_lockfile, save_lock, store_lockfile};
 use super::snapshot::Rollbacks;
 use super::{
     Declared, Drift, Nearest, Snapshot, Target, ThirdPartyFallback, aur_git, aur_source, check_pacman_free, confirm,
-    confirm_no, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies,
+    confirm_no, confirm_or, count, declared, edit_installed, ensure_flatpak_remotes, keep_third_party_copies,
     print_missing_ignored, print_warned, recipes, require_root, select_changes, settle_flatpak, third_party_repos,
     transaction_for, user_cache,
 };
@@ -1534,26 +1534,44 @@ fn build_aur(
         eprintln!("{failed}");
         let (newer, older) = nearest(&git, &failed.base, &failed.commit, &failed.version)?;
         let policy = accept_nearest.or(declared.missing_versions);
-        let pick = match policy {
-            Some(Nearest::Newer) => newer,
-            Some(Nearest::Older) => older,
-            None if noconfirm => newer,
+        let (base, from) = (&failed.base, &failed.version);
+        let older_version = older.as_ref().map(|(_, info)| info.version.clone());
+        let (pick, is_older) = match policy {
+            Some(Nearest::Newer) => (newer, false),
+            Some(Nearest::Older) => (older, true),
+            None if noconfirm => (newer, false),
             None => {
-                let base = &failed.base;
-                if let Some(n) = newer.filter(|(_, info)| {
-                    confirm(&format!("use the nearest newer version, {base} {}?", info.version)).unwrap_or(false)
-                }) {
-                    Some(n)
-                } else {
-                    older.filter(|(_, info)| {
-                        confirm(&format!("use the nearest older version, {base} {}?", info.version)).unwrap_or(false)
-                    })
+                let newer = newer.filter(|(_, info)| {
+                    confirm(&format!(
+                        "use the nearest newer version, {base} {from} -> {}?",
+                        info.version
+                    ))
+                    .unwrap_or(false)
+                });
+                match newer {
+                    Some(newer) => (Some(newer), false),
+                    None => (
+                        older.filter(|(_, info)| {
+                            let to = &info.version;
+                            confirm_or(&format!("DOWNGRADE {base} from {from} to the OLDER {to}?"), false)
+                                .unwrap_or(false)
+                        }),
+                        true,
+                    ),
                 }
             }
         };
         let Some((commit, info)) = pick else {
-            return Err(error.context("no other version was accepted; nothing was changed"));
+            let hint = match older_version.filter(|_| policy != Some(Nearest::Older)) {
+                Some(to) => format!(
+                    "no other version was accepted; nothing was changed. {base} {to} is OLDER than {from} and is taken only on a yes to that question or with --accept-nearest=older"
+                ),
+                None => "no other version was accepted; nothing was changed".to_string(),
+            };
+            return Err(error.context(hint));
         };
+        let direction = if is_older { "an OLDER" } else { "a newer" };
+        eprintln!("{base}: moving from {from} to {}, {direction} version", info.version);
         let old = lock.clone();
         for (name, pkg) in lock
             .packages
@@ -1567,7 +1585,7 @@ fn build_aur(
             pkg.file = info.file(srcpkg);
             pkg.commit = Some(commit.clone());
         }
-        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
+        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm_or)?;
     }
 }
 
@@ -1673,14 +1691,18 @@ fn third_party_fallback(
         }
         let mut replacement = fallback_source(declared, archive, lock.date, repo, name)?;
         replacement.explicit = pkg.explicit;
-        println!("using {name} {} from {}", replacement.version, replacement.repo);
+        let older = match archix::pacman::vercmp(&replacement.version, &pkg.version) {
+            std::cmp::Ordering::Less => format!(", OLDER than the locked {}", pkg.version),
+            _ => String::new(),
+        };
+        println!("using {name} {} from {}{older}", replacement.version, replacement.repo);
         lock.packages.insert(name.clone(), replacement);
         lock.pinned.retain(|pinned| pinned != name);
         replaced = true;
     }
     if replaced {
         let git = aur_git(declared)?;
-        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm)?;
+        review(&git, Some(&old), lock, declared.aur_review && !noconfirm, &confirm_or)?;
         let mut lockfile = load_lockfile(target)?;
         save_lock(target, &mut lockfile, Some(&old), lock)?;
     }

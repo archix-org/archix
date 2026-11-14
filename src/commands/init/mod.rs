@@ -30,7 +30,9 @@ use archix::repack::{self, Installed};
 use archix::repos::Custom;
 
 use super::lock::pending;
-use super::{Declared, Target, aur_git, aur_source, confirm, count, declared, print_warned, require_root, user_cache};
+use super::{
+    Declared, Target, aur_git, aur_source, confirm_or, count, declared, print_warned, require_root, user_cache,
+};
 
 fn section(title: &str) {
     let rule = "─".repeat(44usize.saturating_sub(title.chars().count()));
@@ -484,7 +486,7 @@ fn write_and_lock(
         })
         .collect();
     let git_aur = aur_git(&declared)?;
-    review(&git_aur, None, &lock, declared.aur_review && interactive, &confirm)?;
+    review(&git_aur, None, &lock, declared.aur_review && interactive, &confirm_or)?;
     let mut lockfile = Lockfile::default();
     lockfile.hosts.insert(host.to_string(), lock.clone());
     lockfile.save(&dir.join(LOCK_FILE))?;

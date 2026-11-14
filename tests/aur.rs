@@ -171,6 +171,71 @@ fn aur_packages_are_locked_built_reviewed_and_fall_back() {
 
 #[test]
 #[ignore]
+fn a_failed_build_moves_to_an_older_version_only_when_told_to() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    aur.publish(TestPkg::new("archix-test-older", "1.0"));
+    aur.publish(TestPkg {
+        build: "false",
+        ..TestPkg::new("archix-test-older", "1.1")
+    });
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&["archix-test-older"], &body);
+    assert_eq!(setup.lock().packages["archix-test-older"].version, "1.1-1");
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let entered = setup.answering_raw("\n\n\n", &["switch"]);
+    let out = text(&entered);
+    assert!(!entered.status.success(), "an empty answer doesn't downgrade:\n{out}");
+    assert!(
+        out.contains("DOWNGRADE archix-test-older from 1.1-1 to the OLDER 1.0-1? [y/N]"),
+        "{out}"
+    );
+    assert_eq!(installed("archix-test-older"), None, "{out}");
+    assert_eq!(setup.lock().packages["archix-test-older"].version, "1.1-1");
+
+    let unattended = setup.run(&["switch", "--noconfirm"]);
+    let out = text(&unattended);
+    assert!(!unattended.status.success(), "--noconfirm doesn't downgrade:\n{out}");
+    assert!(
+        out.contains("archix-test-older 1.0-1 is OLDER than 1.1-1") && out.contains("--accept-nearest=older"),
+        "{out}"
+    );
+    assert_eq!(installed("archix-test-older"), None, "{out}");
+
+    let halfway = setup.answering_raw("y\ny\n\n", &["switch"]);
+    let out = text(&halfway);
+    assert!(
+        !halfway.status.success(),
+        "the recipe of an older version isn't trusted by default:\n{out}"
+    );
+    assert!(
+        out.contains("an OLDER version (1.1-1 -> 1.0-1), and lock it? [y/N]"),
+        "{out}"
+    );
+    assert_eq!(setup.lock().packages["archix-test-older"].version, "1.1-1");
+
+    let out = setup.answering("y\ny\ny\n", &["switch"]);
+    assert!(
+        out.contains("archix-test-older: moving from 1.1-1 to 1.0-1, an OLDER version"),
+        "{out}"
+    );
+    assert_eq!(installed("archix-test-older").as_deref(), Some("1.0-1"));
+    assert_eq!(setup.lock().packages["archix-test-older"].version, "1.0-1");
+
+    setup.set_body(&[], "");
+    setup.ok(&["switch", "--noconfirm"]);
+    assert!(installed("archix-test-older").is_none());
+}
+
+#[test]
+#[ignore]
 fn a_build_on_the_host_gets_its_build_dependencies_only_for_the_build() {
     let _system = lock_system();
     let mut aur = LocalAur::new();

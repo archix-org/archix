@@ -1,9 +1,11 @@
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 
 use super::git::AurGit;
 use crate::lock::{AUR_REPO, HostLock};
+use crate::pacman::vercmp;
 
 /// Each AUR base in a lock with the commit it's locked at; the config's own recipes need no review.
 pub fn commits(lock: Option<&HostLock>) -> BTreeMap<String, String> {
@@ -22,13 +24,22 @@ fn orphan_or(maintainer: &str) -> &str {
     }
 }
 
-/// Shows every AUR build recipe entering the lock (a diff for changed bases, every file for new ones) and asks to trust it.
+/// The version a lock has a base's packages at.
+fn version<'a>(lock: Option<&'a HostLock>, base: &str) -> Option<&'a str> {
+    lock?
+        .packages
+        .values()
+        .find(|pkg| pkg.repo == AUR_REPO && pkg.base.as_deref() == Some(base))
+        .map(|pkg| pkg.version.as_str())
+}
+
+/// Shows every AUR build recipe entering the lock (a diff for changed bases, every file for new ones) and asks to trust it; a move to an older version says so and is trusted only on an explicit yes.
 pub fn review(
     git: &AurGit,
     old: Option<&HostLock>,
     new: &HostLock,
     ask: bool,
-    confirm: &dyn Fn(&str) -> Result<bool>,
+    confirm: &dyn Fn(&str, bool) -> Result<bool>,
 ) -> Result<()> {
     let before = commits(old);
     for (name, pkg) in &new.packages {
@@ -44,12 +55,19 @@ pub fn review(
     }
     for (base, commit) in commits(Some(new)) {
         let short = &commit[..commit.len().min(12)];
+        let older = match (version(old, &base), version(Some(new), &base)) {
+            (Some(was), Some(now)) if vercmp(now, was) == Ordering::Less => {
+                Some(format!("an OLDER version ({was} -> {now})"))
+            }
+            _ => None,
+        };
         let shown = match before.get(&base) {
             Some(previous) if *previous == commit => continue,
             Some(previous) => {
                 println!(
-                    "==> {base}: build recipe changed ({} -> {short})",
-                    &previous[..previous.len().min(12)]
+                    "==> {base}: build recipe changed ({} -> {short}){}",
+                    &previous[..previous.len().min(12)],
+                    older.as_ref().map(|older| format!(", {older}")).unwrap_or_default()
                 );
                 git.diff(&base, previous, &commit)?
             }
@@ -62,7 +80,11 @@ pub fn review(
             continue;
         }
         println!("{shown}");
-        if !confirm(&format!("trust {base} at {short} and lock it?"))? {
+        let question = match &older {
+            Some(older) => format!("trust {base} at {short}, {older}, and lock it?"),
+            None => format!("trust {base} at {short} and lock it?"),
+        };
+        if !confirm(&question, older.is_none())? {
             bail!("not locking {base}; nothing was changed");
         }
     }

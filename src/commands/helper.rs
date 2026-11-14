@@ -15,7 +15,7 @@ use archix::resolve::{resolve, snapshot_conf};
 
 use super::lock::{current_lock, load_lockfile, save_lock};
 use super::{
-    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm, declared, recipes, require_root, user_cache,
+    Snapshot, Target, aur_git, aur_source, check_pacman_free, confirm_or, declared, recipes, require_root, user_cache,
 };
 
 /// Adds (or removes) packages in the host's installed.lua, or the one in `path`; the new text waits for the switch to commit and is evaluated from memory until then.
@@ -276,7 +276,13 @@ pub fn upgrade(target: &Target, noconfirm: bool) -> Result<()> {
         )?;
         fresh.keep_pins(&lock);
         if fresh != lock {
-            review(&git, Some(&lock), &fresh, declared.aur_review && !noconfirm, &confirm)?;
+            review(
+                &git,
+                Some(&lock),
+                &fresh,
+                declared.aur_review && !noconfirm,
+                &confirm_or,
+            )?;
             let mut lockfile = load_lockfile(target)?;
             save_lock(target, &mut lockfile, Some(&lock), &fresh)?;
         }

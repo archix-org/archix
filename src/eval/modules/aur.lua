@@ -32,7 +32,7 @@ return {
     missing_versions = archix.option {
       type = t.enum { "ask", "newer", "older" },
       default = "ask",
-      description = "When a locked AUR version can't be built any more: ask (defaulting to the nearest newer version), or always take the nearest newer or older one.",
+      description = "When a locked AUR version can't be built any more: ask (the nearest newer version by default, an older one only on an explicit yes), or always take the nearest newer or older one.",
     },
   },
 }

@@ -901,6 +901,15 @@ fn confirm_no(question: &str) -> Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
+/// Asks with yes as the empty answer when `default_yes`, else no.
+fn confirm_or(question: &str, default_yes: bool) -> Result<bool> {
+    if default_yes {
+        confirm(question)
+    } else {
+        confirm_no(question)
+    }
+}
+
 fn confirm(question: &str) -> Result<bool> {
     eprint!("{question} [Y/n] ");
     io::stderr().flush()?;

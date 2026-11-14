@@ -17,7 +17,7 @@ use archix::resolve::resolve;
 use archix::system::{self, apply::Accounts, apply::SystemChange};
 
 use super::{
-    Declared, Snapshot, Target, aur_git, aur_source, confirm, count, declared, floats, print_missing_ignored,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm_or, count, declared, floats, print_missing_ignored,
     print_warned, recipes, select_changes, settle_flatpak, user_cache,
 };
 
@@ -124,7 +124,7 @@ pub(super) fn current_lock(
         );
         return Ok((new, true));
     }
-    review(&git, old.as_ref(), &new, declared.aur_review && !noconfirm, &confirm)?;
+    review(&git, old.as_ref(), &new, declared.aur_review && !noconfirm, &confirm_or)?;
     save_lock(target, &mut lockfile, old.as_ref(), &new)?;
     Ok((new, true))
 }
