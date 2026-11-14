@@ -514,7 +514,12 @@ fn write_and_lock(
     hand_over(&dir)?;
 
     section("Result");
-    let (lines, warned, _) = pending(&target, &declared, &lock)?;
+    let super::lock::Pending {
+        lines, warned, found, ..
+    } = pending(&target, &declared, &lock)?;
+    for warning in &found.warnings {
+        eprintln!("{warning}");
+    }
     if lines.is_empty() {
         done("the system matches the lock and the config: the first switch changes nothing");
     } else {
@@ -522,6 +527,9 @@ fn write_and_lock(
         for line in &lines {
             println!("      {line}");
         }
+    }
+    for refusal in &found.refusals {
+        warn(format!("`archix switch` would refuse this: {refusal:#}"));
     }
     print_warned(&warned);
     summary(

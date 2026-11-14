@@ -328,16 +328,23 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
     Ok(())
 }
 
-/// What switching to `lock` would change, one line each, plus what's only kept because of warn mode, and keyrings kept newer.
-pub(super) fn pending(
-    target: &Target,
-    declared: &Declared,
-    lock: &HostLock,
-) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+/// What switching to a lock would change and what stops it.
+pub(super) struct Pending {
+    /// One line per change.
+    pub(super) lines: Vec<String>,
+    /// What's only kept because of warn mode.
+    pub(super) warned: Vec<String>,
+    /// Keyrings kept newer.
+    pub(super) kept: Vec<String>,
+    pub(super) found: super::checks::Found,
+}
+
+/// What switching to `lock` would change, and what `archix switch` would refuse about it.
+pub(super) fn pending(target: &Target, declared: &Declared, lock: &HostLock) -> Result<Pending> {
     let paths = Paths::system();
     let db = super::switch::installed_db(&paths);
     let installed = read_local_db(&db)?;
-    let (changes, warned, kept) = select_changes(
+    let (mut changes, warned, kept) = select_changes(
         &lock.packages,
         &installed,
         &db,
@@ -369,16 +376,15 @@ pub(super) fn pending(
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let change = SystemChange {
         from: current.as_ref().map(|g| g.system.clone()).unwrap_or_default(),
-        to: rendered.state,
+        to: rendered.state.clone(),
     };
     let here = super::switch::current_root(&paths);
+    changes.extend(rebuilds(
+        &lock.packages,
+        &installed,
+        current.as_ref().map(|g| &g.packages),
+    ));
     let mut lines: Vec<String> = changes.iter().map(ToString::to_string).collect();
-    let built_from = current.as_ref().map(|g| &g.packages);
-    lines.extend(
-        rebuilds(&lock.packages, &installed, built_from)
-            .iter()
-            .map(ToString::to_string),
-    );
     let place = |path: &str| Some(here.join(path.trim_start_matches('/')));
     lines.extend(
         system::apply::describe(&change, &place, &Accounts::read(&here.join("etc")), &here)?
@@ -395,18 +401,7 @@ pub(super) fn pending(
         eprintln!("warning: {kept}");
     }
     lines.extend(system::fstab::describe_at(&here, target.config, &change.to.fstab));
-    let new_crypttab = super::switch::next_crypttab(&paths, &here, &change, &rendered.blobs);
-    match system::fstab::check_drops(
-        &paths.root,
-        &etc,
-        system::fstab::esp_of(target.config),
-        &change.to.fstab,
-        &new_crypttab,
-        &system::fstab::acknowledged(target.config),
-    ) {
-        Ok(warnings) => warnings.iter().for_each(|warning| eprintln!("{warning}")),
-        Err(refusal) => eprintln!("warning: `archix switch` refuses this: {refusal:#}"),
-    }
+    let resolved = lock;
     let mut lock = lock.clone();
     let unresolved = settle_flatpak(target, declared, &mut lock, false, false)?;
     let (flatpak_lines, unmanaged) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
@@ -415,7 +410,42 @@ pub(super) fn pending(
     if !unmanaged.is_empty() {
         println!("flatpak apps archix doesn't manage: {}", unmanaged.join(" "));
     }
-    Ok((lines, warned, kept))
+    let mut found = super::checks::Found::default();
+    let policy = archix::snapshot::Policy::from_config(target.config)?;
+    let rollbacks = super::snapshot::Rollbacks::of(&paths.root, policy).unwrap_or_else(|refusal| {
+        found.refusals.push(refusal);
+        super::snapshot::Rollbacks::Off
+    });
+    let boot = declared.boot_plan()?;
+    let archive = Archive::new(&declared.archive_url)
+        .with_mirrors(&declared.archive_mirrors)
+        .with_caches(&declared.package_caches);
+    let checked = super::checks::before_prompt(&super::checks::Planned {
+        target,
+        paths: &paths,
+        declared,
+        boot: boot.as_ref(),
+        rollbacks: &rollbacks,
+        lock: resolved,
+        installed: &installed,
+        archive: &archive,
+        rendered: &rendered,
+        change: &change,
+        changes: &changes,
+        applies: !lines.is_empty(),
+        allow_limine_boot: false,
+        signatures: true,
+    });
+    found.refusals.extend(checked.refusals);
+    Ok(Pending {
+        lines,
+        warned,
+        kept,
+        found: super::checks::Found {
+            refusals: found.refusals,
+            ..checked
+        },
+    })
 }
 
 /// Warnings for an fstab or crypttab in /etc that differs from what archix wrote there.
@@ -484,7 +514,8 @@ fn carried(target: &Target, ignored: &BTreeSet<String>, all: bool, command: &str
     Ok(found.lines(all, command))
 }
 
-pub fn diff(target: &Target, all: bool) -> Result<()> {
+/// Prints what a switch would change; false when `archix switch` would refuse it.
+pub fn diff(target: &Target, all: bool) -> Result<bool> {
     let paths = Paths::system();
     let declared = declared(target.config)?;
     let (lock, _) = current_lock(target, &declared, Snapshot::Locked, false, true, false)?;
@@ -504,7 +535,15 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
             count(newer, "package is", "packages are")
         );
     }
-    let (lines, warned, kept) = pending(target, &declared, &lock)?;
+    let Pending {
+        lines,
+        warned,
+        kept,
+        found,
+    } = pending(target, &declared, &lock)?;
+    for warning in &found.warnings {
+        eprintln!("{warning}");
+    }
     if lines.is_empty() {
         println!("the system matches the lock and the config");
     }
@@ -521,7 +560,21 @@ pub fn diff(target: &Target, all: bool) -> Result<()> {
     for line in carried(target, &declared.ignored, all, "diff")? {
         println!("{line}");
     }
-    Ok(())
+    if !found.unsafe_downgrades.is_empty() {
+        println!(
+            "unsafe downgrades, which `archix switch` asks about, and refuses with --noconfirm unless --allow-unsafe-downgrade:"
+        );
+        for line in &found.unsafe_downgrades {
+            println!("  {line}");
+        }
+    }
+    if !found.unchecked.is_empty() {
+        println!("not checked here, `archix switch` does: {}", found.unchecked.join("; "));
+    }
+    for refusal in &found.refusals {
+        eprintln!("`archix switch` would refuse this: {refusal:#}");
+    }
+    Ok(found.refusals.is_empty())
 }
 
 pub fn status(target: &Target, all: bool) -> Result<()> {

@@ -3,7 +3,8 @@ src/aur/	test:aur test:helper test:recipes
 src/commands/helper.rs	test:helper test:aur
 src/commands/init/	test:init
 src/commands/switch.rs	test:switch test:system test:boot test:credentials
-src/commands/lock.rs	test:switch test:archlinux
+src/commands/lock.rs	test:switch test:archlinux test:system
+src/commands/checks.rs	test:switch test:system test:boot
 src/eval/	test:init test:home test:recipes test:system test:fetch
 src/options/	test:system test:home
 src/value.rs	test:system test:home

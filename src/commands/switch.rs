@@ -155,21 +155,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     archix::archive::remember(&paths.state, &declared.archive_url)?;
     archix::archive::remember_caches(&paths.state, &declared.package_caches)?;
     archix::archive::remember_mirrors(&paths.state, &declared.archive_mirrors)?;
-    let beyond = archix::archive::beyond_cpu(
-        lock.packages
-            .iter()
-            .map(|(name, pkg)| (name.as_str(), pkg.file.as_str())),
-        &archix::archive::architectures(),
-    );
-    if !beyond.is_empty() {
-        let shown: Vec<&str> = beyond.iter().take(6).map(String::as_str).collect();
-        bail!(
-            "archix.lock for {} has packages built for a newer CPU level than this machine runs, so it was locked elsewhere: {}{}. Run `archix lock` on this machine; nothing was changed",
-            target.host,
-            shown.join(", "),
-            if beyond.len() > shown.len() { ", ..." } else { "" }
-        );
-    }
+    super::checks::fits_cpu(&lock, target.host)?;
 
     let newer: Vec<String> = newer_than_lock(&lock, &installed)
         .iter()
@@ -317,57 +303,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     for kept in system::credentials::kept_locks(&passwords, &[&here.join("etc")]) {
         eprintln!("warning: {kept}");
     }
-    system::apply::check(&paths, &system_change, &place)?;
-    system::live::check_files(&system_change, &|path: &str| {
-        rendered
-            .state
-            .files
-            .get(path)
-            .and_then(|file| rendered.blobs.get(&file.sha256).cloned())
-    })?;
-    system::live::refuse_packaged_usr_files(&system_change, &db)
-        .map_err(|e| anyhow::anyhow!("{e:#}; nothing was changed"))?;
     system_lines.extend(system::fstab::describe_at(&here, target.config, &rendered.state.fstab));
-    let new_text = |path: &str| match rendered.state.files.get(path) {
-        Some(file) => rendered
-            .blobs
-            .get(&file.sha256)
-            .map(|blob| String::from_utf8_lossy(blob).into_owned()),
-        None => fs::read_to_string(here.join(path.trim_start_matches('/'))).ok(),
-    };
-    let crypttab = format!(
-        "{}{}",
-        new_text("/etc/crypttab").unwrap_or_default(),
-        new_text("/etc/crypttab.initramfs").unwrap_or_default()
-    );
-    let cmdline = new_text("/etc/kernel/cmdline").unwrap_or_default();
-    for warning in system::fstab::check(&paths.root, &rendered.state.fstab, &crypttab, &cmdline)? {
-        eprintln!("{warning}");
-    }
-    let new_crypttab = next_crypttab(&paths, &here, &system_change, &rendered.blobs);
-    for warning in system::fstab::check_drops(
-        &paths.root,
-        &here.join("etc"),
-        system::fstab::esp_of(target.config),
-        &rendered.state.fstab,
-        &new_crypttab,
-        &system::fstab::acknowledged(target.config),
-    )? {
-        eprintln!("{warning}");
-    }
-    if let Some(rules) = rendered.state.files.get(system::firewall::RULES) {
-        system::firewall::validate(&String::from_utf8_lossy(&rendered.blobs[&rules.sha256]))?;
-        system::firewall::check_others(&rendered.state.services, |unit| {
-            system::apply::is_enabled(&here, unit, false)
-        })?;
-        if system::apply::is_enabled(&here, "nftables.service", false)
-            && rendered.state.services.get("nftables.service") != Some(&false)
-        {
-            eprintln!(
-                "warning: nftables.service is enabled too, so /etc/nftables.conf (on Arch: drop everything but SSH) still applies on top of the archix firewall; set services[\"nftables.service\"] = false"
-            );
-        }
-    }
     let previous_flatpak = current.as_ref().map(|g| g.flatpak.clone()).unwrap_or_default();
     let (mut flatpak_lines, _) = flatpak::describe(&lock.flatpak, &previous_flatpak, &flatpak::installed()?);
     flatpak_lines.extend(unresolved_flatpak.iter().map(|app| format!("flatpak    install {app}")));
@@ -415,7 +351,27 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         println!("update     /etc/pacman.conf (custom repos)");
     }
     let nothing_changes = changes.is_empty() && system_lines.is_empty() && flatpak_lines.is_empty() && !repos_stale;
+    let mut found = super::checks::before_prompt(&super::checks::Planned {
+        target,
+        paths: &paths,
+        declared: &declared,
+        boot: boot.as_ref(),
+        rollbacks: &rollbacks,
+        lock: &lock,
+        installed: &installed,
+        archive: &archive,
+        rendered: &rendered,
+        change: &system_change,
+        changes: &changes,
+        applies: !(nothing_changes && unchanged),
+        allow_limine_boot: ALLOW_LIMINE_BOOT.load(std::sync::atomic::Ordering::Relaxed),
+        signatures: false,
+    });
+    for warning in &found.warnings {
+        eprintln!("{warning}");
+    }
     if nothing_changes && unchanged {
+        found.fail()?;
         let current = current.expect("unchanged needs a current generation");
         super::lock::write_deferred()?;
         integration::clear_outside_changes(&paths)?;
@@ -500,12 +456,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         println!("{line}");
     }
     print_hooks(&system_change);
-    guard_downgrades(
-        &unsafe_downgrades(&changes, &rendered.state.unsafe_downgrades),
-        noconfirm,
-        allow_unsafe,
-    )?;
-    check_partial(&paths, &archive, &lock, &installed, &changes, &declared.repos)?;
+    found.fail()?;
+    guard_downgrades(&found.unsafe_downgrades, noconfirm, allow_unsafe)?;
     show_plan_diff(current.as_ref(), &lock.packages, &rendered.state);
     show_config_diff(target, &paths)?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + 1;
@@ -520,24 +472,8 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             boot_tools.join(" ")
         );
     }
-    // A boot Limine started has no boot counting, fallback or rescue entry: package changes wait for a boot through systemd-boot.
-    let mut limine_boot = match (first, &boot) {
-        (false, Some(plan)) => system::limine::unprotected(&paths, plan),
-        _ => None,
-    };
-    if let Some(why) = &limine_boot {
-        eprintln!("warning: {why}");
-    }
-    if changes.is_empty() || ALLOW_LIMINE_BOOT.load(std::sync::atomic::Ordering::Relaxed) {
-        limine_boot = None;
-    }
-    if limine_boot.is_some() && system::limine::out_of_methods(&paths) {
-        bail!(
-            "{} not applied: this boot came through Limine and the firmware starts it whatever archix sets; nothing was changed",
-            count(changes.len(), "package change", "package changes")
-        );
-    }
-    let question = match (first, limine_boot.is_some()) {
+    let limine_boot = found.limine_boot;
+    let question = match (first, limine_boot) {
         (true, _) => format!(
             "set rollbacks up and stop for a reboot? ({} wait for the switch after it)",
             count(changes.len(), "package change", "package changes")
@@ -555,7 +491,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         install_boot_tools(&boot_tools)?;
         return lay_out_first(&paths, &rollbacks, boot.as_ref(), changes.len());
     }
-    if limine_boot.is_some() {
+    if limine_boot {
         return hand_over_first(&paths, &rollbacks, boot.as_ref(), current.as_ref(), changes.len());
     }
     system::blobs::ensure(&paths, &archive, &rendered)?;
@@ -703,10 +639,6 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         ),
         None => format!("before switch to generation {number}"),
     };
-    if let Some(boot) = &boot {
-        system::boot::check_signing(boot)?;
-        system::menu::precheck(&paths, boot).map_err(|e| e.context("nothing was changed"))?;
-    }
     let taken = rollbacks
         .before(&paths, current.as_ref(), label)
         .map_err(|e| e.context("nothing of the switch was applied"))?;
@@ -808,7 +740,7 @@ fn set_strict(target: &Target, declared: &Declared, paths: &Paths) -> Result<()>
 }
 
 /// Refuses `what` on a try boot, whose changes the next boot drops, and on a root archix didn't produce, whose records describe another one.
-fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
+pub(super) fn refuse_unusual_root(paths: &Paths, what: &str) -> Result<()> {
     if let Some(trying) = system::initrd::trying() {
         bail!(
             "this boot is snapshot {n} in try mode, read-only with a throwaway layer, so a {what} would be lost at the next boot; `archix rollback {n}` to keep it, or reboot into the current system; nothing was changed",
@@ -1351,7 +1283,7 @@ fn soname_breaks(
 }
 
 /// Refuses a switch that downgrades declared packages (a revert) when that breaks a package archix doesn't track, by its declared dependencies or the sonames its binaries load, unless --allow-partial.
-fn check_partial(
+pub(super) fn check_partial(
     paths: &Paths,
     archive: &Archive,
     lock: &HostLock,

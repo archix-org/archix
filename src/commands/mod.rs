@@ -1,3 +1,4 @@
+mod checks;
 mod helper;
 mod init;
 pub mod keep;

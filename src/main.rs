@@ -979,7 +979,11 @@ fn run() -> Result<ExitCode> {
             to: Some(date),
             noconfirm,
         } => commands::lock(&target, commands::Snapshot::On(date), noconfirm)?,
-        Command::Diff { all } => commands::diff(&target, all)?,
+        Command::Diff { all } => {
+            if !commands::diff(&target, all)? {
+                return Ok(ExitCode::from(2));
+            }
+        }
         Command::Switch {
             noconfirm,
             accept_nearest,

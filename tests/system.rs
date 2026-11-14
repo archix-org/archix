@@ -385,6 +385,85 @@ fn the_firewall_and_environment_come_from_the_config() {
     assert!(!system_path("/etc/profile.d/archix-environment.sh").exists());
 }
 
+/// The refusals in what archix printed, one per `prefix` line.
+fn refusals<'a>(stderr: &'a str, prefix: &str) -> Vec<&'a str> {
+    stderr.lines().filter_map(|line| line.strip_prefix(prefix)).collect()
+}
+
+#[test]
+#[ignore]
+fn diff_reports_what_switch_would_refuse_with_the_same_words() {
+    let _system = lock_system();
+    let setup = Setup::new(&[], "");
+    setup.first_switch();
+    let clean = setup.run(&["diff"]);
+    assert!(
+        clean.status.success(),
+        "a diff of nothing a switch refuses exits 0: {}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+
+    // A firewall the distribution enabled, as CachyOS does ufw, and something that isn't a file where the config puts one.
+    write_system_path("/etc/systemd/system/ufw.service", UNIT);
+    let wants = system_path("/etc/systemd/system/multi-user.target.wants");
+    fs::create_dir_all(&wants).unwrap();
+    std::os::unix::fs::symlink("/etc/systemd/system/ufw.service", wants.join("ufw.service")).unwrap();
+    assert_eq!(enabled("ufw.service"), "enabled");
+    let pipe = system_path("/etc/archix-test-pipe");
+    assert!(Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+    let body = |ufw: &str| {
+        format!(
+            r#"firewall = {{ enable = true, allowed_services = {{ "ssh" }} }}, files = {{ ["/etc/archix-test-pipe"] = {{ text = "x" }} }}{ufw}"#
+        )
+    };
+    setup.set_body(&[], &body(""));
+    let current = setup.machine.current();
+
+    let switch = setup.fails(&["switch", "--noconfirm"]);
+    let refused = refusals(&switch, "error: ");
+    assert!(
+        refused.iter().any(|line| line.contains(
+            "ufw.service would run beside the archix firewall (it's enabled on this system, and the config doesn't turn it off)"
+        )) && refused
+            .iter()
+            .any(|line| line.contains("/etc/archix-test-pipe exists and is not a file or symlink")),
+        "the switch names everything it refuses:\n{switch}"
+    );
+    assert_eq!(setup.machine.current(), current, "a refused switch applies nothing");
+
+    let diff = setup.run(&["diff"]);
+    let (out, err) = (
+        String::from_utf8_lossy(&diff.stdout).into_owned(),
+        String::from_utf8_lossy(&diff.stderr).into_owned(),
+    );
+    assert_eq!(
+        diff.status.code(),
+        Some(2),
+        "a diff of a switch that is refused exits 2:\n{out}{err}"
+    );
+    assert_eq!(
+        refusals(&err, "`archix switch` would refuse this: "),
+        refused,
+        "diff gives the switch's refusals, word for word:\n{err}"
+    );
+    assert!(
+        out.contains("archix-firewall.service"),
+        "the diff still lists what the switch would change:\n{out}"
+    );
+
+    fs::remove_file(&pipe).unwrap();
+    setup.set_body(&[], &body(r#", services = { ["ufw.service"] = false }"#));
+    let diff = setup.run(&["diff"]);
+    assert!(
+        diff.status.success()
+            && refusals(&String::from_utf8_lossy(&diff.stderr), "`archix switch` would refuse").is_empty(),
+        "nothing is refused once ufw is turned off and the pipe is gone:\n{}",
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    setup.ok(&["switch", "--noconfirm"]);
+    assert_eq!(enabled("archix-firewall.service"), "enabled");
+}
+
 #[test]
 #[ignore]
 fn a_removed_system_user_comes_back_with_its_old_uid() {
