@@ -209,7 +209,7 @@ mod tests {
     fn only_required_lines_with_nothing_mounted_count_as_unmounted() {
         let fstab = "# fstab\nUUID=archix-root / ext4 rw 0 1\n\
                      proc /proc proc defaults 0 0\n\
-                     UUID=archix-test-home /home ext4 defaults 0 0\n\
+                     UUID=archix-test-home /archix-test-home ext4 defaults 0 0\n\
                      UUID=archix-test-data /mnt/data ext4 nofail,x-systemd.device-timeout=30s 0 2\n\
                      UUID=AB12 /efi vfat x-systemd.automount 0 2\n\
                      UUID=archix-test-later /mnt/later ext4 noauto 0 0\n\
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(
             unmounted(Path::new("/"), fstab, "archixtestnull /dev/null none luks\n"),
             [
-                mount("/home", "UUID=archix-test-home", false),
+                mount("/archix-test-home", "UUID=archix-test-home", false),
                 mount("/srv/vol", "/dev/mapper/archixtestvol", false),
                 mount("/srv/null", "/dev/mapper/archixtestnull", true),
                 mount("/srv/www", "/var/archix-test-www", true),
