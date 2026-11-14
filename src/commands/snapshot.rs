@@ -8,6 +8,7 @@ use archix::date::Date;
 use archix::generations::Generation;
 use archix::paths::Paths;
 use archix::snapshot::{self, Kind, Meta, Policy, Record, Store, layout};
+use archix::system::mounts;
 
 /// The btrfs top level of the root's filesystem, mounted under /run for as long as this lives.
 pub(super) struct Top {
@@ -15,45 +16,32 @@ pub(super) struct Top {
 }
 
 impl Top {
-    pub(super) fn mount(uuid: &str) -> Result<Top> {
+    /// Mounts the top level of the btrfs `root` is on, from the device the mount table names for it, with mount(2) alone.
+    pub(super) fn mount(root: &Path) -> Result<Top> {
+        let device = mounts::of(root)
+            .filter(|mount| mount.fs_type == "btrfs")
+            .with_context(|| format!("{} isn't on a mounted btrfs", root.display()))?
+            .source;
         let dir = PathBuf::from(format!("/run/archix/top-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let status = Command::new("mount")
-            .args(["-o", "subvolid=5"])
-            .arg(format!("UUID={uuid}"))
-            .arg(&dir)
-            .status()
-            .context("running mount")?;
-        if !status.success() {
-            bail!(
-                "couldn't mount the top level of the root's btrfs ({uuid}) at {}",
-                dir.display()
-            );
-        }
+        mounts::mount(&device, &dir, "btrfs", "subvolid=5")
+            .with_context(|| format!("mounting the top level of the root's btrfs ({device})"))?;
         Ok(Top { dir })
     }
 }
 
 impl Drop for Top {
     fn drop(&mut self) {
-        let _ = Command::new("umount").arg(&self.dir).status();
+        let _ = mounts::unmount_under(&self.dir);
         let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
-/// The UUID and mount options of the filesystem `root` is on.
+/// The UUID and mount options of the btrfs `root` is on.
 pub(super) fn root_device(root: &Path) -> Result<(String, String)> {
-    let output = Command::new("findmnt")
-        .args(["-n", "-o", "UUID,OPTIONS", "-T"])
-        .arg(root)
-        .output()
-        .context("running findmnt")?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut fields = text.split_whitespace();
-    match (fields.next(), fields.next()) {
-        (Some(uuid), Some(options)) if output.status.success() => Ok((uuid.to_string(), options.to_string())),
-        _ => bail!("findmnt couldn't say which filesystem {} is", root.display()),
-    }
+    let mount = mounts::of(root).with_context(|| format!("{} isn't on a mount /proc lists", root.display()))?;
+    let uuid = archix::system::btrfs::filesystem_uuid(&mount.point)
+        .with_context(|| format!("{} isn't on btrfs, so it has no top level to mount", root.display()))?;
+    Ok((uuid, mount.options))
 }
 
 /// Whether @archix is mounted at `root`/.archix, as setup's fstab line does from the boot after setup on.
@@ -180,7 +168,7 @@ impl Rollbacks {
             Rollbacks::Off => Ok(None),
             Rollbacks::Setup => {
                 let (uuid, options) = root_device(root)?;
-                let top = Top::mount(&uuid)?;
+                let top = Top::mount(root)?;
                 layout::setup(root, &top.dir, &uuid, &options).context("setting up rollbacks")?;
                 println!(
                     "the root is set up for rollbacks; snapshots start after the next reboot, once @archix is mounted"
@@ -296,8 +284,11 @@ pub fn setup(move_root: bool) -> Result<()> {
     if move_root {
         return schedule_root_move(&root);
     }
+    if let Some(why) = snapshot::unsupported(&root) {
+        bail!("{why}");
+    }
     let (uuid, options) = root_device(&root)?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(&root)?;
     match layout::setup(&root, &top.dir, &uuid, &options)? {
         layout::Setup::Done => println!("the root is laid out for rollbacks"),
         layout::Setup::AtNextBoot => println!(
@@ -335,8 +326,7 @@ pub fn split_var_lib() -> Result<()> {
         );
         return Ok(());
     }
-    let (uuid, _) = root_device(Path::new("/"))?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(Path::new("/"))?;
     layout::split_var_lib(Path::new("/"), &top.dir.join(layout::VAR_LIB))
 }
 
@@ -355,7 +345,7 @@ pub fn chroot(device: &str, esp: Option<&str>, command: &[String]) -> Result<()>
         }
         Ok(())
     });
-    let _ = Command::new("umount").arg("-R").arg(&target).status();
+    let _ = mounts::unmount_under(&target);
     let _ = std::fs::remove_dir(&target);
     ran
 }
@@ -393,7 +383,7 @@ pub fn resync() -> Result<()> {
     // Read first: setting the layout up again records the new root.
     let recorded = snapshot::recorded_root(&root.join(snapshot::MOUNT)).unwrap_or_default();
     let (uuid, options) = root_device(&root)?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(&root)?;
     if !archix_mounted(&root) || !root.join(layout::ON_ROOT).is_dir() {
         match layout::setup(&root, &top.dir, &uuid, &options)? {
             layout::Setup::Done => println!("laid the root out for rollbacks again"),

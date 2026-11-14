@@ -45,8 +45,15 @@ impl Root {
         if self.is_slash() {
             return Command::new(program);
         }
-        let mut command = Command::new("chroot");
-        command.arg(&self.path).arg(program);
+        // chroot(2) in the child, not the chroot program, which would be this system's and may not start when a rescue keeps a snapshot.
+        let mut command = Command::new(program);
+        let root = self.path.clone();
+        unsafe {
+            command.pre_exec(move || {
+                std::os::unix::fs::chroot(&root)?;
+                std::env::set_current_dir("/")
+            });
+        }
         command
     }
 

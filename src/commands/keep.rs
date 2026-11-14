@@ -3,17 +3,16 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 use archix::paths::Paths;
 use archix::snapshot::{self, layout, varlib};
-use archix::system::{self, accounts, boot, menu};
+use archix::system::{self, accounts, boot, menu, mounts};
 use archix::value::Value;
 
-use super::snapshot::{Top, archix_mounted, contents, current_generation, root_device, store};
+use super::snapshot::{Top, archix_mounted, contents, current_generation, store};
 use super::{check_pacman_free, confirm, require_root};
 
 /// In @archix's snapshot directory while a keep waits for its reboot: what `--cancel` needs to undo it.
@@ -31,19 +30,46 @@ struct Done {
     moved: Option<PathBuf>,
 }
 
-/// The users the config applied in a snapshot declares, from the plan root's repository holds for its generation; refuses when that copy doesn't verify.
+/// Whether the root's git starts at all, which it doesn't on a root that lost a library it needs.
+fn git_runs() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .env("PATH", "/usr/bin")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+/// The users the config applied in a snapshot declares, from the plan root's repository holds for its generation; refuses when that copy doesn't verify. On a root whose git can't start, which a rollback is there to repair, they come from the generation's record in archix's state instead.
 fn declared_users(paths: &Paths, record: &snapshot::Record) -> Result<BTreeSet<String>> {
     let (Some(generation), Some(commit)) = (record.generation, &record.commit) else {
         return Ok(BTreeSet::new());
     };
     let stored =
-        archix::captured::Applied::verified_at(&paths.root, &paths.state, generation, commit, record.tree.as_deref())
-            .with_context(|| {
-            format!(
+        archix::captured::Applied::verified_at(&paths.root, &paths.state, generation, commit, record.tree.as_deref());
+    let stored = match stored {
+        Ok(stored) => stored,
+        Err(_) if !git_runs() => {
+            let recorded = archix::generations::Store::new(paths).get(generation);
+            eprintln!(
+                "warning: git doesn't start on this root, so the users snapshot {}'s config declares come from generation {generation}'s record{}, not from root's repository",
+                record.number,
+                if recorded.is_ok() {
+                    ""
+                } else {
+                    ", which isn't there: none count as declared"
+                }
+            );
+            return Ok(recorded
+                .map(|generation| generation.system.users.keys().cloned().collect())
+                .unwrap_or_default());
+        }
+        Err(e) => {
+            return Err(e.context(format!(
                 "snapshot {}'s generation {generation} can't be read back from root's repository; nothing was changed",
                 record.number
-            )
-        })?;
+            )));
+        }
+    };
     let plan = archix::eval::isolated::read_plan(&stored.plan)
         .with_context(|| format!("generation {generation}'s stored plan doesn't parse; nothing was changed"))?;
     let Value::Map(config) = plan else {
@@ -70,6 +96,26 @@ fn local_db_in(root: &Path) -> PathBuf {
     }
 }
 
+/// Copies the tree at `from` to `to` with its modes and owners, as `cp -a` does, without running cp: a keep must work on a root whose programs can't start.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let copying = || format!("copying {} to {}", from.display(), to.display());
+    let meta = fs::symlink_metadata(from).with_context(copying)?;
+    if meta.file_type().is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(from).with_context(copying)?, to).with_context(copying)?;
+    } else if meta.is_dir() {
+        fs::create_dir(to).with_context(copying)?;
+        for entry in fs::read_dir(from).with_context(copying)? {
+            let entry = entry.with_context(copying)?;
+            copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        fs::set_permissions(to, meta.permissions()).with_context(copying)?;
+    } else {
+        fs::copy(from, to).with_context(copying)?;
+    }
+    std::os::unix::fs::lchown(to, Some(meta.uid()), Some(meta.gid())).with_context(copying)
+}
+
 /// Carries the generation records `from` has and `to` lacks, so numbers stay unique across a keep, and makes `generation` current in `to`.
 fn carry_generations(from: &Path, to: &Path, generation: Option<u32>) -> Result<()> {
     let (from_dir, to_dir) = (from.join("generations"), to.join("generations"));
@@ -79,19 +125,7 @@ fn carry_generations(from: &Path, to: &Path, generation: Option<u32>) -> Result<
         if name.to_string_lossy().parse::<u32>().is_err() || to_dir.join(&name).exists() {
             continue;
         }
-        let output = Command::new("cp")
-            .args(["-a", "--reflink=auto"])
-            .arg(entry.path())
-            .arg(to_dir.join(&name))
-            .output()
-            .context("running cp")?;
-        if !output.status.success() {
-            bail!(
-                "couldn't copy {}: {}",
-                entry.path().display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
+        copy_tree(&entry.path(), &to_dir.join(&name))?;
     }
     if let Some(generation) = generation
         && to_dir.join(generation.to_string()).is_dir()
@@ -162,19 +196,13 @@ fn kept_images(
     }
     eprintln!(":: building snapshot {number}'s boot image, which the ESP no longer has");
     let mounted: Vec<PathBuf> = ["proc", "sys", "dev"].iter().map(|dir| clone.join(dir)).collect();
-    for (point, what) in mounted.iter().zip(["/proc", "/sys", "/dev"]) {
-        let status = Command::new("mount")
-            .args(["--rbind", what])
-            .arg(point)
-            .status()
-            .context("running mount")?;
-        if !status.success() {
-            bail!("couldn't bind {what} into {}", point.display());
-        }
-    }
-    let built = boot::build(paths, plan, &system::live::Root::new(clone));
+    let bound = mounted
+        .iter()
+        .zip(["/proc", "/sys", "/dev"])
+        .try_for_each(|(point, what)| mounts::bind(Path::new(what), point, true));
+    let built = bound.and_then(|()| boot::build(paths, plan, &system::live::Root::new(clone)));
     for point in mounted.iter().rev() {
-        let _ = Command::new("umount").args(["-R", "-l"]).arg(point).status();
+        mounts::detach_under(point);
     }
     let images = built.context("building the snapshot's boot image")?;
     let all = images
@@ -267,7 +295,11 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
     if let Some(why) = snapshot::foreign_root(&root) {
         bail!("{why}; nothing was changed");
     }
-    check_pacman_free(&paths)?;
+    // From the rescue entry or a live USB the root isn't running: no pacman holds its lock, nothing is pending afterwards and there's nothing to cancel.
+    let offline = system::secureboot::in_chroot();
+    if !offline {
+        check_pacman_free(&paths)?;
+    }
     let record = store
         .get(number)?
         .with_context(|| format!("there's no snapshot {number}; `archix snapshot list` shows the ones there are"))?;
@@ -276,8 +308,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
     let snapshot_root = store.path(number);
     let declared = declared_users(&paths, &record)?;
     // The top level through @archix's mount, as a try boot's root is an overlay.
-    let (uuid, _) = root_device(&root.join(snapshot::MOUNT))?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(&root.join(snapshot::MOUNT))?;
     let replaced_root = top.dir.join(snapshot::ROOT);
     if let Some(plan) = &plan
         && plan.loader == boot::Loader::Limine
@@ -294,9 +325,14 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
         "keeping snapshot {number}: {}",
         super::snapshot::describe(&record).trim_start()
     );
-    println!(
-        "from the next boot it is the root; the running system is kept as a snapshot of kind replaced. Package changes and /etc edits made before that reboot are lost"
-    );
+    match offline {
+        true => {
+            println!("from the next boot it is the root; the root it replaces is kept as a snapshot of kind replaced")
+        }
+        false => println!(
+            "from the next boot it is the root; the running system is kept as a snapshot of kind replaced. Package changes and /etc edits made before that reboot are lost"
+        ),
+    }
     if split {
         println!(
             "/var/lib stays: package-owned files there go back to the snapshot's versions where unchanged, and files of packages installed since move to /var/lib/{}/{number}",
@@ -343,7 +379,7 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
             Ok(())
         },
     )?;
-    match trying {
+    match trying || offline {
         true => println!("snapshot {number} is now @, from the next boot; the @ it replaces is snapshot {replaced}"),
         false => println!("snapshot {number} is now @, from the next boot; the running system is snapshot {replaced}"),
     }
@@ -420,14 +456,17 @@ pub fn keep(number: u32, noconfirm: bool) -> Result<()> {
         moved,
     };
     archix::testhooks::mark("keep-menu");
+    for warning in &warnings {
+        eprintln!("warning: {warning}");
+    }
+    if offline {
+        return Ok(());
+    }
     archix::durable::write(&store.dir().join(DONE), serde_json::to_string_pretty(&done)?.as_bytes())?;
     archix::durable::write(&pending_path(&root), number.to_string().as_bytes())?;
     if let Some(parent) = motd_path(&root).parent() {
         let _ = fs::create_dir_all(parent);
         let _ = fs::write(motd_path(&root), pending_notice(number) + "\n\n");
-    }
-    for warning in &warnings {
-        eprintln!("warning: {warning}");
     }
     println!("{}", pending_notice(number));
     Ok(())
@@ -445,8 +484,7 @@ pub fn cancel() -> Result<()> {
     let text = fs::read_to_string(store.dir().join(DONE))
         .with_context(|| format!("reading {}, which says what to undo", store.dir().join(DONE).display()))?;
     let done: Done = serde_json::from_str(&text).context("parsing what the keep did")?;
-    let (uuid, _) = root_device(&root.join(snapshot::MOUNT))?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(&root.join(snapshot::MOUNT))?;
     let replaced = done.replaced;
     store.cancel_keep(&top.dir, replaced)?;
     let warnings = undo_keep(&paths, &top, done);
@@ -504,8 +542,7 @@ pub fn recover_after_cut(paths: &Paths) -> Result<Vec<String>> {
     if cut.is_none() && done.is_none() {
         return Ok(Vec::new());
     }
-    let (uuid, _) = root_device(&paths.root.join(snapshot::MOUNT))?;
-    let top = Top::mount(&uuid)?;
+    let top = Top::mount(&paths.root.join(snapshot::MOUNT))?;
     let mut said = Vec::new();
     if let Some(replaced) = cut {
         store.recover_keep(&top.dir)?;

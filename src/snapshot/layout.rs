@@ -20,15 +20,8 @@ pub const SPLIT_UNIT: &str = "archix-split-var-lib.service";
 
 /// The subvolume `path` is on, as btrfs names it from the top level, like `/@`; none if it isn't btrfs or isn't mounted.
 pub fn subvolume_of(path: &Path) -> Option<String> {
-    let output = Command::new("findmnt")
-        .args(["-n", "-o", "FSROOT,FSTYPE", "-T"])
-        .arg(path)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut fields = text.split_whitespace();
-    let (root, fs_type) = (fields.next()?, fields.next()?);
-    (output.status.success() && fs_type == "btrfs").then(|| root.to_string())
+    let mount = crate::system::mounts::of(path)?;
+    (mount.fs_type == "btrfs").then_some(mount.root)
 }
 
 /// The fstab lines of the layout for the btrfs `uuid` whose root is mounted with `options`: /var/lib and /.archix as subvolumes of their own, then ROLLED bound from the root.
@@ -268,25 +261,25 @@ pub fn split_is_due(fstab: &str) -> bool {
         .any(|fields| fields.get(1).is_some_and(|point| point == "/var/lib"))
 }
 
-/// Mounts the root on `device` at `target` as it boots: `@`, then @archix and @varlib, then the binds from /var/rollback; for repair from a live USB.
+/// The block device a spec names: a path, or UUID=, PARTUUID=, LABEL= and PARTLABEL= through udev's /dev/disk links.
+pub fn device_path(spec: &str) -> PathBuf {
+    match spec.split_once('=') {
+        Some(("UUID", value)) => Path::new("/dev/disk/by-uuid").join(value),
+        Some(("PARTUUID", value)) => Path::new("/dev/disk/by-partuuid").join(value.to_lowercase()),
+        Some(("LABEL", value)) => Path::new("/dev/disk/by-label").join(value),
+        Some(("PARTLABEL", value)) => Path::new("/dev/disk/by-partlabel").join(value),
+        _ => PathBuf::from(spec),
+    }
+}
+
+/// Mounts the root on `device` at `target` as it boots: `@`, then @archix and @varlib, then the binds from /var/rollback; for repair from a live USB or the rescue entry, with mount(2) alone.
 pub fn mount_all(device: &str, target: &Path) -> Result<()> {
-    let mount = |args: &[&str], at: &Path| -> Result<()> {
-        let output = Command::new("mount")
-            .args(args)
-            .arg(at)
-            .output()
-            .context("running mount")?;
-        if !output.status.success() {
-            bail!(
-                "couldn't mount {}: {}",
-                at.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
+    let device = device_path(device);
+    let device = device.to_string_lossy();
+    let mount = |subvolume: &str, at: &Path| {
+        crate::system::mounts::mount(&device, at, "btrfs", &format!("subvol=/{subvolume}"))
     };
-    fs::create_dir_all(target).with_context(|| format!("creating {}", target.display()))?;
-    mount(&["-o", &format!("subvol=/{}", super::ROOT), device], target)?;
+    mount(super::ROOT, target)?;
     for (subvolume, point) in [(ARCHIX, super::MOUNT), (VAR_LIB, "var/lib")] {
         let at = target.join(point);
         if !at.is_dir() {
@@ -295,13 +288,13 @@ pub fn mount_all(device: &str, target: &Path) -> Result<()> {
                 device
             );
         }
-        mount(&["-o", &format!("subvol=/{subvolume}"), device], &at)?;
+        mount(subvolume, &at)?;
     }
     for name in ROLLED {
-        let source = target.join(ON_ROOT).join(name);
-        mount(
-            &["--bind", &source.to_string_lossy()],
+        crate::system::mounts::bind(
+            &target.join(ON_ROOT).join(name),
             &target.join("var/lib").join(name),
+            false,
         )?;
     }
     Ok(())
@@ -354,12 +347,32 @@ fn pick_esp(found: &[String]) -> Result<String> {
     }
 }
 
+/// The only EFI system partition lsblk lists, for a root whose fstab names none.
+pub fn only_esp() -> Result<String> {
+    let output = Command::new("lsblk")
+        .args(["-p", "-P", "-o", "NAME,PARTTYPE"])
+        .output()
+        .context("running lsblk")?;
+    pick_esp(&esp_partitions(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// The device spec and mount point of the ESP the root at `root` names in its fstab, for boot.esp as archix's state there records it.
+pub fn esp_of(root: &Path) -> Option<(String, String)> {
+    let recorded = fs::read_to_string(root.join(ON_ROOT).join("archix/boot/esp"))
+        .or_else(|_| fs::read_to_string(root.join("var/lib/archix/boot/esp")))
+        .ok();
+    let recorded = recorded.as_deref().map(str::trim).filter(|p| p.starts_with('/'));
+    esp_in_fstab(
+        &fs::read_to_string(root.join("etc/fstab")).unwrap_or_default(),
+        recorded,
+    )
+}
+
 /// Mounts the ESP of the root laid out at `target` where it boots: `esp` if given, else the device the root's fstab names for boot.esp (as archix's state records it, /efi by default), else the only EFI system partition there is. Returns where it went.
 pub fn mount_esp(target: &Path, esp: Option<&str>) -> Result<PathBuf> {
     let recorded = fs::read_to_string(target.join(ON_ROOT).join("archix/boot/esp")).ok();
     let recorded = recorded.as_deref().map(str::trim).filter(|p| p.starts_with('/'));
-    let fstab = fs::read_to_string(target.join("etc/fstab")).unwrap_or_default();
-    let (device, point) = match (esp, esp_in_fstab(&fstab, recorded)) {
+    let (device, point) = match (esp, esp_of(target)) {
         (Some(device), found) => (
             device.to_string(),
             found
@@ -368,30 +381,12 @@ pub fn mount_esp(target: &Path, esp: Option<&str>) -> Result<PathBuf> {
                 .unwrap_or_else(|| "/efi".to_string()),
         ),
         (None, Some(found)) => found,
-        (None, None) => {
-            let output = Command::new("lsblk")
-                .args(["-p", "-P", "-o", "NAME,PARTTYPE"])
-                .output()
-                .context("running lsblk")?;
-            let device = pick_esp(&esp_partitions(&String::from_utf8_lossy(&output.stdout)))?;
-            (device, recorded.unwrap_or("/efi").to_string())
-        }
+        (None, None) => (only_esp()?, recorded.unwrap_or("/efi").to_string()),
     };
     let at = target.join(point.trim_start_matches('/'));
     fs::create_dir_all(&at).with_context(|| format!("creating {}", at.display()))?;
-    let output = Command::new("mount")
-        .args(["-o", "umask=0077"])
-        .arg(&device)
-        .arg(&at)
-        .output()
-        .context("running mount")?;
-    if !output.status.success() {
-        bail!(
-            "couldn't mount the ESP {device} at {}: {}",
-            at.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    crate::system::mounts::mount(&device_path(&device).to_string_lossy(), &at, "vfat", "umask=0077")
+        .with_context(|| format!("mounting the ESP {device}"))?;
     Ok(at)
 }
 

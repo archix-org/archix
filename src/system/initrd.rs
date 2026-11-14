@@ -208,7 +208,7 @@ const LO_FLAGS_OFFSET: usize = 52;
 const LO_FLAGS_AUTOCLEAR: u32 = 4;
 
 /// Attaches `file` to a free loop device, returning it and the handle that keeps it attached: with autoclear, the device goes at its last close, so the caller holds the handle until the mount has its own.
-fn attach_loop(file: &Path) -> Result<(PathBuf, fs::File)> {
+pub(crate) fn attach_loop(file: &Path) -> Result<(PathBuf, fs::File)> {
     let control = fs::OpenOptions::new()
         .read(true)
         .write(true)

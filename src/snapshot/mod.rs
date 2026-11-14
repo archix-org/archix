@@ -272,13 +272,13 @@ impl Store {
         let final_dir = self.dir.join(number.to_string());
         let dir = self.dir.join(format!("{MAKING}{number}"));
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        btrfs(
-            Command::new("btrfs")
-                .args(["-q", "subvolume", "snapshot", "-r"])
-                .arg(source)
-                .arg(dir.join(SNAPSHOT)),
-            &format!("snapshot {} to {}", source.display(), dir.join(SNAPSHOT).display()),
-        )?;
+        crate::system::btrfs::snapshot(source, &dir.join(SNAPSHOT), true).with_context(|| {
+            format!(
+                "btrfs couldn't snapshot {} to {}",
+                source.display(),
+                dir.join(SNAPSHOT).display()
+            )
+        })?;
         crate::durable::sync_filesystems_checked(&[&dir])?;
         crate::testhooks::mark("snapshot-before-record");
         let record = Record {
@@ -319,10 +319,8 @@ impl Store {
         let dir = dir.to_path_buf();
         let snapshot = dir.join(SNAPSHOT);
         if snapshot.exists() {
-            btrfs(
-                Command::new("btrfs").args(["-q", "subvolume", "delete"]).arg(&snapshot),
-                &format!("delete {}", snapshot.display()),
-            )?;
+            crate::system::btrfs::delete_subvolume(&snapshot)
+                .with_context(|| format!("btrfs couldn't delete {}", snapshot.display()))?;
         }
         match fs::remove_dir_all(&dir) {
             Ok(()) => Ok(()),
@@ -405,13 +403,12 @@ impl Store {
             &self.dir.join(KEEP_JOURNAL),
             serde_json::to_string_pretty(&journal)?.as_bytes(),
         )?;
-        btrfs(
-            Command::new("btrfs")
-                .args(["-q", "subvolume", "snapshot"])
-                .arg(self.path(number))
-                .arg(&clone),
-            &format!("make a writable copy of snapshot {number} at {}", clone.display()),
-        )?;
+        crate::system::btrfs::snapshot(&self.path(number), &clone, false).with_context(|| {
+            format!(
+                "btrfs couldn't make a writable copy of snapshot {number} at {}",
+                clone.display()
+            )
+        })?;
         // A pacman snapshot is taken while pacman holds its lock.
         match fs::remove_file(clone.join(layout::ON_ROOT).join("pacman/db.lck")) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -447,10 +444,8 @@ impl Store {
             }
             _ => {
                 if clone.exists() {
-                    btrfs(
-                        Command::new("btrfs").args(["-q", "subvolume", "delete"]).arg(&clone),
-                        &format!("delete the unfinished clone {}", clone.display()),
-                    )?;
+                    crate::system::btrfs::delete_subvolume(&clone)
+                        .with_context(|| format!("btrfs couldn't delete the unfinished clone {}", clone.display()))?;
                 }
                 match fs::remove_file(&journal_path) {
                     Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
@@ -658,22 +653,10 @@ fn over_count(records: &[Record], policy: &Policy, pinned: &BTreeSet<u32>) -> Ve
 
 /// Records the UUID of the subvolume `@` under the mounted top level `top` in `<archix>/root.json`, after setup and each keep, so a root some other tool put there can be told apart later.
 pub fn record_root(archix: &Path, top: &Path) -> Result<String> {
-    let output = Command::new("btrfs")
-        .args(["subvolume", "show"])
-        .arg(top.join(ROOT))
-        .output()
-        .context("running btrfs")?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let uuid = text
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("UUID:"))
-        .map(|uuid| uuid.trim().to_string())
-        .filter(|uuid| output.status.success() && !uuid.is_empty() && uuid != "-");
-    let Some(uuid) = uuid else {
+    let Some(uuid) = subvolume_uuid(&top.join(ROOT)) else {
         bail!(
-            "btrfs couldn't say {}'s UUID: {}",
-            top.join(ROOT).display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            "{} isn't a btrfs subvolume with a UUID, so the root can't be recorded",
+            top.join(ROOT).display()
         );
     };
     crate::durable::write(
@@ -692,16 +675,7 @@ pub fn recorded_root(archix: &Path) -> Option<String> {
 
 /// The UUID of the btrfs subvolume mounted at `path`.
 pub fn subvolume_uuid(path: &Path) -> Option<String> {
-    let output = Command::new("btrfs")
-        .args(["subvolume", "show"])
-        .arg(path)
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix("UUID:"))
-        .map(|uuid| uuid.trim().to_string())
-        .filter(|uuid| output.status.success() && !uuid.is_empty() && uuid != "-")
+    crate::system::btrfs::subvolume_uuid(path)
 }
 
 /// Why the root at `root` isn't the `@` archix produced, when it isn't: its subvolume UUID differs from the one recorded after setup and each keep, as after a snapper or limine-snapper-sync rollback or a restore. None when they match, or there's nothing to compare.
