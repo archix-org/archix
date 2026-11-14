@@ -277,6 +277,29 @@ pub(super) fn write_deferred() -> Result<()> {
     Ok(())
 }
 
+/// After a switch failed, writes the archix.lock it resolved, and whose AUR recipes were trusted, unless the config it was resolved for has deferred edits of its own, which the failure drops.
+pub(super) fn keep_resolved_lock(config_dir: &Path) -> Result<()> {
+    let path = config_dir.join(LOCK_FILE);
+    let edits_config = DEFERRED.with(|deferred| deferred.borrow().iter().flatten().any(|write| write.path != path));
+    let Some(text) = deferred_text(&path).filter(|_| !edits_config) else {
+        return Ok(());
+    };
+    if std::fs::read_to_string(&path).is_ok_and(|on_disk| on_disk == text) {
+        return Ok(());
+    }
+    write_config(&path, text.as_bytes())?;
+    DEFERRED.with(|deferred| {
+        if let Some(writes) = deferred.borrow_mut().as_mut() {
+            writes.retain(|write| write.path != path);
+        }
+    });
+    eprintln!(
+        "kept {}: the switch failed, but the lock it resolved stays, so the next one doesn't resolve or ask about AUR recipes again",
+        path.display()
+    );
+    Ok(())
+}
+
 /// Writes a config file, as its directory's owner when that isn't root.
 pub(super) fn write_config(path: &Path, text: &[u8]) -> Result<()> {
     WRITTEN.with(|written| {

@@ -697,3 +697,55 @@ fn an_aur_package_standing_in_for_a_repo_package_is_used_only_when_declared() {
     fs::write(setup.dir.path().join("init.lua"), init).unwrap();
     fs::write(setup.dir.path().join("archix.lock"), before).unwrap();
 }
+
+#[test]
+#[ignore]
+fn a_refused_switch_keeps_the_lock_it_resolved_and_the_aur_trust_given() {
+    let _system = lock_system();
+    let mut aur = LocalAur::new();
+    let name = "archix-test-trusted";
+    aur.publish(TestPkg::new(name, "1.0"));
+    let body = format!("aur = {{ url = {:?} }}", aur.url());
+    let setup = Setup::new(&[], &body);
+    let before = setup.read("archix.lock").unwrap();
+    let pipe = system_path("/etc/archix-test-pipe");
+    assert!(Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+    let init = setup.read("init.lua").unwrap().replacen(
+        "packages = { ",
+        &format!(r#"files = {{ ["/etc/archix-test-pipe"] = {{ text = "x" }} }}, packages = {{ "{name}", "#),
+        1,
+    );
+    setup.write("init.lua", &init);
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let trusted = setup.answering_raw("y\n", &["switch"]);
+    let out = text(&trusted);
+    assert!(!trusted.status.success(), "the pipe refuses the switch:\n{out}");
+    assert!(
+        out.contains(&format!("trust {name} at")) && out.contains("is not a file or symlink"),
+        "{out}"
+    );
+    assert_ne!(setup.read("archix.lock").unwrap(), before, "{out}");
+    assert_eq!(
+        setup.lock().packages[name].version,
+        "1.0-1",
+        "the resolved, trusted lock stays"
+    );
+    assert_eq!(installed(name), None, "{out}");
+
+    let again = setup.answering_raw("", &["switch"]);
+    let out = text(&again);
+    assert!(!again.status.success(), "{out}");
+    assert!(
+        !out.contains("resolving") && !out.contains(&format!("trust {name} at")),
+        "a rerun neither resolves again nor asks about the recipe again:\n{out}"
+    );
+    assert!(out.contains("is not a file or symlink"), "{out}");
+    fs::remove_file(&pipe).unwrap();
+}

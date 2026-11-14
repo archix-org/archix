@@ -134,6 +134,16 @@ fn switch_after_declaring(
 }
 
 pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>, allow_unsafe: bool) -> Result<()> {
+    let switched = switch_once(target, noconfirm, accept_nearest, allow_unsafe);
+    if switched.is_err()
+        && let Err(e) = super::lock::keep_resolved_lock(target.config_dir)
+    {
+        eprintln!("warning: keeping the resolved archix.lock: {e:#}");
+    }
+    switched
+}
+
+fn switch_once(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>, allow_unsafe: bool) -> Result<()> {
     require_root("switch")?;
     let started = now();
     let paths = Paths::system();
