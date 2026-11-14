@@ -139,8 +139,6 @@ def run(m, t):
         t.require(status == 0, f"the first switch with --config archix-config/ exited {status}: {said[-2500:]}")
         t.check(LAID_OUT_FIRST in said and "the root is set up for rollbacks" in out("cat /root/first-switch.log"), f"the first switch lays the root out and stops for the reboot: {said[-800:]}")
         t.check(ok("grep -E '^install .*systemd-ukify.* before the layout' /root/first-switch.log") and ok("pacman -Q systemd-ukify"), f"the first switch installs systemd-ukify itself: {out('grep ^install /root/first-switch.log')}")
-        rescue = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2>/dev/null").strip()
-        t.check(rescue and ok(f"[ -s {rescue} ]"), f"the first switch builds the rescue entry and its image: {entries()} {rescue!r}")
         t.check(not [e for e in entries() if e != "archix-rescue.conf"], f"on Limine archix writes no entries of its own: {entries()}")
         t.check(out("sha256sum /efi/limine.conf /efi/vmlinuz-linux-cachyos /efi/initramfs-linux-cachyos.img") == limine_conf, "Limine's menu, kernel and initramfs on the ESP stay as they were")
         m.succeed(f"cp /home/admin/archix-config/archix.lock {CONFIG.rsplit('/', 1)[0]}/archix.lock")
@@ -313,6 +311,8 @@ def run(m, t):
         image = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/$(ls /efi/loader/entries | grep '^archix-current' | head -1)").strip()
         inspected = out(f"ukify inspect {image} 2>&1")
         t.check('PRETTY_NAME="CachyOS (' in inspected and "Arch Linux" not in inspected, f"the current image's os-release should name CachyOS: {inspected[:1500]}")
+        rescue = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2>/dev/null").strip()
+        t.check(rescue and ok(f"[ -s {rescue} ]"), f"on systemd-boot the rescue entry and its image are built, with ukify the first switch installed: {entries()} {rescue!r}")
 
     with t.step(f"7: on systemd-boot, keeping snapshot {kept} works"):
         m.succeed(f"set -o pipefail; {HOST} rollback {kept} --noconfirm 2>&1 | tail -20", 1800, what=f"keeping snapshot {kept}")
