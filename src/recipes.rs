@@ -472,7 +472,9 @@ fn patch_tail(version: &str, patches: &[String]) -> String {
          for _dir in \"$srcdir\"/*/; do\n      \
          if patch -d \"$_dir\" -p1 -N --dry-run --silent < \"$srcdir/$_patch\" >/dev/null 2>&1; then\n        \
          patch -d \"$_dir\" -p1 -N < \"$srcdir/$_patch\"\n        continue 2\n      fi\n    done\n    \
-         echo \"archix: $_patch applies to no directory in \\$srcdir\" >&2\n    return 1\n  done\n  \
+         echo \"archix: $_patch applies to no directory in \\$srcdir; what patch says for each:\" >&2\n    \
+         for _dir in \"$srcdir\"/*/; do\n      echo \"archix: in ${{_dir#$srcdir/}}:\" >&2\n      \
+         patch -d \"$_dir\" -p1 -N --dry-run < \"$srcdir/$_patch\" >&2\n    done\n    return 1\n  done\n  \
          if declare -f _archix_prepare >/dev/null; then cd \"$srcdir\" && _archix_prepare; fi\n}}",
         patches.join(" ")
     );
@@ -482,6 +484,20 @@ fn patch_tail(version: &str, patches: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_patch_tail_is_valid_bash() {
+        let tail = patch_tail(
+            "1.0-2",
+            &["archix-0-a.patch".to_string(), "archix-1-b.patch".to_string()],
+        );
+        let out = std::process::Command::new("bash")
+            .args(["-n", "-c", &tail])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{tail}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(tail.contains("what patch says for each"), "{tail}");
+    }
 
     #[test]
     fn gitlab_paths_match_pkgctl() {
