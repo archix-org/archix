@@ -1,4 +1,4 @@
-# The rescue entry, never needing a live USB: it sorts after every other entry and is never the default; a root whose init is broken is repaired from it alone by rolling back to a snapshot (btrfs); a lost root password is reset from it by a wheel user; under Secure Boot its image is signed with its command line inside and no PCR policy, with root locked wrong and empty passwords get no prompt or shell and three tries restart the machine, and a wheel user's password opens its shell and a TPM-bound LUKS volume by passphrase.
+# The rescue entry, never needing a live USB: it sorts after every other entry and is never the default; a root whose init is broken and whose libz is gone, so that pacman, btrfs, git and mount can't start, is repaired from it alone by rolling back to a snapshot (btrfs), with the rescue image's static archix and none of the root's programs; a lost root password is reset from it by a wheel user; under Secure Boot its image is signed with its command line inside and no PCR policy, with root locked wrong and empty passwords get no prompt or shell and three tries restart the machine, and a wheel user's password opens its shell and a TPM-bound LUKS volume by passphrase.
 import json
 
 from boot import common
@@ -74,9 +74,14 @@ def run(m, t):
         t.check(out(f"cat {entry}") == written, f"the entry is as it was: {out(f'cat {entry}')}")
 
     if BTRFS:
-        with t.step(f"2: a root whose init is broken is rolled back to snapshot {good} from the rescue entry"):
+        with t.step(f"2: a root whose init is broken and whose libz is gone is rolled back to snapshot {good} from the rescue entry"):
             m.succeed("printf 'broken\\n' > /usr/lib/systemd/systemd.new && mv /usr/lib/systemd/systemd.new /usr/lib/systemd/systemd && sync -f /usr/lib/systemd", what="breaking the root's systemd")
-            c = to_rescue(m)
+            m.select_entry("archix-rescue.conf")
+            m.succeed("rm /usr/lib/libz.so.1* && sync -f /usr/lib", what="removing libz, as a package swap that removed zlib before its replacement was in did")
+            t.check(not ok("pacman -Q > /dev/null 2>&1") and not ok("btrfs --version > /dev/null 2>&1"), "without libz neither pacman nor btrfs should start")
+            # A reset, not a reboot: nothing on the root can be counted on to run now.
+            m.crash()
+            c = Console(m, None)
             c.t = t
             login(c, "root", ROOT_PASS)
             c.say("rescue> ", "check")
@@ -87,6 +92,7 @@ def run(m, t):
             started = after_rescue(m)
             t.check(started == "archix-current.conf", f"the current entry should boot the kept snapshot: {started}")
             t.check(ok("head -c 4 /usr/lib/systemd/systemd | grep -q ELF"), "systemd should be whole again")
+            t.check(ok("[ -e /usr/lib/libz.so.1 ]") and ok("pacman -Q > /dev/null") and ok("btrfs --version > /dev/null"), f"libz is back, and pacman and btrfs start: {out('pacman -Q 2>&1 | tail -2')}")
             t.check(out("cat /etc/archix-vmtest").strip() == "0", f"the root should be snapshot {good}: {out('cat /etc/archix-vmtest')}")
             t.check(any("replaced" in line for line in out("archix snapshot list").splitlines()), f"the broken root is kept as a snapshot of kind replaced: {out('archix snapshot list')}")
             check_menu(t)

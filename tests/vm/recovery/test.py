@@ -1,4 +1,4 @@
-# A live-USB recovery: two switches, then the ESP wiped (no loader, entries or images) and the root's init damaged, so the disk starts no kernel; a plain Arch disk, as a live USB, takes the static archix from the disk, `archix chroot`s into the root with its layout, puts systemd-boot back and keeps the snapshot from before the damage, which boots and switches again. btrfs only: on ext4 there's no snapshot to keep, and `archix chroot` mounts a btrfs layout.
+# A live-USB recovery: two switches, then the ESP wiped (no loader, entries or images) and the root's init damaged, so the disk starts no kernel; a plain Arch disk, as a live USB, takes the static archix from the disk, `archix chroot`s into the root with its layout, puts systemd-boot back and keeps the snapshot from before the damage, which boots and switches again; then the root loses libz, so none of its programs start, and `archix rescue rollback` on the plain Arch disk, given nothing, finds the root, mounts its layout and keeps a snapshot with the static archix alone. btrfs only: on ext4 there's no snapshot to keep, and `archix chroot` mounts a btrfs layout.
 import subprocess
 
 from boot.common import bind, boot, bump, entries, ok, out
@@ -23,6 +23,13 @@ def powered_off(m, timeout):
     m.process = None
     m.connected = False
     return True
+
+
+def cut(m):
+    """Powers the VM off at once, as nothing on the root can be counted on to shut it down."""
+    m.stop()
+    m.process = None
+    m.connected = False
 
 
 def run(m, t):
@@ -80,3 +87,28 @@ def run(m, t):
         m.reboot()
         boot()
         t.check(out("cat /etc/archix-vmtest").strip() == "3", "the switch after the recovery boots")
+
+    with t.step("5: the root loses libz, and `archix rescue rollback` from the plain Arch disk alone brings the system back"):
+        kept = newest_snapshot()
+        t.check(out(f"cat /.archix/snapshots/{kept}/root/etc/archix-vmtest").strip() == "1", f"snapshot {kept} should hold mark 1")
+        m.succeed(f"echo {kept} > /var/lib/archix-vmtest/kept && echo rescue > /var/lib/archix-vmtest/mode")
+        m.succeed("rm /usr/lib/libz.so.1* && sync -f /usr/lib /var/lib/archix-vmtest", what="removing libz, as a package swap that removed zlib before its replacement was in did")
+        t.check(not ok("pacman -Q > /dev/null 2>&1") and not ok("btrfs --version > /dev/null 2>&1"), "without libz neither pacman nor btrfs should start")
+        cut(m)
+        disks(m, True)
+        m.new_boot("booting the rescue disk again")
+        m.start()
+        m.console_mark = 0
+        m.wait_for_console_text(r"VMTEST: rescue: (recovered|FAIL.*)", timeout=2400)
+        said = m.console_since(m.console_mark)
+        t.log("\n".join(line for line in said.splitlines() if "VMTEST" in line))
+        t.require("VMTEST: rescue: recovered" in said, "archix rescue on the rescue disk failed (above)")
+        t.require(powered_off(m, 300), "the rescue disk should power off")
+        disks(m, False)
+        m.new_boot("booting the rolled back disk")
+        started = boot()
+        t.check(started == "archix-current.conf", f"the current entry should start: {started} {entries()}")
+        t.check(out("cat /etc/archix-vmtest").strip() == "1", f"the root should be snapshot {kept}, mark 1: {out('cat /etc/archix-vmtest')}")
+        t.check(ok("[ -e /usr/lib/libz.so.1 ]") and ok("pacman -Q > /dev/null") and ok("btrfs --version > /dev/null"), f"libz is back, and pacman and btrfs start: {out('pacman -Q 2>&1 | tail -2')}")
+        t.check(any("replaced" in line for line in out("archix snapshot list").splitlines()), f"the root without libz is kept as a snapshot of kind replaced: {out('archix snapshot list')}")
+        t.check(not [line for line in out("systemctl --failed --no-legend").splitlines() if "archix" in line], f"no archix unit should fail: {out('systemctl --failed --no-legend')}")
