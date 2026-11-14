@@ -84,6 +84,17 @@ pub fn of(path: &Path) -> Option<Mount> {
     holding(&table(), &path).cloned()
 }
 
+/// The mount the system at `root` runs from, by /proc/self/mountinfo or in a debug build ARCHIX_TEST_MOUNTINFO; none for a test root without one.
+pub fn running_root(root: &Path) -> Option<Mount> {
+    let text = match std::env::var_os("ARCHIX_TEST_MOUNTINFO").filter(|_| cfg!(debug_assertions)) {
+        Some(path) => fs::read_to_string(path).ok()?,
+        None if crate::testhooks::root() != Path::new("/") => return None,
+        None => fs::read_to_string("/proc/self/mountinfo").ok()?,
+    };
+    let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    holding(&parse(&text), &root).cloned()
+}
+
 /// The mount at exactly `point`, the topmost one there.
 pub fn at(point: &Path) -> Option<Mount> {
     table().into_iter().rev().find(|mount| mount.point == point)

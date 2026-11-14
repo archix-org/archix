@@ -1793,3 +1793,92 @@ fn the_boot_units_wait_for_a_users_run_however_long_it_takes_rather_than_fail() 
         );
     }
 }
+
+/// A filesystem on a block device in the test VM, and its UUID when udev links one.
+fn some_block_device() -> (String, String, Option<String>) {
+    use std::os::unix::fs::FileTypeExt;
+    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap();
+    let (fs_type, device) = mountinfo
+        .lines()
+        .filter_map(|line| {
+            let after: Vec<&str> = line.split_once(" - ")?.1.split_whitespace().collect();
+            Some((after.first()?.to_string(), after.get(1)?.to_string()))
+        })
+        .find(|(_, device)| fs::metadata(device).is_ok_and(|meta| meta.file_type().is_block_device()))
+        .expect("the test VM mounts a block device");
+    let real = fs::canonicalize(&device).unwrap();
+    let uuid = fs::read_dir("/dev/disk/by-uuid")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .find(|link| fs::canonicalize(link.path()).is_ok_and(|target| target == real))
+        .map(|link| link.file_name().to_string_lossy().into_owned());
+    (fs_type, device, uuid)
+}
+
+#[test]
+#[ignore]
+fn diff_and_switch_refuse_a_boot_root_that_isnt_the_running_one() {
+    let _system = lock_system();
+    let (fs_type, device, uuid) = some_block_device();
+    let setup = Setup::new(&[], "");
+    let mountinfo = tempfile::NamedTempFile::new().unwrap();
+    fs::write(
+        mountinfo.path(),
+        format!(
+            "22 1 0:21 /@ {} rw,relatime - {fs_type} {device} rw\n",
+            setup.machine.root.display()
+        ),
+    )
+    .unwrap();
+    let env = [("ARCHIX_TEST_MOUNTINFO", mountinfo.path().to_str().unwrap())];
+    let boot = |root: &str| {
+        format!(
+            r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", rescue_entry = false }}, kernel_params = {{ "root={root}", "rw" }}"#,
+            setup.machine.esp().display()
+        )
+    };
+    let text = |output: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    };
+
+    let placeholder = "UUID=00000000-0000-4000-8000-000000000000";
+    setup.set_body(&[], &boot(placeholder));
+    let diff = setup.run_env(&env, &["diff"]);
+    let out = text(&diff);
+    assert_eq!(diff.status.code(), Some(2), "{out}");
+    assert!(
+        out.contains(&format!(
+            "`archix switch` would refuse this: kernel_params' root={placeholder} names no device on this machine"
+        )),
+        "{out}"
+    );
+    let switch = setup.run_env(&env, &["switch", "--noconfirm"]);
+    let out = text(&switch);
+    assert!(!switch.status.success(), "{out}");
+    assert!(
+        out.contains(&format!(
+            "kernel_params' root={placeholder} names no device on this machine"
+        )),
+        "{out}"
+    );
+    assert_eq!(setup.machine.current(), None, "a refused switch applies nothing");
+
+    let mut good = vec![device.clone()];
+    good.extend(uuid.map(|uuid| format!("UUID={uuid}")));
+    for root in good {
+        setup.set_body(&[], &boot(&root));
+        let diff = setup.run_env(&env, &["diff"]);
+        let out = text(&diff);
+        assert!(
+            diff.status.success(),
+            "root={root} is the running root's device:\n{out}"
+        );
+        assert!(!out.contains("would refuse"), "{out}");
+    }
+    setup.ok_env(&env, &["switch", "--noconfirm"]);
+}

@@ -1050,6 +1050,69 @@ pub fn check_signing(plan: &BootPlan) -> Result<()> {
     Ok(())
 }
 
+/// Refuses a root= that doesn't name the filesystem the system at `root` runs from, such as a placeholder UUID or another disk's: entries with it wouldn't boot this system.
+pub fn check_root(cmdline: &str, root: &Path) -> Result<()> {
+    let uuid = |device: &Path| {
+        super::mounts::probe(device).and_then(|probe| probe.uuid).or_else(|| {
+            fs::read_dir("/dev/disk/by-uuid")
+                .ok()?
+                .flatten()
+                .find(|link| fs::canonicalize(link.path()).is_ok_and(|target| target == device))
+                .map(|link| link.file_name().to_string_lossy().into_owned())
+        })
+    };
+    root_matches(
+        cmdline,
+        super::mounts::running_root(root).as_ref(),
+        &|path| fs::canonicalize(path).ok(),
+        &uuid,
+    )
+}
+
+fn root_matches(
+    cmdline: &str,
+    running: Option<&super::mounts::Mount>,
+    resolve: &dyn Fn(&Path) -> Option<PathBuf>,
+    uuid: &dyn Fn(&Path) -> Option<String>,
+) -> Result<()> {
+    let Some(spec) = cmdline
+        .split_whitespace()
+        .filter_map(|word| word.strip_prefix("root="))
+        .next_back()
+    else {
+        return Ok(());
+    };
+    let Some(running) = running.filter(|mount| mount.source.starts_with('/')) else {
+        return Ok(());
+    };
+    let named = crate::snapshot::layout::device_path(spec);
+    if !named.is_absolute() {
+        return Ok(());
+    }
+    let source = Path::new(&running.source);
+    let here = resolve(source).unwrap_or_else(|| source.to_path_buf());
+    let hint = match uuid(&here) {
+        Some(uuid) => format!("; root=UUID={uuid} names it"),
+        None => String::new(),
+    };
+    let Some(device) = resolve(&named) else {
+        bail!(
+            "kernel_params' root={spec} names no device on this machine ({} doesn't exist), so boot entries with it wouldn't find this system's root, {}{hint}; nothing was changed",
+            named.display(),
+            running.source
+        );
+    };
+    let same_btrfs = running.fs_type == "btrfs" && uuid(&device).is_some_and(|named| uuid(&here) == Some(named));
+    if device == here || same_btrfs {
+        return Ok(());
+    }
+    bail!(
+        "kernel_params' root={spec} is {}, but this system runs from {}, so boot entries with it would boot another root{hint}; nothing was changed",
+        device.display(),
+        running.source
+    )
+}
+
 /// With Secure Boot enforcing, an unsigned image or loader would leave the menu unbootable, so it fails before the menu points at it.
 fn refuse_unsigned(plan: &BootPlan, ukis: &[PathBuf]) -> Result<()> {
     if !firmware_enforces() {
@@ -1675,6 +1738,76 @@ mod tests {
         assert!(
             !entry_unchanged(&paths, id),
             "a temporary file a power cut left isn't the entry"
+        );
+    }
+
+    #[test]
+    fn a_boot_root_must_name_the_filesystem_the_system_runs_from() {
+        let links: std::collections::BTreeMap<&str, &str> = [
+            ("/dev/disk/by-uuid/aaaa", "/dev/nvme0n1p2"),
+            ("/dev/disk/by-partuuid/pppp", "/dev/nvme0n1p2"),
+            ("/dev/disk/by-uuid/bbbb", "/dev/sda1"),
+            ("/dev/nvme0n1p2", "/dev/nvme0n1p2"),
+            ("/dev/sda1", "/dev/sda1"),
+            ("/dev/sdb1", "/dev/sdb1"),
+            ("/dev/mapper/root", "/dev/dm-0"),
+            ("/dev/disk/by-uuid/cccc", "/dev/dm-0"),
+        ]
+        .into();
+        let resolve = |path: &Path| links.get(path.to_str()?).map(PathBuf::from);
+        let uuid = |device: &Path| match device.to_str()? {
+            "/dev/nvme0n1p2" => Some("aaaa".to_string()),
+            "/dev/sda1" | "/dev/sdb1" => Some("bbbb".to_string()),
+            _ => None,
+        };
+        let on = |fs_type: &str, source: &str| super::super::mounts::Mount {
+            root: "/@".to_string(),
+            point: PathBuf::from("/"),
+            fs_type: fs_type.to_string(),
+            source: source.to_string(),
+            options: "rw".to_string(),
+        };
+        let check = |cmdline: &str, running: &super::super::mounts::Mount| {
+            root_matches(cmdline, Some(running), &resolve, &uuid).map_err(|e| e.to_string())
+        };
+        let btrfs = on("btrfs", "/dev/nvme0n1p2");
+        for good in [
+            "root=UUID=aaaa rootflags=subvol=@ rw",
+            "root=PARTUUID=PPPP rw",
+            "root=/dev/nvme0n1p2",
+            "root=x root=UUID=aaaa",
+            "quiet",
+            "root=gpt-auto",
+        ] {
+            assert_eq!(check(good, &btrfs), Ok(()), "{good}");
+        }
+        let placeholder = check("root=UUID=00000000-0000-0000-0000-000000000000 rw", &btrfs).unwrap_err();
+        assert!(
+            placeholder.starts_with(
+                "kernel_params' root=UUID=00000000-0000-0000-0000-000000000000 names no device on this machine"
+            ) && placeholder.contains("this system's root, /dev/nvme0n1p2; root=UUID=aaaa names it"),
+            "{placeholder}"
+        );
+        let other = check("root=UUID=bbbb", &btrfs).unwrap_err();
+        assert!(
+            other.starts_with("kernel_params' root=UUID=bbbb is /dev/sda1, but this system runs from /dev/nvme0n1p2"),
+            "{other}"
+        );
+        assert_eq!(
+            check("root=/dev/sdb1", &on("btrfs", "/dev/sda1")),
+            Ok(()),
+            "another device of the same btrfs"
+        );
+        assert!(check("root=/dev/sdb1", &on("ext4", "/dev/sda1")).is_err());
+        assert_eq!(check("root=UUID=cccc", &on("ext4", "/dev/mapper/root")), Ok(()));
+        assert_eq!(
+            check("root=UUID=zzzz", &on("overlay", "overlay")),
+            Ok(()),
+            "no device to compare"
+        );
+        assert_eq!(
+            root_matches("root=UUID=zzzz", None, &resolve, &uuid).map_err(|e| e.to_string()),
+            Ok(())
         );
     }
 }

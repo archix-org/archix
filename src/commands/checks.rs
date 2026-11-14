@@ -183,6 +183,9 @@ pub(super) fn before_prompt(planned: &Planned) -> Found {
         ),
     );
     if planned.applies {
+        if let Some(plan) = planned.boot {
+            found.take("the boot root", system::boot::check_root(&plan.cmdline, &paths.root));
+        }
         boot_checks(planned, &mut found);
         package_checks(planned, &mut found);
     }
