@@ -510,6 +510,16 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     show_config_diff(target, &paths)?;
     let total = changes.len() + system_lines.len() + flatpak_lines.len() + 1;
     let first = rollbacks.lays_out() && !changes.is_empty();
+    let boot_tools = match (first, &boot) {
+        (true, Some(plan)) => missing_boot_tools(plan, &installed),
+        _ => Vec::new(),
+    };
+    if !boot_tools.is_empty() {
+        println!(
+            "install    {} before the layout, to build its boot images",
+            boot_tools.join(" ")
+        );
+    }
     let question = match first {
         true => format!(
             "set rollbacks up and stop for a reboot? ({} wait for the switch after it)",
@@ -521,6 +531,7 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
         bail!("aborted; nothing was changed");
     }
     if first {
+        install_boot_tools(&boot_tools)?;
         return lay_out_first(&paths, &rollbacks, boot.as_ref(), changes.len());
     }
     system::blobs::ensure(&paths, &archive, &rendered)?;
@@ -968,6 +979,42 @@ fn lay_out_first(
         count(packages, "package change", "package changes")
     );
     report_soft_failures(&failures, "the root is laid out for rollbacks")
+}
+
+/// The tools a boot plan builds its images with that aren't installed: a first switch lays the root out and builds those images before any package changes.
+fn missing_boot_tools(
+    plan: &system::boot::BootPlan,
+    installed: &BTreeMap<String, archix::pacman::LocalPkg>,
+) -> Vec<String> {
+    let mut tools = vec![plan.kernel.as_str(), "mkinitcpio", "systemd-ukify", "dosfstools"];
+    if plan.secure_boot == Some(true) {
+        tools.push("sbctl");
+    }
+    tools
+        .into_iter()
+        .filter(|name| !installed.contains_key(*name))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Installs the boot tools a first switch needs from the configured repos; the switch after its reboot brings them to the lock's versions.
+fn install_boot_tools(tools: &[String]) -> Result<()> {
+    if tools.is_empty() {
+        return Ok(());
+    }
+    let status = Command::new("pacman")
+        .args(["-S", "--needed", "--noconfirm", "--asdeps"])
+        .args(tools)
+        .env(archix::packages::TRANSACTION_ENV, "1")
+        .status()
+        .context("running pacman")?;
+    if !status.success() {
+        bail!(
+            "installing {} for the boot images failed; nothing was changed",
+            tools.join(" ")
+        );
+    }
+    Ok(())
 }
 
 /// Where the state before a failed apply is, for its error.
