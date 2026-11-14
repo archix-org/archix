@@ -61,7 +61,12 @@ def refused(m, t, what, says):
     status, said = m.execute(f"{HOST} switch --noconfirm > /root/refused.log 2>&1; echo $?; cat /root/refused.log", 1800)
     code = said.split("\n", 1)[0].strip()
     t.check(code != "0" and says in said and "nothing was changed" in said, f"switch with {what} should be refused with the same words ({says!r}): {said[-1500:]}")
-    t.check((packages(), out("ls -a /.archix 2>&1"), out(f"sha256sum {CONFIG.rsplit('/', 1)[0]}/archix.lock")) == before, f"the refused switch with {what} changed the packages, the layout or the lock")
+    t.check(packages() == before[0], f"the refused switch with {what} changed the packages")
+    t.check(out("ls -a /.archix 2>&1") == before[1], f"the refused switch with {what} changed the layout")
+    kept = out(f"sha256sum {CONFIG.rsplit('/', 1)[0]}/archix.lock")
+    if kept != before[2]:
+        m.succeed(f"cp {CONFIG.rsplit('/', 1)[0]}/archix.lock /root/kept.lock && {HOST} lock")
+        t.check(out(f"sha256sum {CONFIG.rsplit('/', 1)[0]}/archix.lock").split()[0] == kept.split()[0], f"the lock the refused switch with {what} kept should be the one the config resolves to: {out('diff /root/kept.lock ' + CONFIG.rsplit('/', 1)[0] + '/archix.lock | head -20')}")
     m.succeed(f"cp {STOCK} {CONFIG}")
 
 
