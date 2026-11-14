@@ -33,6 +33,15 @@ jobs:
       - run: tests/vm/boot/checks.py
       - run: tests/vm/replay/writelog.py check
 
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - run: packaging/aur/check.sh
+
   image:
     runs-on: ubuntu-latest
     timeout-minutes: 30

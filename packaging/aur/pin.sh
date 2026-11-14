@@ -11,7 +11,7 @@ for pkg in archix archix-bin; do
     archix-bin) file="archix-$version-x86_64-linux.tar.gz" ;;
   esac
   sum=$(sha256sum "$files/$file" | cut -d ' ' -f1)
-  sed -i "s/^sha256sums=.*/sha256sums=('$sum' 'SKIP')/" "$dir/PKGBUILD"
+  sed -i -E "s/^sha256sums(_x86_64)?=.*/sha256sums\1=('$sum' 'SKIP')/" "$dir/PKGBUILD"
   # makepkg uses the files already beside the PKGBUILD instead of downloading them.
   for f in "$file" "$file.sig"; do ln -sf "$(cd "$files" && pwd)/$f" "$dir/$f"; done
   (cd "$dir" && makepkg --printsrcinfo > .SRCINFO)
