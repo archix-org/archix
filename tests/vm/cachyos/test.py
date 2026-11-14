@@ -311,7 +311,8 @@ def run(m, t):
         t.check(named and all("CachyOS" in line for line in named) and "Arch Linux" not in titles, f"archix's entries should be titled CachyOS: {titles}")
         image = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/$(ls /efi/loader/entries | grep '^archix-current' | head -1)").strip()
         inspected = out(f"ukify inspect {image} 2>&1")
-        t.check('PRETTY_NAME="CachyOS (' in inspected and "Arch Linux" not in inspected, f"the current image's os-release should name CachyOS: {inspected[:1500]}")
+        osrel = inspected.split(".osrel:", 1)[-1].split("\n.", 1)[0]
+        t.check('PRETTY_NAME="CachyOS (' in osrel and "Arch Linux" not in osrel, f"the current image's os-release should name CachyOS: {osrel[:1500]}")
         rescue = out("sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/archix-rescue.conf 2>/dev/null").strip()
         t.check(rescue and ok(f"[ -s {rescue} ]"), f"on systemd-boot the rescue entry and its image are built, with ukify the first switch installed: {entries()} {rescue!r}")
 
