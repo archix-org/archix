@@ -874,6 +874,15 @@ fn check_pacman_free(paths: &Paths) -> Result<()> {
     match packages::pacman_lock(paths) {
         PacmanLock::Free => Ok(()),
         PacmanLock::Running => bail!("pacman is running; wait for it to finish"),
+        PacmanLock::Stale if packages::from_an_earlier_boot(&paths.pacman_lock()) => {
+            std::fs::remove_file(paths.pacman_lock())
+                .with_context(|| format!("removing {}", paths.pacman_lock().display()))?;
+            eprintln!(
+                "removed {}, left by a pacman that a reboot or power cut stopped",
+                paths.pacman_lock().display()
+            );
+            Ok(())
+        }
         PacmanLock::Stale => bail!(
             "{} exists but no pacman is running; if no package manager is in use, remove it and try again",
             paths.pacman_lock().display()

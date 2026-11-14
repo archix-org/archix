@@ -46,6 +46,20 @@ pub fn pacman_lock(paths: &Paths) -> PacmanLock {
     }
 }
 
+/// Whether `path` was last changed before this boot began, so no process running now left it.
+pub fn from_an_earlier_boot(path: &Path) -> bool {
+    let boot = fs::read_to_string("/proc/stat").ok().and_then(|stat| {
+        stat.lines()
+            .find_map(|line| line.strip_prefix("btime "))
+            .and_then(|seconds| seconds.trim().parse::<u64>().ok())
+    });
+    let changed = fs::symlink_metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+    matches!((boot, changed), (Some(boot), Some(changed)) if changed.as_secs() < boot)
+}
+
 /// Whether any process has `path` open: libalpm keeps db.lck open while it holds the lock, whichever front end (pacman, pamac, PackageKit) took it.
 fn held_open(path: &Path) -> bool {
     let Ok(processes) = fs::read_dir("/proc") else {
@@ -976,6 +990,25 @@ mod tests {
             Path::new("libz.so.1.3.1.zlib-ng")
         );
         assert_eq!(fs::read_to_string(lib.join("libz.so.1")).unwrap(), "zlib-ng-compat");
+    }
+
+    #[test]
+    fn a_pacman_lock_changed_before_this_boot_is_from_an_earlier_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("db.lck");
+        fs::write(&lock, "").unwrap();
+        assert!(
+            !from_an_earlier_boot(&lock),
+            "one made now may be a pacman's of this boot"
+        );
+        fs::File::options()
+            .write(true)
+            .open(&lock)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(from_an_earlier_boot(&lock));
+        assert!(!from_an_earlier_boot(&dir.path().join("missing")));
     }
 
     #[test]
