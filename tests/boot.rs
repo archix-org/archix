@@ -982,6 +982,149 @@ fn a_limine_machine_moves_to_systemd_boot_only_once_a_boot_through_it_counted_as
     checks.finish();
 }
 
+#[test]
+#[ignore]
+fn a_boot_limine_started_during_the_move_is_reported_and_holds_package_changes_back() {
+    const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
+    const LOADER: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+    let _system = lock_system();
+    let _keys = NoSbctlKeys::new();
+    let checks = Checks::default();
+    let setup = Setup::new(&[], "");
+    let machine = &setup.machine;
+    let esp = machine.esp();
+    fs::create_dir_all(esp.join("EFI/limine")).unwrap();
+    fs::write(esp.join("EFI/limine/BOOTX64.EFI"), "limine").unwrap();
+    let vars = tempfile::TempDir::new().unwrap();
+    let var = |name: &str| vars.path().join(format!("{name}-{GLOBAL}"));
+    efivar(
+        vars.path(),
+        &format!("Boot0000-{GLOBAL}"),
+        &load_option("Limine", "\\EFI\\limine\\BOOTX64.EFI"),
+    );
+    // An entry an earlier install left, for a partition that is gone: the firmware can't start it.
+    efivar(
+        vars.path(),
+        &format!("Boot0001-{GLOBAL}"),
+        &load_option("Linux Boot Manager", "\\EFI\\systemd\\systemd-bootx64.efi"),
+    );
+    efivar(
+        vars.path(),
+        &format!("BootOrder-{GLOBAL}"),
+        &[0u16, 1].map(u16::to_le_bytes).concat(),
+    );
+    let efi = ("ARCHIX_TEST_EFIVARS", vars.path().to_str().unwrap());
+    let run = tempfile::TempDir::new().unwrap();
+    let at = |boot: &'static str| {
+        [
+            efi,
+            ("ARCHIX_TEST_BOOT_ID", boot),
+            ("ARCHIX_TEST_RUN", run.path().to_str().unwrap()),
+        ]
+    };
+    let order = || efi_u16s(vars.path(), &format!("BootOrder-{GLOBAL}"));
+    let next = || efi_u16s(vars.path(), &format!("BootNext-{GLOBAL}"));
+
+    setup.ok_env(&at("boot-1"), &["switch", "--noconfirm"]);
+    checks.eq(
+        (order(), next()),
+        (vec![0, 1, 2], vec![2]),
+        "the trial is of an entry on the ESP's own partition, not the one an earlier install left",
+    );
+    let info = setup.ok_env(&at("boot-1"), &["boot-info"]);
+    for line in [
+        "loader: limine",
+        "protection: none",
+        "firmware-next: 0002",
+        "firmware-order: 0000,0001,0002",
+        "migration: trying (entry 0002, armed in this boot by BootNext, ignored by the firmware: none)",
+    ] {
+        checks.check(
+            info.contains(line),
+            format_args!("boot-info should say `{line}`: {info}"),
+        );
+    }
+    checks.check(
+        !info.contains("problem:"),
+        format_args!("the firmware holds what was set: {info}"),
+    );
+
+    // The firmware uses BootNext up, and starts Limine all the same.
+    fs::remove_file(var("BootNext")).unwrap();
+    let said = setup.ok_env(&at("boot-2"), &["boot-check"]);
+    checks.check(
+        said.contains("this boot came through Limine, not archix's systemd-boot")
+            && said.contains("boot counting, fallback and the rescue entry are not in effect")
+            && said.contains("ignored BootNext"),
+        format_args!("the boot's check says Limine started it: {said}"),
+    );
+    let status = setup.ok_env(&at("boot-2"), &["status"]);
+    checks.check(
+        status.contains("this boot came through Limine, not archix's systemd-boot"),
+        format_args!("status says so too: {status}"),
+    );
+
+    setup.set_body(&["tree"], "");
+    let said = setup.ok_env(&at("boot-2"), &["switch", "--noconfirm"]);
+    checks.check(
+        said.contains("this boot came through Limine")
+            && said.contains("1 package change waits")
+            && said.contains("--allow-limine-boot"),
+        format_args!("a switch with a package change says it waits: {said}"),
+    );
+    checks.eq(installed("tree"), None, "and changes no package");
+    checks.eq(
+        (order(), next()),
+        (vec![2, 0, 1], vec![2]),
+        "systemd-boot's entry goes first for the next boot, Limine's second",
+    );
+
+    fs::remove_file(var("BootNext")).unwrap();
+    let said = setup.ok_env(&at("boot-3"), &["boot-check"]);
+    checks.check(
+        said.contains("firmware's boot menu"),
+        format_args!("a second boot Limine started points at the firmware's boot menu: {said}"),
+    );
+    checks.eq(order(), vec![0, 1, 2], "and puts Limine first again");
+    let refused = setup.run_env(&at("boot-3"), &["switch", "--noconfirm"]);
+    let said = String::from_utf8_lossy(&refused.stderr).into_owned();
+    checks.check(
+        !refused.status.success() && said.contains("nothing was changed"),
+        format_args!("with every method ignored the switch is refused: {said}"),
+    );
+    checks.eq(installed("tree"), None, "the refused switch changes no package");
+    setup.ok_env(&at("boot-3"), &["switch", "--noconfirm", "--allow-limine-boot"]);
+    checks.check(installed("tree").is_some(), "--allow-limine-boot applies it");
+
+    efivar(
+        vars.path(),
+        &format!("LoaderInfo-{LOADER}"),
+        &"systemd-boot 262"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<u8>>(),
+    );
+    let said = setup.ok_env(&at("boot-4"), &["boot-check"]);
+    checks.check(
+        !said.contains("came through Limine"),
+        format_args!("a boot systemd-boot started has no such notice: {said}"),
+    );
+    let info = setup.ok_env(&at("boot-4"), &["boot-info"]);
+    checks.check(
+        info.contains("loader: systemd-boot\n") && info.contains("loader-info: systemd-boot 262"),
+        format_args!("boot-info names systemd-boot: {info}"),
+    );
+    setup.set_body(&[], "");
+    setup.ok_env(&at("boot-4"), &["switch", "--noconfirm"]);
+    checks.eq(
+        installed("tree"),
+        None,
+        "on a boot systemd-boot started package changes apply",
+    );
+    checks.finish();
+}
+
 /// A tmpfs of `mib` MiB, unmounted with its loop devices when dropped.
 struct Scratch(tempfile::TempDir);
 

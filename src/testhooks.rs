@@ -156,6 +156,19 @@ pub fn loader_features() -> u64 {
     crate::system::boot::read_loader_features()
 }
 
+/// This boot's id, or ARCHIX_TEST_BOOT_ID in a debug build, so a test can stand for a later boot.
+pub fn boot_id() -> String {
+    if cfg!(debug_assertions)
+        && let Ok(id) = std::env::var("ARCHIX_TEST_BOOT_ID")
+    {
+        return id;
+    }
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// Where systemd-boot's EFI variables are: ARCHIX_TEST_EFIVARS in a debug build, none in a chroot or on a test root, whose variables would be the host's.
 pub fn efivars() -> Option<std::path::PathBuf> {
     if cfg!(debug_assertions)

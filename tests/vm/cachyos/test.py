@@ -113,9 +113,13 @@ def run(m, t):
         t.check(order[:1] == ["Limine"], f"Limine should stay first in the boot order: {order}")
         t.check(after is not None and after != "Limine", f"the firmware should try systemd-boot once at the next boot: next {after}")
         t.check(entry("archix-current.conf") is not None, f"the switch should write systemd-boot's menu: {entries()}")
+        info = out("archix boot-info")
+        t.check("loader: limine" in info and "protection: none" in info and "problem:" not in info, f"before the reboot boot-info names Limine and finds the firmware as archix set it: {info}")
         m.reboot()
         started = boot()
         t.check(through_systemd_boot() and started == "archix-current.conf", f"systemd-boot should start the current entry: {started}")
+        info = out("archix boot-info")
+        t.check("loader: systemd-boot" in info and "protection: in effect" in info, f"boot-info should say systemd-boot started the boot, protected: {info}")
         # Under Limine archix can't tell systemd-boot counts boots, so that entry had no tries; the switch from systemd-boot gives it some, and the good boot through them finishes the move.
         for attempt in range(3):
             if migration_done():

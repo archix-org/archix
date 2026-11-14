@@ -80,6 +80,9 @@ enum Command {
         /// Downgrade declared packages even though that breaks packages archix doesn't track, by their dependencies or the libraries they load
         #[arg(long)]
         allow_partial: bool,
+        /// Change packages although Limine started this boot during the move to systemd-boot, so no boot counting, fallback or rescue entry stands behind the switch
+        #[arg(long)]
+        allow_limine_boot: bool,
     },
     /// Gone: a switch that fails partway says what it applied
     #[command(hide = true)]
@@ -186,6 +189,8 @@ enum Command {
     /// Run at boot by archix-boot.service: the boot's own checks (the hibernation guard, failed entries, the try notice, a root archix didn't produce)
     #[command(hide = true)]
     BootCheck,
+    /// Show which boot loader started this boot, whether boot counting and the fallback entries are in effect, the firmware's boot entries and order, and where a move from Limine to systemd-boot stands
+    BootInfo,
     /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: arm the fallback slot and note the failed units
     #[command(hide = true)]
     BootComplete,
@@ -771,6 +776,15 @@ fn run() -> Result<ExitCode> {
             commands::boot_check()?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::BootInfo => {
+            let paths = archix::paths::Paths::system();
+            let esp = std::fs::read_to_string(paths.state.join("boot").join("esp")).ok();
+            let esp = esp.as_deref().map(|esp| std::path::Path::new(esp.trim()));
+            for line in archix::system::limine::info(&paths, esp) {
+                println!("{line}");
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::BootComplete => {
             let paths = archix::paths::Paths::system();
             if archix::system::boot::booted() == Some(archix::system::menu::Entry::Current) {
@@ -972,7 +986,11 @@ fn run() -> Result<ExitCode> {
             allow_unsafe_downgrade,
             without_secrets,
             allow_partial,
+            allow_limine_boot,
         } => {
+            if allow_limine_boot {
+                commands::allow_limine_boot();
+            }
             if without_secrets {
                 commands::without_secrets();
             }
@@ -993,6 +1011,7 @@ fn run() -> Result<ExitCode> {
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
         | Command::BootCheck
+        | Command::BootInfo
         | Command::BootComplete
         | Command::BootMount { .. }
         | Command::Unblessed

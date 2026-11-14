@@ -520,12 +520,33 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
             boot_tools.join(" ")
         );
     }
-    let question = match first {
-        true => format!(
+    // A boot Limine started has no boot counting, fallback or rescue entry: package changes wait for a boot through systemd-boot.
+    let mut limine_boot = match (first, &boot) {
+        (false, Some(plan)) => system::limine::unprotected(&paths, plan),
+        _ => None,
+    };
+    if let Some(why) = &limine_boot {
+        eprintln!("warning: {why}");
+    }
+    if changes.is_empty() || ALLOW_LIMINE_BOOT.load(std::sync::atomic::Ordering::Relaxed) {
+        limine_boot = None;
+    }
+    if limine_boot.is_some() && system::limine::out_of_methods(&paths) {
+        bail!(
+            "{} not applied: this boot came through Limine and the firmware starts it whatever archix sets; nothing was changed",
+            count(changes.len(), "package change", "package changes")
+        );
+    }
+    let question = match (first, limine_boot.is_some()) {
+        (true, _) => format!(
             "set rollbacks up and stop for a reboot? ({} wait for the switch after it)",
             count(changes.len(), "package change", "package changes")
         ),
-        false => format!("apply {}?", count(total, "change", "changes")),
+        (false, true) => format!(
+            "have the firmware try systemd-boot and stop for a reboot? ({} wait for the switch after it)",
+            count(changes.len(), "package change", "package changes")
+        ),
+        (false, false) => format!("apply {}?", count(total, "change", "changes")),
     };
     if !noconfirm && !confirm(&question)? {
         bail!("aborted; nothing was changed");
@@ -533,6 +554,9 @@ pub fn switch(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>,
     if first {
         install_boot_tools(&boot_tools)?;
         return lay_out_first(&paths, &rollbacks, boot.as_ref(), changes.len());
+    }
+    if limine_boot.is_some() {
+        return hand_over_first(&paths, &rollbacks, boot.as_ref(), current.as_ref(), changes.len());
     }
     system::blobs::ensure(&paths, &archive, &rendered)?;
 
@@ -979,6 +1003,31 @@ fn lay_out_first(
         count(packages, "package change", "package changes")
     );
     report_soft_failures(&failures, "the root is laid out for rollbacks")
+}
+
+/// `switch --allow-limine-boot`: package changes go ahead on a boot Limine started during the move to systemd-boot.
+pub fn allow_limine_boot() {
+    ALLOW_LIMINE_BOOT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static ALLOW_LIMINE_BOOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A switch that would change packages on a boot Limine started during the move to systemd-boot does only the boot step, which has the firmware try systemd-boot again: the next switch, after a boot through it, applies everything with boot counting and the fallback entries behind it.
+fn hand_over_first(
+    paths: &Paths,
+    rollbacks: &Rollbacks,
+    boot: Option<&system::boot::BootPlan>,
+    current: Option<&Generation>,
+    packages: usize,
+) -> Result<()> {
+    let none = BTreeMap::new();
+    let failures = write_boot(paths, rollbacks, boot, current.map_or(&none, |g| &g.packages));
+    println!(
+        "{}: reboot, check with `archix boot-info` that systemd-boot started the boot, then run `archix switch` again; `archix switch {}` applies them on a boot Limine started, without that protection",
+        count(packages, "package change waits", "package changes wait"),
+        system::limine::ALLOW_FLAG
+    );
+    report_soft_failures(&failures, "no package was changed")
 }
 
 /// The tools a boot plan builds its images with that aren't installed: a first switch lays the root out and builds those images before any package changes.
@@ -2152,6 +2201,9 @@ pub fn boot_check() -> Result<()> {
         println!("archix: couldn't record which snapshot entries failed: {e:#}");
     }
     let mut notices = recovered;
+    if let Some(limine) = system::limine::after_boot(&paths) {
+        notices.push(format!("archix: {limine}"));
+    }
     if let Some(trying) = try_notes(&paths) {
         notices.extend(trying);
     } else if let Some(why) = archix::snapshot::foreign_root(&paths.root) {
