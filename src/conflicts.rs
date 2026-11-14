@@ -115,7 +115,7 @@ fn mtree_entries(text: &str) -> Vec<(String, u64)> {
 }
 
 /// The symlinks in an mtree listing, each with its target.
-fn mtree_links(text: &str) -> Vec<(String, String)> {
+pub(crate) fn mtree_links(text: &str) -> Vec<(String, String)> {
     text.lines()
         .filter(|line| line.starts_with("./") && line.contains(" type=link"))
         .filter_map(|line| {

@@ -373,6 +373,35 @@ impl Displaced {
     }
 }
 
+/// Finishes what a transaction a cut stopped after its packages were in left undone: the displaced packages' leftover files go, as when it runs to the end; with nothing pending, does nothing.
+pub fn finish_displaced(runner: &dyn RunsPacman, db: &Path) -> Result<()> {
+    let packages = pending_displaced(db);
+    if packages.is_empty() {
+        return match fs::remove_file(displaced_record(db)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).context("removing the record of displaced packages")
+            }
+            _ => Ok(()),
+        };
+    }
+    let mut links = BTreeMap::new();
+    for entry in fs::read_dir(db).into_iter().flatten().flatten() {
+        let mut text = String::new();
+        if fs::File::open(entry.path().join("mtree"))
+            .and_then(|file| std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(file), &mut text))
+            .is_ok()
+        {
+            links.extend(crate::conflicts::mtree_links(&text));
+        }
+    }
+    Displaced {
+        packages,
+        incoming: std::collections::HashSet::new(),
+        links,
+    }
+    .remove_leftovers(db, &runner.root())
+}
+
 /// Beside pacman's database, so a snapshot or rollback takes both or neither.
 fn displaced_record(db: &Path) -> PathBuf {
     db.with_file_name("archix-displaced.json")
@@ -990,6 +1019,70 @@ mod tests {
             Path::new("libz.so.1.3.1.zlib-ng")
         );
         assert_eq!(fs::read_to_string(lib.join("libz.so.1")).unwrap(), "zlib-ng-compat");
+    }
+
+    struct At(PathBuf);
+
+    impl RunsPacman for At {
+        fn pacman(&self) -> Result<Command> {
+            bail!("no pacman here")
+        }
+        fn place(&self) -> String {
+            self.0.display().to_string()
+        }
+        fn root(&self) -> PathBuf {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn a_switch_after_a_cut_that_stopped_a_swap_once_its_packages_were_in_deletes_what_the_old_one_left() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("var/lib/pacman/local");
+        let lib = root.path().join("usr/lib");
+        install(
+            root.path(),
+            "zlib-ng-compat",
+            &[],
+            &["usr/", "usr/lib/", "usr/lib/libz.so.1", "usr/lib/libz.so.1.3.1.zlib-ng"],
+            &[],
+        );
+        let changes = Packages {
+            install: vec![package_file(
+                root.path(),
+                "zlib",
+                &[],
+                &["usr/lib/libz.so.1 -> libz.so.1.4", "usr/lib/libz.so.1.4"],
+            )],
+            remove: vec!["zlib-ng-compat".to_string()],
+            ..Packages::default()
+        };
+        Displaced::find(&db, &changes).unwrap().record(&db).unwrap();
+        // The cut came after pacman put zlib in and its ldconfig pointed libz.so.1 at the old library.
+        fs::remove_dir_all(db.join("zlib-ng-compat-1-1")).unwrap();
+        install(
+            root.path(),
+            "zlib",
+            &[],
+            &["usr/", "usr/lib/", "usr/lib/libz.so.1", "usr/lib/libz.so.1.4"],
+            &[],
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(b"#mtree\n./usr/lib/libz.so.1 time=1 type=link link=libz.so.1.4\n")
+            .unwrap();
+        fs::write(db.join("zlib-1-1/mtree"), gz.finish().unwrap()).unwrap();
+        fs::remove_file(lib.join("libz.so.1")).unwrap();
+        std::os::unix::fs::symlink("libz.so.1.3.1.zlib-ng", lib.join("libz.so.1")).unwrap();
+        assert!(!pending_displaced_files(&db).is_empty());
+        finish_displaced(&At(root.path().to_path_buf()), &db).unwrap();
+        assert!(
+            !lib.join("libz.so.1.3.1.zlib-ng").exists(),
+            "the old package's library goes"
+        );
+        assert_eq!(fs::read_link(lib.join("libz.so.1")).unwrap(), Path::new("libz.so.1.4"));
+        assert!(!displaced_record(&db).exists(), "nothing is left pending");
+        finish_displaced(&At(root.path().to_path_buf()), &db).unwrap();
     }
 
     #[test]

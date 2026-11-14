@@ -363,6 +363,11 @@ pub fn apply(plan: &Plan) -> Result<Applied> {
             "checking the config's /usr files",
             refuse_packaged_usr_files(plan.system, &db),
         )?;
+    } else {
+        progress.step(
+            "finishing a package swap a cut stopped",
+            crate::packages::finish_displaced(root, &db),
+        )?;
     }
     let after = crate::pacman::read_local_db(&db)?;
     let etc = root.path().join("etc");
