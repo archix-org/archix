@@ -498,7 +498,7 @@ fn switch_once(target: &Target, noconfirm: bool, accept_nearest: Option<Nearest>
         bail!("aborted; nothing was changed");
     }
     if first {
-        install_boot_tools(&boot_tools)?;
+        install_tools(&boot_tools, "the boot images")?;
         return lay_out_first(&paths, &rollbacks, boot.as_ref(), changes.len());
     }
     if limine_boot {
@@ -988,8 +988,8 @@ fn missing_boot_tools(
         .collect()
 }
 
-/// Installs the boot tools a first switch needs from the configured repos; the switch after its reboot brings them to the lock's versions.
-fn install_boot_tools(tools: &[String]) -> Result<()> {
+/// Installs tools a switch needs before it can apply the config, as archix's own transaction, from the configured repos; a later switch brings them to the lock's versions.
+fn install_tools(tools: &[String], purpose: &str) -> Result<()> {
     if tools.is_empty() {
         return Ok(());
     }
@@ -1001,7 +1001,7 @@ fn install_boot_tools(tools: &[String]) -> Result<()> {
         .context("running pacman")?;
     if !status.success() {
         bail!(
-            "installing {} for the boot images failed; nothing was changed",
+            "installing {} for {purpose} failed; nothing was changed",
             tools.join(" ")
         );
     }
@@ -1483,6 +1483,18 @@ fn build_aur(
     noconfirm: bool,
     accept_nearest: Option<Nearest>,
 ) -> Result<BTreeMap<String, PathBuf>> {
+    if !names.is_empty() {
+        let on_path = |program: &str| {
+            std::env::var_os("PATH")
+                .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
+        };
+        let missing: Vec<String> = [("mkarchroot", "devtools"), ("git", "git")]
+            .into_iter()
+            .filter(|(program, _)| !on_path(program))
+            .map(|(_, package)| package.to_string())
+            .collect();
+        install_tools(&missing, "building AUR packages")?;
+    }
     let git = aur_git(declared)?;
     let cache = user_cache()?;
     let builder = Builder {
