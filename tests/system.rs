@@ -807,7 +807,17 @@ fn file_systems_and_swap_are_the_fstab_after_archixs_own_root_and_esp_lines() {
     let mut text = read("/etc/crypttab");
     text.push_str("archixhome UUID=archix-test-home none luks\n");
     fs::write(&crypttab, text).unwrap();
-    for (command, out) in [("status", setup.ok(&["status"])), ("diff", setup.ok(&["diff"]))] {
+    let diff = setup.run(&["diff"]);
+    let diff_out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&diff.stdout),
+        String::from_utf8_lossy(&diff.stderr)
+    );
+    checks.check(
+        diff.status.code() == Some(2) && diff_out.contains("`archix switch` would refuse this"),
+        format!("diff exits 2 naming the refusal the switch below makes:\n{diff_out}"),
+    );
+    for (command, out) in [("status", setup.ok(&["status"])), ("diff", diff_out)] {
         checks.check(
             out.contains("/etc/fstab was edited since archix wrote it")
                 && out.contains("  + UUID=archix-usb /mnt/archix-usb ext4 rw,nofail 0 0    (dropped then, unless file_systems declares it)")
