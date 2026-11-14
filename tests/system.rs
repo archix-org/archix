@@ -829,3 +829,120 @@ fn a_swap_file_is_made_once_and_again_only_at_another_size() {
         "no temporary file is left"
     );
 }
+
+struct RecordingPacman {
+    root: std::path::PathBuf,
+    conf: std::path::PathBuf,
+    log: std::path::PathBuf,
+}
+
+impl archix::packages::RunsPacman for RecordingPacman {
+    fn pacman(&self) -> anyhow::Result<Command> {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "if [ -e {root}/usr/lib/libarchixtest.so.1 ]; then echo present; else echo missing; fi >> {log}; exec pacman --root {root} --config {conf} \"$@\"",
+            root = self.root.display(),
+            log = self.log.display(),
+            conf = self.conf.display()
+        ));
+        command.arg("pacman");
+        Ok(command)
+    }
+
+    fn place(&self) -> String {
+        self.root.display().to_string()
+    }
+
+    fn root(&self) -> std::path::PathBuf {
+        self.root.clone()
+    }
+
+    fn conf(&self) -> std::path::PathBuf {
+        self.conf.clone()
+    }
+}
+
+#[test]
+#[ignore]
+fn a_removed_package_whose_library_the_new_one_takes_over_never_leaves_pacman_without_it() {
+    let packages = Packages::new();
+    // As zlib-ng-compat and zlib: the same link, to a file of each one's own.
+    let lib = "install -d \"$pkgdir/usr/lib\" && echo $pkgname > \"$pkgdir/usr/lib/libarchixtest.so.1.$pkgname\" && ln -s libarchixtest.so.1.$pkgname \"$pkgdir/usr/lib/libarchixtest.so.1\"";
+    let old = packages.build("archixtest-old", lib);
+    let new = packages.build("archixtest-new", lib);
+    let root = tempfile::tempdir().unwrap();
+    for dir in ["var/lib/pacman", "var/cache/pacman/pkg", "etc/pacman.d/hooks"] {
+        fs::create_dir_all(root.path().join(dir)).unwrap();
+    }
+    let conf = root.path().join("pacman.conf");
+    fs::write(
+        &conf,
+        format!(
+            "[options]\nSigLevel = Never\nHookDir = {}/etc/pacman.d/hooks\n",
+            root.path().display()
+        ),
+    )
+    .unwrap();
+    let status = Command::new("pacman")
+        .args([
+            "--root",
+            root.path().to_str().unwrap(),
+            "--config",
+            conf.to_str().unwrap(),
+            "-U",
+            "--noconfirm",
+        ])
+        .arg(&old)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let runner = RecordingPacman {
+        root: root.path().to_path_buf(),
+        conf: conf.clone(),
+        log: root.path().join("starts.log"),
+    };
+    let changes = archix::packages::Packages {
+        install: vec![new],
+        remove: vec!["archixtest-old".to_string()],
+        versions: [("archixtest-new".to_string(), "1-1".to_string())].into(),
+        reasons: Default::default(),
+        reinstall: false,
+    };
+    archix::packages::transact(&runner, &changes, &root.path().join("var/lib/pacman/local")).unwrap();
+    let starts = fs::read_to_string(root.path().join("starts.log")).unwrap();
+    assert!(
+        starts.lines().count() >= 2,
+        "the swap takes more than one pacman run:\n{starts}"
+    );
+    assert!(
+        !starts.contains("missing"),
+        "pacman started without the library:\n{starts}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.path().join("usr/lib/libarchixtest.so.1")).unwrap(),
+        "archixtest-new\n"
+    );
+    for gone in ["usr/lib/libarchixtest.so.1.archixtest-old", "usr/share/archixtest-old"] {
+        assert!(
+            fs::symlink_metadata(root.path().join(gone)).is_err(),
+            "{gone}, which only the old package had, is gone"
+        );
+    }
+    assert!(root.path().join("usr/share/archixtest-new/version").exists());
+    let owner = Command::new("pacman")
+        .args([
+            "--root",
+            root.path().to_str().unwrap(),
+            "--config",
+            conf.to_str().unwrap(),
+            "-Qkk",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        owner.status.success(),
+        "pacman's database matches the files:\n{}{}",
+        String::from_utf8_lossy(&owner.stdout),
+        String::from_utf8_lossy(&owner.stderr)
+    );
+}

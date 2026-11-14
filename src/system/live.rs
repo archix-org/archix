@@ -122,6 +122,10 @@ impl RunsPacman for Root {
     fn place(&self) -> String {
         self.path.display().to_string()
     }
+
+    fn root(&self) -> PathBuf {
+        self.path.clone()
+    }
 }
 
 fn describe<S: AsRef<OsStr>>(argv: &[S]) -> String {

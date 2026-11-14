@@ -7,7 +7,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use crate::pacman::{LocalPkg, read_local_db};
+use crate::pacman::read_local_db;
 use crate::paths::Paths;
 
 /// Set for every pacman run archix starts, so archix's own pacman hook can tell them apart from manual ones.
@@ -65,6 +65,12 @@ pub trait RunsPacman {
     fn pacman(&self) -> Result<Command>;
     /// The place pacman runs in, as errors name it.
     fn place(&self) -> String;
+    /// The root pacman changes.
+    fn root(&self) -> PathBuf;
+    /// The pacman.conf that pacman reads.
+    fn conf(&self) -> PathBuf {
+        self.root().join("etc/pacman.conf")
+    }
 }
 
 /// Runs the package changes against the root `runner` stands for, whose pacman database is `db`, then checks the result.
@@ -81,13 +87,24 @@ pub fn transact(runner: &dyn RunsPacman, packages: &Packages, db: &Path) -> Resu
         }
         Ok(())
     };
+    let displaced = Displaced::find(db, packages)?;
     let installed = read_local_db(db)?;
-    let taken_over = removals_taken_over(db, packages, &installed)?;
-    if !taken_over.is_empty() {
-        let mut args: Vec<&OsStr> = vec![OsStr::new("-Rdd"), OsStr::new("--noconfirm")];
-        args.extend(taken_over.iter().map(OsStr::new));
+    let leaving: Vec<&OsStr> = displaced
+        .packages
+        .iter()
+        .filter(|package| installed.contains_key(&package.name))
+        .map(|package| OsStr::new(&package.name))
+        .collect();
+    if !leaving.is_empty() {
+        // On disk first: a transaction that stops after this leaves files no package owns, which the next one must know for its own.
+        displaced.record(db)?;
+        let conf = KeepFilesConf::new(&runner.conf())?;
+        let mut args: Vec<&OsStr> = vec![OsStr::new("--config"), conf.0.as_os_str()];
+        args.extend(["-Rdd", "--noconfirm"].map(OsStr::new));
+        args.extend(leaving);
         pacman(&args)?;
     }
+    let overwrite = displaced.overwrite_globs();
     let keyrings = incoming_keyrings(&packages.install);
     let rest: Vec<&PathBuf> = packages
         .install
@@ -106,9 +123,14 @@ pub fn transact(runner: &dyn RunsPacman, packages: &Packages, db: &Path) -> Resu
         if !packages.reinstall {
             args.push(OsStr::new("--needed"));
         }
+        for glob in &overwrite {
+            args.push(OsStr::new("--overwrite"));
+            args.push(OsStr::new(glob));
+        }
         args.extend(files.iter().map(|path| path.as_os_str()));
         pacman(&args)?;
     }
+    displaced.remove_leftovers(db, &runner.root())?;
     let installed = read_local_db(db)?;
     let remove: Vec<&OsStr> = packages
         .remove
@@ -143,6 +165,231 @@ pub fn transact(runner: &dyn RunsPacman, packages: &Packages, db: &Path) -> Resu
         );
     }
     Ok(())
+}
+
+/// An installed package an incoming one displaces, with what pacman's database says it owns.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct DisplacedPackage {
+    name: String,
+    /// Files, links and directories (ending in /), in the database's order.
+    entries: Vec<String>,
+    /// Its config files, each with the md5 it was installed with.
+    backups: BTreeMap<String, String>,
+}
+
+/// The installed packages that go because incoming ones take their place: pacman would delete their files before the new ones are in, so they leave the database first with every file kept, the new packages overwrite what they share, and only then does the rest go.
+struct Displaced {
+    packages: Vec<DisplacedPackage>,
+    /// Every file and link the incoming packages ship.
+    incoming: std::collections::HashSet<String>,
+}
+
+impl Displaced {
+    fn find(db: &Path, packages: &Packages) -> Result<Displaced> {
+        let mut none = Displaced {
+            packages: Vec::new(),
+            incoming: std::collections::HashSet::new(),
+        };
+        let mut names = std::collections::HashSet::new();
+        let mut displaces = std::collections::HashSet::new();
+        for path in &packages.install {
+            let contents = crate::conflicts::contents(path)?;
+            names.insert(contents.name);
+            displaces.extend(contents.displaces);
+            none.incoming.extend(contents.files);
+        }
+        for entry in fs::read_dir(db).into_iter().flatten().flatten() {
+            let desc = crate::pacman::parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default());
+            let Some(name) = desc.get("NAME").and_then(|n| n.first()).cloned() else {
+                continue;
+            };
+            // An installed version of an incoming package is an upgrade, which pacman does file by file itself.
+            if names.contains(&name) {
+                continue;
+            }
+            let conflicts = displaces.contains(&name)
+                || ["CONFLICTS", "REPLACES"]
+                    .iter()
+                    .flat_map(|key| desc.get(*key).into_iter().flatten())
+                    .any(|dep| names.contains(crate::aur::srcinfo::dep_name(dep)));
+            if !conflicts && !packages.remove.contains(&name) {
+                continue;
+            }
+            let mut files =
+                crate::pacman::parse_desc(&fs::read_to_string(entry.path().join("files")).unwrap_or_default());
+            let entries = files.remove("FILES").unwrap_or_default();
+            if !entries.iter().any(|file| none.incoming.contains(file)) {
+                continue;
+            }
+            let backups = files
+                .remove("BACKUP")
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(file, md5)| (file.to_string(), md5.to_string()))
+                .collect();
+            none.packages.push(DisplacedPackage { name, entries, backups });
+        }
+        // What a transaction that stopped part way already took out of the database, whose files are still there.
+        for package in pending_displaced(db) {
+            if !none.packages.iter().any(|found| found.name == package.name) {
+                none.packages.push(package);
+            }
+        }
+        none.packages.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(none)
+    }
+
+    fn record(&self, db: &Path) -> Result<()> {
+        crate::durable::write(&displaced_record(db), serde_json::to_string(&self.packages)?.as_bytes())
+    }
+
+    /// pacman --overwrite globs for the files the incoming packages take over, each matching only its file.
+    fn overwrite_globs(&self) -> Vec<String> {
+        let globs: Vec<String> = self
+            .packages
+            .iter()
+            .flat_map(|package| &package.entries)
+            .filter(|file| self.incoming.contains(*file))
+            .map(|file| glob_escape(file))
+            .collect();
+        // Past what one command line holds, everything may be overwritten: archix's own conflict check has passed by now.
+        match globs.iter().map(|glob| glob.len() + 16).sum::<usize>() > 1 << 20 {
+            true => vec!["*".to_string()],
+            false => globs,
+        }
+    }
+
+    /// Once the new packages are in: deletes what the displaced ones owned that no installed package owns now, as their removal would have, and puts a new package's version of a shared config file in place.
+    fn remove_leftovers(&self, db: &Path, root: &Path) -> Result<()> {
+        if self.packages.is_empty() {
+            return Ok(());
+        }
+        let installed = read_local_db(db)?;
+        let mut owned = std::collections::HashSet::new();
+        for entry in fs::read_dir(db).into_iter().flatten().flatten() {
+            let files = crate::pacman::parse_desc(&fs::read_to_string(entry.path().join("files")).unwrap_or_default());
+            owned.extend(files.get("FILES").into_iter().flatten().cloned());
+        }
+        let gone = |result: std::io::Result<()>, path: &Path| match result {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).with_context(|| format!("removing {}", path.display()))
+            }
+            _ => Ok(()),
+        };
+        for package in self
+            .packages
+            .iter()
+            .filter(|package| !installed.contains_key(&package.name))
+        {
+            for entry in package.entries.iter().rev() {
+                let path = root.join(entry);
+                let modified = || {
+                    package
+                        .backups
+                        .get(entry)
+                        .is_some_and(|md5| fs::read(&path).is_ok_and(|bytes| crate::capture::md5_bytes(&bytes) != *md5))
+                };
+                if entry.ends_with('/') {
+                    // Like pacman, which leaves a directory that still holds something or that another package owns.
+                    if !owned.contains(entry) && fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
+                        let _ = fs::remove_dir(&path);
+                    }
+                } else if !owned.contains(entry) {
+                    match modified() {
+                        true => gone(fs::rename(&path, pacsave(&path)), &path)?,
+                        false => gone(fs::remove_file(&path), &path)?,
+                    }
+                } else if package.backups.contains_key(entry) {
+                    // pacman left the new owner's version beside the old package's file, as it does for a config file it finds in the way.
+                    let new = path.with_file_name(format!(
+                        "{}.pacnew",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ));
+                    if fs::symlink_metadata(&new).is_ok() {
+                        if modified() {
+                            fs::copy(&path, pacsave(&path)).with_context(|| format!("keeping {}", path.display()))?;
+                        }
+                        fs::rename(&new, &path).with_context(|| format!("moving {} into place", new.display()))?;
+                    }
+                }
+            }
+        }
+        match fs::remove_file(displaced_record(db)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(e).context("removing the record of displaced packages")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Beside pacman's database, so a snapshot or rollback takes both or neither.
+fn displaced_record(db: &Path) -> PathBuf {
+    db.with_file_name("archix-displaced.json")
+}
+
+/// Packages a transaction that stopped part way took out of the database with their files left for the new ones, unless they're installed again.
+fn pending_displaced(db: &Path) -> Vec<DisplacedPackage> {
+    let recorded: Vec<DisplacedPackage> = fs::read_to_string(displaced_record(db))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    if recorded.is_empty() {
+        return recorded;
+    }
+    let installed = read_local_db(db).unwrap_or_default();
+    recorded
+        .into_iter()
+        .filter(|package| !installed.contains_key(&package.name))
+        .collect()
+}
+
+/// The files such packages left, which the next transaction's packages may overwrite.
+pub fn pending_displaced_files(db: &Path) -> Vec<String> {
+    pending_displaced(db)
+        .into_iter()
+        .flat_map(|package| package.entries)
+        .filter(|entry| !entry.ends_with('/'))
+        .collect()
+}
+
+fn pacsave(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        "{}.pacsave",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
+/// A copy of a pacman.conf under which a removal takes packages out of the database, with their scriptlets and hooks, and deletes none of their files (NoUpgrade also holds for removals); removed when dropped.
+struct KeepFilesConf(PathBuf);
+
+impl KeepFilesConf {
+    fn new(conf: &Path) -> Result<KeepFilesConf> {
+        let text = fs::read_to_string(conf).with_context(|| format!("reading {}", conf.display()))?;
+        let dir = std::env::temp_dir();
+        for attempt in 0..100 {
+            let path = dir.join(format!("archix-pacman-{}-{attempt}.conf", std::process::id()));
+            let file = fs::OpenOptions::new().write(true).create_new(true).open(&path);
+            match file {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(format!("[options]\nNoUpgrade = *\n{text}").as_bytes())
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    return Ok(KeepFilesConf(path));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+            }
+        }
+        bail!("couldn't create a pacman.conf in {}", dir.display())
+    }
+}
+
+impl Drop for KeepFilesConf {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 /// Incoming packages that ship a pacman keyring; they're installed on their own first, so pacman checks the rest against the keys they add.
@@ -391,30 +638,20 @@ pub fn without_signatures(paths: &Paths, files: &[PathBuf]) -> Result<Vec<PathBu
     Ok(out)
 }
 
-/// Packages the changes remove that own a file an incoming package ships; pacman would refuse the install while they still hold it, so they go first.
-fn removals_taken_over(db: &Path, packages: &Packages, installed: &BTreeMap<String, LocalPkg>) -> Result<Vec<String>> {
-    let removing: Vec<&String> = packages
-        .remove
-        .iter()
-        .filter(|name| installed.contains_key(*name))
-        .collect();
-    if removing.is_empty() {
-        return Ok(Vec::new());
+/// `path` as a pacman --overwrite glob that matches only itself, or, with a comma, which separates globs, itself and its like.
+fn glob_escape(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            ',' => escaped.push('?'),
+            '*' | '?' | '[' | ']' | '\\' | '!' => {
+                escaped.push('\\');
+                escaped.push(c);
+            }
+            c => escaped.push(c),
+        }
     }
-    let mut incoming = std::collections::HashSet::new();
-    for path in &packages.install {
-        incoming.extend(crate::conflicts::contents(path)?.files);
-    }
-    let owners = crate::conflicts::owners(db);
-    Ok(removing
-        .into_iter()
-        .filter(|name| {
-            owners
-                .get(name.as_str())
-                .is_some_and(|files| files.iter().any(|file| incoming.contains(file)))
-        })
-        .cloned()
-        .collect())
+    escaped
 }
 
 /// Every way the packages in database `db` differ from the changes' end state.
@@ -469,6 +706,192 @@ mod tests {
             "x is signed by t <t@t>, whose key was revoked"
         );
         assert_eq!(signer_problem_in("x", "[GNUPG:] GOODSIG A t <t@t>\n"), None);
+    }
+
+    /// A package file with only what `conflicts::contents` reads.
+    fn package_file(dir: &Path, name: &str, conflicts: &[&str], files: &[&str]) -> PathBuf {
+        use std::io::Write;
+        let mut info = format!("pkgname = {name}\npkgver = 2-1\n");
+        for conflict in conflicts {
+            info.push_str(&format!("conflict = {conflict}\n"));
+        }
+        let mut mtree = String::from("#mtree\n/set type=file uid=0 gid=0 mode=644\n");
+        for file in files {
+            mtree.push_str(&format!("./{file} time=1 size=1\n"));
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(mtree.as_bytes()).unwrap();
+        let mtree = gz.finish().unwrap();
+        let path = dir.join(format!("{name}-2-1-any.pkg.tar.zst"));
+        let mut archive = tar::Builder::new(zstd::Encoder::new(fs::File::create(&path).unwrap(), 1).unwrap());
+        for (name, bytes) in [(".PKGINFO", info.as_bytes()), (".MTREE", &mtree[..])] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive.append_data(&mut header, name, bytes).unwrap();
+        }
+        archive.into_inner().unwrap().finish().unwrap();
+        path
+    }
+
+    /// An installed package in a pacman database under `root`, its files written too.
+    fn install(root: &Path, name: &str, conflicts: &[&str], files: &[&str], backups: &[(&str, &str)]) {
+        let dir = root.join(format!("var/lib/pacman/local/{name}-1-1"));
+        fs::create_dir_all(&dir).unwrap();
+        let mut desc = format!("%NAME%\n{name}\n\n%VERSION%\n1-1\n\n");
+        if !conflicts.is_empty() {
+            desc.push_str(&format!("%CONFLICTS%\n{}\n\n", conflicts.join("\n")));
+        }
+        fs::write(dir.join("desc"), desc).unwrap();
+        let mut list = format!("%FILES%\n{}\n\n", files.join("\n"));
+        if !backups.is_empty() {
+            let lines: Vec<String> = backups.iter().map(|(file, md5)| format!("{file}\t{md5}")).collect();
+            list.push_str(&format!("%BACKUP%\n{}\n\n", lines.join("\n")));
+        }
+        fs::write(dir.join("files"), list).unwrap();
+        for file in files {
+            let path = root.join(file);
+            match file.ends_with('/') {
+                true => fs::create_dir_all(&path).unwrap(),
+                false => {
+                    fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    fs::write(&path, name).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packages_whose_files_an_incoming_one_takes_are_displaced_removed_or_in_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("var/lib/pacman/local");
+        // As CachyOS's zlib-ng-compat, which conflicts with zlib and ships the same libz.so.1.
+        install(
+            root.path(),
+            "zlib-ng-compat",
+            &["zlib"],
+            &["usr/", "usr/lib/", "usr/lib/libz.so.1"],
+            &[],
+        );
+        install(
+            root.path(),
+            "renamed-old",
+            &[],
+            &["usr/bin/tool", "usr/share/odd,name"],
+            &[],
+        );
+        install(root.path(), "zlib-doc", &["zlib"], &["usr/share/doc/zlib-ng"], &[]);
+        install(root.path(), "removed-apart", &[], &["usr/bin/apart"], &[]);
+        install(root.path(), "upgraded", &[], &["usr/bin/upgraded"], &[]);
+        let install_files = vec![
+            package_file(root.path(), "zlib", &[], &["usr/lib/libz.so.1", "usr/lib/libz.so.1.3"]),
+            package_file(root.path(), "renamed-new", &[], &["usr/bin/tool", "usr/share/odd,name"]),
+            package_file(root.path(), "upgraded", &[], &["usr/bin/upgraded"]),
+        ];
+        let changes = Packages {
+            install: install_files,
+            remove: ["renamed-old", "removed-apart"].map(str::to_string).to_vec(),
+            ..Packages::default()
+        };
+        let displaced = Displaced::find(&db, &changes).unwrap();
+        let names: Vec<&str> = displaced.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["renamed-old", "zlib-ng-compat"],
+            "one the config dropped and one pacman removes for its conflict; not what shares no file, nor an upgrade"
+        );
+        assert_eq!(
+            displaced.overwrite_globs(),
+            ["usr/bin/tool", "usr/share/odd?name", "usr/lib/libz.so.1"]
+        );
+        assert!(Displaced::find(&db, &Packages::default()).unwrap().packages.is_empty());
+        // A transaction that stopped after they left the database: the next one still knows their files.
+        displaced.record(&db).unwrap();
+        fs::remove_dir_all(db.join("zlib-ng-compat-1-1")).unwrap();
+        assert_eq!(pending_displaced_files(&db), ["usr/lib/libz.so.1"]);
+        let again = Displaced::find(&db, &changes).unwrap();
+        let names: Vec<&str> = again.packages.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["renamed-old", "zlib-ng-compat"]);
+        assert!(again.overwrite_globs().contains(&"usr/lib/libz.so.1".to_string()));
+    }
+
+    #[test]
+    fn what_a_displaced_package_leaves_goes_once_the_new_ones_are_in() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("var/lib/pacman/local");
+        let installed_md5 = crate::capture::md5_bytes(b"old");
+        install(
+            root.path(),
+            "old",
+            &[],
+            &[
+                "etc/",
+                "etc/old.conf",
+                "etc/edited.conf",
+                "etc/shared.conf",
+                "usr/",
+                "usr/lib/",
+                "usr/lib/libshared.so",
+                "usr/share/",
+                "usr/share/old/",
+                "usr/share/old/data",
+                "usr/share/kept/",
+                "usr/share/kept/data",
+            ],
+            &[
+                ("etc/old.conf", &installed_md5),
+                ("etc/edited.conf", &installed_md5),
+                ("etc/shared.conf", &installed_md5),
+            ],
+        );
+        let changes = Packages {
+            install: vec![package_file(
+                root.path(),
+                "new",
+                &[],
+                &["usr/lib/libshared.so", "etc/shared.conf"],
+            )],
+            remove: vec!["old".to_string()],
+            ..Packages::default()
+        };
+        let displaced = Displaced::find(&db, &changes).unwrap();
+        assert_eq!(displaced.packages.len(), 1);
+        // What pacman's runs leave: old out of the database with its files kept, new in, its config file beside the one in the way.
+        fs::remove_dir_all(db.join("old-1-1")).unwrap();
+        install(
+            root.path(),
+            "new",
+            &[],
+            &["usr/", "usr/lib/", "usr/lib/libshared.so", "etc/", "etc/shared.conf"],
+            &[],
+        );
+        fs::write(root.path().join("etc/shared.conf"), "old").unwrap();
+        fs::write(root.path().join("etc/shared.conf.pacnew"), "new").unwrap();
+        fs::write(root.path().join("etc/edited.conf"), "mine").unwrap();
+        fs::write(root.path().join("usr/share/kept/unowned"), "someone's").unwrap();
+        displaced.remove_leftovers(&db, root.path()).unwrap();
+        let at = |path: &str| root.path().join(path);
+        assert_eq!(fs::read_to_string(at("usr/lib/libshared.so")).unwrap(), "new");
+        assert!(
+            !at("usr/share/old").exists(),
+            "its own files and their directory are gone"
+        );
+        assert!(!at("usr/share/kept/data").exists());
+        assert!(
+            at("usr/share/kept/unowned").exists(),
+            "a directory that still holds something stays"
+        );
+        assert!(!at("etc/old.conf").exists(), "an untouched config file goes");
+        assert!(!at("etc/edited.conf").exists());
+        assert_eq!(fs::read_to_string(at("etc/edited.conf.pacsave")).unwrap(), "mine");
+        assert_eq!(
+            fs::read_to_string(at("etc/shared.conf")).unwrap(),
+            "new",
+            "the new owner's config file replaces the old package's untouched one"
+        );
+        assert!(!at("etc/shared.conf.pacnew").exists());
+        assert!(at("etc").is_dir() && at("usr/lib").is_dir());
     }
 
     #[test]

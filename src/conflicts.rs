@@ -178,7 +178,8 @@ pub fn check(install: &[PathBuf], removed: &[String], local_db: &Path, root: &Pa
             }
         }
     }
-    let owned = owned_files(local_db);
+    let mut owned = owned_files(local_db);
+    owned.extend(crate::packages::pending_displaced_files(local_db));
     for Contents {
         name, files, backups, ..
     } in &incoming
