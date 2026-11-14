@@ -21,6 +21,8 @@ pub struct Contents {
     pub size: u64,
     /// Config files (`backup` in .PKGINFO), which pacman installs as .pacnew instead of refusing when one already exists.
     pub backups: Vec<String>,
+    /// Each symlink it ships with where it points.
+    pub links: Vec<(String, String)>,
 }
 
 pub fn contents(path: &Path) -> Result<Contents> {
@@ -33,6 +35,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
     };
     let mut archive = tar::Archive::new(decoder);
     let (mut name, mut files, mut displaces, mut size, mut backups) = (None, None, Vec::new(), 0, Vec::new());
+    let mut links = Vec::new();
     for entry in archive.entries().with_context(at)? {
         let mut entry = entry.with_context(at)?;
         let entry_path = entry.path().with_context(at)?.to_string_lossy().into_owned();
@@ -67,6 +70,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
                 let mut text = String::new();
                 GzDecoder::new(entry).read_to_string(&mut text).with_context(at)?;
                 files = Some(mtree_entries(&text));
+                links = mtree_links(&text);
             }
             _ if !entry_path.starts_with('.') => break,
             _ => {}
@@ -80,6 +84,7 @@ pub fn contents(path: &Path) -> Result<Contents> {
                 sizes,
                 size,
                 backups: backups.clone(),
+                links: links.clone(),
             });
         }
     }
@@ -106,6 +111,19 @@ fn mtree_entries(text: &str) -> Vec<(String, u64)> {
             Some((path, size))
         })
         .filter(|(path, _)| !path.starts_with('.'))
+        .collect()
+}
+
+/// The symlinks in an mtree listing, each with its target.
+fn mtree_links(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter(|line| line.starts_with("./") && line.contains(" type=link"))
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let path = unescape(words.next()?.trim_start_matches("./"));
+            let target = words.find_map(|word| word.strip_prefix("link="))?;
+            Some((path, unescape(target)))
+        })
         .collect()
 }
 

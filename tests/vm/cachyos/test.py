@@ -185,8 +185,9 @@ def run(m, t):
         t.check(libz_works(), f"libz.so.1 should be there and pacman, sudo and btrfs start: {out(f'ls -l {LIBZ}* 2>&1; sudo -n true 2>&1')}")
         t.check(not ok("[ -e /var/lib/pacman/archix-displaced.json ]"), "nothing displaced is left pending")
         swap_zlib(m, t, "zlib-ng-compat", "zlib")
-        switch(m, t, "the switch swapping zlib back for zlib-ng-compat")
-        t.check(zlib_owner() == "zlib-ng-compat" and libz_works(), f"zlib-ng-compat should own {LIBZ} again, and it work: {zlib_owner()}")
+        said = switch(m, t, "the switch swapping zlib back for zlib-ng-compat")
+        t.log(said[-3000:])
+        t.check(zlib_owner() == "zlib-ng-compat" and libz_works(), f"zlib-ng-compat should own {LIBZ} again, and it work: {zlib_owner()}; {out('ls -l /usr/lib/libz* 2>&1; journalctl -b -n 30 --no-pager -o cat 2>&1 | tail -30')}")
 
     with t.step("3c: a power cut in the middle of the swap leaves libz.so.1, and the system boots and switches again"):
         swap_zlib(m, t, "zlib", "zlib-ng-compat")

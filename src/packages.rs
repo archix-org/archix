@@ -182,6 +182,8 @@ struct Displaced {
     packages: Vec<DisplacedPackage>,
     /// Every file and link the incoming packages ship.
     incoming: std::collections::HashSet<String>,
+    /// Where each symlink the incoming packages ship points.
+    links: BTreeMap<String, String>,
 }
 
 impl Displaced {
@@ -189,6 +191,7 @@ impl Displaced {
         let mut none = Displaced {
             packages: Vec::new(),
             incoming: std::collections::HashSet::new(),
+            links: BTreeMap::new(),
         };
         let mut names = std::collections::HashSet::new();
         let mut displaces = std::collections::HashSet::new();
@@ -197,6 +200,7 @@ impl Displaced {
             names.insert(contents.name);
             displaces.extend(contents.displaces);
             none.incoming.extend(contents.files);
+            none.links.extend(contents.links);
         }
         for entry in fs::read_dir(db).into_iter().flatten().flatten() {
             let desc = crate::pacman::parse_desc(&fs::read_to_string(entry.path().join("desc")).unwrap_or_default());
@@ -277,11 +281,31 @@ impl Displaced {
             }
             _ => Ok(()),
         };
-        for package in self
+        let leaving: Vec<&DisplacedPackage> = self
             .packages
             .iter()
             .filter(|package| !installed.contains_key(&package.name))
-        {
+            .collect();
+        // pacman's ldconfig may have pointed a taken-over link at a library of the old package, which goes below; each is put back, in one rename, to where its new package has it.
+        for entry in leaving.iter().flat_map(|package| &package.entries) {
+            let Some(target) = self.links.get(entry) else {
+                continue;
+            };
+            let path = root.join(entry);
+            if fs::read_link(&path).is_ok_and(|now| now == Path::new(target)) {
+                continue;
+            }
+            let temporary = path.with_file_name(format!(
+                ".{}.archix-link",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            let _ = fs::remove_file(&temporary);
+            std::os::unix::fs::symlink(target, &temporary)
+                .and_then(|()| fs::rename(&temporary, &path))
+                .with_context(|| format!("pointing {} at {target}", path.display()))?;
+        }
+        let mut libraries_gone = false;
+        for package in leaving {
             for entry in package.entries.iter().rev() {
                 let path = root.join(entry);
                 let modified = || {
@@ -296,6 +320,7 @@ impl Displaced {
                         let _ = fs::remove_dir(&path);
                     }
                 } else if !owned.contains(entry) {
+                    libraries_gone |= entry.contains(".so");
                     match modified() {
                         true => gone(fs::rename(&path, pacsave(&path)), &path)?,
                         false => gone(fs::remove_file(&path), &path)?,
@@ -313,6 +338,16 @@ impl Displaced {
                         fs::rename(&new, &path).with_context(|| format!("moving {} into place", new.display()))?;
                     }
                 }
+            }
+        }
+        // ldconfig is static, and links nothing ships may still name a library that went.
+        if libraries_gone && root.join("etc/ld.so.conf").exists() {
+            let mut ldconfig = Command::new("ldconfig");
+            if root != Path::new("/") {
+                ldconfig.arg("-r").arg(root);
+            }
+            if !ldconfig.status().is_ok_and(|status| status.success()) {
+                eprintln!("warning: ldconfig failed after removing the files of packages that were replaced");
             }
         }
         match fs::remove_file(displaced_record(db)) {
@@ -717,7 +752,10 @@ mod tests {
         }
         let mut mtree = String::from("#mtree\n/set type=file uid=0 gid=0 mode=644\n");
         for file in files {
-            mtree.push_str(&format!("./{file} time=1 size=1\n"));
+            match file.split_once(" -> ") {
+                Some((link, target)) => mtree.push_str(&format!("./{link} time=1 type=link link={target}\n")),
+                None => mtree.push_str(&format!("./{file} time=1 size=1\n")),
+            }
         }
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
         gz.write_all(mtree.as_bytes()).unwrap();
@@ -892,6 +930,52 @@ mod tests {
         );
         assert!(!at("etc/shared.conf.pacnew").exists());
         assert!(at("etc").is_dir() && at("usr/lib").is_dir());
+    }
+
+    #[test]
+    fn a_link_ldconfig_pointed_at_the_old_packages_library_points_at_the_new_ones_before_that_goes() {
+        let root = tempfile::tempdir().unwrap();
+        let db = root.path().join("var/lib/pacman/local");
+        let lib = root.path().join("usr/lib");
+        install(
+            root.path(),
+            "zlib",
+            &[],
+            &["usr/", "usr/lib/", "usr/lib/libz.so.1", "usr/lib/libz.so.1.4"],
+            &[],
+        );
+        let changes = Packages {
+            install: vec![package_file(
+                root.path(),
+                "zlib-ng-compat",
+                &["zlib"],
+                &[
+                    "usr/lib/libz.so.1 -> libz.so.1.3.1.zlib-ng",
+                    "usr/lib/libz.so.1.3.1.zlib-ng",
+                ],
+            )],
+            remove: vec!["zlib".to_string()],
+            ..Packages::default()
+        };
+        let displaced = Displaced::find(&db, &changes).unwrap();
+        // What pacman leaves, its ldconfig having picked the higher version, the old package's.
+        fs::remove_dir_all(db.join("zlib-1-1")).unwrap();
+        install(
+            root.path(),
+            "zlib-ng-compat",
+            &[],
+            &["usr/", "usr/lib/", "usr/lib/libz.so.1", "usr/lib/libz.so.1.3.1.zlib-ng"],
+            &[],
+        );
+        fs::remove_file(lib.join("libz.so.1")).unwrap();
+        std::os::unix::fs::symlink("libz.so.1.4", lib.join("libz.so.1")).unwrap();
+        displaced.remove_leftovers(&db, root.path()).unwrap();
+        assert!(!lib.join("libz.so.1.4").exists(), "the old package's library goes");
+        assert_eq!(
+            fs::read_link(lib.join("libz.so.1")).unwrap(),
+            Path::new("libz.so.1.3.1.zlib-ng")
+        );
+        assert_eq!(fs::read_to_string(lib.join("libz.so.1")).unwrap(), "zlib-ng-compat");
     }
 
     #[test]
