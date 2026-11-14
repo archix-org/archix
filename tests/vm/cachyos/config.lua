@@ -4,7 +4,7 @@ local function cachyos(name, arch)
 end
 
 return {
-  packages = { "base", "linux-cachyos", "mkinitcpio", "systemd-ukify", "cachyos-keyring", "htop", "jq", "sbctl", "e2fsprogs", "git", "limine", "efibootmgr" },
+  packages = { "base", "linux-cachyos", "mkinitcpio", "cachyos-keyring", "htop", "jq", "sbctl", "e2fsprogs", "git", "limine", "efibootmgr", "zlib-ng-compat", "cachyos-hooks", "ufw", "sudo" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   custom_repos = {
@@ -15,6 +15,14 @@ return {
   },
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
   boot = { loader = "limine", kernel = "linux-cachyos" },
+  file_systems = {
+    ["/home"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@home", "noatime", "compress=zstd" } },
+    ["/root"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@root", "noatime", "compress=zstd" } },
+    ["/srv"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@srv", "noatime", "compress=zstd" } },
+    ["/var/cache"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@cache", "noatime", "compress=zstd" } },
+    ["/var/tmp"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@tmp", "noatime", "compress=zstd" } },
+    ["/var/log"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@log", "noatime", "compress=zstd" } },
+  },
   rollback = { enable = true },
   allow_no_password_login = true,
   files = {
