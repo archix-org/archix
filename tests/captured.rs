@@ -237,6 +237,25 @@ fn a_file_its_owner_cant_read_fails_the_capture_by_name() {
     assert!(error.contains("secret.txt") && error.contains(USER), "{error}");
 }
 
+#[test]
+fn a_relative_config_path_is_captured_from_where_archix_was_run() {
+    let owner = setup();
+    config(&owner, "relative", "return { packages = { \"vim\" } }\n");
+    for given in ["relative", "relative/", "./relative"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_archix"))
+            .current_dir(&owner.home)
+            .args(["--config", given, "--host", "box", "eval"])
+            .output()
+            .unwrap();
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success() && said.contains("vim"), "--config {given}: {said}");
+    }
+}
+
 fn evaluate(owner: &Owner, name: &str, init: &str, limits: &Limits) -> Result<String, String> {
     let dir = config(owner, name, init);
     let work = Work::new(&captures()).unwrap();

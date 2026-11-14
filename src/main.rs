@@ -605,7 +605,9 @@ fn run() -> Result<ExitCode> {
         anyhow::bail!(why);
     }
     // A switch by 0.1.0-dogfood that replaced archix itself left units saying `ExecStart=/usr/bin/archix (deleted) boot-check`.
-    let cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
+    let mut cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
+    // Git and the config's owner resolve a relative path from wherever they run, which isn't always here.
+    cli.config = std::path::absolute(&cli.config).with_context(|| format!("resolving {}", cli.config.display()))?;
     let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
     // Both run before the root is fully up, so they skip archix's locks and pending-state checks.
     let command = match command {

@@ -208,6 +208,7 @@ impl Drop for Work {
 
 /// Captures `config_dir` as its owner, in a throwaway repository the owner's own git config never reaches, and unpacks the tree into a root-owned copy whose tree id root checks itself.
 pub fn capture(config_dir: &Path, work: &Work) -> Result<Captured> {
+    let config_dir = &std::path::absolute(config_dir).with_context(|| format!("resolving {}", config_dir.display()))?;
     let owner = Owner::of(config_dir)?;
     let private = work.dir.join("root");
     fs::create_dir(&private)?;
