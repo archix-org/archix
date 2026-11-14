@@ -1,3 +1,4 @@
 /target
 /docs/DESIGN.md
 __pycache__/
+*.pkg.tar.*
