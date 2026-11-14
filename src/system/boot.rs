@@ -873,7 +873,11 @@ pub fn esp_unwritable(paths: &Paths, esp: &Path, what: &str, why: &str) -> Resul
 /// Why a new generation's entry won't be counted, when the systemd-boot that started this boot can't do it.
 pub fn counting_off() -> Option<String> {
     let features = crate::testhooks::loader_features();
-    (features != 0 && !loader_counts_boots(features)).then(|| {
+    // Limine sets LoaderFeatures too; a boot it started gets the move's own warning.
+    let other = super::limine::Firmware::new()
+        .and_then(|firmware| firmware.loader_info())
+        .is_some_and(|info| !info.starts_with("systemd-boot"));
+    (features != 0 && !other && !loader_counts_boots(features)).then(|| {
         "boot counting is off: the systemd-boot that started this boot is older than 260, so a generation that doesn't boot isn't passed over; `sudo bootctl update` installs the one your systemd package has".to_string()
     })
 }
