@@ -173,7 +173,20 @@ pub fn resolve(
             .flat_map(|packages| packages.keys())
             .map(String::as_str)
             .collect();
-        from_aur = aur_closure(aur, &conf, &db, &not_in_repos, &newer, &in_repos)?;
+        // AUR builds run in a chroot with only the official repos (aur::build), so their build dependencies resolve against those.
+        let official_repos: Vec<Repo> = repos
+            .iter()
+            .filter(|repo| is_official(&repo.name))
+            .map(|repo| Repo::official(&repo.name))
+            .collect();
+        let build_conf = db.join(format!("pacman.{}.build.conf", std::process::id()));
+        fs::write(&build_conf, pacman_conf(archive, date, &official_repos))
+            .with_context(|| format!("writing {}", build_conf.display()))?;
+        let build = BuildRepos {
+            conf: &build_conf,
+            db: &db,
+        };
+        from_aur = aur_closure(aur, &conf, &db, &build, &not_in_repos, &newer, &in_repos)?;
     }
     let mut targets: Vec<String> = official.clone();
     targets.extend(from_aur.repo_deps.iter().map(|dep| provider(&sync, dep, prefer)));
@@ -463,10 +476,17 @@ impl<'a> Newer<'a> {
 }
 
 /// Walks AUR packages and their dependencies, installing runtime ones and only building make/check-only ones; `in_repos` names what the snapshot's repos ship, which an AUR package may stand in for only when declared.
+/// The official repos alone, as the build chroot has them.
+struct BuildRepos<'a> {
+    conf: &'a Path,
+    db: &'a Path,
+}
+
 fn aur_closure(
     aur: &Aur,
     conf: &Path,
     db: &Path,
+    build_repos: &BuildRepos,
     targets: &BTreeSet<String>,
     newer: &Newer,
     in_repos: &BTreeSet<&str>,
@@ -555,8 +575,8 @@ fn aur_closure(
         };
         let runtime_deps = pkg.depends.clone();
         let build_deps: Vec<String> = info.makedepends.iter().chain(&info.checkdepends).cloned().collect();
-        let all: Vec<String> = runtime_deps.iter().chain(&build_deps).cloned().collect();
-        let missing_from_repos = unsatisfied(conf, db, &all)?;
+        let missing_from_repos = unsatisfied(conf, db, &runtime_deps)?;
+        let missing_from_build_repos = unsatisfied(build_repos.conf, build_repos.db, &build_deps)?;
         for dep in runtime_deps {
             if !missing_from_repos.contains(&dep) {
                 if needed_at_runtime {
@@ -568,7 +588,7 @@ fn aur_closure(
             }
         }
         for dep in build_deps {
-            if missing_from_repos.contains(&dep) {
+            if missing_from_build_repos.contains(&dep) {
                 needed_by.entry(dep.clone()).or_insert_with(|| name.clone());
                 queue.push_back((dep, false));
             }
