@@ -92,13 +92,16 @@ fn files_users_and_services_follow_the_config() {
         read("/etc/sysctl.d/90-archix.conf"),
         "kernel.domainname = archix.test\n"
     );
-    assert!(setup.ok(&["diff"]).contains("matches the lock and the config"));
+    let (code, diff) = setup.diff(&[]);
+    assert!(code == Some(0) && diff.contains("nothing to do"), "{diff}");
 
     write_system_path("/etc/archix-test.conf", "edited by hand\n");
+    let (code, diff) = setup.diff(&[]);
     assert!(
-        setup
-            .ok(&["diff"])
-            .contains("/etc/archix-test.conf (edited outside archix")
+        code == Some(1)
+            && plan_line(&diff, "modify", "/etc/archix-test.conf")
+            && diff.contains("the hand edit goes to .archix-save"),
+        "{diff}"
     );
     setup.set_body(&[], &body("two"));
     setup.ok(&["switch", "--noconfirm"]);
@@ -431,20 +434,12 @@ fn diff_reports_what_switch_would_refuse_with_the_same_words() {
     );
     assert_eq!(setup.machine.current(), current, "a refused switch applies nothing");
 
-    let diff = setup.run(&["diff"]);
-    let (out, err) = (
-        String::from_utf8_lossy(&diff.stdout).into_owned(),
-        String::from_utf8_lossy(&diff.stderr).into_owned(),
-    );
+    let (code, out) = setup.diff(&[]);
+    assert_eq!(code, Some(2), "a diff of a switch that is refused exits 2:\n{out}");
     assert_eq!(
-        diff.status.code(),
-        Some(2),
-        "a diff of a switch that is refused exits 2:\n{out}{err}"
-    );
-    assert_eq!(
-        refusals(&err, "`archix switch` would refuse this: "),
+        plan_refusals(&out),
         refused,
-        "diff gives the switch's refusals, word for word:\n{err}"
+        "diff gives the switch's refusals, word for word:\n{out}"
     );
     assert!(
         out.contains("archix-firewall.service"),
@@ -453,12 +448,10 @@ fn diff_reports_what_switch_would_refuse_with_the_same_words() {
 
     fs::remove_file(&pipe).unwrap();
     setup.set_body(&[], &body(r#", services = { ["ufw.service"] = false }"#));
-    let diff = setup.run(&["diff"]);
+    let (code, out) = setup.diff(&[]);
     assert!(
-        diff.status.success()
-            && refusals(&String::from_utf8_lossy(&diff.stderr), "`archix switch` would refuse").is_empty(),
-        "nothing is refused once ufw is turned off and the pipe is gone:\n{}",
-        String::from_utf8_lossy(&diff.stderr)
+        code == Some(1) && plan_refusals(&out).is_empty(),
+        "nothing is refused once ufw is turned off and the pipe is gone, and the firewall is still to come:\n{out}"
     );
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(enabled("archix-firewall.service"), "enabled");
@@ -712,9 +705,9 @@ fn file_systems_and_swap_are_the_fstab_after_archixs_own_root_and_esp_lines() {
                 .contains("Requires=archix-swapfile-swap-swapfile.service"),
         "a swap file with a size is made by a unit before its swap unit",
     );
-    let diff = setup.ok(&["diff"]);
+    let (code, diff) = setup.diff(&[]);
     checks.check(
-        diff.contains("matches the lock and the config"),
+        code == Some(0) && diff.contains("nothing to do"),
         format!("nothing is left to change:\n{diff}"),
     );
     let status = setup.ok(&["status"]);
@@ -753,14 +746,9 @@ fn file_systems_and_swap_are_the_fstab_after_archixs_own_root_and_esp_lines() {
     let mut text = read("/etc/crypttab");
     text.push_str("archixhome UUID=archix-test-home none luks\n");
     fs::write(&crypttab, text).unwrap();
-    let diff = setup.run(&["diff"]);
-    let diff_out = format!(
-        "{}{}",
-        String::from_utf8_lossy(&diff.stdout),
-        String::from_utf8_lossy(&diff.stderr)
-    );
+    let (code, diff_out) = setup.diff(&[]);
     checks.check(
-        diff.status.code() == Some(2) && diff_out.contains("`archix switch` would refuse this"),
+        code == Some(2) && !plan_refusals(&diff_out).is_empty(),
         format!("diff exits 2 naming the refusal the switch below makes:\n{diff_out}"),
     );
     for (command, out) in [("status", setup.ok(&["status"])), ("diff", diff_out)] {

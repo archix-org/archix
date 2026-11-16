@@ -75,7 +75,11 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
         setup.lock().flatpak.is_empty(),
         "lock doesn't add remotes, so the commit waits for switch"
     );
-    assert!(setup.ok(&["diff"]).contains("flatpak    install org.archix.Hello"));
+    let (code, diff) = setup.diff(&[]);
+    assert!(
+        code == Some(1) && diff.contains("\nflatpak\n") && diff.contains("install org.archix.Hello"),
+        "{diff}"
+    );
     let out = setup.ok(&["switch", "--noconfirm"]);
     assert!(out.contains("flatpak    install org.archix.Hello"), "{out}");
     assert_eq!(
@@ -93,11 +97,8 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
         Some(first.as_str()),
         "switch keeps the locked commit, not the newest"
     );
-    assert!(
-        setup
-            .ok(&["diff"])
-            .contains("the system matches the lock and the config")
-    );
+    let (code, diff) = setup.diff(&[]);
+    assert!(code == Some(0) && diff.contains("nothing to do"), "{diff}");
 
     setup.ok(&["update", "--to", IMAGE_SNAPSHOT, "--noconfirm"]);
     assert_eq!(

@@ -345,9 +345,9 @@ fn dropping_a_declared_capability_gives_back_the_one_the_packages_install_script
     assert_eq!(getcap(&file), "cap_sys_nice=ep");
 
     setup.set_body(&[name], &body);
-    let diff = setup.ok(&["diff"]);
+    let (code, diff) = setup.diff(&[]);
     assert!(
-        diff.contains(&format!("setcap     {path} cap_ipc_lock=ep (as its package left it)")),
+        code == Some(1) && diff.contains(path) && diff.contains("cap_ipc_lock=ep"),
         "{diff}"
     );
     setup.ok(&["switch", "--noconfirm"]);

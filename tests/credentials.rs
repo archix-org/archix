@@ -68,9 +68,9 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_revert_keeps_the_
     let live = machine.root.join("etc");
     password::set(&live, "alice", OTHER).unwrap();
     password::set(&live, "bob", OTHER).unwrap();
-    let diff = setup.ok(&["diff"]);
+    let (code, diff) = setup.diff(&[]);
     c.check(
-        diff.contains("password   resetting alice's password to the declared one") && !diff.contains("bob"),
+        code == Some(1) && plan_line(&diff, "modify user", "alice") && !diff.contains("bob"),
         format!("diff announces the reset of the enforced password only:\n{diff}"),
     );
     no_hash_in(&c, &diff, "diff");

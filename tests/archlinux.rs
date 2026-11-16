@@ -217,10 +217,16 @@ fn unknown_packages_fail_to_lock() {
 fn diff_lists_installs_and_removals() {
     let dir = config(&["base", "htop"]);
     stdout(&archix(dir.path(), &["lock"]));
-    let diff = stdout(&archix(dir.path(), &["diff"]));
-    assert!(diff.contains("install    htop "), "{diff}");
+    let output = archix(dir.path(), &["diff"]);
+    let diff = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
-        diff.contains("remove     rust "),
+        matches!(output.status.code(), Some(1) | Some(2)),
+        "{diff}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(common::plan_line(&diff, "install", "htop"), "{diff}");
+    assert!(
+        common::plan_line(&diff, "remove", "rust"),
         "the test image's rust is not declared:\n{diff}"
     );
 }

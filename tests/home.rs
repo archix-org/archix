@@ -159,9 +159,10 @@ fn merged_keys_and_read_only_files() {
         "{\n    \"bar\": {\"height\": 31, \"position\": \"top\"}\n}\n",
     )
     .unwrap();
+    let (code, diff) = setup.diff(&[]);
     assert!(
-        setup.ok(&["diff"]).contains("matches the lock and the config"),
-        "an app's own keys and formatting aren't drift"
+        code == Some(0) && diff.contains("nothing to do"),
+        "an app's own keys and formatting aren't drift:\n{diff}"
     );
 
     fs::set_permissions(at("/home/homeuser/.zshrc"), fs::Permissions::from_mode(0o644)).unwrap();

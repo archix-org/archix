@@ -291,12 +291,13 @@ fn secrets_reach_only_the_ramfs_their_links_and_shadow_and_a_rescue_password_hol
         checked.contains("this machine: decrypts it") && checked.contains("/etc/wireguard/wg0.conf"),
         format!("check:\n{checked}"),
     );
-    let diff = lab.ok(&["diff"]);
+    let (_, diff) = lab.run(&["diff"], &[], None);
     c.check(
-        diff.contains("secret     wg0: new (/etc/wireguard/wg0.conf)")
-            && diff.contains("password   alice's comes from secret pw")
+        plan_line(&diff, "create", "/etc/wireguard/wg0.conf")
+            && diff.contains("/etc/wireguard/wg0.conf [secret changed]")
+            && plan_line(&diff, "add user", "alice")
             && !diff.contains("/usr/lib/archix/secrets/"),
-        format!("diff names the secrets, not their files:\n{diff}"),
+        format!("diff names the secrets' consumers, never their values or files:\n{diff}"),
     );
     let out = lab.ok(&["switch", "--noconfirm"]);
     let root_dir = lab.root().to_path_buf();
@@ -583,9 +584,9 @@ fn each_generation_activates_its_own_values_on_switch_and_revert_and_a_rotated_k
     let first = lab.machine().current().unwrap();
     let v2 = lab.marker("v2", 32);
     lab.set("wg0", v2.as_bytes());
-    let diff = lab.ok(&["diff"]);
+    let (_, diff) = lab.run(&["diff"], &[], None);
     c.check(
-        diff.contains("secret     wg0: changed"),
+        diff.contains("/etc/wireguard/wg0.conf [secret changed]"),
         format!("diff tells a new value:\n{diff}"),
     );
     let vmlck = tempfile::NamedTempFile::new().unwrap();

@@ -603,6 +603,17 @@ impl Setup {
         self.ok_env(&[], args)
     }
 
+    /// `archix diff` with `args`: its SCOPE 3.1 exit code (0 nothing, 1 changes, 2 refuses, 3 error, 4 incomplete) and everything it said.
+    pub fn diff(&self, args: &[&str]) -> (Option<i32>, String) {
+        let output = self.run(&[&["diff"], args].concat());
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.code(), text)
+    }
+
     pub fn fails(&self, args: &[&str]) -> String {
         let output = self.run(args);
         assert!(!output.status.success(), "archix {args:?} should have failed");
@@ -620,6 +631,24 @@ impl Setup {
     pub fn first_switch(&self) -> String {
         self.ok(&["switch", "--noconfirm"])
     }
+}
+
+/// The refusals a diff lists under "switch would refuse".
+pub fn plan_refusals(out: &str) -> Vec<String> {
+    out.lines()
+        .skip_while(|line| *line != "switch would refuse")
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// Whether a diff has a line for `verb` (e.g. "install", "modify user") naming `name`.
+pub fn plan_line(out: &str, verb: &str, name: &str) -> bool {
+    out.lines().any(|line| {
+        let line = line.trim_start_matches(['!', ' ']);
+        line.starts_with(verb) && line[verb.len()..].trim_start().split([' ', ':']).next() == Some(name)
+    })
 }
 
 /// Lines only in `before` as "- line" and only in `after` as "+ line", or "(identical)".
