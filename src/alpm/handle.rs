@@ -193,6 +193,24 @@ pub fn fetch(handle: &mut Alpm) -> Result<()> {
     Ok(())
 }
 
+/// Downloads the `.files` dbs next to the `.db` ones, for the file lists of packages not installed yet.
+pub fn fetch_files(conf: &PacmanConf, dbpath: &Path) -> Result<()> {
+    let mut handle = open(conf, dbpath)?;
+    handle.set_dbext(".files");
+    fetch(&mut handle)
+}
+
+/// Each package's version in the handle's sync dbs, the first repo winning as pacman's order does.
+pub fn sync_versions(handle: &Alpm) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for db in handle.syncdbs() {
+        for pkg in db.pkgs() {
+            out.entry(pkg.name().to_string()).or_insert_with(|| pkg.version().to_string());
+        }
+    }
+    out
+}
+
 /// How a prepare answers libalpm's questions.
 #[derive(Debug, Clone)]
 pub enum Answers {

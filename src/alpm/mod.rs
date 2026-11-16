@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub use conf::{PacmanConf, PinMode};
-pub use handle::{Added, Answers, Prepared, open, prepare_remove, prepare_sync, prepare_sync_skipping};
+pub use handle::{Added, Answers, Prepared, fetch, fetch_files, open, plan_dbpath, root_sync_dir, sync_versions, user_sync_dir, prepare_remove, prepare_sync, prepare_sync_skipping};
 
 /// The file lists in a `<repo>.files` db (plain, gzip or zstd tar), by package name.
 pub fn read_files_db(path: &Path) -> Result<BTreeMap<String, Vec<String>>> {

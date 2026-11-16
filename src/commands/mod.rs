@@ -1,4 +1,5 @@
 mod checks;
+pub mod diff;
 mod helper;
 mod init;
 pub mod keep;
@@ -35,7 +36,7 @@ use archix::value::Value;
 pub use helper::{edit_installed, pick, prefetch, search, upgrade};
 pub use init::init;
 pub use keep::limine_after_good_boot;
-pub use lock::{defer_config_writes, deferred_overlay, diff, lock, status};
+pub use lock::{defer_config_writes, deferred_overlay, lock, status};
 
 /// `archix secure-boot setup`.
 pub fn secure_boot_revoke(dry_run: bool, noconfirm: bool) -> Result<()> {

@@ -57,11 +57,20 @@ enum Command {
         #[arg(long)]
         noconfirm: bool,
     },
-    /// Show what a switch would change to make this machine match the lock, and what it carries that the config doesn't declare
+    /// Show the plan a switch would apply, read-only: exit 0 nothing to do, 1 changes, 2 switch would refuse, 3 error, 4 incomplete
     Diff {
-        /// List everything carried but not declared, not only the first lines of each kind
+        /// Print the plan as JSON, with its schema version
+        #[arg(long, conflicts_with = "stat")]
+        json: bool,
+        /// Print names only
         #[arg(long)]
-        all: bool,
+        stat: bool,
+        /// Write the plan and its fingerprint to this file, for `switch --plan`
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
+        /// Use the sync dbs already cached instead of fetching them; the header says so
+        #[arg(long)]
+        cached: bool,
     },
     /// Apply the lock and the config to the running system, in place
     Switch {
@@ -855,6 +864,13 @@ fn run() -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
+    if let Command::Diff { json, stat, save, cached } = command {
+        let args = commands::diff::DiffArgs { json, stat, save, cached };
+        return Ok(ExitCode::from(commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
+            eprintln!("error: {e:#}");
+            commands::diff::error_code()
+        })));
+    }
     if !cli.config.join("init.lua").is_file() {
         anyhow::bail!(
             "there's no archix config at {} yet; run `sudo archix init` to write one that describes this machine, or point --config at yours",
@@ -979,11 +995,7 @@ fn run() -> Result<ExitCode> {
             to: Some(date),
             noconfirm,
         } => commands::lock(&target, commands::Snapshot::On(date), noconfirm)?,
-        Command::Diff { all } => {
-            if !commands::diff(&target, all)? {
-                return Ok(ExitCode::from(2));
-            }
-        }
+        Command::Diff { .. } => unreachable!("diff returns before the config is captured"),
         Command::Switch {
             noconfirm,
             accept_nearest,

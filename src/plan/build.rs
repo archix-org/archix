@@ -30,7 +30,8 @@ pub struct Environment {
     pub visudo: Box<dyn Fn(&[u8]) -> Option<bool>>,
     /// `ldd` of a binary under the root; None when it isn't a dynamic executable or ldd can't run.
     pub ldd: Box<dyn Fn(&Path) -> Option<String>>,
-    pub secret_hmacs: Option<BTreeMap<String, String>>,
+    /// HMACs of the rendered secrets' values under the machine key; None without the key.
+    pub secret_hmacs: Box<dyn Fn(&crate::system::Rendered) -> Option<BTreeMap<String, String>>>,
     pub flatpak_installed: Option<BTreeMap<String, InstalledApp>>,
 }
 
@@ -198,13 +199,14 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
 
     let from = inputs.last.map(|l| &l.system);
     let empty = BTreeMap::new();
+    let hmacs = (env.secret_hmacs)(&rendered);
     let sys = system::build(&SystemInputs {
         root: &env.root,
         to: &rendered.state,
         blobs: &rendered.blobs,
         from,
         enabled: &*env.enabled,
-        secret_hmacs: env.secret_hmacs.as_ref(),
+        secret_hmacs: hmacs.as_ref(),
         last_hmacs: inputs.last.map_or(&empty, |l| &l.secret_hmacs),
         ssh_session: env.ssh_session,
         display_manager: env.display_manager.as_deref(),
@@ -313,7 +315,7 @@ mod tests {
                 path.ends_with("usr/bin/pacman")
                     .then(|| "\tlibz.so.1 => /usr/lib/libz.so.1 (0x1)\n".to_string())
             }),
-            secret_hmacs: None,
+            secret_hmacs: Box::new(|_| None),
             flatpak_installed: None,
         }
     }
