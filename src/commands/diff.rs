@@ -38,6 +38,17 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
+fn is_active(unit: &str, user: bool) -> Option<bool> {
+    if user {
+        return None;
+    }
+    let status = Command::new("systemctl")
+        .args(["is-active", "--quiet", "--", unit])
+        .status()
+        .ok()?;
+    Some(status.success())
+}
+
 fn kernel_release() -> Option<String> {
     let mut name: libc::utsname = unsafe { std::mem::zeroed() };
     if unsafe { libc::uname(&mut name) } != 0 {
@@ -107,6 +118,7 @@ fn environment(flatpak: bool) -> Environment {
         snapper_configured: root.join("etc/snapper/configs/root").exists(),
         display_manager: display_manager(&root),
         enabled: Box::new(|unit, user| Some(archix::system::apply::is_enabled(Path::new("/"), unit, user))),
+        active: Box::new(is_active),
         visudo: Box::new(visudo),
         ldd: Box::new(ldd),
         secret_hmacs: Box::new(move |rendered| secret_hmacs(&state, rendered)),

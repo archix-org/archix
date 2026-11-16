@@ -6,11 +6,12 @@ use alpm::Alpm;
 use anyhow::Result;
 
 use super::hooks::{self, Change, Op};
-use super::model::{FileAction, Header, LineItem, PkgAction, Plan};
+use super::model::{FileAction, FileItem, Header, LineItem, PackageItem, PkgAction, Plan, ServiceAction};
 use super::packages::{self, LocalPkg, PackageInputs};
 use super::record::LastApplied;
 use super::risk::{self, RiskContext};
 use super::system::{self, SystemInputs};
+use super::units::{self, PackageUnits};
 use crate::alpm::PacmanConf;
 use crate::flatpak::{InstalledApp, LockedApp};
 use crate::value::Value;
@@ -32,6 +33,8 @@ pub struct Environment {
     pub snapper_configured: bool,
     pub display_manager: Option<String>,
     pub enabled: UnitState,
+    /// Whether a unit is active now; None when that can't be told.
+    pub active: UnitState,
     pub visudo: Visudo,
     /// `ldd` of a binary under the root; None when it isn't a dynamic executable or ldd can't run.
     pub ldd: Ldd,
@@ -108,6 +111,82 @@ fn new_files(conf: &PacmanConf, dbpath: &Path) -> BTreeMap<String, Vec<String>> 
         if let Ok(lists) = crate::alpm::read_files_db(&path) {
             for (name, files) in lists {
                 out.entry(name).or_insert(files);
+            }
+        }
+    }
+    out
+}
+
+fn cache_dirs(conf: &PacmanConf) -> Vec<PathBuf> {
+    let dirs: Vec<PathBuf> = conf.values("CacheDir").into_iter().map(PathBuf::from).collect();
+    match dirs.is_empty() {
+        true => vec![PathBuf::from("/var/cache/pacman/pkg/")],
+        false => dirs,
+    }
+}
+
+/// Each package line as the units logic needs it: its files before and after, and the units in its downloaded package file.
+fn package_units(
+    items: &[PackageItem],
+    local: &BTreeMap<String, LocalPkg>,
+    listed: &BTreeMap<String, Vec<String>>,
+    cache_dirs: &[PathBuf],
+) -> Vec<PackageUnits> {
+    items
+        .iter()
+        .filter_map(|p| {
+            let op = match p.action {
+                PkgAction::Install if local.contains_key(&p.name) => Op::Upgrade,
+                PkgAction::Install => Op::Install,
+                PkgAction::Upgrade | PkgAction::Downgrade => Op::Upgrade,
+                PkgAction::Remove => Op::Remove,
+                _ => return None,
+            };
+            let old_files = local.get(&p.name).map(|l| l.files.clone()).unwrap_or_default();
+            let read = match (op, &p.to) {
+                (Op::Remove, _) | (_, None) => None,
+                (_, Some(version)) => {
+                    units::cached_package(cache_dirs, &p.name, version).and_then(|file| units::read_package(&file).ok())
+                }
+            };
+            let new_files = match op {
+                Op::Remove => None,
+                _ => listed
+                    .get(&p.name)
+                    .cloned()
+                    .or_else(|| read.as_ref().map(|(files, _)| files.clone()))
+                    .or_else(|| (op == Op::Upgrade).then(|| old_files.clone())),
+            };
+            Some(PackageUnits {
+                package: p.name.clone(),
+                op,
+                old_files,
+                new_files,
+                archive: read.map(|(_, units)| units),
+            })
+        })
+        .collect()
+}
+
+/// Installed packages, not changed by the plan, whose files under /etc the files group changes.
+fn config_changed(
+    files: &[FileItem],
+    packages: &[PackageItem],
+    local: &BTreeMap<String, LocalPkg>,
+) -> BTreeMap<String, Vec<String>> {
+    let changing: BTreeSet<&str> = packages.iter().map(|p| p.name.as_str()).collect();
+    let mut out = BTreeMap::new();
+    for item in files
+        .iter()
+        .filter(|f| matches!(f.action, FileAction::Create | FileAction::Modify | FileAction::Delete))
+    {
+        let path = item.path.trim_start_matches('/');
+        if !path.starts_with("etc/") {
+            continue;
+        }
+        for (name, pkg) in local.iter().filter(|(n, _)| !changing.contains(n.as_str())) {
+            if pkg.files.iter().any(|f| f == path) {
+                out.insert(name.clone(), pkg.files.clone());
             }
         }
     }
@@ -250,7 +329,35 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
             plan.files.push(item);
         }
     }
+    let unit_lines = units::plan_units(
+        &package_units(
+            &plan.packages,
+            &local,
+            &package_inputs.new_files,
+            &cache_dirs(inputs.conf),
+        ),
+        &units::UnitContext {
+            root: &env.root,
+            declared: &rendered.state.services,
+            enabled: &*env.enabled,
+            active: &*env.active,
+            ssh_session: env.ssh_session,
+            display_manager: env.display_manager.as_deref(),
+            config_changed: &config_changed(&plan.files, &plan.packages, &local),
+        },
+    );
     plan.services = sys.services;
+    for item in plan
+        .services
+        .iter_mut()
+        .filter(|s| s.action == ServiceAction::Enable && !s.user)
+    {
+        if let Some(links) = unit_lines.symlinks.get(&item.unit) {
+            item.reason = format!("{}; {links}", item.reason);
+        }
+    }
+    plan.services.extend(unit_lines.services);
+    plan.notes.extend(unit_lines.notes);
     plan.users = sys.users;
     plan.refusals.extend(sys.refusals);
     plan.unchecked.extend(sys.unchecked);
@@ -329,6 +436,7 @@ mod tests {
             snapper_configured: false,
             display_manager: None,
             enabled: Box::new(|_, _| Some(false)),
+            active: Box::new(|_, _| Some(false)),
             visudo: Box::new(|_| Some(true)),
             ldd: Box::new(|path| {
                 path.ends_with("usr/bin/pacman")

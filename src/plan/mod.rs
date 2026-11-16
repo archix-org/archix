@@ -11,6 +11,7 @@ pub mod repostate;
 pub mod risk;
 pub mod system;
 pub mod udiff;
+pub mod units;
 
 pub use build::{Environment, PlanInputs};
 pub use legacy::*;
