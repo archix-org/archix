@@ -326,7 +326,7 @@ impl Displaced {
                     package
                         .backups
                         .get(entry)
-                        .is_some_and(|md5| fs::read(&path).is_ok_and(|bytes| crate::capture::md5_bytes(&bytes) != *md5))
+                        .is_some_and(|md5| fs::read(&path).is_ok_and(|bytes| crate::machine::md5_bytes(&bytes) != *md5))
                 };
                 if entry.ends_with('/') {
                     // Like pacman, which leaves a directory that still holds something or that another package owns.
@@ -901,7 +901,7 @@ mod tests {
     fn what_a_displaced_package_leaves_goes_once_the_new_ones_are_in() {
         let root = tempfile::tempdir().unwrap();
         let db = root.path().join("var/lib/pacman/local");
-        let installed_md5 = crate::capture::md5_bytes(b"old");
+        let installed_md5 = crate::machine::md5_bytes(b"old");
         install(
             root.path(),
             "old",

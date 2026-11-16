@@ -26,15 +26,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Write a config describing this machine as it is, locked to exactly what's installed
-    Init {
-        /// Take every question's default without asking
-        #[arg(long)]
-        defaults: bool,
-        /// Rebuild this package, which no repo or the AUR has, as a recipe from its installed files; its files stay out of the config and package caches
-        #[arg(long, value_name = "PACKAGE")]
-        repack: Vec<String>,
-    },
+    /// Write a minimal config for this machine as it stands (explicit packages, enabled services, users), locked to what's installed
+    Init,
     /// Print the evaluated configuration as JSON
     Eval,
     /// List every declared option
@@ -356,7 +349,7 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
         Command::Secrets(Secrets::Rekey { machine: true, .. }) => Some("secrets rekey --machine"),
-        Command::Init { .. } => Some("init"),
+        Command::Init => Some("init"),
         Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
         Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
         Command::SecureBoot(SecureBoot::RotatePcrKey { .. }) => Some("secure-boot rotate-pcr-key"),
@@ -678,8 +671,8 @@ fn run() -> Result<ExitCode> {
         Some(host) => host,
         None => system_hostname()?,
     };
-    if let Command::Init { defaults, repack } = command {
-        commands::init(&cli.config, &hostname, defaults, &repack)?;
+    if let Command::Init = command {
+        commands::init(&cli.config, &hostname)?;
         return Ok(ExitCode::SUCCESS);
     }
     if matches!(command, Command::Options { .. }) && !cli.config.join("init.lua").is_file() {
@@ -778,7 +771,7 @@ fn run() -> Result<ExitCode> {
         | Command::Install { .. }
         | Command::Remove { .. }
         | Command::Upgrade { .. }
-        | Command::Init { .. }
+        | Command::Init
         | Command::PacmanHook { .. }
         | Command::Rollback { .. }
         | Command::User(_)

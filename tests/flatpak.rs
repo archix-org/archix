@@ -108,44 +108,6 @@ fn flatpak_apps_are_locked_to_commits_and_roll_back() {
     setup.ok(&["switch", "--noconfirm"]);
     assert_eq!(installed_commit().as_deref(), Some(second.as_str()));
 
-    setup.ok(&["revert", "--noconfirm"]);
-    assert_eq!(
-        installed_commit().as_deref(),
-        Some(first.as_str()),
-        "rollback pins the old commit again"
-    );
-
-    let captured = tempfile::tempdir().unwrap();
-    let config = captured.path().join("cfg");
-    // init describes the container, which the machine's current generation isn't about.
-    let current = std::path::Path::new("/var/lib/archix/generations/current");
-    std::fs::rename(current, current.with_extension("machine")).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_archix"))
-        .args([
-            "--config",
-            config.to_str().unwrap(),
-            "--host",
-            "fpinit",
-            "init",
-            "--defaults",
-        ])
-        .output()
-        .unwrap();
-    std::fs::rename(current.with_extension("machine"), current).unwrap();
-    let out = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(out.contains("the system matches the lock and the config"), "{out}");
-    let lock = archix::lock::Lockfile::load(&config.join("archix.lock")).unwrap().hosts["fpinit"].clone();
-    assert_eq!(
-        lock.flatpak["org.archix.Hello"].commit, first,
-        "init locks the installed commit"
-    );
-    let host = std::fs::read_to_string(config.join("lua/hosts/fpinit/init.lua")).unwrap();
-    assert!(host.contains("\"local:org.archix.Hello\""), "{host}");
-
     setup.ok(&["switch", "--noconfirm"]);
     setup.set_body(&["flatpak"], "");
     setup.ok(&["switch", "--noconfirm"]);

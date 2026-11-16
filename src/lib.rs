@@ -1,9 +1,7 @@
 pub mod adopt;
 pub mod archive;
 pub mod aur;
-pub mod capture;
 pub mod captured;
-pub mod carried;
 pub mod conflicts;
 pub mod date;
 pub mod downgrade;
@@ -19,6 +17,7 @@ pub mod installed;
 pub mod integration;
 pub mod lock;
 pub mod luagen;
+pub mod machine;
 pub mod old_model;
 pub mod options;
 pub mod packages;

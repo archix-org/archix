@@ -775,7 +775,7 @@ pub fn prune_root(
 
 /// Whether rollbacks can work on the root at `root`: btrfs, with `/` a subvolume other than the top level, which no snapshot can replace.
 pub fn unsupported(root: &Path) -> Option<String> {
-    if !crate::capture::is_btrfs(root) {
+    if !crate::machine::is_btrfs(root) {
         return Some(format!(
             "{} isn't on btrfs, so archix can't snapshot it: rollbacks are off, and switches, config reverts and drift tracking work as usual",
             root.display()

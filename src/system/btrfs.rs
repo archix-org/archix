@@ -234,7 +234,7 @@ fn short_of_metadata(usage: &Usage) -> bool {
 
 /// btrfs can show free space and still fail writes: once data chunks fill the device, metadata can't grow. This hands empty data chunks back before a switch writes anything, and refuses one that would still fail halfway.
 pub fn ensure_metadata_room(mount: &Path) -> Result<()> {
-    if !crate::capture::is_btrfs(mount) {
+    if !crate::machine::is_btrfs(mount) {
         return Ok(());
     }
     let Some(before) = usage(mount) else {

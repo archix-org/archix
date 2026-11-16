@@ -1125,7 +1125,7 @@ pub fn check(root: &Path, lines: &[FstabLine], crypttab: &str, cmdline: &str) ->
         if line.is_swap() && line.device.starts_with('/') && !line.device.starts_with("/dev/") {
             let file = root.join(line.device.trim_start_matches('/'));
             let dir = file.parent().unwrap_or(root);
-            let on_btrfs = crate::capture::is_btrfs(nearest_existing(dir));
+            let on_btrfs = crate::machine::is_btrfs(nearest_existing(dir));
             let shared = dir.exists() && on_btrfs && !own_subvolume(dir);
             match (line.size, shared) {
                 (Some(_), true) => bail!(
@@ -1240,7 +1240,7 @@ pub fn make_swapfile(file: &Path, bytes: u64) -> Result<()> {
     }
     let dir = file.parent().context("a swap file needs a directory")?;
     if !dir.exists() {
-        if crate::capture::is_btrfs(nearest_existing(dir)) {
+        if crate::machine::is_btrfs(nearest_existing(dir)) {
             if let Some(parent) = dir.parent() {
                 fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
             }
@@ -1255,7 +1255,7 @@ pub fn make_swapfile(file: &Path, bytes: u64) -> Result<()> {
     let name = file.file_name().context("a swap file needs a name")?.to_string_lossy();
     let temp = dir.join(format!(".{name}.archix-new"));
     let _ = fs::remove_file(&temp);
-    if crate::capture::is_btrfs(dir) {
+    if crate::machine::is_btrfs(dir) {
         if !own_subvolume(dir) {
             bail!(
                 "{} is on btrfs in {}, which isn't a subvolume of its own, and btrfs can't snapshot a subvolume holding an active swap file; move it to a directory archix can create as a subvolume",
