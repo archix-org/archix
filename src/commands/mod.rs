@@ -2,7 +2,6 @@ mod helper;
 mod init;
 pub mod keep;
 mod lock;
-pub mod pacman_hook;
 pub mod rescue;
 pub mod snapshot;
 

@@ -123,12 +123,6 @@ enum Command {
     /// Run by archix-health-check.service before boot-complete.target: check a counted boot, and mark its entry bad if it fails
     #[command(hide = true)]
     HealthCheck,
-    /// Run by archix's pacman hooks around a transaction archix didn't start: `pre` snapshots the root, `post` rebuilds the boot image if the kernel or initramfs changed, resets boot counting and records the packages
-    #[command(hide = true)]
-    PacmanHook {
-        #[arg(value_enum)]
-        when: commands::pacman_hook::When,
-    },
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
@@ -516,9 +510,6 @@ fn run() -> Result<ExitCode> {
             archix::system::initrd::mount(&root, &archix::testhooks::run_dir(), &cmdline)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::PacmanHook { when } => {
-            return Ok(commands::pacman_hook::run(when));
-        }
         Command::Rescue { options, action } => {
             if !is_root() {
                 anyhow::bail!("`archix rescue` mounts filesystems, so it needs root");
@@ -772,7 +763,6 @@ fn run() -> Result<ExitCode> {
         | Command::Remove { .. }
         | Command::Upgrade { .. }
         | Command::Init
-        | Command::PacmanHook { .. }
         | Command::Rollback { .. }
         | Command::User(_)
         | Command::Prefetch { .. }

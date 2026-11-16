@@ -21,7 +21,6 @@ pub mod menu;
 pub mod merge;
 pub mod mounts;
 pub mod password;
-pub mod removal;
 pub mod rescue;
 pub mod rescue_auth;
 pub mod restart;

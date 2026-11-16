@@ -1,4 +1,3 @@
-pub mod hooks;
 mod vercmp;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};

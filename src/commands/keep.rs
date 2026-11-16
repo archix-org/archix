@@ -253,7 +253,7 @@ fn package_file(
 }
 
 fn pending_path(root: &Path) -> PathBuf {
-    root.join(archix::pacman::hooks::KEEP_PENDING.trim_start_matches('/'))
+    root.join("run/archix/keep-pending")
 }
 
 fn motd_path(root: &Path) -> PathBuf {

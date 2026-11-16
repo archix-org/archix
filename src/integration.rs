@@ -31,12 +31,11 @@ pub fn files(paths: &Paths, archix: &Path) -> Vec<(PathBuf, String)> {
          Exec=sh -c 'command -v notify-send >/dev/null || exit 0; \
          [ -s {notes} ] && notify-send -u critical archix \"$(cat {notes})\"; exit 0'\n"
     );
-    let mut files = crate::pacman::hooks::files(archix, &paths.state);
-    files.extend([
+    let _ = archix;
+    vec![
         (PathBuf::from("/etc/profile.d/archix.sh"), profile),
         (PathBuf::from("/etc/xdg/autostart/archix-status.desktop"), autostart),
-    ]);
-    files
+    ]
 }
 
 /// The statically linked archix the initramfs hook copies; the package installs it.
@@ -389,26 +388,12 @@ mod tests {
     }
 
     #[test]
-    fn hook_runs_this_binary() {
+    fn the_notes_reach_logins_and_desktops() {
         let dir = tempfile::tempdir().unwrap();
         let paths = temp_paths(dir.path());
         let files = files(&paths, Path::new("/opt/archix/bin/archix"));
-        let post = files
-            .iter()
-            .find(|(path, _)| path.ends_with("95-archix-post.hook"))
-            .unwrap();
-        assert!(
-            post.1.contains("exec /opt/archix/bin/archix pacman-hook post;"),
-            "{}",
-            post.1
-        );
-        assert!(
-            !files
-                .iter()
-                .any(|(path, _)| path.ends_with("00-archix-deployment.hook")),
-            "plain pacman isn't guarded any more"
-        );
         let profile = files.iter().find(|(path, _)| path.ends_with("archix.sh")).unwrap();
         assert!(profile.1.contains("state/notes"));
+        assert!(files.iter().any(|(path, _)| path.ends_with("archix-status.desktop")));
     }
 }

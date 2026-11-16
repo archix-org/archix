@@ -1363,65 +1363,6 @@ fn a_switch_writes_a_fat_esp_flushing_data_before_names_and_never_with_a_per_fil
 
 #[test]
 #[ignore]
-fn a_counted_boot_that_finds_the_unfinished_mark_on_a_fat_esp_is_marked_bad_and_reboots_at_once() {
-    let _system = lock_system();
-    let checks = Checks::default();
-    let setup = Setup::new(&[], "");
-    let machine = &setup.machine;
-    let _esp = FatEsp::over(&machine.esp());
-    setup.set_body(
-        &[],
-        &format!(
-            r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", rescue_entry = false, health_check = {{ reboot_on_failure = true }} }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
-            machine.esp().display()
-        ),
-    );
-    let fat = [COUNTING, ("ARCHIX_TEST_CHECK_ESP", "1")];
-    setup.ok_env(&fat, &["switch", "--noconfirm"]);
-    archix::pacman::hooks::mark_unfinished(
-        &setup.paths.state,
-        &archix::pacman::hooks::Unfinished {
-            pacman: 1,
-            started: 1_792_576_985,
-            slot: None,
-            switch: None,
-        },
-    )
-    .unwrap();
-    let record = tempfile::tempdir().unwrap();
-    let rebooted = record.path().join("reboot");
-    let out = setup.run_env(
-        &[
-            COUNTING,
-            ("ARCHIX_TEST_CHECK_ESP", "1"),
-            ("ARCHIX_TEST_COUNTED_BOOT", "1"),
-            ("ARCHIX_TEST_ENTRY", "archix-current+2.conf"),
-            ("ARCHIX_TEST_REBOOT", rebooted.to_str().unwrap()),
-        ],
-        &["health-check"],
-    );
-    let said = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    checks.check(
-        said.contains("its entry is marked bad, and the machine reboots into the fallback now"),
-        format!("the mark fails the check and the entry is marked bad on FAT: {said}"),
-    );
-    checks.check(
-        machine.entries().contains(&"archix-current+0-2.conf".to_string()),
-        format!("the entry has no tries left: {:?}", machine.entries()),
-    );
-    checks.check(
-        rebooted.exists(),
-        "and the machine reboots at once, not after boot.unblessed_timeout",
-    );
-    checks.finish();
-}
-
-#[test]
-#[ignore]
 fn a_move_from_limine_cut_short_after_its_generation_is_recorded_is_taken_up_by_the_next_switch() {
     const GLOBAL: &str = "8be4df61-93ca-11d2-aa0d-00e098032b8c";
     let _system = lock_system();

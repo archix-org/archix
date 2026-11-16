@@ -436,17 +436,10 @@ pub fn run_boot(paths: &Paths) -> Result<bool> {
     );
     let users = generation.as_ref().map(|g| g.system.users.clone()).unwrap_or_default();
     let allowed = menu.blessed_failed_units;
-    // An edited entry isn't a failure by itself: a cut one has the mark, which goes only after the boot step is flushed.
-    let unfinished = crate::pacman::hooks::unfinished(&paths.state);
-    let torn = unfinished.is_some();
-    let failed = match unfinished {
-        Some(unfinished) => Some((unfinished.target().to_string(), unfinished.why())),
-        None => {
-            let targets = targets(check.as_ref(), &users, &allowed);
-            let timeout = check.as_ref().map_or(120, |check| check.timeout);
-            run(&paths.root, &targets, &users, timeout).map(|(target, why)| (target.to_string(), why))
-        }
-    };
+    let torn = false;
+    let targets = targets(check.as_ref(), &users, &allowed);
+    let timeout = check.as_ref().map_or(120, |check| check.timeout);
+    let failed = run(&paths.root, &targets, &users, timeout).map(|(target, why)| (target.to_string(), why));
     let Some((target, why)) = failed else {
         println!("archix: {} passed its health check", entry.id());
         return Ok(true);
