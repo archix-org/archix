@@ -210,7 +210,7 @@ pub struct Computed {
 }
 
 /// SCOPE 3's plan() for the config at `config_dir`, with its fingerprint; diff and switch both call this.
-pub fn compute(config_dir: &Path, host: &str, cached: bool) -> Result<Computed> {
+pub fn compute(config_dir: &Path, host: &str, cached: bool, no_build: bool) -> Result<Computed> {
     let evaluation = evaluate_for_plan(config_dir, host)?;
     let config = &evaluation.config;
     let tree = evaluation.tree.as_path();
@@ -266,7 +266,7 @@ pub fn compute(config_dir: &Path, host: &str, cached: bool) -> Result<Computed> 
         .unwrap_or_default();
     let flatpak = lock.as_ref().map(|l| l.flatpak.clone()).unwrap_or_default();
     let hm_lock = lock.as_ref().map(|l| l.home_manager.clone()).unwrap_or_default();
-    let env = environment(!flatpak.is_empty(), home_env(hm_lock, args.no_build));
+    let env = environment(!flatpak.is_empty(), home_env(hm_lock, no_build));
     let header = Header {
         mode,
         date,
@@ -333,7 +333,7 @@ pub fn compute(config_dir: &Path, host: &str, cached: bool) -> Result<Computed> 
 
 /// `archix diff`: plan(), printed; returns SCOPE 3.1's exit code.
 pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
-    let computed = compute(config_dir, host, args.cached)?;
+    let computed = compute(config_dir, host, args.cached, args.no_build)?;
     let plan = &computed.plan;
     if args.json {
         out(&render::json(plan));

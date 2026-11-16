@@ -95,6 +95,23 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         rest: Vec<String>,
     },
+    /// List past switches, or show switch N's steps and plan; --verify N checks it against pacman.log, snapper and systemd (exit 1 on a failed check)
+    Log {
+        /// The switch number, as `archix log` lists it
+        n: Option<u32>,
+        /// Check switch N against observations the executor doesn't produce (SCOPE 4)
+        #[arg(long)]
+        verify: bool,
+        /// Print verify's daemon allowlist and write map
+        #[arg(long)]
+        print_allowlist: bool,
+        /// Read this pacman.log instead of pacman-conf's LogFile
+        #[arg(long, value_name = "FILE", requires = "verify")]
+        pacman_log: Option<PathBuf>,
+        /// Read this pacman DBPath instead of pacman-conf's
+        #[arg(long, value_name = "DIR", requires = "verify")]
+        dbpath: Option<PathBuf>,
+    },
     /// Search the repositories and the AUR (pacman-style: archix -Ss <terms>)
     Search {
         #[arg(required = true)]
@@ -338,6 +355,22 @@ fn run() -> Result<ExitCode> {
             archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
+        Command::Log {
+            n,
+            verify,
+            print_allowlist,
+            pacman_log,
+            dbpath,
+        } => {
+            let args = commands::log::LogArgs {
+                n,
+                verify,
+                print_allowlist,
+                pacman_log,
+                dbpath,
+            };
+            return Ok(ExitCode::from(commands::log::log(&args)?));
+        }
         Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
             eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
             return Ok(ExitCode::from(3));
@@ -528,6 +561,7 @@ fn run() -> Result<ExitCode> {
         | Command::Init
         | Command::Prefetch { .. }
         | Command::Swapfile { .. }
+        | Command::Log { .. }
         | Command::EvaluateIsolated { .. }
         | Command::WriteFile { .. }
         | Command::Secrets(_) => {

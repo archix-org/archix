@@ -330,6 +330,7 @@ mod tests {
     fn aur_packages_match_by_name() {
         let mut p = plan(Vec::new());
         p.aur.push(crate::plan::AurItem {
+            base: None,
             name: "paru-bin".into(),
             commit: None,
             helper: None,

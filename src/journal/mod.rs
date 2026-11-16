@@ -1,4 +1,7 @@
 //! SCOPE 4's journal: one directory per switch under /var/log/archix/switches, written by the switch and read by `archix log`.
+pub mod read;
+pub mod verify;
+pub mod writemap;
 pub mod writer;
 
 use std::collections::BTreeMap;

@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use archix::exec::live::{Inputs, Live, Options};
 use archix::exec::output::{raw, say, warn};
-use archix::exec::{PendingAur, PendingHome, dblock, exit, failure, signals, snapshot};
+use archix::exec::{AurBuilder, HomeManager, dblock, exit, failure, signals, snapshot};
 use archix::journal::{JournalWriter, Outcome};
 use archix::plan::fingerprint::{self, SavedPlan};
 use archix::plan::{Plan, record, render};
@@ -71,7 +71,7 @@ pub fn switch(config_dir: &Path, host: &str, args: &SwitchArgs) -> Result<u8> {
     if !is_root() {
         return Ok(refuse("it changes the system, so it needs root; run it with sudo"));
     }
-    let computed = match compute(config_dir, host, false) {
+    let computed = match compute(config_dir, host, false, false) {
         Ok(computed) => computed,
         Err(e) => return Ok(refuse(&format!("{e:#}; nothing was changed"))),
     };
@@ -123,6 +123,12 @@ fn execute(computed: Computed, args: &SwitchArgs) -> Result<u8> {
         Err(e) => return Ok(refuse(&format!("opening the journal: {e:#}"))),
     };
     let config = computed.evaluation.config.clone();
+    let hm_lock = computed
+        .lock
+        .as_ref()
+        .map(|l| l.home_manager.clone())
+        .unwrap_or_default();
+    let tree = computed.evaluation.tree.clone();
     let esp = archix::system::fstab::esp_of(&config).to_string();
     let fstab = archix::system::fstab::render(&config, &esp)?.lines;
     let inputs = Inputs {
@@ -146,7 +152,17 @@ fn execute(computed: Computed, args: &SwitchArgs) -> Result<u8> {
         config,
         paths,
     };
-    let mut live = Live::new(inputs, Box::new(PendingAur), Box::new(PendingHome));
+    let home = HmSwitch {
+        runner: archix::home::hm::Runner::new(&inputs.config),
+        config: inputs.config.clone(),
+        tree,
+        lock: hm_lock,
+    };
+    let mut live = Live::new(
+        inputs,
+        Box::new(ChrootAur(archix::aur::chroot::DevtoolsBuilder::default())),
+        Box::new(home),
+    );
     let report = archix::exec::execute(&mut live, &mut journal, &signals::interrupted);
     let dir = journal.journal().dir.clone();
     match (report.outcome, report.wrote) {
@@ -169,6 +185,34 @@ fn execute(computed: Computed, args: &SwitchArgs) -> Result<u8> {
         })),
     }
     Ok(report.exit_code())
+}
+
+/// SCOPE 2.4's devtools chroot builder behind the executor's hook.
+struct ChrootAur(archix::aur::chroot::DevtoolsBuilder);
+
+impl AurBuilder for ChrootAur {
+    fn build(&self, items: &[archix::plan::AurItem], conf: &Path, sync_dbs: &Path) -> Result<Vec<std::path::PathBuf>> {
+        self.0.build(items, conf, sync_dbs)
+    }
+}
+
+/// SCOPE 7: writes the user's flake from the captured config, then builds and activates it as that user.
+struct HmSwitch {
+    runner: archix::home::hm::Runner,
+    config: archix::value::Value,
+    tree: std::path::PathBuf,
+    lock: archix::lock::HmLock,
+}
+
+impl HomeManager for HmSwitch {
+    fn build(&self, user: &str, _flake_dir: &Path) -> Result<std::path::PathBuf> {
+        let dir = archix::home::hm::generate(user, &self.config, &self.tree, &self.lock)?;
+        self.runner.build(user, &dir)
+    }
+
+    fn activate(&self, user: &str, store_path: &Path) -> Result<()> {
+        self.runner.activate(user, store_path)
+    }
 }
 
 #[cfg(test)]
@@ -205,6 +249,7 @@ mod tests {
         let mut p = plan();
         assert!(blockers(&p, false, false).is_empty(), "nothing to do needs no snapshot");
         p.flatpak.push(LineItem {
+            diff: None,
             line: "install x".into(),
             reason: "declared".into(),
             risk: Vec::new(),

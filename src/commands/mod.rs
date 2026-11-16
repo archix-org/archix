@@ -2,6 +2,7 @@ pub mod diff;
 mod helper;
 mod init;
 mod lock;
+pub mod log;
 pub mod switch;
 
 use std::collections::{BTreeMap, BTreeSet};
