@@ -201,6 +201,9 @@ pub fn parse_accounts(passwd: &str, group: &str, sysusers: &BTreeSet<String>) ->
         let (Ok(uid), Ok(gid)) = (uid.parse::<u32>(), gid.parse::<u32>()) else {
             continue;
         };
+        if name == crate::aur::build::BUILD_USER {
+            continue;
+        }
         let system = hand_made(uid, name);
         if !regular(uid) && !system {
             continue;
@@ -230,7 +233,7 @@ pub fn parse_accounts(passwd: &str, group: &str, sysusers: &BTreeSet<String>) ->
     }
     for (name, gid, _) in &groups {
         let own = accounts.users.get(name).is_some_and(|user| user.group.is_none());
-        if own {
+        if own || name == crate::aur::build::BUILD_USER {
             continue;
         }
         if regular(*gid) {
@@ -364,9 +367,9 @@ mod tests {
     fn system_users_and_groups_made_by_hand_are_kept() {
         let passwd = "root:x:0:0::/root:/bin/bash\npostgres:x:975:975::/var/lib/postgres:/usr/bin/bash\n\
                       scanner:x:950:950::/opt/scanner:/bin/false\nmetrics:x:220:220::/:/usr/bin/nologin\n\
-                      me:x:1000:1000::/home/me:/bin/bash\n";
-        let group =
-            "root:x:0:\npostgres:x:975:\nscanner:x:950:\nmetrics:x:220:\ni2c:x:961:me\ndocker:x:972:me\nme:x:1000:\n";
+                      me:x:1000:1000::/home/me:/bin/bash\narchix-build:x:960:960::/var/lib/archix/build:/usr/bin/nologin\n";
+        let group = "root:x:0:\npostgres:x:975:\nscanner:x:950:\nmetrics:x:220:\ni2c:x:961:me\ndocker:x:972:me\nme:x:1000:\n\
+                     archix-build:x:960:\n";
         let sysusers = parse_sysusers(
             "# made by packages\nu postgres 975 - /var/lib/postgres\ng docker 972\nu! root 0\nm me wheel\n",
         );

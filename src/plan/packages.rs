@@ -363,6 +363,14 @@ fn refusals(
             out.push(format!("{name}{what} would be removed"));
         }
     }
+    const NO_LOGIN: [&str; 6] = [
+        "/usr/bin/nologin",
+        "/usr/sbin/nologin",
+        "/sbin/nologin",
+        "/bin/false",
+        "/usr/bin/false",
+        "/bin/nologin",
+    ];
     for (user, shell) in &inputs.shells {
         let file = shell.trim_start_matches('/');
         if let Some((owner, _)) = local.iter().find(|(_, p)| p.files.iter().any(|f| f == file))
@@ -371,6 +379,7 @@ fn refusals(
             out.push(format!("{user}'s login shell {shell} would be removed with {owner}"));
         }
         if let Some(shells) = &inputs.etc_shells
+            && !NO_LOGIN.contains(&shell.as_str())
             && !shells.lines().any(|line| line.trim() == shell)
         {
             out.push(format!("{user}'s login shell {shell} is not in /etc/shells"));
@@ -564,6 +573,7 @@ mod tests {
         i.shells = vec![
             ("alice".into(), "/usr/bin/zsh".into()),
             ("bob".into(), "/usr/bin/fish".into()),
+            ("daemon".into(), "/usr/bin/nologin".into()),
         ];
         i.etc_shells = Some("/bin/sh\n/usr/bin/zsh\n".into());
         let g = build(&mut handle, &i).unwrap();
@@ -574,6 +584,10 @@ mod tests {
             "{all}"
         );
         assert!(all.contains("/usr/bin/fish is not in /etc/shells"), "{all}");
+        assert!(
+            !all.contains("nologin"),
+            "a no-login shell is never a login problem: {all}"
+        );
     }
 
     #[test]
