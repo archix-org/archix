@@ -46,3 +46,5 @@ src/commands/diff.rs	test:init test:captured test:switch_v2
 src/exec/	test:switch_v2
 src/journal/	test:switch_v2
 src/commands/switch.rs	test:switch_v2
+src/home/	test:hm_layer
+src/plan/home.rs	test:hm_layer

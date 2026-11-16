@@ -183,6 +183,9 @@ pub struct UserItem {
 pub struct LineItem {
     pub line: String,
     pub reason: String,
+    /// A unified diff, such as a generated home.nix's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub risk: Vec<String>,
 }
@@ -292,6 +295,7 @@ mod tests {
         LineItem {
             line: "x".into(),
             reason: "declared".into(),
+            diff: None,
             risk: Vec::new(),
         }
     }

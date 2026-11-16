@@ -20,6 +20,7 @@ pub struct DiffArgs {
     pub stat: bool,
     pub save: Option<PathBuf>,
     pub cached: bool,
+    pub no_build: bool,
 }
 
 const SCREEN_LOCKERS: [&str; 9] = [
@@ -107,7 +108,23 @@ fn secret_hmacs(state: &Path, rendered: &archix::system::Rendered) -> Option<BTr
     }))
 }
 
-fn environment(flatpak: bool) -> Environment {
+fn on_path(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+fn home_env(lock: archix::lock::HmLock, no_build: bool) -> archix::plan::home::HomeEnv {
+    use archix::plan::home::{HomeEnv, TOOLS};
+    HomeEnv {
+        lock,
+        no_build,
+        tools: TOOLS.iter().all(|tool| on_path(tool)),
+        account: Box::new(|user| archix::home::hm::account(Path::new("/"), user).ok()),
+        linger_enabled: Box::new(|user| Path::new("/var/lib/systemd/linger").join(user).exists()),
+        build: Box::new(archix::home::hm::runner::build_for_diff),
+    }
+}
+
+fn environment(flatpak: bool, home: archix::plan::home::HomeEnv) -> Environment {
     let root = PathBuf::from("/");
     let state = PathBuf::from("/var/lib/archix");
     Environment {
@@ -125,6 +142,7 @@ fn environment(flatpak: bool) -> Environment {
         flatpak_installed: (flatpak && archix::flatpak::available())
             .then(|| archix::flatpak::installed().ok())
             .flatten(),
+        home: Some(home),
         root,
     }
 }
@@ -247,7 +265,8 @@ pub fn compute(config_dir: &Path, host: &str, cached: bool) -> Result<Computed> 
         })
         .unwrap_or_default();
     let flatpak = lock.as_ref().map(|l| l.flatpak.clone()).unwrap_or_default();
-    let env = environment(!flatpak.is_empty());
+    let hm_lock = lock.as_ref().map(|l| l.home_manager.clone()).unwrap_or_default();
+    let env = environment(!flatpak.is_empty(), home_env(hm_lock, args.no_build));
     let header = Header {
         mode,
         date,

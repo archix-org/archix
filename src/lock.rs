@@ -41,6 +41,24 @@ pub struct HostLock {
     /// Hashes of the config's local recipes and patches the lock was resolved with.
     #[serde(default)]
     pub recipes: BTreeMap<String, String>,
+    /// The revs home.<user>.home_manager flakes pin (SCOPE 7).
+    #[serde(default)]
+    pub home_manager: HmLock,
+}
+
+/// The home-manager and nixpkgs commits every generated flake pins; empty until `archix update` resolves them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HmLock {
+    #[serde(default)]
+    pub home_manager: String,
+    #[serde(default)]
+    pub nixpkgs: String,
+}
+
+impl HmLock {
+    pub fn is_empty(&self) -> bool {
+        self.home_manager.is_empty() && self.nixpkgs.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -230,6 +248,11 @@ impl Lockfile {
                     let _ = writeln!(out, "{} = {}", key(id), string(hash));
                 }
             }
+            if !lock.home_manager.is_empty() {
+                let _ = writeln!(out, "\n[hosts.{host}.home_manager]");
+                let _ = writeln!(out, "home_manager = {}", string(&lock.home_manager.home_manager));
+                let _ = writeln!(out, "nixpkgs = {}", string(&lock.home_manager.nixpkgs));
+            }
             if !lock.flatpak.is_empty() {
                 let _ = writeln!(out, "\n[hosts.{host}.flatpak]");
                 for (id, app) in &lock.flatpak {
@@ -343,6 +366,10 @@ mod tests {
                 },
             )]),
             recipes: BTreeMap::from([("local:hello".to_string(), "abc123".to_string())]),
+            home_manager: HmLock {
+                home_manager: "a".repeat(40),
+                nixpkgs: "b".repeat(40),
+            },
         };
         Lockfile {
             hosts: BTreeMap::from([("my.laptop".to_string(), host)]),
@@ -358,6 +385,10 @@ mod tests {
         assert_eq!(Lockfile::load(&path).unwrap(), lock);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("[hosts.\"my.laptop\".packages]"), "{text}");
+        assert!(
+            text.contains("[hosts.\"my.laptop\".home_manager]\nhome_manager = \"aaaa"),
+            "{text}"
+        );
         assert!(text.contains("\"gtk+\" = { version = \"1:2.24-1\""), "{text}");
         assert!(
             text.contains("yay-bin = { version = \"13.0.1-1\", repo = \"aur\", file = \"yay-bin-13.0.1-1-x86_64.pkg.tar.zst\", base = \"yay-bin\", commit = \"0123abcd\", sources = { \"yay::git+https://example.org/yay.git\" = \"c0ffee\" }, explicit = false, build_only = true }"),

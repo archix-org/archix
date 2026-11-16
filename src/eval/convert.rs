@@ -22,6 +22,7 @@ fn to_raw_at(markers: &Markers, value: &LuaValue, path: &str, depth: usize) -> R
     match value {
         LuaValue::Boolean(b) => Ok(Raw::Bool(*b)),
         LuaValue::Integer(i) => Ok(Raw::Int(*i)),
+        LuaValue::Number(f) if f.is_nan() => Err(fail("value is NaN, which no config value can be".into())),
         LuaValue::Number(f) => Ok(Raw::Float(*f)),
         LuaValue::String(s) => match s.to_str() {
             Ok(s) => Ok(Raw::Str(s.to_string())),
@@ -233,7 +234,7 @@ fn group_table(
     let mut nulls = HashSet::new();
     for (key, value) in value.into_iter().flatten() {
         let sub = options::join(&path, key);
-        match children.get(key) {
+        match options::lookup(&children, key) {
             Some(Node::Group(group)) => {
                 let map = match value {
                     Value::Map(map) => Some(map),
@@ -255,7 +256,7 @@ fn group_table(
             return Ok(LuaValue::Nil);
         };
         let sub = options::join(&path, &key);
-        match children.get(&key) {
+        match options::lookup(&children, &key) {
             Some(Node::Group(group)) => Ok(LuaValue::Table(group_table(lua, &null, group.clone(), sub, None)?)),
             Some(Node::Opt(_)) => {
                 if !nulls.contains(&key) {

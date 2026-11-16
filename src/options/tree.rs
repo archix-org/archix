@@ -91,10 +91,26 @@ fn flatten_type(ty: &Type, path: &str, out: &mut Vec<(String, Rc<Decl>)>) {
     }
 }
 
+/// Whether a group child stands for any key, such as `home.<user>`.
+pub fn is_wildcard(name: &str) -> bool {
+    name.len() > 2 && name.starts_with('<') && name.ends_with('>')
+}
+
+/// The child `key` names: the one declared under that name, else the group's wildcard.
+pub fn lookup<'a>(children: &'a Children, key: &str) -> Option<&'a Node> {
+    children.get(key).or_else(|| {
+        children
+            .iter()
+            .find(|(name, _)| is_wildcard(name))
+            .map(|(_, node)| node)
+    })
+}
+
 /// A "; did you mean `x`?" suffix naming the closest sibling of an unknown key, or "".
 pub fn did_you_mean(path: &str, key: &str, children: &Children) -> String {
     children
         .keys()
+        .filter(|name| !is_wildcard(name))
         .map(|name| (strsim::damerau_levenshtein(name, key), name))
         .filter(|(distance, _)| *distance <= 2)
         .min()

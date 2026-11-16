@@ -28,6 +28,7 @@ fn rendered_lock(date: &str) -> String {
             packages: BTreeMap::new(),
             flatpak: BTreeMap::new(),
             recipes: BTreeMap::new(),
+            home_manager: Default::default(),
         },
     );
     lockfile.render()

@@ -1,6 +1,7 @@
 pub mod build;
 pub mod evaluate;
 pub mod fingerprint;
+pub mod home;
 pub mod hooks;
 mod legacy;
 pub mod model;

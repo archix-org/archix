@@ -57,6 +57,18 @@ return {
         default = {},
         description = "The user's systemd units, by kind (services, timers, sockets, paths, targets) and name, as sections of keys; Install.WantedBy creates the .wants links.",
       },
+      ["<user>"] = {
+        home_manager = archix.option {
+          type = t.nullable(t.attrs_of(t.any)),
+          default = archix.null,
+          description = "This user's home as home-manager options, by their home-manager names; archix writes them to ~/.config/archix/home-manager/<user>/home.nix and the switch builds and activates it. hm.pkg, hm.raw, hm.path, hm.null, hm.list{} and hm.attrs{} say what Lua can't. A user has these or the built-in home modules (home.user), never both.",
+        },
+        linger = archix.option {
+          type = t.bool,
+          default = false,
+          description = "Keep this user's systemd manager running without a login, which home-manager's activation needs when the switch runs while they're logged out; archix never enables linger unless this says so.",
+        },
+      },
     },
   },
 }
