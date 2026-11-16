@@ -133,6 +133,7 @@ pub fn build(handle: &mut Alpm, inputs: &PackageInputs) -> Result<PackageGroup> 
             (None, true) => targets.push(name.clone()),
             (None, false) => group.aur.push(AurItem {
                 name: name.clone(),
+                base: None,
                 commit: inputs.aur_commits.get(name).cloned(),
                 helper: inputs.risk.helper.clone(),
                 reason: "declared, in no repo: built from the AUR".into(),

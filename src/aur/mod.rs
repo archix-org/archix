@@ -1,4 +1,5 @@
 pub mod build;
+pub mod chroot;
 pub mod git;
 pub mod index;
 pub mod install;
