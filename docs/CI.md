@@ -2,23 +2,35 @@
 
 | Workflow | When | Jobs | Takes |
 | --- | --- | --- | --- |
-| `ci.yml` | Every push to `main`, every pull request, and by hand (workflow_dispatch) | `lint`: fmt, clippy, the archive proxy's own test and `tests/vm/boot/checks.py`; `image`: the test image; `build`: archix and every test executable, built once (see below); `container`: `tests/arch/run.sh` over six shards; `container-sum`: the shards ran every test once; `boot`: the split boot tests on the Python driver (`docs/vm-testing.md`, `tests/vm/run.sh boot TEST...`), in jobs of at most four tests, as `tests/ci/boot-results.sh` restores and saves four caches a job: on btrfs `counting try pacman unattended`, `guard keep hang glibc`, `order health hook layer`, `records strict ptrace accounts`, `revoke secureboot entry-edit file-systems` and `removal`, and on ext4 the lane with rollbacks off, `ext4`; each job runs its tests two at a time and skips each test the Actions cache holds a pass of for its inputs' hash, with its logs, one cache entry per test; a failing test never stops the others in its job, the job summary lists each test's outcome, a failed test is an annotation naming it and fails the job, and a failed base marks each of its tests failed; `suites`: one job each for the suites with an image of their own that fit a CI job (`tests/vm/run.sh SUITE`: selfupgrade, dkms2, pcr, firewall, rescue, recovery, secrets on btrfs), cached the same way through `RESULT_PREFIX=` | not yet measured with the 2026-11 tests |
-| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | One job per test named in `suites` as suite-test (`powercut-pacman`, `boot-glibc`, ...), `suite-NAME` for a suite with an image of its own on btrfs and `ext4-NAME` on ext4 (`tests/vm/run.sh NAME`; run.sh's `suite_tests` and `ext4_tests`), by default the power-cut tests (`tests/vm/run.sh powercut TEST`), the Limine tests (`limine-TEST`) and every `suite-NAME` and `ext4-NAME`; on btrfs, `boot-ext4` on ext4; never from the result cache (`ARCHIX_VM_CACHE=0`), each `repeat` times side by side. The power-cut suite builds archix itself with the test hooks' debug assertions | a power-cut test took 25-70 min locally; 5 h VM timeout, 5.5 h job limit |
+| `ci.yml` | Every push to `main`, every pull request, and by hand (workflow_dispatch); a push to any other branch runs nothing | `lint`: fmt, clippy, the archive proxy's own test, `tests/vm/boot/checks.py` and `tests/ci/rescope-pending.py check`; `image`: the test image; `build`: archix and every test executable, built once (see below); `container`: `tests/arch/run.sh` over six shards, every test but those `tests/ci/rescope-pending.txt` skips; `container-sum`: the shards ran every one of those once; `suites`: one job each for the suites with an image of their own that fit a CI job (`tests/vm/run.sh SUITE`: dkms2, firewall, secrets on btrfs), each skipped with a notice while the pending list names it, else cached by its inputs' hash as `tests/ci/boot-results.sh` restores and saves it, the job summary listing its outcome | not yet measured with the 2026-11 tests |
+| `release-gate.yml` | Nightly, by hand (workflow_dispatch), and from `release.yml` | One job per test named in `suites` as `suite-NAME` for a suite with an image of its own on btrfs and `ext4-NAME` on ext4 (`tests/vm/run.sh NAME`; run.sh's `suite_tests` and `ext4_tests`), by default every `suite-NAME` and `ext4-NAME`; never from the result cache (`ARCHIX_VM_CACHE=0`), each `repeat` times side by side. It doesn't read the pending list: a suite pending the rescope fails there, as the gate proves a commit | 5 h VM timeout, 5.5 h job limit |
 | `release.yml` | A `v*` tag | Runs both of the above, then builds the draft release only if they pass | |
 
 The VM jobs need KVM: `tests/ci/check-kvm.sh` fails the job if the runner user can't create a VM, rather than letting QEMU emulate.
 
 ## Building once
 
-The `build` job runs `tests/arch/run.sh` with `ARCHIX_BUILD_OUT=DIR`: in the test image it builds the release binary and every test executable `cargo test` would run, runs the doc tests (they have no executable to hand on), and uploads `target.tar.zst` and `tests.tsv` (every test, by target and executable) as the `archix-build` artifact (`archix-build-gate` in the gate). Test jobs take it as `ARCHIX_PREBUILT=DIR`: `tests/vm/run.sh` and `tests/vm/deploy-boot/run.sh` copy the binaries out instead of compiling, and `tests/arch/run.sh` unpacks the executables into the build volume at the paths they were built for. `selfupgrade` still builds `ARCHIX_OLD`, and `powercut-log` its own build with debug assertions. The job caches the compiled dependencies and the crate registry (`cargo-<hash of Cargo.lock, Cargo.toml and the Dockerfile>`, archix's own artifacts pruned), so only archix itself is compiled when they haven't changed.
+The `build` job runs `tests/arch/run.sh` with `ARCHIX_BUILD_OUT=DIR`: in the test image it builds the release binary and every test executable `cargo test` would run, runs the doc tests (they have no executable to hand on), and uploads `target.tar.zst` and `tests.tsv` (every test, by target and executable) as the `archix-build` artifact (`archix-build-gate` in the gate). Test jobs take it as `ARCHIX_PREBUILT=DIR`: `tests/vm/run.sh` copies the binary out instead of compiling, and `tests/arch/run.sh` unpacks the executables into the build volume at the paths they were built for. The job caches the compiled dependencies and the crate registry (`cargo-<hash of Cargo.lock, Cargo.toml and the Dockerfile>`, archix's own artifacts pruned), so only archix itself is compiled when they haven't changed.
 
 The dev profile compiles dependencies with `opt-level = 3` (`Cargo.toml`); archix's own code stays unoptimised with its debug assertions. The tests run the debug binary, and unoptimised sha2 and zstd took half the suite's time: 3761 s of tests became 1887 s.
 
 ## The container shards
 
-`tests/ci/shard-plan.py plan` splits the build's `tests.tsv`, so a new test or test file is in a shard without anyone listing it, over `CONTAINER_SHARDS` (6) by `tests/ci/test-times.tsv` (each test's time from a CI run; a test it doesn't know counts as its target's mean). Each shard runs `tests/arch/run.sh` with `ARCHIX_TEST_LIST`, which runs its tests from the prebuilt executables with `--include-ignored --exact`, one executable at a time as `cargo test` does, fails if an executable ran fewer tests than it was given, and writes each test's outcome to `ARCHIX_TEST_RESULTS`. `container-sum` (`shard-plan.py check`) fails unless the shards' results hold every test of `tests.tsv` exactly once, each passed, and prints the count per target. Tests in one shard still share a container and run as before; tests in different shards no longer see each other's leftovers.
+`tests/ci/rescope-pending.py filter` first takes the tests `tests/ci/rescope-pending.txt` names out of the build's `tests.tsv` (below); then `tests/ci/shard-plan.py plan` splits the rest, so a new test or test file is in a shard without anyone listing it, over `CONTAINER_SHARDS` (6) by `tests/ci/test-times.tsv` (each test's time from a CI run; a test it doesn't know counts as its target's mean). Each shard runs `tests/arch/run.sh` with `ARCHIX_TEST_LIST`, which runs its tests from the prebuilt executables with `--include-ignored --exact`, one executable at a time as `cargo test` does, fails if an executable ran fewer tests than it was given, and writes each test's outcome to `ARCHIX_TEST_RESULTS`. `container-sum` (`shard-plan.py check`) fails unless the shards' results hold every test of `tests.tsv` exactly once, each passed, and prints the count per target. Tests in one shard still share a container and run as before; tests in different shards no longer see each other's leftovers.
 
 When the shards drift apart, refresh the times from a green run's shard logs: save each with `gh run view <run> --job <id> --log > shard-<i>.log` and run `tests/ci/test-times.py shard-*.log > tests/ci/test-times.tsv`.
+
+## Pending the rescope
+
+`tests/ci/rescope-pending.txt` is the one list of tests CI skips until the rescope rewrites what they need (docs/SCOPE.md 2.2, 9), one line each: the target and test (or `vm` and a suite) and why. `build` drops them from the shards with `rescope-pending.py filter`, which writes them with their reasons to the job summary and `pending.tsv` in the `container-shards` artifact, and fails if the list names a test the build didn't list, so a renamed or deleted test can't leave it stale; each `suites` job runs `rescope-pending.py vm SUITE` first and, for a listed suite, ends with a notice giving why; `lint` runs `rescope-pending.py check`, which fails on a malformed or duplicate line, a suite run.sh doesn't have or a test function that doesn't exist. Locally nothing is skipped: `tests/arch/run.sh` and `tests/vm/run.sh` run every test, and a VM suite stops at its first switch with the stub named (`not_stub` in `tests/vm/boot/common.py`). A test leaves the list in the commit that makes it pass.
+
+At scope-v1 (910ba9c) the list holds:
+
+- the tests that switch or install, remove or upgrade: the stub exits 3;
+- every other test built on tests/common's `Setup`, which writes `boot = { loader, esp, kernel, rescue_entry }`, refused by eval since the boot removal (f26a266);
+- tests calling a removed command: `archix status` (captured.rs five, and others), `snapshot`, `user unlock` and `rescue` (eval's help test), `recover` and `rescue` (switch.rs);
+- eval's fstab test expecting a swap file under /.archix refused, archlinux's diff test expecting the old diff's output and exit 0, and archlinux's DKMS test whose config sets `boot`;
+- the five VM suites, whose first switch is the stub, and dkms2's and nvidia's images, which needed archix-static.
 
 ## Running it locally
 
@@ -28,7 +40,7 @@ When the shards drift apart, refresh the times from a green run's shard logs: sa
 | `tests/arch/run.sh --jobs 2` | every test, over two containers balanced as in CI; takes both heavy slots | 10.5 min |
 | `tests/arch/run.sh --quick` | the unit tests, the cheap always-run targets and the test files `tests/quick.tsv` maps the files changed since `main` (or `ARCHIX_QUICK_BASE`: `HEAD` for the uncommitted changes) to (any unmapped file, `tests/common/`, `Cargo.*` or the Dockerfile: everything); it ends by naming every target it skipped | 68 s after an edit to `src/flatpak.rs`, rebuilds included (253 of 422 tests) |
 | `tests/arch/run.sh <cargo test args>` | as `cargo test <args> -- --include-ignored` | |
-| `FS=ext4 tests/vm/run.sh boot` | the split boot tests side by side (`docs/vm-testing.md`) | 198 s with `ARCHIX_HEAVY_JOBS=4`: 56 s to the laid-out base, then the seven tests; 0.85 s cached |
+| `FS=btrfs tests/vm/run.sh SUITE` | one VM suite (`docs/vm-testing.md`), pending or not | |
 
 Every runner builds the test image through `tests/arch/image.sh`, which skips `docker build` when the image is labelled with the Dockerfile's hash. The build volume is one per checkout, so `cargo` rebuilds only what changed (0.06 s for the release build and 1 s for the tests with nothing changed).
 
@@ -66,7 +78,7 @@ The VM suites were not run offline; from their scripts, beyond the image, crates
 
 | Suite | Host | Why |
 | --- | --- | --- |
-| `cachyos` | mirror.cachyos.org (the keyring package and the live `cachyos*` repos) | By design: CachyOS's real repos, which no snapshot pins; the suite then makes the mirror unreachable to rebuild from archix's own copies |
+| `cachyos` | mirror.cachyos.org (the keyring package and the live `cachyos*` repos) | By design: CachyOS's real repos, which no snapshot pins |
 | `nvidia` | aur.archlinux.org (package list, `nvidia-580xx-dkms` and `nvidia-580xx-utils` recipes), NVIDIA's download server (the recipes' driver source) | By design: the closed driver is an AUR package |
 
 To check again: `tests/ci/offline-check.sh --warm` runs the suite online through a proxy of its own on port 8093 (`ARCHIX_OFFLINE_PORT`), filling its cache in `~/.cache/archix-offline-check` (`ARCHIX_OFFLINE_STATE`) from archive.archlinux.org or `ARCHIX_OFFLINE_UPSTREAM` (the local `http://127.0.0.1:8079` cache, say); then `tests/ci/offline-check.sh` runs it offline (`tests/arch/run.sh --jobs 2` with `ARCHIX_TEST_OFFLINE=1`, which starts the test containers with `--network none`), and prints the proxy's hit and miss counts and every request it couldn't answer. Arguments after the optional `--warm` go to `tests/arch/run.sh`, as `--test switch bare_terms` for one test. A test outside the tables above that fails there and passes online needs the internet; give it a `LocalAur`, a fixture or the proxy, or add it here with why.
@@ -143,20 +155,20 @@ The suite has 422 tests where it had 425; the five took 48 s in CI and the two t
 
 ## Reproducing a job
 
-Run the same script the job runs, for example `FS=btrfs tests/vm/run.sh boot glibc` or `FS=btrfs tests/vm/run.sh powercut keep`. To use the same cache locally:
+Run the same script the job runs, for example `FS=btrfs tests/vm/run.sh firewall`. To use the same cache locally:
 
 ```sh
 tests/ci/archive-proxy.py serve --cache ~/.cache/archix-archive --port 8079 &
-ARCHIX_TEST_ARCHIVE=http://127.0.0.1:8079 tests/vm/run.sh boot
+ARCHIX_TEST_ARCHIVE=http://127.0.0.1:8079 tests/vm/run.sh firewall
 ```
 
 A failed container shard names its tests; `tests/arch/run.sh --test <target> <name>` runs it (and any test whose name contains it). To run a shard's exact set, download the run's `container-shards` and `archix-build` artifacts and run `ARCHIX_PREBUILT=<archix-build dir> ARCHIX_TEST_LIST=<dir>/shard-<i>.tsv tests/arch/run.sh`.
 
 
 
-An intermittent failure is hunted on GitHub rather than locally: `gh workflow run release-gate.yml --ref <branch> -f suites=boot-counting -f repeat=10` runs ten of that test side by side. When a boot test's guest has a NIC networkd didn't configure, the driver's `boot()` (`tests/vm/boot/common.py`) logs QEMU's view of the device (`info network` and the rx and tx queues' `info virtio-queue-status`) to the timeline, and pulls and puts back the cable with `set_link` if the guest's own link down/up didn't help.
+An intermittent failure is hunted on GitHub rather than locally: `gh workflow run release-gate.yml --ref <branch> -f suites=suite-firewall -f repeat=10` runs ten of that suite side by side. When a suite's guest has a NIC networkd didn't configure, the driver's `boot()` (`tests/vm/boot/common.py`) logs QEMU's view of the device (`info network` and the rx and tx queues' `info virtio-queue-status`) to the timeline, and pulls and puts back the cable with `set_link` if the guest's own link down/up didn't help.
 
-A failed job uploads its logs as the `logs-<job>` artifact: each work dir's `serial.log`, `timeline.log` and `output.log`, plus the proxy's log, but never disk images. A power-cut test prints one `CUT point=... booted=... boots=... consistent=...` line per cut and a `CUTS:` summary at its end, in `output.log`.
+A failed job uploads its logs as the `logs-<job>` artifact: each work dir's `serial.log`, `timeline.log` and `output.log`, plus the proxy's log, but never disk images.
 
 
 ## The networkd carrier race

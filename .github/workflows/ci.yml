@@ -31,6 +31,7 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: tests/ci/archive-proxy-test.py
       - run: tests/vm/boot/checks.py
+      - run: tests/ci/rescope-pending.py check
 
   package:
     runs-on: ubuntu-latest
@@ -71,9 +72,11 @@ jobs:
           kvm: "true"
           need-gb: "10"
       - uses: ./.github/actions/build
-      # The shards split every test cargo built, so a new test or test file can't fall outside them.
+      # The shards split every test cargo built but those tests/ci/rescope-pending.txt skips with why, so a new test or test file can't fall outside them.
       - id: plan
         run: |
+          mkdir -p "$RUNNER_TEMP/shards"
+          tests/ci/rescope-pending.py filter "$RUNNER_TEMP/build/tests.tsv" "$RUNNER_TEMP/shards/pending.tsv"
           tests/ci/shard-plan.py plan "$RUNNER_TEMP/build/tests.tsv" tests/ci/test-times.tsv "$CONTAINER_SHARDS" "$RUNNER_TEMP/shards"
           cp "$RUNNER_TEMP/build/tests.tsv" "$RUNNER_TEMP/shards/"
           echo "shards=$(jq -nc --argjson n "$CONTAINER_SHARDS" '[range(1; $n + 1)]')" >> "$GITHUB_OUTPUT"
@@ -176,7 +179,7 @@ jobs:
           path: ${{ runner.temp }}/archive/base
           key: archive-base-${{ github.run_id }}-${{ github.run_attempt }}-container
 
-  # The suites with an image of their own (tests/vm/run.sh's suite_tests) that fit a CI job, one a job, each pass cached by its inputs' hash; the release gate runs every one.
+  # The suites with an image of their own (tests/vm/run.sh's suite_tests) that fit a CI job, one a job, each pass cached by its inputs' hash, but those tests/ci/rescope-pending.txt skips with why; the release gate runs every one.
   suites:
     needs: [image, build]
     runs-on: ubuntu-latest
@@ -194,23 +197,30 @@ jobs:
     steps:
       - run: echo "ARCHIX_PREBUILT=$RUNNER_TEMP/build" >> "$GITHUB_ENV" && echo "ARCHIX_VM_RESULTS=$RUNNER_TEMP/vm-results" >> "$GITHUB_ENV"
       - uses: actions/checkout@v5
-      - uses: ./.github/actions/vm-setup
+      - id: pending
+        run: tests/ci/rescope-pending.py vm ${{ matrix.suite }}
+      - if: steps.pending.outputs.run == 'true'
+        uses: ./.github/actions/vm-setup
         with:
           group: ${{ matrix.suite }}
           need-gb: "40"
-      - uses: actions/download-artifact@v4
+      - if: steps.pending.outputs.run == 'true'
+        uses: actions/download-artifact@v4
         with:
           name: archix-build
           path: ${{ runner.temp }}/build
       - id: keys
+        if: steps.pending.outputs.run == 'true'
         run: tests/ci/boot-results.sh keys ${{ matrix.suite }}
       - if: steps.keys.outputs.test1
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
           key: ${{ steps.keys.outputs.key1 }}
-      - run: tests/ci/boot-results.sh gather
-      - run: tests/vm/run.sh ${{ matrix.suite }}
+      - if: steps.pending.outputs.run == 'true'
+        run: tests/ci/boot-results.sh gather
+      - if: steps.pending.outputs.run == 'true'
+        run: tests/vm/run.sh ${{ matrix.suite }}
       - id: split
         if: always() && steps.keys.outcome == 'success'
         run: tests/ci/boot-results.sh split
@@ -219,7 +229,7 @@ jobs:
         with:
           path: ${{ runner.temp }}/vm-cache/${{ steps.keys.outputs.test1 }}
           key: ${{ steps.keys.outputs.key1 }}
-      - if: always()
+      - if: always() && steps.pending.outputs.run == 'true'
         uses: ./.github/actions/vm-finish
         with:
           group: ${{ matrix.suite }}
