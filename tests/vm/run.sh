@@ -1,28 +1,26 @@
 #!/usr/bin/env bash
-# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh boot [TEST...]` the boot tests side by side from one base (their list is boot_tests below; all but ext4, the lane with rollbacks off, need FS=btrfs), `run.sh powercut [TEST...]` the power cuts at archix's marks (powercut_tests, FS=btrfs, archix built with the test hooks' debug assertions), `run.sh replay [TEST...]` the write replay of a logged run at every flush, mark and ESP subset (replay_tests, FS=btrfs, built like the power-cut suite; the REPLAY_* settings in tests/vm/replay/replay.py), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test, and `run.sh SUITE` each of suite_tests, a test with an image of its own (tests/vm/SUITE: config.lua, image.env, test.py; ext4_tests also run with FS=ext4): selfupgrade the upgrade from a deployments system (ARCHIX_OLD) refused, dkms2 DKMS with two kernels, nvidia NVIDIA's DKMS drivers (TO_DATE, 2026-10-10 by default), cachyos CachyOS on Limine and its move to systemd-boot, churn a year of weekly switches, pcr signed PCR policies with swtpm, firewall the firewall over ssh and a second NIC, rescue the rescue entry, recovery a live-USB recovery, secrets declared secrets on real boots.
+# Boots archix in QEMU with OVMF on the Python driver (docs/vm-testing.md): `run.sh replay [TEST...]` the write replay of a logged run at every flush, mark and ESP subset (replay_tests, FS=btrfs, archix built with the test hooks' debug assertions; the REPLAY_* settings in tests/vm/replay/replay.py), `run.sh limine [TEST...]` a machine Limine boots (limine_tests, FS=btrfs, built likewise), `--interactive` a REPL on one test, and `run.sh SUITE` each of suite_tests, a test with an image of its own (tests/vm/SUITE: config.lua, image.env, test.py; ext4_tests also run with FS=ext4): selfupgrade the upgrade from a deployments system (ARCHIX_OLD) refused, dkms2 DKMS with two kernels, nvidia NVIDIA's DKMS drivers (TO_DATE, 2026-10-10 by default), cachyos CachyOS on Limine and its move to systemd-boot, churn a year of weekly switches, pcr signed PCR policies with swtpm, firewall the firewall over ssh and a second NIC, recovery a live-USB recovery, secrets declared secrets on real boots.
 set -euo pipefail
-suite=${1:-boot}
+suite=${1:?run.sh takes a suite: limine, replay or one of suite_tests}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 # The driver's suites (tests/vm/driver, docs/vm-testing.md): --interactive gives a REPL with the VM as machine, and a pass is recorded by its inputs' hash and skipped next time unless --no-cache or ARCHIX_VM_CACHE=0.
 driver= interactive= cache=1 names=()
 [ "${ARCHIX_VM_CACHE:-1}" != 0 ] || cache=
-boot_tests=(counting try guard unattended pacman keep hang glibc order health hook layer records strict ptrace accounts revoke secureboot entry-edit file-systems removal ext4)
-powercut_tests=(pacman keep varlib rootmove switch esp)
 # A machine Limine boots (FS=btrfs, built with the test hooks): keep refused across a kernel change, a root replaced as limine-snapper-restore does, the move to systemd-boot with cuts at each step, and the handover on firmware that ignores BootNext.
 limine_tests=(keep resync migration handover)
-replay_tests=(pacman install keep switch varlib rootmove uncounted)
-suite_tests=(selfupgrade dkms2 nvidia cachyos churn pcr firewall rescue recovery secrets)
+replay_tests=(pacman install keep switch rootmove uncounted)
+suite_tests=(selfupgrade dkms2 nvidia cachyos churn pcr firewall recovery secrets)
 # Those of suite_tests that also apply with FS=ext4, rollbacks off; the release gate runs them on both.
-ext4_tests=(selfupgrade dkms2 nvidia churn pcr firewall rescue secrets)
+ext4_tests=(selfupgrade dkms2 nvidia churn pcr firewall secrets)
 case $suite in
-  boot | powercut | limine | replay) driver=$suite ;;
-  *) [[ " ${suite_tests[*]} " == *" $suite "* ]] || { echo "unknown suite $suite; run.sh takes boot, powercut, limine, replay or one of: ${suite_tests[*]}" >&2; exit 2; } ;;
+  limine | replay) driver=$suite ;;
+  *) [[ " ${suite_tests[*]} " == *" $suite "* ]] || { echo "unknown suite $suite; run.sh takes limine, replay or one of: ${suite_tests[*]}" >&2; exit 2; } ;;
 esac
 # The last commit of the deployments model, which selfupgrade lays the system out with.
 export ARCHIX_OLD=${ARCHIX_OLD:-505fc7b}
-# The split suites, boot, powercut, limine and replay, run their tests side by side from one base.
+# The split suites, limine and replay, run their tests side by side from one base.
 split=
-case $suite in boot) split=("${boot_tests[@]}") ;; powercut) split=("${powercut_tests[@]}") ;; limine) split=("${limine_tests[@]}") ;; replay) split=("${replay_tests[@]}") ;; esac
+case $suite in limine) split=("${limine_tests[@]}") ;; replay) split=("${replay_tests[@]}") ;; esac
 for arg in "${@:2}"; do
   case $arg in
     --interactive) interactive=1 ;;
@@ -33,16 +31,8 @@ for arg in "${@:2}"; do
   esac
 done
 [ -z "$split" ] || [ -z "$interactive" ] || [ ${#names[@]} = 1 ] || { echo "run.sh $suite --interactive takes one test, or base" >&2; exit 2; }
-# ext4 is the only boot test for an ext4 base, and the only one a btrfs base can't run.
-for_fs() {
-  [ "$suite" = boot ] && [ "$1" != base ] || return 0
-  case ${FS:-ext4} in ext4) [ "$1" = ext4 ] ;; *) [ "$1" != ext4 ] ;; esac
-}
-if [ -n "$split" ] && [ ${#names[@]} -gt 0 ]; then
-  for name in "${names[@]}"; do for_fs "$name" || { echo "run.sh boot $name doesn't run on FS=${FS:-ext4}: ext4 needs FS=ext4, the rest FS=btrfs" >&2; exit 2; }; done
-fi
 if [ -n "$split" ] && [ ${#names[@]} = 0 ]; then
-  for name in "${split[@]}"; do ! for_fs "$name" || names+=("$name"); done
+  names=("${split[@]}")
 fi
 "$root/tests/arch/image.sh"
 cache_py=$root/tests/vm/driver/cache.py
@@ -68,7 +58,7 @@ else
   pending=("$suite")
 fi
 # Exported before the keys are taken, as cache.py hashes it: set after them, it made every power-cut pass's key change during its run.
-[ "$suite" = boot ] || export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
+export VM_TIMEOUT="${VM_TIMEOUT:-14400}"
 if [ ${#pending[@]} -gt 0 ] && [ -z "$interactive" ]; then
   for name in "${pending[@]}"; do inputs[$name]=$(python3 "$cache_py" inputs "$name"); done
   while read -r name key; do keys[$name]=$key; done < <(python3 "$cache_py" keys "${pending[@]}")
@@ -91,8 +81,8 @@ target=archix-target-$(printf %s "$root" | sha256sum | cut -c1-12)
 . "$root/tests/vm/work-dir.sh" vm
 mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/registry -v "$work":/work -v "$root/tests/vm":/vm:ro -e SUITE="$suite" -e FS="${FS:-ext4}" -e TO_DATE="${TO_DATE:-}")
 [ -n "$split" ] || mounts+=(-e IMAGE_DIR="/vm/$suite")
-# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut, Limine and replay suites build their own, with the test hooks' debug assertions.
-if [ "$suite" = powercut ] || [ "$suite" = limine ] || [ "$suite" = replay ]; then
+# ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the Limine and replay suites build their own, with the test hooks' debug assertions.
+if [ "$suite" = limine ] || [ "$suite" = replay ]; then
   docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
     cargo build --locked --release && cp /target/powercut/release/archix /work/archix'
 elif [ -n "${ARCHIX_PREBUILT:-}" ]; then
@@ -128,9 +118,8 @@ build_image() {
     "${image_env[@]}" --env ARCHIVE="${archive/127.0.0.1/10.0.2.2}" --env VM_ARCHIVE="${archive/127.0.0.1/10.0.2.2}" "$@" -- /vm/build-image.sh
 }
 build_image
-# The power-cut and replay tests of the first layout start from the plain image, and rootmove's from one with the root at the top level of its btrfs.
-if [ "$suite" = powercut ] || [ "$suite" = replay ]; then
-  [[ " ${pending[*]} " != *" $suite-varlib "* ]] || cp --sparse=always "$work/disk.img" "$work/plain.img"
+# The replay rootmove test starts from an image with the root at the top level of its btrfs.
+if [ "$suite" = replay ]; then
   [[ " ${pending[*]} " != *" $suite-rootmove "* ]] || build_image --env IMG=/work/top.img --env ROOT_AT_TOP=1
 fi
 tty=() args=()

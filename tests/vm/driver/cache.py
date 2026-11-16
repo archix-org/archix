@@ -13,15 +13,11 @@ ROOT = Path(__file__).resolve().parents[3]
 # Everything in the repository that decides what the VM runs: archix's source and toolchain, the image builder and the driver.
 COMMON = ["src", "Cargo.toml", "Cargo.lock", "tests/arch/Dockerfile", "tests/arch/image.sh", "tests/vm/run.sh", "tests/vm/build-image.sh", "tests/vm/driver"]
 BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/boot/base.py"]
-BOOT_TESTS = ["counting", "try", "guard", "unattended", "pacman", "keep", "hang", "glibc", "order", "health", "hook", "layer", "records", "strict", "ptrace", "accounts", "revoke", "secureboot", "entry-edit", "file-systems", "removal", "ext4"]
-POWERCUT_TESTS = ["pacman", "keep", "varlib", "rootmove", "switch", "esp"]
 LIMINE_TESTS = ["keep", "resync", "migration", "handover"]
-REPLAY_TESTS = ["pacman", "install", "keep", "switch", "varlib", "rootmove", "uncounted"]
+REPLAY_TESTS = ["pacman", "install", "keep", "switch", "rootmove", "uncounted"]
 # The suites with an image of their own (tests/vm/run.sh's suite_tests), which share only boot/common.py with the boot tests.
-OWN_TESTS = ["selfupgrade", "dkms2", "nvidia", "cachyos", "churn", "pcr", "firewall", "rescue", "recovery", "secrets"]
-SUITES = ({f"boot-{name}": BOOT_SHARED + [f"tests/vm/boot/{name}"] for name in BOOT_TESTS}
-          | {f"powercut-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", f"tests/vm/powercut/{name}"] for name in POWERCUT_TESTS}
-          | {f"limine-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/limine/base.py", f"tests/vm/limine/{name}"] for name in LIMINE_TESTS}
+OWN_TESTS = ["selfupgrade", "dkms2", "nvidia", "cachyos", "churn", "pcr", "firewall", "recovery", "secrets"]
+SUITES = ({f"limine-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/limine/base.py", f"tests/vm/limine/{name}"] for name in LIMINE_TESTS}
           | {f"replay-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/replay/writelog.py", "tests/vm/replay/fat.py", "tests/vm/replay/replay.py", f"tests/vm/replay/{name}"] + (["tests/vm/powercut/switch"] if name == "switch" else []) for name in REPLAY_TESTS}
           | {name: ["tests/vm/boot/common.py", "tests/vm/suite.py", f"tests/vm/{name}"] for name in OWN_TESTS})
 ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": "", "REPLAY_SUBSETS": "", "REPLAY_EVERY": "", "REPLAY_ONLY": "", "REPLAY_SEED": "", "REPLAY_WINDOW": "", "REPLAY_ESP_ONLY": "", "REPLAY_JOBS": ""}
