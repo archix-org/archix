@@ -535,60 +535,6 @@ fn files_on_fat_are_not_edited_just_because_fat_has_no_modes() {
 
 #[test]
 #[ignore]
-fn a_btrfs_whose_data_chunks_fill_the_device_gets_room_back_before_a_switch() {
-    let dir = tempfile::TempDir::new().unwrap();
-    let (image, mount) = (dir.path().join("btrfs.img"), dir.path().join("mnt"));
-    fs::create_dir_all(&mount).unwrap();
-    let sh = |command: &str| {
-        let ok = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok, "{command}");
-    };
-    // Several data chunks, as on a real disk: btrfs never gives up the only chunk of a type.
-    sh(&format!("truncate -s 6G {0} && mkfs.btrfs -q {0}", image.display()));
-    // commit=300 keeps the kernel from reclaiming the emptied chunks by itself before the check.
-    sh(&format!(
-        "mount -o loop,commit=300 {} {}",
-        image.display(),
-        mount.display()
-    ));
-    // Some data to keep, as any root has; with nothing at all, btrfs refuses to balance away its last data chunk.
-    for i in 0..300 {
-        fs::write(mount.join(format!("file{i}")), vec![7u8; 4096]).unwrap();
-    }
-    let free = archix::conflicts::free_space(&mount).unwrap();
-    sh(&format!(
-        "fallocate -l {} {}/fill && rm {1}/fill",
-        free - (16 << 20),
-        mount.display()
-    ));
-    let stuck = archix::system::btrfs::unallocated(&mount).unwrap();
-    println!(
-        "unallocated after filling and emptying the data chunks: {} MiB",
-        stuck >> 20
-    );
-    assert!(
-        stuck < 64 << 20,
-        "the data chunks should still hold the device: {} MiB unallocated",
-        stuck >> 20
-    );
-    archix::system::btrfs::ensure_metadata_room(&mount).unwrap();
-    let after = archix::system::btrfs::unallocated(&mount).unwrap();
-    println!("unallocated after ensure_metadata_room: {} MiB", after >> 20);
-    sh(&format!("umount {}", mount.display()));
-    assert!(
-        after > 2 << 30,
-        "the empty data chunks should be back in the pool: {} MiB unallocated",
-        after >> 20
-    );
-}
-
-#[test]
-#[ignore]
 fn a_swap_file_on_btrfs_gets_a_subvolume_of_its_own_and_never_shares_one() {
     let dir = tempfile::TempDir::new().unwrap();
     let (image, root) = (dir.path().join("btrfs.img"), dir.path().join("root"));

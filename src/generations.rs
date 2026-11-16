@@ -30,9 +30,6 @@ pub struct Generation {
     pub settings: Settings,
     pub config_commit: Option<String>,
     pub config_dirty: bool,
-    /// Where root's config repository holds this generation's tree, lock and plan; rollback, keep and revert read it from there only.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub applied: Option<crate::captured::Generation>,
     #[serde(default)]
     pub system: SystemState,
     /// Flatpak apps this generation pinned, by id.
@@ -50,9 +47,6 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
-    /// The config's `rollback` table, which a rollback away from this generation snapshots and prunes by.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rollback: Option<crate::snapshot::Policy>,
 }
 
 impl Generation {
@@ -290,11 +284,9 @@ mod tests {
                 ignored: vec![],
                 keep: 10,
                 keep_days: 30,
-                rollback: None,
             },
             config_commit: None,
             config_dirty: false,
-            applied: None,
             system: SystemState::default(),
             flatpak: BTreeMap::new(),
             package_capabilities: BTreeMap::new(),

@@ -1,7 +1,6 @@
 pub mod accounts;
 pub mod apply;
 pub mod blobs;
-pub mod btrfs;
 pub mod capabilities;
 pub mod credentials;
 pub mod firewall;
@@ -9,7 +8,6 @@ pub mod fstab;
 pub mod hooks;
 pub mod live;
 pub mod merge;
-pub mod mounts;
 pub mod password;
 pub mod restart;
 pub mod sleep;

@@ -269,7 +269,6 @@ fn check_mounts(root: &Path, incoming: &[Contents]) -> Result<()> {
         }
     }
     for (mount, add) in adds {
-        crate::system::btrfs::ensure_metadata_room(&mount)?;
         check_space(&mount, add, 0)?;
     }
     Ok(())

@@ -106,7 +106,7 @@ fn normal(point: &str) -> &str {
     }
 }
 
-/// Why `point` can't be a mount point file_systems declares, with the ESP at `esp`: archix writes the root's and the ESP's lines itself, the trees a snapshot of the root holds must stay on it, and /var/lib and /.archix are the layout's own.
+/// Why `point` can't be a mount point file_systems declares, with the ESP at `esp`: archix keeps the root's and the ESP's lines as they are, and the trees a snapshot of the root holds must stay on it.
 pub fn refused_point(point: &str, esp: &str) -> Option<String> {
     let esp = normal(esp);
     if point == "/" {
@@ -127,11 +127,8 @@ pub fn refused_point(point: &str, esp: &str) -> Option<String> {
             ));
         }
     }
-    if under(point, "/.archix") {
-        return Some("archix mounts its own subvolume, @archix, at /.archix".into());
-    }
     if point == "/var" || point == "/var/lib" || under(point, "/var/lib/pacman") || under(point, "/var/lib/dkms") {
-        return Some("with rollbacks, archix mounts @varlib at /var/lib and binds the pacman database and DKMS state from the root over it, so they roll back with it".into());
+        return Some("the pacman database and DKMS state stay on the root filesystem, so a snapshot of the root holds them with the packages".into());
     }
     None
 }
@@ -143,7 +140,6 @@ fn refused_swap_file(file: &str, esp: &str) -> Option<String> {
         return Some(format!("it's on the ESP at {esp}"));
     }
     for (dir, why) in [
-        ("/.archix", "snapshots live in /.archix"),
         ("/usr", "/usr is part of every snapshot of the root"),
         ("/opt", "/opt is part of every snapshot of the root"),
         ("/boot", "/boot is part of every snapshot of the root"),
@@ -512,22 +508,14 @@ pub(crate) fn fields(line: &str) -> Option<Vec<String>> {
     Some(line.split_whitespace().map(unescape).collect())
 }
 
-/// Lines archix keeps as they are: the root's, the ESP's (at `esp`, or a vfat one at /boot, /efi or /boot/efi), and the rollback layout's (@varlib, @archix and the binds over /var/lib), which setup wrote.
+/// Lines archix keeps as they are: the root's and the ESP's (at `esp`, or a vfat one at /boot, /efi or /boot/efi).
 fn kept(fields: &[String], esp: &str) -> bool {
     let vfat_esp = fields.get(2).is_some_and(|fs_type| fs_type == "vfat")
         && fields.get(1).is_some_and(|point| ["/boot", "/efi", "/boot/efi"].contains(&normal(point)));
-    let layout = [
-        "/var/lib",
-        "/.archix",
-        "/var/lib/pacman",
-        "/var/lib/dkms",
-        "/var/lib/archix",
-    ];
     fields.len() >= 2
         && (normal(&fields[1]) == "/"
             || normal(&fields[1]) == normal(esp)
-            || vfat_esp
-            || layout.contains(&normal(&fields[1])))
+            || vfat_esp)
 }
 
 /// The fstab archix writes where the fstab was `old`: its root and ESP lines as they are, then the declared lines.
@@ -1579,18 +1567,6 @@ mod tests {
     }
 
     #[test]
-    fn a_switch_keeps_the_rollback_layouts_lines_as_setup_wrote_them() {
-        let old = "UUID=a / btrfs rw,subvol=/@ 0 0\n\
-                   UUID=a /var/lib btrfs rw,subvol=/@varlib 0 0\n\
-                   UUID=a /.archix btrfs rw,subvol=/@archix 0 0\n\
-                   /var/rollback/pacman /var/lib/pacman none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
-                   /var/rollback/dkms /var/lib/dkms none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
-                   /var/rollback/archix /var/lib/archix none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n";
-        let text = compose(old, "/efi", &[]);
-        assert_eq!(text, format!("{HEADER}\n{old}"));
-    }
-
-    #[test]
     fn mount_points_archix_lays_out_or_writes_itself_are_refused() {
         for (point, why) in [
             ("/", "root's line"),
@@ -1601,7 +1577,6 @@ mod tests {
             ("/opt", "snapshot of the root holds it"),
             ("/boot", "snapshot of the root holds it"),
             ("/etc", "snapshot of the root holds it"),
-            ("/.archix", "@archix"),
             ("/var", "pacman database"),
             ("/var/lib", "pacman database"),
             ("/var/lib/pacman", "pacman database"),
@@ -1718,10 +1693,6 @@ mod tests {
                 .contains("Before=swap-swapfile.swap shutdown.target\n")
         );
         for (spec, why) in [
-            (
-                serde_json::json!({ "file": "/.archix/swapfile", "size": "1G" }),
-                "snapshots live in /.archix",
-            ),
             (
                 serde_json::json!({ "file": "/usr/local/swapfile", "size": "1G" }),
                 "/usr is part of every snapshot",

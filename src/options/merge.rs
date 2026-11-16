@@ -25,16 +25,12 @@ pub fn check(path: &str, ty: &Type, def: Def) -> Result<Value, Vec<Diagnostic>> 
 /// Options archix no longer has, with what replaced them.
 const REMOVED: &[(&str, &str)] = &[
     (
-        "boot.snapshots",
-        "archix takes its own btrfs snapshots: rollback.enable turns them on and rollback.keep_switch sets how many switches keep one",
+        "rollback",
+        "archix takes no snapshots of its own: snapper with snap-pac snapshots every pacman transaction (docs/SCOPE.md)",
     ),
     (
-        "boot.entries",
-        "rollback.entries sets how many snapshots get a boot entry",
-    ),
-    (
-        "deployments.keep",
-        "deployments are gone: a switch applies in place, and rollback.keep_switch sets how many switch snapshots stay",
+        "boot",
+        "archix no longer writes boot entries: limine-snapper-sync puts snapshots in the Limine menu (docs/SCOPE.md)",
     ),
 ];
 
@@ -444,24 +440,17 @@ mod tests {
 
     #[test]
     fn a_removed_option_names_what_replaced_it() {
-        let root = tree(vec![(
-            "boot",
-            Node::Group(Rc::new(tree(vec![("tries", opt(Type::Int, None))]))),
-        )]);
+        let root = tree(vec![("packages", opt(Type::Int, None))]);
         let (_, errors) = merge(
             &root,
             vec![def(
                 "a.lua",
-                map(vec![("boot", map(vec![("snapshots", Raw::Bool(false))]))]),
+                map(vec![("rollback", map(vec![("enable", Raw::Bool(true))]))]),
             )],
         );
         assert_eq!(errors.len(), 1);
-        assert_eq!(errors[0].path.as_deref(), Some("boot.snapshots"));
-        assert!(
-            errors[0].message.contains("rollback.keep_switch"),
-            "{}",
-            errors[0].message
-        );
+        assert_eq!(errors[0].path.as_deref(), Some("rollback"));
+        assert!(errors[0].message.contains("snapper"), "{}", errors[0].message);
     }
 
     #[test]

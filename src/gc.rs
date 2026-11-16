@@ -166,9 +166,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
         return Ok(Report::default());
     };
     let mut report = Report::default();
-    let snapshots = crate::snapshot::Store::open(&paths.root).list().unwrap_or_default();
-    let mut keep = kept(&generations, current, settings.keep, settings.keep_days, now());
-    keep.extend(snapshots.iter().filter_map(|record| record.generation));
+    let keep = kept(&generations, current, settings.keep, settings.keep_days, now());
     for generation in &generations {
         if !keep.contains(&generation.number) {
             store.delete(generation.number)?;
@@ -177,8 +175,7 @@ pub fn collect(paths: &Paths, snapshot_cache: &Path) -> Result<Report> {
     }
 
     let kept_generations: Vec<_> = generations.iter().filter(|g| keep.contains(&g.number)).collect();
-    let mut locks: Vec<_> = kept_generations.iter().map(|g| (g.number, &g.packages)).collect();
-    locks.extend(snapshots.iter().map(|record| (0, &record.packages)));
+    let locks: Vec<_> = kept_generations.iter().map(|g| (g.number, &g.packages)).collect();
     let files = cached_files(&locks);
     for dir in [paths.packages(), paths.cache.join("verified")] {
         let Ok(entries) = fs::read_dir(&dir) else { continue };

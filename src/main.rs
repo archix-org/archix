@@ -82,31 +82,12 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Adopt a root archix didn't produce (a snapper or limine-snapper-sync rollback, a restore): check its layout, carry accounts over from the root it replaced when that can be found, and record it
-    Resync,
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
     /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
     #[command(subcommand)]
     Secrets(Secrets),
-    /// The root's btrfs snapshots: taking, listing and deleting them, and laying the root out for rollbacks
-    #[command(subcommand)]
-    Snapshot(SnapshotAction),
-    /// Repair from a live USB: mount the root on a device as it boots, @archix, @varlib, the binds from /var/rollback and the ESP included, and arch-chroot into it
-    Chroot {
-        /// The root's btrfs device, such as /dev/nvme0n1p2 or an opened /dev/mapper/root
-        device: String,
-        /// The ESP's device, when the root's fstab doesn't say and there's more than one EFI system partition
-        #[arg(long, value_name = "DEVICE")]
-        esp: Option<String>,
-        /// The command to run inside, a shell by default
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        command: Vec<String>,
-    },
-    /// Run at boot by archix-split-var-lib.service, before /var/lib is mounted: move it into its own subvolume
-    #[command(hide = true)]
-    SplitVarLib,
     /// Run by a root command under a transient uid: evaluate a captured config tree and print its plan
     #[command(hide = true)]
     EvaluateIsolated {
@@ -163,26 +144,6 @@ enum Secrets {
     Activate {
         #[arg(long, default_value = "/")]
         root: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
-enum SnapshotAction {
-    /// Take a read-only snapshot of the root now; prune never drops it
-    Create {
-        /// A note to keep with it, shown by `archix snapshot list`
-        #[arg(long)]
-        note: Option<String>,
-    },
-    /// List the snapshots, oldest first, with what took each
-    List,
-    /// Delete a snapshot
-    Delete { number: u32 },
-    /// Lay the root out for rollbacks: /.archix and /var/lib as subvolumes of their own, with pacman's database, DKMS's and archix's state kept on the root; /var/lib moves at the next boot
-    Setup {
-        /// On a root that is btrfs's top level: move it into an `@` subvolume at the next boot, in the initramfs; other subvolumes at the top level stay as they are
-        #[arg(long)]
-        move_root: bool,
     },
 }
 
@@ -249,10 +210,6 @@ fn with_sudo() -> String {
 /// Commands that change the system, checked before anything (like installed.lua) is touched.
 fn needs_root(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
-        Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
-        Command::Snapshot(SnapshotAction::Setup { .. }) => Some("snapshot setup"),
-        Command::Resync => Some("resync"),
         Command::Secrets(Secrets::Init { .. }) => Some("secrets init"),
         Command::Secrets(Secrets::RotateMachineKey { .. }) => Some("secrets rotate-machine-key"),
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
@@ -370,17 +327,6 @@ fn run() -> Result<ExitCode> {
             archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Chroot { device, esp, command } => {
-            if !is_root() {
-                anyhow::bail!("`archix chroot` mounts filesystems; run it as root");
-            }
-            commands::snapshot::chroot(&device, esp.as_deref(), &command)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::SplitVarLib => {
-            commands::snapshot::split_var_lib()?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Switch { .. } | Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
             eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
             return Ok(ExitCode::from(3));
@@ -425,21 +371,8 @@ fn run() -> Result<ExitCode> {
             );
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Snapshot(action) => {
-            match action {
-                SnapshotAction::Create { note } => commands::snapshot::create(note)?,
-                SnapshotAction::List => commands::snapshot::list()?,
-                SnapshotAction::Delete { number } => commands::snapshot::delete(number)?,
-                SnapshotAction::Setup { move_root } => commands::snapshot::setup(move_root)?,
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Prefetch { url } => {
             commands::prefetch(&url)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Resync => {
-            commands::snapshot::resync()?;
             return Ok(ExitCode::SUCCESS);
         }
         _ => {}
@@ -550,13 +483,9 @@ fn run() -> Result<ExitCode> {
         | Command::Upgrade { .. }
         | Command::Init
         | Command::Prefetch { .. }
-        | Command::Resync
         | Command::Swapfile { .. }
-        | Command::Snapshot(_)
-        | Command::SplitVarLib
         | Command::EvaluateIsolated { .. }
         | Command::WriteFile { .. }
-        | Command::Chroot { .. }
         | Command::Secrets(_) => {
             unreachable!("handled before the config is evaluated")
         }

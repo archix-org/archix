@@ -30,7 +30,6 @@ pub mod repos;
 pub mod resolve;
 pub mod revert;
 pub mod secrets;
-pub mod snapshot;
 pub mod soname;
 pub mod system;
 pub mod testhooks;

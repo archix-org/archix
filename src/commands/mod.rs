@@ -1,7 +1,6 @@
 mod helper;
 mod init;
 mod lock;
-pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
