@@ -499,28 +499,6 @@ fn a_drifted_package_only_an_aur_package_of_another_name_provides_is_declared_on
 
 #[test]
 #[ignore]
-fn a_switch_with_rollbacks_on_refuses_a_root_on_the_btrfs_top_level_until_its_moved_into_at() {
-    let _system = lock_system();
-    let setup = Setup::on(Machine::on_btrfs_top("3G"), &[], "rollback = { enable = true }", &[]);
-    let out = setup.run(&["switch", "--noconfirm"]);
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success() && said.contains("top level") && said.contains("--move-root"),
-        "the switch refuses, naming why and the way out: {said}"
-    );
-    assert!(
-        archix::generations::Store::new(&setup.paths)
-            .current()
-            .unwrap()
-            .is_none(),
-        "and applies nothing"
-    );
-    setup.set_body(&[], "rollback = { enable = false }");
-    setup.ok(&["switch", "--noconfirm"]);
-}
-
-#[test]
-#[ignore]
 fn unsafe_downgrades_ask_and_noconfirm_refuses_them() {
     let _system = lock_system();
     let body = r#"unsafe_downgrades = { lemon = { "3.54" } }"#;

@@ -19,7 +19,6 @@ pub struct Markers {
 /// Modules shipped inside the binary, loaded before init.lua and reachable as `archix.<name>`.
 pub const BUILTIN_MODULES: &[(&str, &str)] = &[
     ("packages", include_str!("modules/packages.lua")),
-    ("generations", include_str!("modules/generations.lua")),
     ("aur", include_str!("modules/aur.lua")),
     ("system", include_str!("modules/system.lua")),
     ("hooks", include_str!("modules/hooks.lua")),

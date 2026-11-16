@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 
 use super::{ManagedFile, SystemState, User, blobs};
 use crate::fetch::sha256;
-use crate::generations::now;
 use crate::paths::Paths;
 
 /// The system part of a switch: what the current generation applied and what the target applies.
@@ -271,8 +270,14 @@ pub fn is_enabled(root: &Path, unit: &str, user: bool) -> bool {
         .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
 }
 
-/// One line per change applying `change` would make to what `locate` finds and the accounts and services of `root`, flagging managed files someone edited by hand.
-pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root: &Path) -> Result<Vec<String>> {
+/// One line per change applying `change` would make to what `locate` finds and the accounts and services of `root`, flagging managed files someone edited by hand; `left_by_packages` is the capabilities each file had as its package left it, as getcap prints them.
+pub fn describe(
+    change: &SystemChange,
+    locate: Locate,
+    accounts: &Accounts,
+    root: &Path,
+    left_by_packages: &BTreeMap<String, String>,
+) -> Result<Vec<String>> {
     let mut lines = Vec::new();
     for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
@@ -365,14 +370,6 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
             lines.push(format!("setcap     {path} {}", super::capabilities::to_text(&want)));
         }
     }
-    let records = crate::generations::Store::new(&Paths::under(root));
-    let left_by_packages = records
-        .current()
-        .ok()
-        .flatten()
-        .and_then(|current| records.get(current).ok())
-        .map(|current| current.package_capabilities)
-        .unwrap_or_default();
     for (path, text) in &change.from.capabilities {
         if !change.to.capabilities.contains_key(path)
             && super::capabilities::parse(text).is_ok_and(|had| caps_at(path) == Some(had))
@@ -391,6 +388,13 @@ pub fn describe(change: &SystemChange, locate: Locate, accounts: &Accounts, root
         }
     }
     Ok(lines)
+}
+
+/// Seconds since the Unix epoch.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
 }
 
 /// Creates and updates the users and groups archix manages in a staging root through `run`, which runs a command in it, reading its accounts from `etc`; passwords are credentials::apply's. Returns the regular users it created, whose homes `create_homes` makes once the deployment is committed.
@@ -1517,6 +1521,63 @@ mod tests {
         assert!(a.file_name().unwrap().to_string_lossy().starts_with(".x.archix."));
         let (tmp, _) = create_temp(&target).unwrap();
         assert_eq!(fs::symlink_metadata(&tmp).unwrap().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn describing_a_change_names_files_users_groups_and_services_but_not_what_already_matches() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("etc")).unwrap();
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        fs::write(root.path().join("etc/passwd"), format!("root:x:{uid}:{gid}::/root:/bin/bash\n")).unwrap();
+        fs::write(root.path().join("etc/group"), format!("root:x:{gid}:\n")).unwrap();
+        fs::write(root.path().join("etc/issue"), "Arch\n").unwrap();
+        fs::set_permissions(root.path().join("etc/issue"), fs::Permissions::from_mode(0o644)).unwrap();
+        let file = |text: &str| ManagedFile {
+            sha256: crate::fetch::sha256_bytes(text.as_bytes()),
+            link: None,
+            mode: 0o644,
+            owner: "root".into(),
+            group: "root".into(),
+            merge: None,
+        };
+        let mut from = SystemState::default();
+        from.files.insert("/etc/old".into(), file("old\n"));
+        from.groups.insert("gone".into(), super::super::Group { gid: None, system: false });
+        let mut to = SystemState::default();
+        to.files.insert("/etc/motd".into(), file("hello\n"));
+        to.files.insert("/etc/issue".into(), file("Arch\n"));
+        to.users.insert(
+            "alice".into(),
+            User {
+                uid: None,
+                group: None,
+                groups: Vec::new(),
+                shell: "/bin/bash".into(),
+                home: None,
+                description: String::new(),
+                system: false,
+                hashed_password: None,
+                initial_hashed_password: None,
+                hashed_password_secret: None,
+            },
+        );
+        to.groups.insert("media".into(), super::super::Group { gid: Some(1500), system: false });
+        to.services.insert("sshd.service".into(), true);
+        let change = SystemChange { from, to };
+        let locate = |path: &str| Some(root.path().join(path.trim_start_matches('/')));
+        let accounts = Accounts::read(&root.path().join("etc"));
+        let lines = describe(&change, &locate, &accounts, root.path(), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            lines,
+            [
+                "create     /etc/motd",
+                "unmanage   /etc/old",
+                "add user   alice",
+                "group      media",
+                "remove     group gone",
+                "enable     sshd.service",
+            ]
+        );
     }
 
     #[test]

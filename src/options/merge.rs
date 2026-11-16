@@ -32,6 +32,10 @@ const REMOVED: &[(&str, &str)] = &[
         "boot",
         "archix no longer writes boot entries: limine-snapper-sync puts snapshots in the Limine menu (docs/SCOPE.md)",
     ),
+    (
+        "generations",
+        "archix keeps no generations: snapper's snapshots and the journal of switches stand in for them (docs/SCOPE.md)",
+    ),
 ];
 
 #[derive(Default)]

@@ -987,21 +987,6 @@ pub fn check_drops(
     )
 }
 
-/// Warnings for the fstab lines of the running system's `current` that the fstab `target` leaves out and that are mounted now or protected, as a rollback can't refuse.
-pub fn rollback_warnings(root: &Path, current: &str, target: &str, esp: &str) -> Vec<String> {
-    guarded_drops(current, esp, &others(target, esp), &[], &|point| mounted(root, point))
-        .into_iter()
-        .map(|guarded| {
-            format!(
-                "warning: the generation rolled back to has no fstab line for {} ({}; {}), so the next boot goes without it; declare it in file_systems and switch again",
-                guarded.what,
-                guarded.line,
-                guarded.why.join("; ")
-            )
-        })
-        .collect()
-}
-
 /// The ESP's mount point archix keeps out of file_systems; a vfat line at /boot or /boot/efi is kept too.
 pub fn esp_of(_config: &Value) -> &str {
     "/efi"
