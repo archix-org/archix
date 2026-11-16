@@ -22,6 +22,37 @@ fn archix(config: &str, args: &[&str]) -> (bool, String) {
     (output.status.success(), text)
 }
 
+fn archix_code(config: &str, args: &[&str]) -> (Option<i32>, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["--config", config, "--host", "initbox"])
+        .args(args)
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    (output.status.code(), text)
+}
+
+#[test]
+#[ignore]
+fn diff_right_after_init_has_nothing_to_do() {
+    let _system = lock_system();
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("cfg");
+    let config = config.to_str().unwrap();
+    let (ok, out) = archix(config, &["init"]);
+    assert!(ok, "init failed:\n{out}");
+    let (code, text) = archix_code(config, &["diff"]);
+    assert_eq!(code, Some(0), "SCOPE 8: diff after init exits 0, got:\n{text}");
+    let (code, json) = archix_code(config, &["diff", "--json"]);
+    assert_eq!(code, Some(0), "{json}");
+    let plan: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(plan["schema_version"].is_number(), "{json}");
+}
+
 /// A partial upgrade: lemon from a later snapshot than the rest of the image.
 fn install_newer_lemon() {
     let file = std::env::temp_dir().join("lemon-3.54.0-1-x86_64.pkg.tar.zst");
