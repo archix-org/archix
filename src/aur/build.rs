@@ -14,7 +14,6 @@ use crate::archive::Archive;
 use crate::date::Date;
 use crate::fetch::{Wanted, fetch_all};
 use crate::lock::Locked;
-use crate::packages::TRANSACTION_ENV;
 use crate::pacman::read_sync_db;
 use crate::paths::Paths;
 use crate::repos::{Repo, is_official};
@@ -661,8 +660,7 @@ impl Builder<'_> {
         if !files.is_empty() {
             let mut cmd = Command::new("pacman");
             cmd.args(["-U", "--noconfirm", "--needed", "--asdeps"])
-                .args(&files)
-                .env(TRANSACTION_ENV, "1");
+                .args(&files);
             run(&mut cmd, "pacman -U")?;
         }
         let mut makepkg = Command::new("runuser");
@@ -683,7 +681,7 @@ impl Builder<'_> {
             .collect();
         if !added.is_empty() {
             let mut cmd = Command::new("pacman");
-            cmd.args(["-R", "--noconfirm"]).args(&added).env(TRANSACTION_ENV, "1");
+            cmd.args(["-R", "--noconfirm"]).args(&added);
             run(&mut cmd, "pacman -R")?;
         }
         built

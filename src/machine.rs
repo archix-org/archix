@@ -6,7 +6,6 @@ use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use md5::{Digest, Md5};
 
 use crate::pacman::parse_desc;
 use crate::repos::{Custom, is_official};
@@ -32,10 +31,6 @@ pub struct Accounts {
     pub groups: BTreeMap<String, u32>,
     /// Which of `groups` are system groups.
     pub system_groups: BTreeSet<String>,
-}
-
-pub fn md5_bytes(bytes: &[u8]) -> String {
-    Md5::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// `path`, absolute on the machine, inside `root`.

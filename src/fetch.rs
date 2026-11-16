@@ -38,7 +38,7 @@ pub fn fetch_all(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], wanted
         .filter_map(|item| item.size)
         .sum();
     if downloads > 0 {
-        crate::conflicts::check_space(dir, downloads, 0)?;
+        check_space(dir, downloads, 0)?;
     }
     let next = AtomicUsize::new(0);
     let full = AtomicBool::new(false);
@@ -176,9 +176,60 @@ pub fn sha256(path: &Path) -> Result<String> {
     Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// pacman extracts file by file and the boot step writes initramfs images, so a switch keeps this much free beyond what it adds.
+const SPARE: u64 = 128 << 20;
+
+/// Refuses a transaction that adds `adds` bytes and frees `frees` when `root`'s filesystem can't hold the difference plus some spare.
+pub fn check_space(root: &Path, adds: u64, frees: u64) -> Result<()> {
+    let Some((mut free, total)) = space(root) else {
+        return Ok(());
+    };
+    // pacman keeps 5% of the filesystem as a cushion; a small ESP still takes a ucode update.
+    let needed = adds.saturating_sub(frees) + SPARE.min(total / 20);
+    // btrfs hands back a deleted file's space only at its next commit, which can take two.
+    for _ in 0..2 {
+        if free >= needed {
+            break;
+        }
+        if let Ok(dir) = File::open(root) {
+            unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
+        }
+        free = space(root).map_or(free, |(free, _)| free);
+    }
+    if free < needed {
+        let mib = |bytes: u64| bytes.div_ceil(1 << 20);
+        bail!(
+            "{} has {} MiB free, but this needs about {} MiB; nothing was changed. Free some space (`pacman -Sc`) and try again",
+            root.display(),
+            mib(free),
+            mib(needed)
+        );
+    }
+    Ok(())
+}
+
+/// Bytes available to unprivileged users, as pacman counts them, and the filesystem's size.
+fn space(path: &Path) -> Option<(u64, u64)> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0).then(|| {
+        let block = stat.f_frsize as u64;
+        (stat.f_bavail as u64 * block, stat.f_blocks as u64 * block)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn downloads_that_would_fill_the_filesystem_are_refused_before_they_start() {
+        let dir = tempfile::tempdir().unwrap();
+        check_space(dir.path(), 0, 0).unwrap();
+        let error = check_space(dir.path(), u64::MAX / 2, 0).unwrap_err().to_string();
+        assert!(error.contains("MiB free") && error.contains("nothing was changed"), "{error}");
+        check_space(dir.path(), u64::MAX / 2, u64::MAX / 2).unwrap();
+    }
 
     #[test]
     fn a_full_disk_is_told_apart_from_other_failures() {

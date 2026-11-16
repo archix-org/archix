@@ -1184,46 +1184,6 @@ fn revert_applies_an_earlier_generation_in_place_and_refuses_one_root_s_reposito
 
 #[test]
 #[ignore]
-fn a_transaction_is_refused_before_it_starts_when_the_root_has_too_few_inodes_left() {
-    let dir = tempfile::tempdir().unwrap();
-    let (image, mnt) = (dir.path().join("fs.img"), dir.path().join("mnt"));
-    fs::create_dir_all(&mnt).unwrap();
-    let sh = |script: &str| {
-        let status = Command::new("bash").args(["-ec", script]).status().unwrap();
-        assert!(status.success(), "{script}");
-    };
-    sh(&format!(
-        "truncate -s 64M {0} && mkfs.ext4 -q -N 8192 {0} && mount -o loop {0} {1}",
-        image.display(),
-        mnt.display()
-    ));
-    let db = mnt.join("var/lib/pacman/local");
-    fs::create_dir_all(&db).unwrap();
-    let checked = archix::conflicts::check(&[], &[], &db, &mnt);
-    let filler = mnt.join("filler");
-    fs::create_dir(&filler).unwrap();
-    let mut made = 0;
-    while fs::File::create(filler.join(made.to_string())).is_ok() {
-        made += 1;
-    }
-    for n in 0..64 {
-        fs::remove_file(filler.join(n.to_string())).unwrap();
-    }
-    let refused = archix::conflicts::check(&[], &[], &db, &mnt);
-    let _ = Command::new("umount").arg(&mnt).status();
-    checked.expect("a root with inodes to spare passes");
-    let text = format!(
-        "{:#}",
-        refused.expect_err("a root without inodes for the transaction passed")
-    );
-    assert!(
-        text.contains("free inodes") && text.contains("nothing was changed"),
-        "{text}"
-    );
-}
-
-#[test]
-#[ignore]
 fn on_btrfs_a_switch_that_lays_the_root_out_and_changes_packages_stops_before_them_until_the_reboot() {
     let _system = lock_system();
     let setup = Setup::on(Machine::on_btrfs(), &["tree"], ROLLBACKS, &[]);

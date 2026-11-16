@@ -395,8 +395,11 @@ impl Machine {
 
     /// Mount points at or under `path`, deepest first.
     fn mounts_under(path: &Path) -> Vec<PathBuf> {
-        let mut points: Vec<PathBuf> = archix::conflicts::mount_points()
-            .into_iter()
+        let mut points: Vec<PathBuf> = fs::read_to_string("/proc/self/mounts")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .map(|point| PathBuf::from(point.replace("\\040", " ")))
             .filter(|point| point.starts_with(path))
             .collect();
         points.sort_by_key(|point| std::cmp::Reverse(point.components().count()));
