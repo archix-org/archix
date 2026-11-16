@@ -65,10 +65,17 @@ enum Command {
         #[arg(long)]
         cached: bool,
     },
-    /// Apply the config to the running system; being rewritten for the rescope
+    /// Apply the plan diff prints to the running system: exit 0 done, 2 refused before anything was written, 3 failed partway
     Switch {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-        rest: Vec<String>,
+        /// Apply without asking
+        #[arg(long)]
+        noconfirm: bool,
+        /// Go without a snapper pre/post pair; needed when snapper isn't set up
+        #[arg(long)]
+        no_snapshot: bool,
+        /// Apply a plan saved by `diff --save`, refusing if anything it was made from moved; nothing is asked
+        #[arg(long, value_name = "FILE")]
+        plan: Option<PathBuf>,
     },
     /// Declare packages and install them; being rewritten with switch
     Install {
@@ -328,7 +335,7 @@ fn run() -> Result<ExitCode> {
             archix::system::fstab::make_swapfile(&path, bytes)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Switch { .. } | Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
+        Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
             eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
             return Ok(ExitCode::from(3));
         }
@@ -415,6 +422,31 @@ fn run() -> Result<ExitCode> {
             commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
                 eprintln!("error: {e:#}");
                 commands::diff::error_code()
+            }),
+        ));
+    }
+    if let Command::Switch {
+        noconfirm,
+        no_snapshot,
+        plan,
+    } = command
+    {
+        if is_root() {
+            leave_login_session();
+            if let Err(e) = hold_exclusive() {
+                eprintln!("archix switch refuses: {e:#}");
+                return Ok(ExitCode::from(commands::switch::REFUSED));
+            }
+        }
+        let args = commands::switch::SwitchArgs {
+            noconfirm,
+            no_snapshot,
+            plan,
+        };
+        return Ok(ExitCode::from(
+            commands::switch::switch(&cli.config, &hostname, &args).unwrap_or_else(|e| {
+                eprintln!("error: {e:#}");
+                commands::switch::REFUSED
             }),
         ));
     }

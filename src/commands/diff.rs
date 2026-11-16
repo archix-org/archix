@@ -176,8 +176,23 @@ fn out(text: &str) {
     let _ = std::io::stdout().write_all(text.as_bytes());
 }
 
-/// `archix diff`: plan(), printed; returns SCOPE 3.1's exit code.
-pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
+/// Everything one plan() call saw and made, for diff to print and switch to execute.
+pub struct Computed {
+    pub plan: archix::plan::Plan,
+    pub fingerprint: Fingerprint,
+    pub conf: PacmanConf,
+    pub dbpath: PathBuf,
+    pub evaluation: archix::plan::evaluate::Evaluated,
+    pub lock: Option<archix::lock::HostLock>,
+    pub last: Option<LastApplied>,
+    pub rendered: archix::system::Rendered,
+    pub secret_hmacs: Option<BTreeMap<String, String>>,
+    pub snapper_configured: bool,
+    pub archive_url: String,
+}
+
+/// SCOPE 3's plan() for the config at `config_dir`, with its fingerprint; diff and switch both call this.
+pub fn compute(config_dir: &Path, host: &str, cached: bool) -> Result<Computed> {
     let evaluation = evaluate_for_plan(config_dir, host)?;
     let config = &evaluation.config;
     let tree = evaluation.tree.as_path();
@@ -199,7 +214,7 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
 
     let mut date = lock_date;
     let mut conf = conf_at(date);
-    let (mut handle, mut dbpath) = prepared_handle(&conf, &sync_dir(&conf), args.cached)?;
+    let (mut handle, mut dbpath) = prepared_handle(&conf, &sync_dir(&conf), cached)?;
     let mut moved_from = None;
     if let Some(start) = lock_date {
         let installed: BTreeMap<String, String> = archix::plan::packages::local_packages(&handle)
@@ -210,7 +225,7 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         if !repostate::newer_than(&installed, &at_lock).is_empty() {
             let (found, _) = repostate::earliest_not_older(start, 60, &installed, |d| {
                 let c = conf_at(Some(d));
-                let (h, _) = prepared_handle(&c, &sync_dir(&c), args.cached)?;
+                let (h, _) = prepared_handle(&c, &sync_dir(&c), cached)?;
                 Ok(alpm::sync_versions(&h))
             })?;
             date = Some(found);
@@ -238,7 +253,7 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         date,
         moved_from: moved_from.as_ref().and(lock_date),
         fingerprint: String::new(),
-        cached_dbs: args.cached,
+        cached_dbs: cached,
     };
     let mut plan = plan(
         &mut handle,
@@ -255,6 +270,7 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
             env: &env,
         },
     )?;
+    drop(handle);
 
     let rendered = archix::system::render(config, tree)?;
     let print = Fingerprint {
@@ -280,18 +296,37 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         unchecked: plan.unchecked.clone(),
     };
     plan.header.fingerprint = print.digest();
+    let secret_hmacs = (env.secret_hmacs)(&rendered);
+    Ok(Computed {
+        plan,
+        fingerprint: print,
+        conf,
+        dbpath,
+        lock,
+        last,
+        rendered,
+        secret_hmacs,
+        snapper_configured: env.snapper_configured,
+        archive_url: archive,
+        evaluation,
+    })
+}
 
+/// `archix diff`: plan(), printed; returns SCOPE 3.1's exit code.
+pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
+    let computed = compute(config_dir, host, args.cached)?;
+    let plan = &computed.plan;
     if args.json {
-        out(&render::json(&plan));
+        out(&render::json(plan));
     } else if args.stat {
-        out(&render::stat(&plan));
+        out(&render::stat(plan));
     } else {
-        out(&render::human(&plan));
+        out(&render::human(plan));
     }
     if let Some(path) = &args.save {
         SavedPlan {
             plan: plan.clone(),
-            fingerprint: print,
+            fingerprint: computed.fingerprint.clone(),
         }
         .save(path)?;
     }
