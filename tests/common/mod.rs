@@ -1045,12 +1045,25 @@ pub fn leak_sweep(
             look(&plain, &entry.path().display().to_string(), false);
         }
     }
+    hits.extend(sweep_outputs(markers, outputs));
+    hits
+}
+
+/// The leak sweep's look at archix's command outputs alone: each marker, raw and as base64, in each output; returns the hits.
+pub fn sweep_outputs(markers: &[(String, Vec<u8>)], outputs: &[String]) -> Vec<Hit> {
+    let mut hits = Vec::new();
     for (i, output) in outputs.iter().enumerate() {
-        look(
-            output.as_bytes(),
-            &format!("the output of archix command {}", i + 1),
-            false,
-        );
+        for (name, value) in markers {
+            let found = [value.clone(), base64(value).into_bytes()]
+                .iter()
+                .any(|form| archix::secrets::memory::contains(output.as_bytes(), form));
+            if found {
+                hits.push(Hit {
+                    marker: name.clone(),
+                    place: format!("the output of archix command {}", i + 1),
+                });
+            }
+        }
     }
     hits
 }

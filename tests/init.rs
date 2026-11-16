@@ -47,18 +47,19 @@ fn init_config() -> (tempfile::TempDir, String) {
     (dir, config)
 }
 
-/// Adds a module declaring `files` (a Lua table body) to an init-written config.
-fn manage_files(config: &str, files: &str) {
+/// Adds a module with `fields` (Lua table fields) to an init-written config.
+fn manage(config: &str, fields: &str) {
     fs::write(
         format!("{config}/init.lua"),
         "return { imports = { \"hosts.\" .. archix.hostname, \"managed\" } }\n",
     )
     .unwrap();
-    fs::write(
-        format!("{config}/lua/managed.lua"),
-        format!("return {{ files = {{ {files} }} }}\n"),
-    )
-    .unwrap();
+    fs::write(format!("{config}/lua/managed.lua"), format!("return {{ {fields} }}\n")).unwrap();
+}
+
+/// Adds a module declaring `files` (a Lua table body) to an init-written config.
+fn manage_files(config: &str, files: &str) {
+    manage(config, &format!("files = {{ {files} }}"));
 }
 
 /// A file as a switch would have left it: `content` with `mode`, owned by root.
@@ -292,4 +293,103 @@ fn a_normal_users_diff_is_incomplete_and_lists_only_root_only_items() {
             "a user's diff sees the same {group} as root's: {said}"
         );
     }
+}
+
+fn hex_digest(program: &str, bytes: &[u8]) -> String {
+    use std::io::Write;
+    let mut child = Command::new(program)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(bytes).unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// What a leak of `value` could look like: itself, and its sha256, sha512 and md5 hex, whole and as their 12-character prefixes (which every longer prefix contains), in either case.
+fn derived_markers(name: &str, value: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut out = vec![(format!("{name} plaintext"), value.to_vec())];
+    for program in ["sha256sum", "sha512sum", "md5sum"] {
+        let hex = hex_digest(program, value);
+        assert!(hex.len() >= 32, "{program}: {hex}");
+        for form in [hex.clone(), hex.to_uppercase()] {
+            out.push((format!("{name} {program} prefix"), form.as_bytes()[..12].to_vec()));
+            out.push((format!("{name} {program}"), form.into_bytes()));
+        }
+    }
+    out
+}
+
+/// Removes this machine's secrets identity when dropped, if the test made it.
+struct MadeIdentity(Option<std::path::PathBuf>);
+
+impl Drop for MadeIdentity {
+    fn drop(&mut self) {
+        if let Some(dir) = &self.0 {
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+}
+
+#[test]
+#[ignore]
+fn diff_never_shows_a_secret_or_an_unkeyed_hash_of_it() {
+    let _system = lock_system();
+    let path = "/etc/archix-leak.conf";
+    let _restore = RestoreFile::new(Path::new(path));
+    let state = archix::paths::Paths::system().state;
+    let existed = archix::secrets::crypto::dir(&state).exists();
+    let (machine_key, made) = archix::secrets::crypto::init(&state, false).unwrap();
+    let _identity = MadeIdentity((made && !existed).then(|| archix::secrets::crypto::dir(&state)));
+    let admin = age::x25519::Identity::generate().to_public().to_string();
+    let (dir, config) = init_config();
+    manage(
+        &config,
+        &format!(
+            r#"secrets = {{ machine_key = "{machine_key}", admins = {{ "{admin}" }}, items = {{ leak = {{ file = "secrets/leak.age" }} }} }},
+  files = {{ [{path:?}] = {{ text = "KEY=" .. archix.secret("leak") .. "\n", mode = "0600" }} }}"#
+        ),
+    );
+    let secret = marker(40);
+    let mut set = Command::new(env!("CARGO_BIN_EXE_archix"))
+        .args(["--config", &config, "--host", "initbox", "secrets", "set", "leak"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut set.stdin.take().unwrap(), secret.as_bytes()).unwrap();
+    let set = set.wait_with_output().unwrap();
+    assert!(
+        set.status.success(),
+        "secrets set: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let saved = dir.path().join("plan.json");
+    let mut outputs = Vec::new();
+    for args in [
+        vec!["diff"],
+        vec!["diff", "--json"],
+        vec!["diff", "--save", saved.to_str().unwrap()],
+    ] {
+        let (code, text) = archix_code(&config, &args);
+        assert!(matches!(code, Some(1) | Some(4)), "archix {args:?}:\n{text}");
+        outputs.push(text);
+    }
+    outputs.push(fs::read_to_string(&saved).unwrap());
+    assert!(
+        outputs[0].contains(path) && outputs[0].contains("secret"),
+        "the file shows as a secret line:\n{}",
+        outputs[0]
+    );
+    let mut markers = derived_markers("secret", secret.as_bytes());
+    markers.extend(derived_markers("rendered file", format!("KEY={secret}\n").as_bytes()));
+    let hits = sweep_outputs(&markers, &outputs);
+    assert!(hits.is_empty(), "SCOPE 3.3: diff leaked {hits:#?}");
 }
