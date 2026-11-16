@@ -74,6 +74,9 @@ pub struct PackageItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AurItem {
     pub name: String,
+    /// The AUR package base holding `name`; None when it's `name` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
