@@ -36,6 +36,10 @@ const REMOVED: &[(&str, &str)] = &[
         "generations",
         "archix keeps no generations: snapper's snapshots and the journal of switches stand in for them (docs/SCOPE.md)",
     ),
+    (
+        "holds",
+        "holds are gone with the rescope (docs/SCOPE.md)",
+    ),
 ];
 
 #[derive(Default)]

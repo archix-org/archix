@@ -12,7 +12,6 @@ use crate::aur::git::AurGit;
 use crate::aur::index::{Index, constraint, meets};
 use crate::aur::srcinfo::{self, SrcInfo};
 use crate::date::Date;
-use crate::holds::{Hold, Holds};
 use crate::lock::{ARCHIVE_REPO, AUR_REPO, HostLock, LOCAL_REPO, Locked};
 use crate::pacman::{SyncPkg, read_sync_db};
 use crate::recipes::Recipes;
@@ -114,8 +113,7 @@ fn conf_for(archive: &Archive, date: Date, repos: &[Repo], served: Option<&Path>
     text
 }
 
-/// Locks `declared` and everything it depends on at `date` into the exact closure, taking from the AUR what the repos lack; `prefer` picks providers and is installed as dependencies; `holds` keep packages at a version or AUR commit.
-#[allow(clippy::too_many_arguments)]
+/// Locks `declared` and everything it depends on at `date` into the exact closure, taking from the AUR what the repos lack; `prefer` picks providers and is installed as dependencies.
 pub fn resolve(
     archive: &Archive,
     cache: &Path,
@@ -124,7 +122,6 @@ pub fn resolve(
     declared: &[String],
     prefer: &[String],
     aur: Option<&Aur>,
-    holds: &Holds,
 ) -> Result<HostLock> {
     let invalid: Vec<&String> = declared.iter().filter(|name| !valid_name(name)).collect();
     if !invalid.is_empty() {
@@ -136,17 +133,11 @@ pub fn resolve(
         declared: declared.to_vec(),
         prefer: prefer.to_vec(),
         pinned: Vec::new(),
-        held: BTreeMap::new(),
         packages: BTreeMap::new(),
         flatpak: BTreeMap::new(),
         recipes: BTreeMap::new(),
     };
     if declared.is_empty() {
-        if let Some(name) = holds.keys().next() {
-            bail!(
-                "holds.{name}: {name} isn't among this config's packages or their dependencies; drop the hold or declare it"
-            );
-        }
         if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
             lock.recipes = recipes.fingerprints(&BTreeSet::new())?;
         }
@@ -178,10 +169,6 @@ pub fn resolve(
         let path = db.join("sync").join(format!("{}.db", repo.name));
         sync.insert(repo.name.clone(), read_sync_db(&path)?);
     }
-    let aur_newest = match aur {
-        Some(aur) => hold_aur_commits(aur, &sync, holds)?,
-        None => BTreeMap::new(),
-    };
     if let Some(aur) = aur.filter(|_| !not_in_repos.is_empty()) {
         let newer = Newer::new(archive, cache, date, repos);
         let in_repos: BTreeSet<&str> = sync
@@ -244,23 +231,11 @@ pub fn resolve(
             lock.packages.insert(name, locked);
         }
     }
-    let built = std::mem::take(&mut from_aur.meta);
     let mut recipes_built = std::mem::take(&mut from_aur.infos);
     for (name, mut locked) in from_aur.packages {
         locked.explicit = not_in_repos.contains(&name);
         lock.packages.insert(name, locked);
     }
-    crate::holds::apply(
-        &mut lock,
-        holds,
-        &crate::holds::Resolution {
-            archive,
-            cache,
-            sync: &sync,
-            built: &built,
-            aur_newest: &aur_newest,
-        },
-    )?;
     if let Some(recipes) = aur.and_then(|aur| aur.recipes) {
         recipes_built.extend(apply_patches(recipes, &sync, &mut lock)?);
         lock.recipes = recipes.fingerprints(&lock.local_recipes())?;
@@ -269,46 +244,6 @@ pub fn resolve(
         lock_build_deps(&mut lock, &recipes_built, &conf, &db, &sync)?;
     }
     Ok(lock)
-}
-
-/// Locks each held AUR package's base at its held commit, or the commit whose recipe builds its held version; returns the version the AUR's newest recipe builds for each.
-fn hold_aur_commits(
-    aur: &Aur,
-    sync: &BTreeMap<String, BTreeMap<String, SyncPkg>>,
-    holds: &Holds,
-) -> Result<BTreeMap<String, String>> {
-    let mut newest = BTreeMap::new();
-    for (name, hold) in holds {
-        let in_repos = sync.values().any(|packages| packages.contains_key(name));
-        let local = aur.recipes.is_some_and(|recipes| recipes.satisfier(name).is_some());
-        if in_repos || local || matches!(hold, Hold::AtLeast(_)) {
-            continue;
-        }
-        let Some(entry) = aur.index()?.get(name) else {
-            bail!("holds.{name}: {name} is in neither the configured repos nor the AUR");
-        };
-        let base = entry.package_base.clone();
-        aur.git.sync(&base)?;
-        let commit = match hold {
-            Hold::Commit(commit) => aur
-                .git
-                .full_commit(&base, commit)
-                .with_context(|| format!("holds.{name}: {base}'s AUR history has no commit {commit}"))?,
-            _ => match crate::adopt::commit_where(aur.git, &base, |version| hold.matches(version))? {
-                Some((commit, _)) => commit,
-                None => bail!(
-                    "holds.{name}: no commit in {base}'s AUR history builds {name} {}; hold a commit instead",
-                    hold.spec()
-                ),
-            },
-        };
-        aur.commits.borrow_mut().insert(base.clone(), commit);
-        let head = aur.git.head(&base)?;
-        let info = srcinfo::parse(&aur.git.show(&base, &head, ".SRCINFO")?)
-            .with_context(|| format!("reading {base}'s .SRCINFO at {head}"))?;
-        newest.insert(name.clone(), info.version);
-    }
-    Ok(newest)
 }
 
 /// Swaps each patched package, and the rest of its base in the lock, for a build of Arch's recipe with the config's patches.
@@ -430,8 +365,6 @@ struct AurClosure {
     repo_deps: BTreeSet<String>,
     /// `name=version` for every AUR package and what it provides, so pacman treats those dependencies as met.
     provides: Vec<String>,
-    /// Each package's version, provides and depends from its .SRCINFO, for checking holds.
-    meta: BTreeMap<String, crate::holds::Meta>,
     /// The .SRCINFO of every base the closure builds.
     infos: BTreeMap<String, SrcInfo>,
 }
@@ -636,14 +569,6 @@ fn aur_closure(
                 .get(&name)
                 .map(|entry| entry.maintainer.clone().unwrap_or_default()),
         };
-        closure.meta.insert(
-            name.clone(),
-            crate::holds::Meta {
-                version: info.version.clone(),
-                provides: pkg.provides.clone(),
-                depends: pkg.depends.clone(),
-            },
-        );
         closure.packages.insert(
             name,
             Locked {

@@ -25,7 +25,6 @@ fn rendered_lock(date: &str) -> String {
             declared: Vec::new(),
             prefer: Vec::new(),
             pinned: Vec::new(),
-            held: BTreeMap::new(),
             packages: BTreeMap::new(),
             flatpak: BTreeMap::new(),
             recipes: BTreeMap::new(),

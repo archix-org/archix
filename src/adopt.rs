@@ -16,22 +16,16 @@ use crate::paths::Paths;
 use crate::repos::Repo;
 use crate::resolve::{Aur, resolve};
 
-/// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves; a held one isn't adopted but goes back to its hold.
+/// Installed packages at a newer version than the lock, the drift a manual `pacman -Syu` or `yay` leaves.
 pub fn newer_than_lock<'a>(lock: &HostLock, installed: &'a BTreeMap<String, LocalPkg>) -> Vec<&'a LocalPkg> {
     lock.packages
         .iter()
-        .filter(|(name, _)| !holding(lock, name))
         .filter_map(|(name, locked)| {
             installed
                 .get(name)
                 .filter(|pkg| vercmp(&pkg.version, &locked.version) == Ordering::Greater)
         })
         .collect()
-}
-
-/// Whether the lock keeps `name` at a version or commit by the config's `holds`, rather than only above a floor.
-fn holding(lock: &HostLock, name: &str) -> bool {
-    lock.held.get(name).is_some_and(|held| !held.hold.starts_with(">="))
 }
 
 /// Which installed versions [`fit`] pins when they differ from the snapshot's.
@@ -167,10 +161,9 @@ pub fn fit(
     aur: Option<&Aur>,
     mode: Fit,
 ) -> Result<HostLock> {
-    let holds = previous.map(crate::holds::from_lock).transpose()?.unwrap_or_default();
     let mut best: Option<(usize, HostLock)> = None;
     for date in &candidates.dates {
-        let mut resolved = match resolve(archive, cache, *date, repos, declared, prefer, aur, &holds) {
+        let mut resolved = match resolve(archive, cache, *date, repos, declared, prefer, aur) {
             Ok(resolved) => resolved,
             Err(e) => {
                 eprintln!("skipping snapshot {date}: {e:#}");
@@ -203,7 +196,6 @@ pub fn fit(
         for (name, locked) in &adopted.packages {
             if let (Some(pkg), Some(base)) = (installed.get(name), &locked.base)
                 && locked.repo == AUR_REPO
-                && !holding(&adopted, name)
                 && differs(&pkg.version, &locked.version)
             {
                 aur_bases.insert(base.clone(), pkg.version.clone());
@@ -223,7 +215,7 @@ pub fn fit(
         }
     }
     if moved {
-        adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur, &holds)?;
+        adopted = resolve(archive, cache, adopted.date, repos, declared, prefer, aur)?;
         if let Some(previous) = previous {
             adopted.keep_pins(previous);
         }
@@ -234,7 +226,7 @@ pub fn fit(
             let (Some(base), Some(commit)) = (locked.base.clone(), locked.commit.clone()) else {
                 continue;
             };
-            if locked.repo != AUR_REPO || !differs(&pkg.version, &locked.version) || adopted.held.contains_key(name) {
+            if locked.repo != AUR_REPO || !differs(&pkg.version, &locked.version) {
                 continue;
             }
             let Some(upstream) = vcs_commit(&pkg.version) else {
@@ -264,7 +256,7 @@ pub fn fit(
     let mut pins = Vec::new();
     for (name, locked) in &adopted.packages {
         let Some(pkg) = installed.get(name) else { continue };
-        if !locked.is_built() && differs(&pkg.version, &locked.version) && !holding(&adopted, name) {
+        if !locked.is_built() && differs(&pkg.version, &locked.version) {
             pins.push((name.clone(), pkg.clone(), locked.clone()));
         }
     }

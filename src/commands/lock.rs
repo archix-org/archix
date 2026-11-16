@@ -49,7 +49,6 @@ pub(super) fn current_lock(
             &declared.prefer,
             &declared.repo_names(),
             &recipes.fingerprints(&old.local_recipes())?,
-            &declared.hold_specs(),
         )
         // Only `archix lock` re-resolves a lock made for a newer CPU; switch refuses it instead of rewriting the lock it applies.
         && (!for_this_cpu
@@ -79,7 +78,6 @@ pub(super) fn current_lock(
             &declared.packages,
             prefer,
             Some(&aur),
-            &declared.holds,
         )
     };
     let mut new = resolve_with(&declared.prefer)?;
@@ -260,8 +258,6 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
     for (name, pkg) in &new.packages {
         let note = if floats(name, pkg) {
             " (builds from a VCS source; its first build records the commit)"
-        } else if new.held.get(name).is_some_and(|held| held.newest != pkg.version) {
-            " (held)"
         } else {
             ""
         };

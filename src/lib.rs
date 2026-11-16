@@ -8,7 +8,6 @@ pub mod durable;
 pub mod eval;
 pub mod fetch;
 pub mod flatpak;
-pub mod holds;
 pub mod installed;
 pub mod lock;
 pub mod luagen;

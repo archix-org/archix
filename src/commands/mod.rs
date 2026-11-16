@@ -106,14 +106,9 @@ struct Declared {
     flatpak_remotes: BTreeMap<String, flatpak::Remote>,
     /// Official packages to rebuild with these patch files, relative to the config directory.
     patches: BTreeMap<String, Vec<String>>,
-    holds: archix::holds::Holds,
 }
 
 impl Declared {
-    fn hold_specs(&self) -> BTreeMap<String, String> {
-        archix::holds::specs(&self.holds)
-    }
-
     fn repo_names(&self) -> Vec<String> {
         self.repos.iter().map(|repo| repo.name.clone()).collect()
     }
@@ -222,7 +217,6 @@ fn declared(config: &Value) -> Result<Declared> {
                 .collect(),
             _ => BTreeMap::new(),
         },
-        holds: archix::holds::from_config(map.get("holds"))?,
     };
     if let Some(Value::Map(fp)) = map.get("flatpak") {
         let default_remote = match fp.get("remote") {
