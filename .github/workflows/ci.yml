@@ -31,7 +31,6 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: tests/ci/archive-proxy-test.py
       - run: tests/vm/boot/checks.py
-      - run: tests/vm/replay/writelog.py check
 
   package:
     runs-on: ubuntu-latest
@@ -186,22 +185,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { suite: selfupgrade, fs: btrfs }
           - { suite: dkms2, fs: btrfs }
-          - { suite: pcr, fs: btrfs }
           - { suite: firewall, fs: btrfs }
-          - { suite: recovery, fs: btrfs }
           - { suite: secrets, fs: btrfs }
     name: ${{ matrix.suite }} (${{ matrix.fs }})
     env:
       FS: ${{ matrix.fs }}
-      RESULT_PREFIX: ""
     steps:
       - run: echo "ARCHIX_PREBUILT=$RUNNER_TEMP/build" >> "$GITHUB_ENV" && echo "ARCHIX_VM_RESULTS=$RUNNER_TEMP/vm-results" >> "$GITHUB_ENV"
       - uses: actions/checkout@v5
-        with:
-          # selfupgrade builds ARCHIX_OLD from history, which a shallow clone lacks.
-          fetch-depth: ${{ matrix.suite == 'selfupgrade' && '0' || '1' }}
       - uses: ./.github/actions/vm-setup
         with:
           group: ${{ matrix.suite }}

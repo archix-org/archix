@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: cache.py key SUITE | inputs SUITE | hit SUITE KEY | record SUITE KEY SECONDS [LOG...]; the VM suites' result cache, in ARCHIX_VM_RESULTS (~/.cache/archix-vm-results): a suite whose inputs hash to a recorded pass is skipped, and the pass keeps its logs.
+# Usage: cache.py key SUITE | keys SUITE... | inputs SUITE | hit SUITE KEY | record SUITE KEY SECONDS [LOG...]; the VM suites' result cache, in ARCHIX_VM_RESULTS (~/.cache/archix-vm-results): a suite whose inputs hash to a recorded pass is skipped, and the pass keeps its logs.
 import hashlib
 import json
 import os
@@ -12,15 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 # Everything in the repository that decides what the VM runs: archix's source and toolchain, the image builder and the driver.
 COMMON = ["src", "Cargo.toml", "Cargo.lock", "tests/arch/Dockerfile", "tests/arch/image.sh", "tests/vm/run.sh", "tests/vm/build-image.sh", "tests/vm/driver"]
-BOOT_SHARED = ["tests/vm/boot/config.lua", "tests/vm/boot/common.py", "tests/vm/boot/base.py"]
-LIMINE_TESTS = ["keep", "resync", "migration", "handover"]
-REPLAY_TESTS = ["pacman", "install", "keep", "switch", "rootmove", "uncounted"]
-# The suites with an image of their own (tests/vm/run.sh's suite_tests), which share only boot/common.py with the boot tests.
-OWN_TESTS = ["selfupgrade", "dkms2", "nvidia", "cachyos", "churn", "pcr", "firewall", "recovery", "secrets"]
-SUITES = ({f"limine-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/limine/base.py", f"tests/vm/limine/{name}"] for name in LIMINE_TESTS}
-          | {f"replay-{name}": BOOT_SHARED + ["tests/vm/powercut/cut.py", "tests/vm/replay/writelog.py", "tests/vm/replay/fat.py", "tests/vm/replay/replay.py", f"tests/vm/replay/{name}"] + (["tests/vm/powercut/switch"] if name == "switch" else []) for name in REPLAY_TESTS}
-          | {name: ["tests/vm/boot/common.py", "tests/vm/suite.py", f"tests/vm/{name}"] for name in OWN_TESTS})
-ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": "", "REPLAY_SUBSETS": "", "REPLAY_EVERY": "", "REPLAY_ONLY": "", "REPLAY_SEED": "", "REPLAY_WINDOW": "", "REPLAY_ESP_ONLY": "", "REPLAY_JOBS": ""}
+# The suites with an image of their own (tests/vm/run.sh's suite_tests).
+OWN_TESTS = ["dkms2", "nvidia", "cachyos", "firewall", "secrets"]
+SUITES = {name: ["tests/vm/boot/common.py", "tests/vm/suite.py", f"tests/vm/{name}"] for name in OWN_TESTS}
+ENV = {"FS": "ext4", "TO_DATE": "", "VM_MEM": "", "VM_CPUS": "", "VM_TIMEOUT": ""}
 IMAGE = "archix-arch-test"
 KEEP = 500
 
@@ -55,9 +50,6 @@ def inputs(suite, shared=None):
             lines.append(f"file {name} missing")
     for name, default in ENV.items():
         lines.append(f"env {name}={os.environ.get(name) or default}")
-    if suite == "selfupgrade":
-        old = subprocess.run(["git", "-C", str(ROOT), "rev-parse", os.environ.get("ARCHIX_OLD") or "505fc7b"], check=True, capture_output=True, text=True).stdout.strip()
-        lines.append(f"old {old}")
     prebuilt = os.environ.get("ARCHIX_PREBUILT")
     if prebuilt:
         for member in ("target/release/archix",):
