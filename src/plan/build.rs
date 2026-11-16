@@ -17,6 +17,11 @@ use crate::value::Value;
 
 const HELPERS: [&str; 6] = ["paru", "paru-bin", "paru-git", "yay", "yay-bin", "yay-git"];
 
+pub type UnitState = Box<dyn Fn(&str, bool) -> Option<bool>>;
+pub type Visudo = Box<dyn Fn(&[u8]) -> Option<bool>>;
+pub type Ldd = Box<dyn Fn(&Path) -> Option<String>>;
+pub type SecretHmacs = Box<dyn Fn(&crate::system::Rendered) -> Option<BTreeMap<String, String>>>;
+
 /// What plan() reads from the machine beyond the dbs and files, injected so tests stay pure.
 pub struct Environment {
     pub root: PathBuf,
@@ -26,12 +31,12 @@ pub struct Environment {
     pub chwd: BTreeSet<String>,
     pub snapper_configured: bool,
     pub display_manager: Option<String>,
-    pub enabled: Box<dyn Fn(&str, bool) -> Option<bool>>,
-    pub visudo: Box<dyn Fn(&[u8]) -> Option<bool>>,
+    pub enabled: UnitState,
+    pub visudo: Visudo,
     /// `ldd` of a binary under the root; None when it isn't a dynamic executable or ldd can't run.
-    pub ldd: Box<dyn Fn(&Path) -> Option<String>>,
+    pub ldd: Ldd,
     /// HMACs of the rendered secrets' values under the machine key; None without the key.
-    pub secret_hmacs: Box<dyn Fn(&crate::system::Rendered) -> Option<BTreeMap<String, String>>>,
+    pub secret_hmacs: SecretHmacs,
     pub flatpak_installed: Option<BTreeMap<String, InstalledApp>>,
 }
 

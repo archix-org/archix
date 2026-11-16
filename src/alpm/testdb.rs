@@ -103,6 +103,12 @@ pub struct TestRoot {
     pub dir: tempfile::TempDir,
 }
 
+impl Default for TestRoot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestRoot {
     pub fn new() -> TestRoot {
         let dir = tempfile::tempdir().unwrap();

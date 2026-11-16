@@ -62,7 +62,9 @@ fn account_verb(action: AccountAction) -> &'static str {
     }
 }
 
-fn groups(plan: &Plan, with_diffs: bool) -> Vec<(&'static str, Vec<(Line, Option<String>)>)> {
+type Group = (&'static str, Vec<(Line, Option<String>)>);
+
+fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
     let mut out = Vec::new();
     let packages = plan
         .packages

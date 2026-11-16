@@ -281,7 +281,7 @@ pub fn ldd_libraries(output: &str) -> Vec<String> {
     for line in output.lines() {
         let line = line.trim();
         let path = match line.split_once("=>") {
-            Some((_, rest)) => rest.trim().split_whitespace().next().unwrap_or(""),
+            Some((_, rest)) => rest.split_whitespace().next().unwrap_or(""),
             None => line.split_whitespace().next().unwrap_or(""),
         };
         if !path.starts_with('/') {

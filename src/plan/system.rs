@@ -316,7 +316,7 @@ fn users(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
             (None, _) => (Some(AccountAction::AddUser), Vec::new()),
             (Some(_), Some(prev)) => {
                 let changes = user_changes(prev, user);
-                (Some(AccountAction::ModifyUser).filter(|_| !changes.is_empty()), changes)
+                ((!changes.is_empty()).then_some(AccountAction::ModifyUser), changes)
             }
             (Some(_), None) => (None, Vec::new()),
         };
