@@ -53,6 +53,30 @@ fn archix(dir: &Path, race: Option<&str>, args: &[&str]) -> (bool, String) {
     )
 }
 
+/// `archix diff --json` on `dir` as root, with ARCHIX_TEST_AFTER_CAPTURE set to `race`: its exit code, the plan's header date (or the lock's, when the plan moved it) and everything it said.
+fn diff_date(dir: &Path, race: Option<&str>) -> (Option<i32>, Option<String>, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_archix"));
+    command.args(["--config", dir.to_str().unwrap(), "--host", "box", "diff", "--json"]);
+    if let Some(race) = race {
+        command.env("ARCHIX_TEST_AFTER_CAPTURE", race);
+    }
+    let out = command.output().unwrap();
+    let plan: Option<serde_json::Value> = serde_json::from_slice(&out.stdout).ok();
+    let date = plan.and_then(|p| {
+        let header = &p["header"];
+        header["moved_from"]
+            .as_str()
+            .or(header["date"].as_str())
+            .map(str::to_string)
+    });
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.code(), date, said)
+}
+
 fn sh(command: &str) -> String {
     let output = Command::new("sh").arg("-c").arg(command).output().unwrap();
     assert!(
@@ -382,12 +406,14 @@ fn the_lock_a_root_command_reads_is_the_captured_one_so_changing_it_after_the_ca
     fs::write(&swapped, rendered_lock("2001-02-03")).unwrap();
     sh(&format!("chown -R {USER}: {}", dir.display()));
     let race = format!("cp {} {}/archix.lock", swapped.display(), dir.display());
-    let (_, said) = archix(&dir, Some(&race), &["status"]);
-    assert!(
-        said.contains("box is locked to snapshot 2026-10-10"),
+    let (code, date, said) = diff_date(&dir, Some(&race));
+    assert_ne!(code, Some(3), "{said}");
+    assert_eq!(
+        date.as_deref(),
+        Some("2026-10-10"),
         "the lock wasn't the captured one:\n{said}"
     );
-    assert!(!said.contains("2001-02-03"), "{said}");
+    assert!(!said.contains("2001"), "{said}");
     assert!(
         fs::read_to_string(dir.join("archix.lock"))
             .unwrap()
@@ -404,12 +430,12 @@ fn the_config_a_root_command_evaluates_is_the_captured_one_so_changing_it_after_
     sh(&format!("chown -R {USER}: {}", dir.display()));
     fs::set_permissions(&owner.home, fs::Permissions::from_mode(0o755)).unwrap();
     let race = format!("echo 'this is not lua' > {}/init.lua", dir.display());
-    let (ok, said) = archix(&dir, Some(&race), &["status"]);
+    let (code, date, said) = diff_date(&dir, Some(&race));
     println!(
-        "EVIDENCE TOCTOU: init.lua replaced with `this is not lua` by ARCHIX_TEST_AFTER_CAPTURE, after the capture and before the evaluation; status exited {}",
-        if ok { 0 } else { 1 }
+        "EVIDENCE TOCTOU: init.lua replaced with `this is not lua` by ARCHIX_TEST_AFTER_CAPTURE, after the capture and before the evaluation; diff exited {code:?}"
     );
-    assert!(ok && said.contains("box is locked to snapshot 2026-10-10"), "{said}");
+    assert_ne!(code, Some(3), "{said}");
+    assert_eq!(date.as_deref(), Some("2026-10-10"), "{said}");
     assert!(
         fs::read_to_string(dir.join("init.lua")).unwrap().contains("not lua"),
         "the race never happened"
@@ -458,7 +484,7 @@ fn a_gitignored_lock_fails_loudly_rather_than_reading_as_no_lock() {
     fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
     fs::write(dir.join(".gitignore"), "archix.lock\n").unwrap();
     sh(&format!("chown -R {USER}: {}", dir.display()));
-    let (ok, said) = archix(&dir, None, &["status"]);
+    let (ok, said) = archix(&dir, None, &["diff"]);
     assert!(
         !ok && said.contains("archix.lock") && said.contains("gitignore"),
         "{said}"
@@ -521,7 +547,7 @@ fn a_gitignored_file_the_config_reads_fails_naming_it_and_saying_its_gitignored(
         fs::write(dir.join("archix.lock"), rendered_lock("2026-10-10")).unwrap();
         fs::write(dir.join(".gitignore"), "lua/local.lua\nsecret.txt\n").unwrap();
         sh(&format!("chown -R {USER}: {}", dir.display()));
-        let (ok, said) = archix(&dir, None, &["status"]);
+        let (ok, said) = archix(&dir, None, &["diff"]);
         let file = if name == "ignored-require" {
             "lua/local.lua"
         } else {

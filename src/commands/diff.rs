@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use archix::alpm::{self, PacmanConf, PinMode};
 use archix::date::Date;
 use archix::plan::build::{Environment, PlanInputs, plan};
+use archix::plan::evaluate::evaluate_for_plan;
 use archix::plan::fingerprint::{self, Fingerprint, SavedPlan};
 use archix::plan::record::{self, LastApplied};
 use archix::plan::{Header, exit, render, repostate};
@@ -162,21 +163,17 @@ fn out(text: &str) {
 
 /// `archix diff`: plan(), printed; returns SCOPE 3.1's exit code.
 pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
-    let evaluation = archix::eval::evaluate(&archix::eval::Input {
-        config_dir: config_dir.to_path_buf(),
-        hostname: host.to_string(),
-        overlay: BTreeMap::new(),
-    })
-    .map_err(|errors| anyhow!("{errors}"))?;
-    let config = evaluation.config;
+    let evaluation = evaluate_for_plan(config_dir, host)?;
+    let config = &evaluation.config;
+    let tree = evaluation.tree.as_path();
     let system_conf = PacmanConf::read(None)?;
-    let lock_path = config_dir.join(archix::lock::LOCK_FILE);
-    let lock = match lock_path.exists() {
-        true => archix::lock::Lockfile::load(&lock_path)?.hosts.remove(host),
-        false => None,
+    let lock_path = evaluation.lock_path(config_dir)?;
+    let lock = match &lock_path {
+        Some(path) => archix::lock::Lockfile::load(path)?.hosts.remove(host),
+        None => None,
     };
     let mode = system_conf.pin_mode();
-    let archive = str_option(&config, "archive_url")
+    let archive = str_option(config, "archive_url")
         .unwrap_or(archix::archive::ARCHIVE_URL)
         .to_string();
     let lock_date = lock.as_ref().map(|l| l.date).filter(|_| mode == PinMode::Archive);
@@ -232,8 +229,8 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         &mut handle,
         &dbpath,
         &PlanInputs {
-            config: &config,
-            config_dir,
+            config,
+            config_dir: tree,
             conf: &conf,
             header,
             moved_from,
@@ -244,10 +241,12 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         },
     )?;
 
-    let rendered = archix::system::render(&config, config_dir)?;
+    let rendered = archix::system::render(config, tree)?;
     let print = Fingerprint {
-        config_tree: fingerprint::hash_config_tree(config_dir)?,
-        lock: fingerprint::hash_file(&lock_path),
+        config_tree: fingerprint::hash_config_tree(tree)?,
+        lock: lock_path
+            .as_deref()
+            .map_or_else(|| "missing".into(), fingerprint::hash_file),
         pacman_conf: fingerprint::hash_bytes(conf.render().as_bytes()),
         sync_dbs: fingerprint::hash_sync_dbs(&dbpath, &conf.repos.iter().map(|r| r.name.clone()).collect::<Vec<_>>()),
         local_db: fingerprint::hash_local_db(&conf.db_path())?,

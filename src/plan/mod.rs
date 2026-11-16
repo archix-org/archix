@@ -1,4 +1,5 @@
 pub mod build;
+pub mod evaluate;
 pub mod fingerprint;
 pub mod hooks;
 mod legacy;

@@ -424,22 +424,12 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
-    let evaluation = match commands::evaluate_config(&cli.config, &hostname, Default::default())? {
-        Ok(evaluation) => evaluation,
-        Err(errors) => {
-            eprintln!("{errors}");
-            return Ok(ExitCode::FAILURE);
-        }
-    };
-    let tree = evaluation
-        .captured
-        .as_ref()
-        .map_or(cli.config.clone(), |captured| captured.dir.clone());
+    let evaluation = archix::plan::evaluate::evaluate_for_plan(&cli.config, &hostname)?;
     let target = commands::Target {
         config_dir: &cli.config,
         host: &hostname,
         config: &evaluation.config,
-        tree: &tree,
+        tree: &evaluation.tree,
         captured: evaluation.captured.as_ref(),
     };
     let state = archix::paths::Paths::system().state;
@@ -454,7 +444,7 @@ fn run() -> Result<ExitCode> {
             archix::secrets::tool::rekey(&cli.config, &hostname, &state, &names, machine)?
         }
         Command::Secrets(Secrets::Check) => {
-            let rendered = archix::system::render_linked(&evaluation.config, &tree, &cli.config)
+            let rendered = archix::system::render_linked(&evaluation.config, &evaluation.tree, &cli.config)
                 .ok()
                 .and_then(|r| r.state.secrets);
             if !archix::secrets::tool::check(&cli.config, &hostname, &state, rendered.as_ref())? {
