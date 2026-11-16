@@ -57,44 +57,15 @@ enum Command {
         #[arg(long)]
         noconfirm: bool,
     },
-    /// Show what a switch would change to make this machine match the lock, and what it carries that the config doesn't declare
+    /// Show what a switch would change; being rewritten for the rescope
     Diff {
-        /// List everything carried but not declared, not only the first lines of each kind
-        #[arg(long)]
-        all: bool,
-    },
-    /// Apply the lock and the config to the running system, in place
-    Switch {
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-        /// Go back across versions that may not read newer data (postgresql majors and the like) without asking
-        #[arg(long)]
-        allow_unsafe_downgrade: bool,
-        /// When a locked AUR version can't be built, take the nearest newer or older one without asking
-        #[arg(long, value_enum)]
-        accept_nearest: Option<commands::Nearest>,
-        /// Commit even though secrets don't decrypt on this machine yet: those are left out, and what uses them fails until a switch after `archix secrets rekey`
-        #[arg(long)]
-        without_secrets: bool,
-        /// Downgrade declared packages even though that breaks packages archix doesn't track, by their dependencies or the libraries they load
-        #[arg(long)]
-        allow_partial: bool,
-        /// Change packages although Limine started this boot during the move to systemd-boot, so no boot counting, fallback or rescue entry stands behind the switch
-        #[arg(long)]
-        allow_limine_boot: bool,
-    },
-    /// Gone: a switch that fails partway says what it applied
-    #[command(hide = true)]
-    Recover {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         rest: Vec<String>,
     },
-    /// Show the lock, the current and booted generations, pending changes and what the machine carries that the config doesn't declare
-    Status {
-        /// List everything carried but not declared, not only the first lines of each kind
-        #[arg(long)]
-        all: bool,
+    /// Apply the config to the running system; being rewritten for the rescope
+    Switch {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
     /// Keep snapshot N: it becomes the root (`@`) from the next boot, with accounts made since carried over, and the running system is kept as a snapshot; `--cancel` undoes it before that boot
     Rollback {
@@ -111,71 +82,25 @@ enum Command {
     /// Manage accounts a rollback brought back locked
     #[command(subcommand)]
     User(UserAction),
-    /// Apply an earlier generation's record live, in place (the previous one by default): its packages from archix's cache and the archive, its files, users and services; what it doesn't declare stays as it is, and the config and archix.lock stay as they are
-    Revert {
-        /// Generation number; `archix generations` lists them
-        generation: Option<u32>,
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-        /// Go back across versions that may not read newer data (postgresql majors and the like) without asking
-        #[arg(long)]
-        allow_unsafe_downgrade: bool,
-    },
-    /// List generations, the current one marked with *, then the snapshots by the state each holds
-    Generations,
-    /// Delete old generation records and cached files no kept generation or snapshot needs
-    Gc,
-    /// Declare packages in installed.lua and install them (pacman-style: archix -S <packages>)
+    /// Declare packages and install them; being rewritten with switch
     Install {
-        #[arg(required = true)]
-        packages: Vec<String>,
-        /// Directory under the config's lua/ whose installed.lua to edit, instead of lua/hosts/<host>/
-        #[arg(long)]
-        path: Option<PathBuf>,
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-        #[arg(skip)]
-        upgrade_first: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
-    /// Remove packages from installed.lua and uninstall them (pacman-style: archix -R <packages>)
-    #[command(short_flag = 'R')]
+    /// Remove packages; being rewritten with switch
     Remove {
-        #[arg(required = true)]
-        packages: Vec<String>,
-        /// Directory under the config's lua/ whose installed.lua to edit
-        #[arg(long)]
-        path: Option<PathBuf>,
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
+    },
+    /// Move the lock forward and switch; being rewritten with switch
+    Upgrade {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
+        rest: Vec<String>,
     },
     /// Search the repositories and the AUR (pacman-style: archix -Ss <terms>)
     Search {
         #[arg(required = true)]
         terms: Vec<String>,
-    },
-    /// Move archix.lock to the newest snapshot and AUR packages to their newest recipes, then switch (also: archix, archix -Syu)
-    Upgrade {
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-    },
-    /// pacman-style operations: -S <packages>, -Ss <terms>, -Syu [packages]
-    #[command(short_flag = 'S', hide = true)]
-    Sync {
-        #[arg(short = 's')]
-        search: bool,
-        #[arg(short = 'y', action = clap::ArgAction::Count)]
-        refresh: u8,
-        #[arg(short = 'u', action = clap::ArgAction::Count)]
-        upgrade: u8,
-        #[arg(long)]
-        noconfirm: bool,
-        #[arg(long)]
-        needed: bool,
-        targets: Vec<String>,
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
@@ -186,9 +111,6 @@ enum Command {
         #[command(subcommand)]
         action: Option<commands::rescue::Action>,
     },
-    /// Run at boot by archix-boot.service: the boot's own checks (the hibernation guard, failed entries, the try notice, a root archix didn't produce)
-    #[command(hide = true)]
-    BootCheck,
     /// Show which boot loader started this boot, whether boot counting and the fallback entries are in effect, the firmware's boot entries and order, and where a move from Limine to systemd-boot stands
     BootInfo,
     /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: arm the fallback slot and note the failed units
@@ -200,12 +122,6 @@ enum Command {
     /// Run every minute of a counted boot by archix-unblessed.timer: reboot it once it's stuck past boot.unblessed_timeout with nobody logged in
     #[command(hide = true)]
     Unblessed,
-    /// Print the try-mode notice, if this boot is one; with --desktop, send it as a desktop notification
-    #[command(hide = true)]
-    Notice {
-        #[arg(long)]
-        desktop: bool,
-    },
     /// Adopt a root archix didn't produce (a snapper or limine-snapper-sync rollback, a restore): check its layout, carry accounts over from the root it replaced when that can be found, and record it
     Resync,
     /// Run by systemd-bless-boot.service, before its own rename: count the booted entry as good, synced under its new name
@@ -232,9 +148,6 @@ enum Command {
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
-    /// Share package files and AUR builds with other machines through a package cache
-    #[command(subcommand)]
-    Cache(Cache),
     /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
     #[command(subcommand)]
     Secrets(Secrets),
@@ -266,9 +179,6 @@ enum Command {
     /// Run by root as a directory's owner: write stdin to NAME in DIR without following a symlink
     #[command(hide = true)]
     WriteFile { dir: PathBuf, name: std::ffi::OsString },
-    /// `archix <terms>`, like `yay <terms>`: search, pick from a numbered list, install the picks
-    #[command(external_subcommand)]
-    Pick(Vec<String>),
 }
 
 #[derive(Subcommand)]
@@ -344,15 +254,6 @@ enum SnapshotAction {
 }
 
 #[derive(Subcommand)]
-enum Cache {
-    /// Copy this machine's package files, signatures and AUR build records into a directory other machines list in package_caches
-    Push {
-        /// The cache directory, such as a NAS mount; serve it over HTTP to share it beyond the network share
-        dir: PathBuf,
-    },
-}
-
-#[derive(Subcommand)]
 enum SecureBoot {
     /// Create sbctl keys if needed and enroll them, with Microsoft's, while the firmware is in setup mode
     Setup {
@@ -380,38 +281,6 @@ enum SecureBoot {
         /// LUKS2 volumes to re-enroll, such as /dev/nvme0n1p2; systemd-cryptenroll asks for each one's passphrase or recovery key, or reads $PASSWORD
         devices: Vec<PathBuf>,
     },
-}
-
-/// Turns pacman-style `-S` operations into the native command they mean.
-fn from_sync(command: Command) -> Result<Command> {
-    let Command::Sync {
-        search,
-        refresh,
-        upgrade,
-        noconfirm,
-        targets,
-        ..
-    } = command
-    else {
-        return Ok(command);
-    };
-    Ok(match (search, upgrade > 0, targets.is_empty()) {
-        (true, _, false) => Command::Search { terms: targets },
-        (true, _, true) => anyhow::bail!("-Ss needs search terms"),
-        (false, true, true) => Command::Upgrade { noconfirm },
-        (false, upgrade_first, false) => Command::Install {
-            packages: targets,
-            path: None,
-            noconfirm,
-            upgrade_first,
-        },
-        (false, false, true) if refresh > 0 => {
-            anyhow::bail!(
-                "archix doesn't sync databases on their own; use -Syu to upgrade, or `archix update` to move the lock"
-            )
-        }
-        (false, false, true) => anyhow::bail!("-S needs packages to install"),
-    })
 }
 
 #[derive(Serialize)]
@@ -477,14 +346,8 @@ fn with_sudo() -> String {
 /// Commands that change the system, checked before anything (like installed.lua) is touched.
 fn needs_root(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Install { .. } => Some("install"),
-        Command::Remove { .. } => Some("remove"),
-        Command::Switch { .. } => Some("switch"),
-        Command::Upgrade { .. } => Some("upgrade"),
         Command::Rollback { .. } => Some("rollback"),
-        Command::Revert { .. } => Some("revert"),
         Command::User(_) => Some("user"),
-        Command::Gc => Some("gc"),
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
         Command::Snapshot(SnapshotAction::Setup { .. }) => Some("snapshot setup"),
@@ -613,7 +476,10 @@ fn run() -> Result<ExitCode> {
     let mut cli = Cli::parse_from(std::env::args_os().filter(|arg| arg != "(deleted)"));
     // Git and the config's owner resolve a relative path from wherever they run, which isn't always here.
     cli.config = std::path::absolute(&cli.config).with_context(|| format!("resolving {}", cli.config.display()))?;
-    let command = from_sync(cli.command.unwrap_or(Command::Upgrade { noconfirm: false }))?;
+    let Some(command) = cli.command else {
+        <Cli as clap::CommandFactory>::command().print_help()?;
+        return Ok(ExitCode::from(2));
+    };
     // Both run before the root is fully up, so they skip archix's locks and pending-state checks.
     let command = match command {
         Command::EvaluateIsolated { dir, host } => {
@@ -660,19 +526,20 @@ fn run() -> Result<ExitCode> {
         Command::PacmanHook { when } => {
             return Ok(commands::pacman_hook::run(when));
         }
-        Command::Notice { desktop } => {
-            commands::notice(desktop);
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Recover { .. } => anyhow::bail!(
-            "`archix recover` is gone: a switch that fails partway says what it applied, and with rollbacks on a snapshot holds the system as it was before; run `archix switch` again"
-        ),
         Command::Rescue { options, action } => {
             if !is_root() {
                 anyhow::bail!("`archix rescue` mounts filesystems, so it needs root");
             }
             commands::rescue::run(options, action)?;
             return Ok(ExitCode::SUCCESS);
+        }
+        Command::Switch { .. } | Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
+            eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
+            return Ok(ExitCode::from(3));
+        }
+        Command::Diff { .. } => {
+            eprintln!("archix: diff is being rewritten for the rescope (docs/SCOPE.md)");
+            return Ok(ExitCode::from(3));
         }
         command => command,
     };
@@ -687,7 +554,7 @@ fn run() -> Result<ExitCode> {
     let changes_things = needs_root(&command).is_some()
         || matches!(
             command,
-            Command::BootCheck | Command::BootComplete | Command::Bless | Command::HealthCheck | Command::Unblessed
+            Command::BootComplete | Command::Bless | Command::HealthCheck | Command::Unblessed
         );
     if needs_root(&command).is_some() {
         leave_login_session();
@@ -695,7 +562,7 @@ fn run() -> Result<ExitCode> {
     // The minutely unblessed check skips a minute another run holds; the next one looks again.
     let busy = match command {
         Command::Unblessed => Busy::Skip,
-        Command::BootCheck | Command::BootComplete | Command::Bless | Command::HealthCheck => Busy::Wait,
+        Command::BootComplete | Command::Bless | Command::HealthCheck => Busy::Wait,
         _ => Busy::Short,
     };
     if changes_things && !hold_exclusive(busy)? {
@@ -716,22 +583,6 @@ fn run() -> Result<ExitCode> {
         }
         Command::User(UserAction::Unlock { name }) => {
             commands::keep::unlock(&name)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Revert {
-            generation,
-            noconfirm,
-            allow_unsafe_downgrade,
-        } => {
-            commands::revert(generation, noconfirm, allow_unsafe_downgrade)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Generations => {
-            commands::generations()?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Gc => {
-            commands::gc()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Secrets(Secrets::Init { replace }) => {
@@ -755,10 +606,6 @@ fn run() -> Result<ExitCode> {
             );
             return Ok(ExitCode::SUCCESS);
         }
-        Command::Cache(Cache::Push { dir }) => {
-            commands::cache_push(&dir)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Snapshot(action) => {
             match action {
                 SnapshotAction::Create { note } => commands::snapshot::create(note)?,
@@ -770,10 +617,6 @@ fn run() -> Result<ExitCode> {
         }
         Command::Prefetch { url } => {
             commands::prefetch(&url)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::BootCheck => {
-            commands::boot_check()?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::BootInfo => {
@@ -861,27 +704,7 @@ fn run() -> Result<ExitCode> {
             cli.config.display()
         );
     }
-    // Nothing these commands change in the config is written until the switch has applied.
-    if matches!(
-        command,
-        Command::Install { .. }
-            | Command::Remove { .. }
-            | Command::Switch { .. }
-            | Command::Upgrade { .. }
-            | Command::Pick(_)
-    ) {
-        commands::defer_config_writes();
-    }
-    match &command {
-        Command::Install { packages, path, .. } => {
-            commands::edit_installed(&cli.config, &hostname, path.as_deref(), packages, &[])?;
-        }
-        Command::Remove { packages, path, .. } => {
-            commands::edit_installed(&cli.config, &hostname, path.as_deref(), &[], packages)?;
-        }
-        _ => {}
-    }
-    let evaluation = match commands::evaluate_config(&cli.config, &hostname, commands::deferred_overlay(&cli.config))? {
+    let evaluation = match commands::evaluate_config(&cli.config, &hostname, Default::default())? {
         Ok(evaluation) => evaluation,
         Err(errors) => {
             eprintln!("{errors}");
@@ -918,36 +741,7 @@ fn run() -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         }
-        Command::Install {
-            noconfirm,
-            upgrade_first,
-            ..
-        } => {
-            let result = if upgrade_first {
-                commands::upgrade(&target, noconfirm)
-            } else {
-                commands::switch(&target, noconfirm, None, false)
-            };
-            result.map_err(|e| e.context("installed.lua was left as it was"))?;
-        }
-        Command::Remove { noconfirm, .. } => {
-            commands::switch(&target, noconfirm, None, false)
-                .map_err(|e| e.context("installed.lua was left as it was"))?;
-        }
         Command::Search { terms } => commands::search(&target, &terms)?,
-        Command::Pick(args) => {
-            let noconfirm = args.iter().any(|arg| arg == "--noconfirm");
-            let terms: Vec<String> = args.into_iter().filter(|arg| arg != "--noconfirm").collect();
-            let picked = commands::pick(&target, &terms)?;
-            if picked.is_empty() {
-                return Ok(ExitCode::SUCCESS);
-            }
-            if unsafe { libc::geteuid() } != 0 {
-                return install_with_sudo(&cli.config, &hostname, &picked, noconfirm);
-            }
-            commands::declare_and_switch(&target, &picked, noconfirm)?;
-        }
-        Command::Upgrade { noconfirm } => commands::upgrade(&target, noconfirm)?,
         Command::Eval => println!("{}", serde_json::to_string_pretty(&evaluation.config)?),
         Command::Options { json } => {
             // As root the config's own options would need an in-process evaluation, so only archix's built-in ones are listed.
@@ -979,84 +773,37 @@ fn run() -> Result<ExitCode> {
             to: Some(date),
             noconfirm,
         } => commands::lock(&target, commands::Snapshot::On(date), noconfirm)?,
-        Command::Diff { all } => {
-            if !commands::diff(&target, all)? {
-                return Ok(ExitCode::from(2));
-            }
-        }
-        Command::Switch {
-            noconfirm,
-            accept_nearest,
-            allow_unsafe_downgrade,
-            without_secrets,
-            allow_partial,
-            allow_limine_boot,
-        } => {
-            if allow_limine_boot {
-                commands::allow_limine_boot();
-            }
-            if without_secrets {
-                commands::without_secrets();
-            }
-            if allow_partial {
-                commands::allow_partial();
-            }
-            commands::switch(&target, noconfirm, accept_nearest, allow_unsafe_downgrade)?
-        }
-        Command::Status { all } => commands::status(&target, all)?,
-        Command::Recover { .. }
+        Command::Diff { .. }
+        | Command::Switch { .. }
+        | Command::Install { .. }
+        | Command::Remove { .. }
+        | Command::Upgrade { .. }
         | Command::Init { .. }
         | Command::PacmanHook { .. }
         | Command::Rollback { .. }
         | Command::User(_)
-        | Command::Revert { .. }
-        | Command::Generations
-        | Command::Gc
         | Command::Prefetch { .. }
         | Command::Rescue { .. }
-        | Command::BootCheck
         | Command::BootInfo
         | Command::BootComplete
         | Command::BootMount { .. }
         | Command::Unblessed
-        | Command::Notice { .. }
         | Command::Resync
         | Command::Bless
         | Command::HealthCheck
         | Command::Swapfile { .. }
         | Command::EmergencyHint { .. }
         | Command::SecureBoot(_)
-        | Command::Cache(_)
         | Command::Snapshot(_)
         | Command::SplitVarLib
         | Command::EvaluateIsolated { .. }
         | Command::WriteFile { .. }
         | Command::Chroot { .. }
-        | Command::Secrets(_)
-        | Command::Sync { .. } => {
+        | Command::Secrets(_) => {
             unreachable!("handled before the config is evaluated")
         }
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// Installing needs root, so a search run as a user hands its picks to `sudo archix install`, the way yay calls sudo.
-fn install_with_sudo(config: &std::path::Path, host: &str, packages: &[String], noconfirm: bool) -> Result<ExitCode> {
-    let exe = std::env::current_exe().context("finding archix's own path")?;
-    let mut cmd = std::process::Command::new("sudo");
-    cmd.arg(exe)
-        .arg("--config")
-        .arg(config)
-        .args(["--host", host, "install"]);
-    if noconfirm {
-        cmd.arg("--noconfirm");
-    }
-    let status = cmd.arg("--").args(packages).status().context("running sudo")?;
-    Ok(if status.success() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
 }
 
 fn system_hostname() -> Result<String> {

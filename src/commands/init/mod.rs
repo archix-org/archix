@@ -29,9 +29,8 @@ use archix::recipes::Recipes;
 use archix::repack::{self, Installed};
 use archix::repos::Custom;
 
-use super::lock::pending;
 use super::{
-    Declared, Target, aur_git, aur_source, confirm_or, count, declared, print_warned, require_root, user_cache,
+    Declared, Target, aur_git, aur_source, confirm_or, count, declared, require_root, user_cache,
 };
 
 fn section(title: &str) {
@@ -449,7 +448,7 @@ fn write_and_lock(
     let evaluation = evaluate(&dir, host)?;
     let mut declared = declared(&evaluation.config)?;
     let mut lock = lock_as_installed(&declared, facts, paths, &dir)?;
-    let swapped = swapped_providers(&lock, facts, &declared);
+    let swapped = swapped_providers(&lock, facts);
     let evaluation = if swapped.is_empty() {
         evaluation
     } else {
@@ -464,7 +463,7 @@ fn write_and_lock(
         lock = lock_as_installed(&declared, facts, paths, &dir)?;
         evaluation
     };
-    let target = Target {
+    let _target = Target {
         config_dir: &dir,
         host,
         config: &evaluation.config,
@@ -514,24 +513,6 @@ fn write_and_lock(
     hand_over(&dir)?;
 
     section("Result");
-    let super::lock::Pending {
-        lines, warned, found, ..
-    } = pending(&target, &declared, &lock)?;
-    for warning in &found.warnings {
-        eprintln!("{warning}");
-    }
-    if lines.is_empty() {
-        done("the system matches the lock and the config: the first switch changes nothing");
-    } else {
-        warn("the first switch would still change these:");
-        for line in &lines {
-            println!("      {line}");
-        }
-    }
-    for refusal in &found.refusals {
-        warn(format!("`archix switch` would refuse this: {refusal:#}"));
-    }
-    print_warned(&warned);
     summary(
         &dir,
         host,
@@ -1871,11 +1852,11 @@ fn lock_as_installed(declared: &Declared, facts: &Facts, paths: &Paths, dir: &Pa
 }
 
 /// Installed dependencies the lock would replace with another provider of the same thing.
-fn swapped_providers(lock: &HostLock, facts: &Facts, declared: &Declared) -> Vec<String> {
+fn swapped_providers(lock: &HostLock, facts: &Facts) -> Vec<String> {
     plan(&lock.packages, &facts.machine.local)
         .into_iter()
         .filter_map(|change| match change {
-            Change::Remove { name, .. } if !declared.ignored.contains(&name) && !facts.orphans.contains(&name) => {
+            Change::Remove { name, .. } if !facts.orphans.contains(&name) => {
                 Some(name)
             }
             _ => None,
