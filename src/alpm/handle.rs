@@ -308,6 +308,32 @@ fn collect(handle: &Alpm, replaced: BTreeMap<String, String>) -> Prepared {
 
 /// Prepares, never commits, a sync transaction for `targets` (plus a full upgrade if asked), without taking the lock.
 pub fn prepare_sync(handle: &mut Alpm, targets: &[String], sysupgrade: bool, answers: Answers) -> Result<Prepared> {
+    prepare_sync_skipping(handle, targets, sysupgrade, answers, &[])
+}
+
+/// As prepare_sync, with `skip` (what the removal transaction takes) left out of the full upgrade as IgnorePkg would.
+pub fn prepare_sync_skipping(
+    handle: &mut Alpm,
+    targets: &[String],
+    sysupgrade: bool,
+    answers: Answers,
+    skip: &[String],
+) -> Result<Prepared> {
+    let added: Vec<&String> = skip
+        .iter()
+        .filter(|name| !handle.ignorepkgs().iter().any(|i| i == name.as_str()))
+        .collect();
+    for name in &added {
+        handle.add_ignorepkg(name.as_str()).map_err(|e| anyhow!("ignoring {name}: {e}"))?;
+    }
+    let result = prepare_sync_inner(handle, targets, sysupgrade, answers);
+    for name in added {
+        let _ = handle.remove_ignorepkg(name.as_str());
+    }
+    result
+}
+
+fn prepare_sync_inner(handle: &mut Alpm, targets: &[String], sysupgrade: bool, answers: Answers) -> Result<Prepared> {
     let replaced = install_questions(handle, answers);
     handle
         .trans_init(TransFlag::NO_LOCK)
