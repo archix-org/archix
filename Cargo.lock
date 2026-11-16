@@ -121,6 +121,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "alpm"
+version = "5.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c7b56a77dc29bbe3c1d2b2a073200b7a09ed0a5d0b421315e915abdee4e1f2b"
+dependencies = [
+ "alpm-sys",
+ "bitflags 2.13.2",
+]
+
+[[package]]
+name = "alpm-sys"
+version = "5.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2802ef5d74e47cceda08d0d583c69be2595a5d25e2d6eef349b5e5b5ed4560e9"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -199,6 +218,7 @@ name = "archix"
 version = "0.2.0"
 dependencies = [
  "age",
+ "alpm",
  "anyhow",
  "clap",
  "console",
