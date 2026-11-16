@@ -8,7 +8,7 @@ use std::rc::Rc;
 use crate::value::Raw;
 
 pub use merge::{check, merge};
-pub use tree::{Children, Decl, Node, declare, did_you_mean, flatten};
+pub use tree::{Children, Decl, Node, declare, did_you_mean, flatten, is_wildcard, lookup};
 pub use types::Type;
 
 pub const PRIO_FORCE: i32 = 50;

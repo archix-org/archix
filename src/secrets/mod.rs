@@ -346,6 +346,7 @@ fn place_error(path: &[String]) -> String {
             parts[0]
         ),
         ["home", "files", ..] => format!("{name}: home files can't hold secrets yet; link a file in /etc instead"),
+        ["home", _, "home_manager", ..] => format!("{name}: {}", crate::home::hm::SECRET_MESSAGE),
         _ => format!(
             "{name}: a secret can't go here; secrets go into files (secret = name, or archix.secret in text) and users.<name>.hashed_password, and units take them with EnvironmentFile= or LoadCredential="
         ),

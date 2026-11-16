@@ -112,6 +112,37 @@ local function secret_name(name, fname)
   return name
 end
 
+local HM = "__archix_hm"
+
+local function hm_string(value, fname)
+  if type(value) ~= "string" or value == "" then error(fname .. ": expected a non-empty string", 3) end
+  return value
+end
+
+local function hm_copy(t, fname, sequence)
+  if type(t) ~= "table" or getmetatable(t) ~= nil then error(fname .. ": expected a table", 3) end
+  local out, n = {}, 0
+  for k, v in next, t do
+    n = n + 1
+    if sequence and math.type(k) ~= "integer" then error(fname .. ": expected list items only", 3) end
+    if not sequence and type(k) ~= "string" then error(fname .. ": expected named fields only", 3) end
+    out[k] = v
+  end
+  if n == 0 then return { [HM] = sequence and "list" or "attrs" } end
+  return out
+end
+
+-- Values for home.<user>.home_manager that a plain Lua value can't say; the generator reads the HM tag.
+local hm = {
+  pkg = function(name) return { [HM] = "pkg", name = hm_string(name, "hm.pkg") } end,
+  raw = function(expr) return { [HM] = "raw", expr = hm_string(expr, "hm.raw") } end,
+  path = function(rel) return { [HM] = "path", path = hm_string(rel, "hm.path") } end,
+  null = NULL,
+  list = function(t) return hm_copy(t, "hm.list", true) end,
+  attrs = function(t) return hm_copy(t, "hm.attrs", false) end,
+}
+_G.hm = hm
+
 archix = {
   -- A placeholder the switch and each boot replace with the value; evaluation never sees it.
   secret = function(name) return "{{archix-secret:" .. secret_name(name, "archix.secret") .. "}}" end,
@@ -123,6 +154,7 @@ archix = {
   force = function(value) return override(PRIO_FORCE, value) end,
   default = function(value) return override(PRIO_DEFAULT, value) end,
   null = NULL,
+  hm = hm,
 }
 
 return { option = OPTION, type = TYPE, prio = PRIO, null = NULL }

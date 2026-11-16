@@ -104,6 +104,7 @@ pub(super) fn current_lock(
     if let Some(old) = &old {
         new.keep_pins(old);
         new.flatpak = old.flatpak.clone();
+        new.home_manager = old.home_manager.clone();
     }
     if !save {
         eprintln!(
@@ -232,6 +233,7 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
         .map(|lock| lock.flatpak.clone())
         .unwrap_or_default();
     let (mut lock, changed) = current_lock(target, &declared, snapshot, true, noconfirm, true)?;
+    let hm_changed = settle_home_manager(target, &mut lock, refresh, &archix::home::hm::update::http_get)?;
     for app in settle_flatpak(target, &declared, &mut lock, true, refresh)? {
         println!("note: {app}; the next `archix switch` locks it");
     }
@@ -240,10 +242,36 @@ pub fn lock(target: &Target, snapshot: Snapshot, noconfirm: bool) -> Result<()> 
             println!("flatpak {id} at {}", &app.commit[..app.commit.len().min(12)]);
         }
     }
-    if !changed && lock.flatpak == before {
+    if !changed && !hm_changed && lock.flatpak == before {
         println!("{LOCK_FILE} is up to date for {} (snapshot {})", target.host, lock.date);
     }
     Ok(())
+}
+
+/// Resolves the home-manager and nixpkgs revs when a user has home_manager: on update, or when the lock has none yet.
+fn settle_home_manager(
+    target: &Target,
+    lock: &mut HostLock,
+    refresh: bool,
+    fetch: &dyn Fn(&str) -> Result<String>,
+) -> Result<bool> {
+    if archix::home::hm::users(target.config).is_empty() || !(refresh || lock.home_manager.is_empty()) {
+        return Ok(false);
+    }
+    let revs = archix::home::hm::update::resolve(fetch)?;
+    if revs == lock.home_manager {
+        return Ok(false);
+    }
+    println!(
+        "home-manager {} and nixpkgs {}",
+        &revs.home_manager[..12],
+        &revs.nixpkgs[..12]
+    );
+    lock.home_manager = revs;
+    let mut lockfile = load_lockfile(target)?;
+    lockfile.hosts.insert(target.host.to_string(), lock.clone());
+    store_lockfile(target, &lockfile)?;
+    Ok(true)
 }
 
 fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
@@ -281,6 +309,47 @@ fn summarize(old: Option<&HostLock>, new: &HostLock) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_pins_home_manager_revs_only_for_a_config_that_uses_it() {
+        use archix::home::hm::update::{HOME_MANAGER_URL, NIXPKGS_URL};
+        let dir = tempfile::tempdir().unwrap();
+        let fetch = |url: &str| -> Result<String> {
+            Ok(match url {
+                HOME_MANAGER_URL => format!("{{\"sha\": \"{}\"}}", "1".repeat(40)),
+                NIXPKGS_URL => "2".repeat(40),
+                _ => anyhow::bail!("unexpected {url}"),
+            })
+        };
+        use archix::value::Value;
+        let none = Value::Map(Default::default());
+        let target = |config| Target {
+            config_dir: dir.path(),
+            host: "box",
+            config,
+            tree: dir.path(),
+            captured: None,
+        };
+        let text = "version = 1\n[hosts.box]\ndate = \"2026-11-01\"\nrepos = []\ndeclared = []\n";
+        let mut lock = Lockfile::parse(text, dir.path()).unwrap().hosts.remove("box").unwrap();
+        assert!(!settle_home_manager(&target(&none), &mut lock, true, &fetch).unwrap());
+        assert!(lock.home_manager.is_empty());
+
+        let settings = Value::Map([("x".to_string(), Value::Bool(true))].into());
+        let user = Value::Map([("home_manager".to_string(), settings)].into());
+        let uses = Value::Map([("home".to_string(), Value::Map([("al".to_string(), user)].into()))].into());
+        assert!(settle_home_manager(&target(&uses), &mut lock, false, &fetch).unwrap());
+        assert_eq!(lock.home_manager.nixpkgs, "2".repeat(40));
+        let text = std::fs::read_to_string(dir.path().join(LOCK_FILE)).unwrap();
+        assert!(
+            text.contains(&format!("home_manager = \"{}\"", "1".repeat(40))),
+            "{text}"
+        );
+        assert!(
+            !settle_home_manager(&target(&uses), &mut lock, false, &fetch).unwrap(),
+            "a locked rev stays until update"
+        );
+    }
 
     #[test]
     fn dkms_gets_the_headers_of_every_installed_kernel_the_repos_have_them_for() {

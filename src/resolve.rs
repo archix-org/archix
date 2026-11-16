@@ -136,6 +136,7 @@ pub fn resolve(
         packages: BTreeMap::new(),
         flatpak: BTreeMap::new(),
         recipes: BTreeMap::new(),
+        home_manager: Default::default(),
     };
     if declared.is_empty() {
         if let Some(recipes) = aur.and_then(|aur| aur.recipes) {

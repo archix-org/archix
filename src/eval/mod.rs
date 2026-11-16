@@ -81,7 +81,8 @@ pub fn evaluate(input: &Input) -> Result<Evaluation, EvalError> {
         return Err(EvalError(loader.diags));
     }
     let options = Rc::new(loader.options);
-    let (config, diags) = fixpoint(&sandbox, &options, &loader.modules)?;
+    let (config, mut diags) = fixpoint(&sandbox, &options, &loader.modules)?;
+    diags.extend(crate::home::hm::check_users(&config));
     if diags.is_empty() {
         Ok(Evaluation { config, options })
     } else {

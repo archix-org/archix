@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use super::{Children, Def, Diagnostic, Node, PRIO_OPTION_DEFAULT, PRIO_PLAIN, Type, did_you_mean, join};
+use super::{
+    Children, Def, Diagnostic, Node, PRIO_OPTION_DEFAULT, PRIO_PLAIN, Type, did_you_mean, is_wildcard, join, lookup,
+};
 use crate::value::{Raw, Value};
 
 pub fn merge(root: &Children, defs: Vec<Def>) -> (Value, Vec<Diagnostic>) {
@@ -73,7 +75,7 @@ impl Merger {
             match def.raw {
                 Raw::Map(map) => {
                     for (key, raw) in map {
-                        if children.contains_key(&key) {
+                        if lookup(children, &key).is_some() {
                             let sub = Def {
                                 raw,
                                 prio: def.prio,
@@ -97,21 +99,30 @@ impl Merger {
             }
         }
         let mut out = BTreeMap::new();
-        for (name, node) in children {
+        for (name, node) in children.iter().filter(|(name, _)| !is_wildcard(name)) {
             let defs = buckets.remove(name).unwrap_or_default();
-            let sub = join(path, name);
-            let value = match node {
-                Node::Group(group) => self.group(&sub, group, defs),
-                Node::Opt(decl) => {
-                    let default = decl.default.as_ref().map(|raw| (raw, &decl.source));
-                    self.option(&sub, &decl.ty, default, defs)
-                }
-            };
-            if let Some(value) = value {
+            if let Some(value) = self.node(&join(path, name), node, defs) {
                 out.insert(name.clone(), value);
             }
         }
+        if let Some((_, node)) = children.iter().find(|(name, _)| is_wildcard(name)) {
+            for (key, defs) in buckets {
+                if let Some(value) = self.node(&join(path, &key), node, defs) {
+                    out.insert(key, value);
+                }
+            }
+        }
         (!out.is_empty()).then_some(Value::Map(out))
+    }
+
+    fn node(&mut self, path: &str, node: &Node, defs: Vec<Def>) -> Option<Value> {
+        match node {
+            Node::Group(group) => self.group(path, group, defs),
+            Node::Opt(decl) => {
+                let default = decl.default.as_ref().map(|raw| (raw, &decl.source));
+                self.option(path, &decl.ty, default, defs)
+            }
+        }
     }
 
     fn unknown(&mut self, path: &str, key: &str, children: &Children, source: &str) {
@@ -234,7 +245,7 @@ impl Merger {
             }
         }
         let (first, _) = values.first()?;
-        if values.iter().all(|(value, _)| value == first) {
+        if values.iter().skip(1).all(|(value, _)| value == first) {
             return Some(first.clone());
         }
         let items = values

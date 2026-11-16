@@ -43,3 +43,5 @@ src/machine.rs	test:init
 src/plan/	test:init test:parity test:captured
 src/alpm/	test:parity test:init
 src/commands/diff.rs	test:init test:captured
+src/home/	test:hm_layer
+src/plan/home.rs	test:hm_layer
