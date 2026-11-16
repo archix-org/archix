@@ -415,7 +415,8 @@ fn users(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
         });
     }
     for name in from_users.into_iter().flatten().map(|(n, _)| n) {
-        if !inputs.to.users.contains_key(name) && accounts.uid(name).is_some() {
+        if !inputs.to.users.contains_key(name) && accounts.uid(name).is_some() && name != crate::aur::build::BUILD_USER
+        {
             group.users.push(UserItem {
                 action: AccountAction::RemoveUser,
                 name: name.clone(),
@@ -732,7 +733,13 @@ mod tests {
         let mut from = SystemState::default();
         from.users.insert("alice".into(), user("/bin/bash"));
         from.users.insert("root".into(), user("/bin/bash"));
+        from.users
+            .insert(crate::aur::build::BUILD_USER.into(), user("/usr/bin/nologin"));
         let g = fx.run(Some(&from), None, &BTreeMap::new());
+        assert!(
+            !g.users.iter().any(|u| u.name == crate::aur::build::BUILD_USER),
+            "archix's build user belongs to its package's sysusers.d file, never removed as undeclared"
+        );
         let alice = g.users.iter().find(|u| u.name == "alice").unwrap();
         assert_eq!(alice.action, AccountAction::ModifyUser);
         assert!(!alice.risk.is_empty());

@@ -6,7 +6,7 @@ pkgrel=1
 pkgdesc="Declarative, lockable, rollback-able system configuration for Arch Linux (local checkout)"
 arch=('x86_64')
 url="https://archix.dev"
-license=('GPL-3.0-or-later')
+license=('GPL-3.0-only')
 depends=('pacman' 'libgcc' 'glibc')
 makedepends=('git' 'rust')
 optdepends=(
@@ -51,4 +51,5 @@ package() {
   install -Dm755 "$srcdir/target/release/archix" "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
+  install -Dm644 packaging/archix.sysusers "$pkgdir/usr/lib/sysusers.d/archix.conf"
 }
