@@ -58,7 +58,7 @@ pub fn ensure(paths: &Paths, archive: &Archive, rendered: &Rendered) -> Result<(
             continue;
         }
         let tmp = dir.join(format!(".{sha256}.fetch"));
-        eprintln!("downloading {url}");
+        crate::exec::output::say(&format!("downloading {url}"));
         if !archive.fetch(url, &tmp)? {
             bail!("{url} doesn't exist");
         }

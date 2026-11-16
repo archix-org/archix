@@ -390,13 +390,6 @@ pub fn describe(
     Ok(lines)
 }
 
-/// Seconds since the Unix epoch.
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 /// Creates and updates the users and groups archix manages in a staging root through `run`, which runs a command in it, reading its accounts from `etc`; passwords are credentials::apply's. Returns the regular users it created, whose homes `create_homes` makes once the deployment is committed.
 pub fn users(
     change: &SystemChange,
@@ -502,8 +495,8 @@ pub fn create_homes(
             .with_context(|| format!("chmod {}", home.display()))?;
         chown_tree(&home, uid, gid)?;
         match with_password.contains(name) {
-            true => eprintln!("created user {name}, with the password the config sets"),
-            false => eprintln!("created user {name}; set a password with `passwd {name}`"),
+            true => crate::exec::output::say(&format!("created user {name}, with the password the config sets")),
+            false => crate::exec::output::say(&format!("created user {name}; set a password with `passwd {name}`")),
         }
     }
     Ok(())
@@ -785,14 +778,13 @@ fn writer(paths: &Paths, target: &Path, file: &ManagedFile, accounts: &Accounts)
     }))
 }
 
-/// Where originals and hand-edited copies of managed files are kept.
+/// Where originals of managed files are kept.
 struct Saves {
     backups: PathBuf,
-    edited: PathBuf,
 }
 
 /// archix's state for root's files; for a home's files, a directory there that belongs to its user, who writes them.
-fn saves(paths: &Paths, stamp: &str, writer: Option<&Writer>) -> Result<Saves> {
+fn saves(paths: &Paths, writer: Option<&Writer>) -> Result<Saves> {
     let base = match writer {
         None => paths.state.clone(),
         Some(writer) => {
@@ -813,7 +805,6 @@ fn saves(paths: &Paths, stamp: &str, writer: Option<&Writer>) -> Result<Saves> {
     };
     Ok(Saves {
         backups: base.join("backups"),
-        edited: base.join("edited").join(stamp),
     })
 }
 
@@ -893,14 +884,13 @@ fn become_user(writer: &Writer) -> Result<()> {
 /// Runs `work` on the managed `file` at `target`, as its user when it's in their home, with where its originals go; a user's content is read from archix's store beforehand.
 fn as_owner(
     paths: &Paths,
-    stamp: &str,
     target: &Path,
     file: &ManagedFile,
     accounts: &Accounts,
     work: impl FnOnce(&Saves, Option<&[u8]>) -> Result<()>,
 ) -> Result<()> {
     let writer = writer(paths, target, file, accounts)?;
-    let saves = saves(paths, stamp, writer.as_ref())?;
+    let saves = saves(paths, writer.as_ref())?;
     let Some(writer) = writer else {
         return work(&saves, None);
     };
@@ -923,12 +913,11 @@ fn as_owner(
 
 /// Writes, replaces and unmanages the files `locate` places, backing up originals and hand edits instead of losing them; owners come from `accounts`, and a home's files are written as its user.
 pub fn files(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
-    let stamp = now().to_string();
     let mut failures = Vec::new();
     for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
         let previous = change.from.files.get(path);
-        let result = as_owner(paths, &stamp, &target, want, accounts, |saves, content| {
+        let result = as_owner(paths, &target, want, accounts, |saves, content| {
             apply_file(paths, saves, path, &target, want, previous, accounts, content)
         });
         if let Err(e) = result {
@@ -948,7 +937,7 @@ pub fn files(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Ac
         let root_backup = under(&paths.state.join("backups"), path);
         let as_user = matches!(writer(paths, &target, previous, accounts), Ok(Some(_)));
         let legacy = (as_user && fs::symlink_metadata(&root_backup).is_ok()).then_some(root_backup.as_path());
-        let result = as_owner(paths, &stamp, &target, previous, accounts, |saves, _| {
+        let result = as_owner(paths, &target, previous, accounts, |saves, _| {
             unmanage(saves, legacy, path, &target, previous, accounts)
         });
         match result {
@@ -986,9 +975,9 @@ fn apply_file(
 ) -> Result<()> {
     let disk = on_disk(target)?;
     if want.link.is_some() && mount_point(target) && !matches(target, &disk, want, accounts) {
-        eprintln!(
+        crate::exec::output::warn(&format!(
             "warning: {path} is mounted over here (a container or arch-chroot does that), so it's left alone; the next switch outside replaces it"
-        );
+        ));
         return Ok(());
     }
     if let Some(merge) = &want.merge {
@@ -1024,14 +1013,12 @@ fn apply_file(
                 }
             }
             Some(previous) if !matches(target, &disk, previous, accounts) => {
-                let copy = under(&saves.edited, path);
-                let dir = copy.parent().expect("absolute path");
-                fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+                let copy = save_path(target);
                 fs::copy(target, &copy).with_context(|| format!("saving the edited {path}"))?;
-                eprintln!(
+                crate::exec::output::warn(&format!(
                     "warning: {path} was edited outside archix; that version is saved at {}",
                     copy.display()
-                );
+                ));
             }
             Some(_) => {}
         }
@@ -1061,10 +1048,10 @@ fn unmanage(
         return Ok(());
     };
     if disk != OnDisk::Missing && !matches(target, &disk, previous, accounts) {
-        eprintln!(
+        crate::exec::output::warn(&format!(
             "warning: {path} was edited outside archix; restoring the original anyway, see {}",
             source.display()
-        );
+        ));
     }
     if matches!(disk, OnDisk::Link(_) | OnDisk::File { .. }) {
         fs::remove_file(target).with_context(|| format!("removing {path}"))?;
@@ -1078,13 +1065,12 @@ fn unmanage(
 
 /// Backs up every file the target manages that's already on disk exactly as wanted, for a switch that writes no files.
 pub fn keep_originals(paths: &Paths, change: &SystemChange, locate: Locate, accounts: &Accounts) -> Result<()> {
-    let stamp = now().to_string();
     for (path, want) in &change.to.files {
         let Some(target) = locate(path) else { continue };
         if want.merge.is_some() || change.from.files.contains_key(path) {
             continue;
         }
-        as_owner(paths, &stamp, &target, want, accounts, |saves, _| {
+        as_owner(paths, &target, want, accounts, |saves, _| {
             let disk = on_disk(&target)?;
             if disk != OnDisk::Missing && matches(&target, &disk, want, accounts) {
                 keep_original(&target, &under(&saves.backups, path)).with_context(|| format!("backing up {path}"))?;
@@ -1093,6 +1079,13 @@ pub fn keep_originals(paths: &Paths, change: &SystemChange, locate: Locate, acco
         })?;
     }
     Ok(())
+}
+
+/// Where a hand-edited managed file is kept before archix writes over it (SCOPE 6).
+pub fn save_path(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_os_string();
+    name.push(".archix-save");
+    PathBuf::from(name)
 }
 
 /// Copies a file archix takes over as it is, so unmanaging it later puts it back instead of deleting it.

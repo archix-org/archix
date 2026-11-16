@@ -327,7 +327,7 @@ pub struct Prepared {
     pub replaced: BTreeMap<String, String>,
 }
 
-fn install_questions(handle: &Alpm, answers: Answers) -> Rc<RefCell<BTreeMap<String, String>>> {
+pub(crate) fn install_questions(handle: &Alpm, answers: Answers) -> Rc<RefCell<BTreeMap<String, String>>> {
     let replaced = Rc::new(RefCell::new(BTreeMap::new()));
     let record = replaced.clone();
     handle.set_question_cb((), move |question, _| {
@@ -368,7 +368,7 @@ fn install_questions(handle: &Alpm, answers: Answers) -> Rc<RefCell<BTreeMap<Str
     replaced
 }
 
-fn prepare_error(e: alpm::PrepareError) -> anyhow::Error {
+pub(crate) fn prepare_error(e: alpm::PrepareError) -> anyhow::Error {
     let detail = match e.data() {
         Some(alpm::PrepareData::UnsatisfiedDeps(deps)) => deps
             .iter()
@@ -393,7 +393,7 @@ fn prepare_error(e: alpm::PrepareError) -> anyhow::Error {
     }
 }
 
-fn collect(handle: &Alpm, replaced: BTreeMap<String, String>) -> Prepared {
+pub(crate) fn collect(handle: &Alpm, replaced: BTreeMap<String, String>) -> Prepared {
     let local = handle.localdb();
     let mut add: Vec<Added> = handle
         .trans_add()
