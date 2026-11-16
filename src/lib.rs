@@ -10,6 +10,7 @@ pub mod eval;
 pub mod fetch;
 pub mod flatpak;
 pub mod installed;
+pub mod journal;
 pub mod lock;
 pub mod luagen;
 pub mod machine;
