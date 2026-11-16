@@ -41,6 +41,8 @@ pub struct Environment {
     /// HMACs of the rendered secrets' values under the machine key; None without the key.
     pub secret_hmacs: SecretHmacs,
     pub flatpak_installed: Option<BTreeMap<String, InstalledApp>>,
+    /// What the home group needs for home-manager users; None leaves them unchecked.
+    pub home: Option<super::home::HomeEnv>,
 }
 
 pub struct PlanInputs<'a> {
@@ -323,6 +325,7 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
             plan.home.push(LineItem {
                 line: format!("{verb} {}", item.path),
                 reason: item.reason,
+                diff: item.diff,
                 risk: item.risk,
             });
         } else {
@@ -376,12 +379,7 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
         });
     }
 
-    if let Some(Value::Map(users)) = get(config, "home")
-        && users.values().any(|u| get(u, "home_manager").is_some())
-    {
-        plan.unchecked
-            .push("home: home-manager build isn't run by this diff yet".into());
-    }
+    super::home::plan_home(config, inputs.config_dir, env.home.as_ref(), &mut plan)?;
 
     if !inputs.flatpak.is_empty() {
         match &env.flatpak_installed {
@@ -392,6 +390,7 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
                     plan.flatpak.push(LineItem {
                         line: line.trim_start_matches("flatpak").trim().to_string(),
                         reason: "declared, from a live remote".into(),
+                        diff: None,
                         risk: Vec::new(),
                     });
                 }
@@ -405,11 +404,13 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
             true => LineItem {
                 line: "snapper pre and post snapshots".into(),
                 reason: "snapper is set up".into(),
+                diff: None,
                 risk: Vec::new(),
             },
             false => LineItem {
                 line: "no pre-snapshot".into(),
                 reason: "snapper isn't set up; the switch needs --no-snapshot".into(),
+                diff: None,
                 risk: vec!["no pre-snapshot".into()],
             },
         });
@@ -444,6 +445,7 @@ mod tests {
             }),
             secret_hmacs: Box::new(|_| None),
             flatpak_installed: None,
+            home: None,
         }
     }
 

@@ -191,7 +191,7 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
     for (title, items) in [("home", &plan.home), ("flatpak", &plan.flatpak)] {
         let lines = items
             .iter()
-            .map(|i| (line(format!("{}  ({})", i.line, i.reason), &i.risk), None))
+            .map(|i| (line(format!("{}  ({})", i.line, i.reason), &i.risk), i.diff.clone()))
             .collect();
         out.push((title, lines));
     }

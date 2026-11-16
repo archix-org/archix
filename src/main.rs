@@ -64,6 +64,9 @@ enum Command {
         /// Use the sync dbs already cached instead of fetching them; the header says so
         #[arg(long)]
         cached: bool,
+        /// Skip `home-manager build`, so home-manager users' file changes aren't listed (exit 4)
+        #[arg(long)]
+        no_build: bool,
     },
     /// Apply the config to the running system; being rewritten for the rescope
     Switch {
@@ -403,6 +406,7 @@ fn run() -> Result<ExitCode> {
         stat,
         save,
         cached,
+        no_build,
     } = command
     {
         let args = commands::diff::DiffArgs {
@@ -410,6 +414,7 @@ fn run() -> Result<ExitCode> {
             stat,
             save,
             cached,
+            no_build,
         };
         return Ok(ExitCode::from(
             commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
