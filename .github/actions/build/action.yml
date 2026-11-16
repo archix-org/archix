@@ -1,5 +1,5 @@
 name: Build archix once
-description: Builds the release and static binaries and every test executable in the test image, runs the doc tests, and uploads them as an artifact the test jobs take as ARCHIX_PREBUILT.
+description: Builds the release binary and every test executable in the test image, runs the doc tests, and uploads them as an artifact the test jobs take as ARCHIX_PREBUILT.
 inputs:
   name:
     description: The artifact's name, unique in the workflow run (release.yml runs CI and the release gate in one).

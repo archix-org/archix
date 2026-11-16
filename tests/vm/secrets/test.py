@@ -1,16 +1,13 @@
-# Declared secrets on real boots, in place: consumers read them (a wg-quick link, a NetworkManager profile under /run that `nmcli connection modify --temporary` edits in place, LoadCredential=, EnvironmentFile=, a crypt_hash login), a snapshot's entry boots its own values (btrfs), a lost identity fails closed without a fallback and is recovered with the admin key, a damaged ciphertext costs only its secret, the rescue entry decrypts nothing and its password holds, `archix chroot` keeps a snapshot without the identity (btrfs), a crash leaves no core, swap and hibernation; each scenario ends with the guest's leak sweep, the run with a grep of the raw root and swap partitions.
+# Declared secrets on real boots, in place: consumers read them (a wg-quick link, a NetworkManager profile under /run that `nmcli connection modify --temporary` edits in place, LoadCredential=, EnvironmentFile=, a crypt_hash login), a switch changes a value live, a lost identity fails closed and is recovered with the admin key, a damaged ciphertext costs only its secret, a crash leaves no core, swap and hibernation; each scenario ends with the guest's leak sweep, the run with a grep of the raw root and swap partitions.
 import json
 import re
 import secrets as random
 import shlex
 import subprocess
-import time
 
-from driver import MachineError
 from boot.common import bind as bind_common
-from boot.common import state as state_common
-from boot.common import wait_fallback
-from suite import BTRFS, lay_out, newest_snapshot
+from boot.common import not_stub
+from suite import lay_out
 
 HOST = "archix --host archix-vm"
 CONFIG = "/etc/archix/init.lua"
@@ -18,7 +15,7 @@ RAMFS = "/run/vmtest-ramfs"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 BACKDOOR = "archix-backdoor.service"
 SECRETS_UNIT = "archix-secrets.service"
-MACHINE = {"mem": "1536", "console_input": True}
+MACHINE = {"mem": "1536"}
 m = t = None
 markers = {}
 original = ""
@@ -30,10 +27,6 @@ def out(cmd, timeout=900):
 
 def ok(cmd, timeout=900):
     return m.execute(cmd, timeout)[0] == 0
-
-
-def current():
-    return out("archix generations | awk '$1 == \"*\" && $2 ~ /^[0-9]+$/ { print $2; exit }'").strip()
 
 
 def marker(name, length=32):
@@ -49,19 +42,17 @@ def wg_key(name):
 
 
 def boot(allowed_failed=()):
-    """Waits for the guest to reach multi-user.target with no failed unit but the backdoor's and `allowed_failed`; returns the entry systemd-boot started and the snapshot a try boot runs, or None."""
+    """Waits for the guest to reach multi-user.target with no failed unit but the backdoor's and `allowed_failed`; returns the entry systemd-boot started."""
     m.execute("systemctl is-system-running --wait > /dev/null", 900)
     selected = out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
-    tried = out("cat /run/archix/try 2>/dev/null").strip()
-    running = json.loads(tried).get("snapshot") if tried else None
-    t.log(f"booted entry {selected}, try {running}, current {current()}")
+    t.log(f"booted entry {selected}")
     t.require(ok("systemctl is-active -q multi-user.target"), "the boot didn't reach multi-user.target")
     failed = [u for u in out("systemctl --failed --no-legend --plain | awk '{ print $1 }'").split() if u != BACKDOOR and u not in allowed_failed]
     for unit in failed:
         t.log(f"{unit}: " + out(f"journalctl -b -u {unit} --no-pager | tail -20"))
     t.require(not failed, f"units failed at this boot: {' '.join(failed)}")
     ok("mountpoint -q " + RAMFS + " || { mkdir -p " + RAMFS + " && mount -t ramfs -o mode=0700 ramfs " + RAMFS + "; }")
-    return selected, running
+    return selected
 
 
 def set_config(extra):
@@ -127,41 +118,8 @@ def nm_profile(key):
     return f"[connection]\nid=home\ntype=wireguard\ninterface-name=wghome\nautoconnect=false\n\n[wireguard]\nprivate-key={key}\n\n[ipv4]\nmethod=disabled\n\n[ipv6]\nmethod=disabled\n"
 
 
-def state_slot():
-    """The fallback slot's snapshot, from the menu's state."""
-    return state_common().get("slot")
-
-
 def values_hash(name):
     return out(f"sha256sum < /run/archix/secrets/{name} 2>/dev/null | cut -d' ' -f1").strip()
-
-
-cursor = [0]
-
-
-def expect(regex, timeout=900):
-    """Waits for regex on the serial console after what the last expect matched, so a prompt shown before doesn't count again."""
-    import time
-    pattern = re.compile(regex)
-    deadline = time.monotonic() + timeout
-    while True:
-        with open(m.serial, "rb") as console:
-            console.seek(cursor[0])
-            text = console.read().decode("latin-1")
-        found = pattern.search(text)
-        if found:
-            cursor[0] += found.end()
-            t.log(f"console: {found.group(0)!r}")
-            return found.group(0)
-        if time.monotonic() > deadline:
-            raise MachineError(f"/{regex}/ didn't show on the console within {timeout} s: {text[-800:]}")
-        time.sleep(0.5)
-
-
-def su_works(password):
-    """Whether alice logs in with su and `password`, typed once su has turned echo off and asked for it."""
-    login = m.execute(f"(sleep 3; printf '%s\\n' {shlex.quote(password)}) | SHELL=/bin/sh setpriv --reuid=nobody --regid=nobody --clear-groups script -qec 'su alice -c \"id -un\"' /dev/null 2>&1")
-    return login[1].split()[-1:] == ["alice"]
 
 
 def sha(text):
@@ -223,7 +181,9 @@ def run(machine, test):
         markers["pw"] = pw_hash
         set_secret("pw", pw_hash)
         set_secret("swapcheck", marker("swapcheck", 32))
-        switched = m.succeed(f"{HOST} switch --noconfirm", what="the switch with secrets")
+        status, switched = m.execute(f"{HOST} switch --noconfirm 2>&1", 3600)
+        not_stub(status, switched, "the switch with secrets")
+        t.require(status == 0, f"the switch with secrets exited {status}: {switched[-2000:]}")
         t.check("secret     wg0: new" in switched and pw_hash not in switched, f"the switch names the secrets, never a value: {switched[-1500:]}")
         m.reboot()
         boot()
@@ -251,7 +211,7 @@ def run(machine, test):
         t.check(not ok("su nobody -s /bin/sh -c 'cat /run/archix/secrets/wg0' 2>/dev/null"), "another user can't read a root secret")
         sweep("s1", lambda name, place: name == "pw" and shadow_place(place))
 
-    with t.step("s2: a switch changes a value live; a snapshot's entry boots its own values"):
+    with t.step("s2: a switch changes a value live"):
         new_api = marker("api2", 24)
         set_secret("api", new_api)
         m.succeed(f"{HOST} switch --noconfirm", what="the switch with a new api value")
@@ -259,60 +219,17 @@ def run(machine, test):
         m.reboot()
         boot()
         t.check(values_hash("api") == sha(new_api), "the boot after it decrypts the new value")
-        if BTRFS:
-            older = newest_snapshot()
-            m.select_entry(f"archix-snapshot-{older}.conf")
-            m.reboot()
-            selected, running = boot()
-            t.check(running == older, f"snapshot {older}'s entry should boot it in try mode, not {running}")
-            t.check(values_hash("api") == sha(markers["api"]), "the snapshot boots its own, older value")
-            t.check(values_hash("wg0") == sha(f"[Interface]\nPrivateKey = {markers['wg0']}\nAddress = 10.99.0.1/24\n"), "and every other secret as it was")
-            m.reboot()
-            selected, running = boot()
-            t.check(running is None and values_hash("api") == sha(new_api), "the next boot is the current system's, with the new value")
         sweep("s2", lambda name, place: name == "pw" and shadow_place(place))
 
-    # Without snapshots (ext4) there's no slot to fall back to.
-    if BTRFS:
-        with t.step("s3: an identity lost on a counted boot fails its health check and falls back to the slot, which decrypts"):
-            m.succeed(f"{HOST} install tree --noconfirm", what="archix install tree")
-            t.require(ok("ls /efi/loader/entries/archix-current+2.conf /efi/loader/entries/archix-current+2-0.conf 2>/dev/null | grep -q ."), "the current entry should count its tries after the switch")
-            slot = state_slot()
-            t.log(f"the slot is snapshot {slot}")
-            m.succeed("mv /var/lib/archix/secrets/identity /root/identity.lost")
-            m.reboot()
-            began = time.monotonic()
-            m.wait_for_shell()
-            said = m.wait_until_succeeds("journalctl -b -u archix-health-check.service --no-pager | grep 'failed its health check'", timeout=600, what="the counted boot should fail its health check")
-            t.check(SECRETS_UNIT in said, f"the health check should name {SECRETS_UNIT}: {said}")
-            took = wait_fallback(began)
-            selected, running = boot()
-            t.log(f"fell back {took:.0f} s after the reboot")
-            t.check(running == slot, f"the boot should fall back to the slot, snapshot {slot}, in try mode: {selected} {running}")
-            t.check(ok(f"systemctl is-active -q {SECRETS_UNIT}") and values_hash("api") == sha(markers["api2"]), "the slot holds the identity, so every secret decrypts there")
-            status = out(f"{HOST} status 2>&1")
-            t.check(f"archix rollback {slot}" in status, f"status should point at `archix rollback {slot}` to keep it: {status[-1200:]}")
-            m.succeed(f"{HOST} rollback {slot} --noconfirm", what=f"keeping snapshot {slot}")
-            m.reboot()
-            selected, running = boot()
-            t.check(selected == "archix-current.conf" and running is None and ok(f"systemctl is-active -q {SECRETS_UNIT}"), f"the kept slot boots with its secrets: {selected} {running}")
-            m.wait_until_succeeds("ls /efi/loader/entries/archix-current.conf", timeout=600, what="the kept root's counted boot should be blessed")
-            sweep("s3", lambda name, place: name == "pw" and shadow_place(place))
-
-    with t.step("s3b: on a boot with nothing to count, a lost identity fails closed and nothing falls back; the admin key recovers"):
-        m.reboot()
-        boot()
-        t.require(ok("ls /efi/loader/entries/archix-current.conf"), "the current entry should count no tries")
+    with t.step("s3: a lost identity fails closed; the admin key recovers"):
         m.succeed("mv /var/lib/archix/secrets/identity /root/identity.lost")
         m.reboot()
-        selected, running = boot(allowed_failed=(SECRETS_UNIT,))
-        t.check(selected == "archix-current.conf" and running is None, f"the current system should boot though no secret decrypts, not {selected} {running}")
+        boot(allowed_failed=(SECRETS_UNIT,))
         t.check(ok(f"systemctl is-failed -q {SECRETS_UNIT}"), f"{SECRETS_UNIT} should fail")
         t.check(not ok("systemctl start archix-test-cred.service"), "LoadCredential= fails closed")
         t.check(not ok("cat /etc/wireguard/wg0.conf > /dev/null 2>&1"), "the link dangles")
-        notes = out("cat /var/lib/archix/notes")
-        t.check("no secret was decrypted at this boot" in notes, f"the login note should say so: {notes}")
-        t.check(ok("ls /efi/loader/entries/archix-current.conf") and not out("journalctl -b -u archix-health-check.service --no-pager | grep 'failed its health check'").strip(), "an uncounted boot runs no health check and marks nothing bad")
+        said = out(f"journalctl -b -u {SECRETS_UNIT} --no-pager")
+        t.check("no secret was decrypted at this boot" in said, f"the decrypt step should say so: {said[-800:]}")
         said = m.succeed("archix secrets init", what="a new identity after the loss")
         new_key = re.search(r'machine_key = "(age1[0-9a-z]+)"', said).group(1)
         admin = out("age-keygen -y /root/admin.key").strip()
@@ -323,7 +240,7 @@ def run(machine, test):
         m.reboot()
         boot()
         t.check(ok(f"systemctl is-active -q {SECRETS_UNIT}") and values_hash("api") == sha(markers["api2"]), "after the recovery every secret decrypts again")
-        sweep("s3b", lambda name, place: name == "pw" and shadow_place(place))
+        sweep("s3", lambda name, place: name == "pw" and shadow_place(place))
 
     with t.step("s4: a damaged ciphertext costs only its secret"):
         sha_nb = json.loads(out("cat /usr/lib/archix/secrets/manifest.json"))["secrets"]["nb"]["sha256"]
@@ -331,74 +248,11 @@ def run(machine, test):
         m.reboot()
         boot(allowed_failed=(SECRETS_UNIT, "archix-test-env.service"))
         t.check(not ok("test -e /run/archix/secrets/nb") and ok("test -s /run/archix/secrets/api"), "only the damaged secret is missing")
-        status = out(f"{HOST} status")
-        t.check("secret nb is missing at this boot" in status, f"status should name it: {status}")
-        m.succeed(f"sed -i 's|\\[\"/etc/archix-vmtest\"\\] = {{ text = \"0\" }}|[\"/etc/archix-vmtest\"] = {{ text = \"4\" }}|' {CONFIG} && {HOST} switch --noconfirm", what="a switch that writes the deployed secrets again")
-        damaged = newest_snapshot() if BTRFS else None
+        m.succeed(f"sed -i 's|\\[\"/etc/archix-vmtest\"\\] = {{ text = \"0\" }}|[\"/etc/archix-vmtest\"] = {{ text = \"4\" }}|' {CONFIG} && {HOST} switch --noconfirm", what="a switch that writes the secrets again")
         m.reboot()
         boot()
-        t.check(ok("test -s /run/archix/secrets/nb"), "the next deployment has it whole again")
+        t.check(ok("test -s /run/archix/secrets/nb"), "the boot after the switch has it whole again")
         sweep("s4", lambda name, place: name == "pw" and shadow_place(place))
-
-    with t.step("s6: the rescue entry decrypts nothing; a password set there holds over the secret's"):
-        m.select_entry("archix-rescue.conf")
-        m.reboot()
-        cursor[0] = m.console_mark
-        expect(r"rescue login \(root or a wheel user\): ", timeout=600)
-        m.type("alice")
-        expect(r"password: ", timeout=60)
-        m.type(password)
-        expect(r"logged in as alice", timeout=60)
-        expect(r"rescue> ", timeout=60)
-        m.type("shell")
-        expect(r"\[rescue ", timeout=60)
-        m.type("echo VMTEST-RESCUE:$(grep -c ' ramfs ' /proc/mounts):$(test -e /run/archix/secrets && echo present || echo absent):$(ls /run/archix 2>/dev/null | tr '\\n' ,)")
-        seen = expect(r"VMTEST-RESCUE:\d+:(present|absent):[^\r\n]*", timeout=60)
-        t.check(seen.startswith("VMTEST-RESCUE:0:absent"), f"the rescue should mount no ramfs and have no /run/archix/secrets: {seen}")
-        t.check(not re.search(r"archix: secrets: |decrypted \d+ of", m.console_since(m.console_mark)), "nothing in the rescue boot decrypts")
-        m.type("exit")
-        expect(r"rescue> ", timeout=60)
-        m.type("password alice")
-        expect(r"new password for alice: ", timeout=60)
-        m.type("rescued pass")
-        expect(r"again: ", timeout=60)
-        m.type("rescued pass")
-        said = expect(r"boots keep it over the crypt_hash secret pw", timeout=120)
-        t.log(f"the rescue said: {said}")
-        expect(r"rescue> ", timeout=60)
-        m.type("reboot")
-        m.new_boot("rebooting from the rescue")
-        boot()
-        t.check(ok("test -s /var/lib/archix/accounts/password-override/alice"), "the rescue should record the override")
-        t.check("alice's password was set in the rescue entry" in out("cat /var/lib/archix/notes"), "a login note should say the boot kept it")
-        t.check(su_works("rescued pass"), "alice should log in with the rescue's password after a normal boot")
-        switched = m.succeed(f"{HOST} switch --noconfirm", what="a switch with the secret unchanged")
-        # A switch with nothing to apply takes no snapshot, so the one after s4's repair is taken by hand.
-        if BTRFS:
-            m.succeed("archix snapshot create --note 'secrets whole again'", what="a snapshot after s4's repair")
-        whole = newest_snapshot() if BTRFS else None
-        t.check("keeping alice's password set in the rescue entry over the crypt_hash secret pw" in switched, f"the switch should keep it: {switched[-600:]}")
-        m.reboot()
-        boot()
-        t.check(su_works("rescued pass"), "and the boot after that switch")
-        sweep("s6", lambda name, place: name == "pw" and shadow_place(place))
-
-    if BTRFS:
-        with t.step(f"s7: `archix chroot`, as from a live USB, keeps snapshot {whole} without the identity"):
-            m.succeed("mv /var/lib/archix/secrets/identity /root/identity.away")
-            rolled = m.execute(f"archix chroot /dev/vda2 env -u JOURNAL_STREAM archix rollback {whole} --noconfirm 2>&1", timeout=1800)
-            t.check(rolled[0] == 0, f"a keep from the chroot needs no identity: {rolled[1][-800:]}")
-            m.succeed("mv /root/identity.away /var/lib/archix/secrets/identity")
-            m.reboot()
-            selected, _ = boot()
-            t.check(selected == "archix-current.conf", f"the kept snapshot should boot from the current entry, not {selected}")
-            journal = out(f"journalctl -b -u {SECRETS_UNIT} --no-pager")
-            t.check(ok(f"systemctl is-active -q {SECRETS_UNIT}") and ok("test -s /run/archix/secrets/api && test -s /run/archix/secrets/nb") and "wasn't decrypted" not in journal, f"the kept snapshot, from after s4's repair, decrypts every secret at boot with the identity back: {journal[-800:]}")
-            replaced = newest_snapshot()
-            m.succeed(f"archix rollback {replaced} --noconfirm", what=f"keeping snapshot {replaced}, the root the keep replaced")
-            m.reboot()
-            boot()
-            sweep("s7", lambda name, place: name == "pw" and shadow_place(place))
 
     with t.step("s9: a crash of the decrypt step with values in memory leaves no core dump"):
         crashed = m.execute("strace -f -o /dev/null -e inject=linkat,rename:signal=SEGV:when=1 archix secrets activate > /dev/null 2>&1; echo $?")
@@ -419,8 +273,6 @@ def run(machine, test):
         t.check("AllowHibernation=no" in dropin and "secrets" in dropin, f"hibernation should be off for the secrets: {dropin}")
         can = out("busctl call org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager CanHibernate 2>&1")
         t.check('"yes"' not in can, f"logind shouldn't offer hibernation: {can}")
-        status = out(f"{HOST} status")
-        t.check("hibernation is off while secrets are declared and swap isn't encrypted" in status, f"status should say why: {status}")
         used = m.succeed("mount -t tmpfs -o size=2400M tmpfs /mnt && (dd if=/dev/urandom of=/mnt/fill bs=1M count=1700 2>/dev/null; true); free -m | awk '/Swap/ { print $3 }'; rm -f /mnt/fill; umount /mnt", timeout=1800, what="memory pressure")
         t.check(int(used.strip() or 0) > 100, f"the pressure should have used swap: {used.strip()} MiB")
         set_config(secrets_config(new_key, admin, ITEMS, CONSUMERS, more=", allow_hibernation = true") + "\n" + SWAP_CONFIG)

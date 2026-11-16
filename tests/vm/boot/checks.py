@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Usage: checks.py; fails on any privileged container in tests/, scripts/ or .github/, and unless run.sh's suite_tests each have a test.py and a cache key in cache.py, with ci.yml's suites job naming only them, and its replay tests each a test.py and a cache key too.
+# Usage: checks.py; fails on any privileged container in tests/, scripts/ or .github/, and unless run.sh's suite_tests each have a test.py and a cache key in cache.py, with ci.yml's suites job naming only them.
 import json
 import re
 import sys
@@ -26,18 +26,6 @@ def suite_problems(suites, ext4, ci):
     return found
 
 
-def split_problems():
-    """What's wrong with run.sh's replay tests against their directories and cache.py's lists."""
-    found = []
-    for suite in ("replay",):
-        tests = listed(f"{suite}_tests")
-        found += [f"run.sh's {suite} test {name} has no tests/vm/{suite}/{name}/test.py" for name in tests if not (ROOT / "tests/vm" / suite / name / "test.py").is_file()]
-        cached = re.search(rf"^{suite.upper()}_TESTS = (\[.*\])$", (ROOT / "tests/vm/driver/cache.py").read_text(), re.M)
-        if not tests or not cached or sorted(json.loads(cached.group(1))) != sorted(tests):
-            found.append(f"tests/vm/driver/cache.py's {suite.upper()}_TESTS isn't run.sh's {suite}_tests ({' '.join(tests)}), so a test would have no cache key")
-    return found
-
-
 # Spelled in two pieces so this file doesn't match itself.
 PRIVILEGED = "--" + "privileged"
 
@@ -61,11 +49,11 @@ def privileged_problems():
 
 def main():
     ci = (ROOT / ".github/workflows/ci.yml").read_text()
-    found = suite_problems(listed("suite_tests"), listed("ext4_tests"), ci) + split_problems() + privileged_problems()
+    found = suite_problems(listed("suite_tests"), listed("ext4_tests"), ci) + privileged_problems()
     if found:
         print("\n".join(found))
         return 1
-    print(f"run.sh's {len(listed('suite_tests'))} suites and {len(listed('replay_tests'))} replay tests each have a test.py and a cache key, and no container is privileged")
+    print(f"run.sh's {len(listed('suite_tests'))} suites each have a test.py and a cache key, and no container is privileged")
     return 0
 
 

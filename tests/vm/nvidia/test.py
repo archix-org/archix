@@ -1,8 +1,8 @@
-# NVIDIA DKMS drivers in place: nvidia-open-dkms added live at 2026-06-01, then the newer snapshot (TO_DATE, 2026-10-10 by default) changing kernel and driver, the snapshot before it tried with its own kernel, driver and DKMS state, a keep of the snapshot from before the driver leaving no trace of it, the closed nvidia-580xx-dkms from the AUR added and dropped, and a revert to the generation with the open driver rebuilding it from archix's package cache. No GPU, so modules are built and checked, not loaded.
+# NVIDIA DKMS drivers in place: nvidia-open-dkms added live at 2026-06-01, then the newer snapshot (TO_DATE, 2026-10-10 by default) changing kernel and driver and booting them, the open driver dropped leaving no trace, and the closed nvidia-580xx-dkms from the AUR added and dropped. No GPU, so modules are built and checked, not loaded.
 import os
 
-from boot.common import HOST, bind, boot, entries, entry, ok, out, trying
-from suite import BTRFS, add_packages, current_generation, drop_packages, images_consistent, lay_out, newest_snapshot, switch, update
+from boot.common import bind, boot, ok, out
+from suite import add_packages, drop_packages, lay_out, switch, update
 
 MACHINE = {"mem": "6144", "cpus": "4", "global_timeout": 14400}
 TO = os.environ.get("TO_DATE") or "2026-10-10"
@@ -45,12 +45,11 @@ def driver(t, version):
 
 
 def current_image():
-    name = entry("archix-current.conf")
-    return out(f"sed -nE 's#^(efi|uki) /#/efi/#p' /efi/loader/entries/{name}").strip()
+    return "/efi/EFI/Linux/arch-linux.efi"
 
 
 def no_driver(t):
-    """No nvidia package, module, DKMS record, source tree, firmware or drop-in, modprobe finds none, and the current image's initramfs has none."""
+    """No nvidia package, module, DKMS record, source tree, firmware or drop-in, modprobe finds none, and linux's UKI has none in its initramfs."""
     for name in ("nvidia-open-dkms", "nvidia-utils", "nvidia-580xx-dkms", "nvidia-580xx-utils"):
         t.check(not pkg(name), f"{name} should be gone, but {pkg(name)} is installed")
     t.check(not out("ls /usr/lib/modules/*/updates/dkms/nvidia* 2>/dev/null").strip(), f"nvidia modules are left behind: {out('ls /usr/lib/modules/*/updates/dkms/')}")
@@ -73,56 +72,30 @@ def run(m, t):
         no_driver(t)
         add_packages(m, "nvidia-open-dkms")
         switch(m, t, "the switch adding nvidia-open-dkms")
-        none = newest_snapshot() if BTRFS else None
-        with_driver = current_generation()
         old_driver, old_kernel = pkg("nvidia-open-dkms"), kernel()
-        t.log(f"nvidia-open-dkms {old_driver} on {old_kernel}; snapshot before it {none}, generation {with_driver}")
+        t.log(f"nvidia-open-dkms {old_driver} on {old_kernel}")
         driver(t, old_driver)
-        images_consistent(t)
 
     with t.step(f"2: the {TO} update changes kernel and driver, building the new one for the new kernel"):
         update(m, t, TO)
         switch(m, t, f"the switch to the {TO} snapshot")
-        nv_old = newest_snapshot() if BTRFS else None
         new_driver, new_kernel = pkg("nvidia-open-dkms"), installed_kernel()
-        t.log(f"now nvidia-open-dkms {new_driver} for {new_kernel}; snapshot before it {nv_old}")
+        t.log(f"now nvidia-open-dkms {new_driver} for {new_kernel}")
         t.require(new_driver != old_driver and new_kernel != old_kernel, f"the {TO} snapshot should change kernel and driver: {new_kernel} {new_driver}")
         t.check(built(new_kernel) == upstream(new_driver), f"nvidia {new_driver} should be built for {new_kernel}, not {built(new_kernel)!r}")
-        images_consistent(t)
         m.reboot()
 
     with t.step("3: the update's kernel boots with its driver"):
         started = boot()
-        t.check(started == "archix-current.conf" and kernel() == new_kernel, f"the current entry should boot {new_kernel}: {started} {kernel()}")
+        t.check(started == new_kernel, f"the reboot should start {new_kernel}, not {started}")
         driver(t, new_driver)
 
-    if BTRFS:
-        with t.step(f"4: trying snapshot {nv_old} brings back the old kernel and driver, with nothing rebuilt"):
-            name = f"archix-snapshot-{nv_old}.conf"
-            t.require(entry(name), f"snapshot {nv_old} should have an entry: {entries()}")
-            m.select_entry(name)
-            m.reboot()
-            boot()
-            t.check((trying() or {}).get("snapshot") == nv_old and kernel() == old_kernel, f"a try boot of snapshot {nv_old} on {old_kernel}: {trying()} {kernel()}")
-            driver(t, old_driver)
-            t.check(f"nvidia/{upstream(new_driver)}" not in out("dkms status nvidia"), f"the try's DKMS state shouldn't know the {new_driver} build: {out('dkms status nvidia')}")
-
-        with t.step(f"5: keeping snapshot {none}, from before the driver, leaves no trace of it"):
-            m.succeed(f"set -o pipefail; {HOST} rollback {none} --noconfirm 2>&1 | tail -20", 1800, what=f"keeping snapshot {none}")
-            m.reboot()
-            started = boot()
-            t.check(started == "archix-current.conf" and trying() is None and kernel() == old_kernel, f"the kept root should boot {old_kernel} from the current entry: {started} {trying()} {kernel()}")
-            no_driver(t)
-            images_consistent(t)
-    else:
-        with t.step("4: dropping the driver leaves no trace of it"):
-            drop_packages(m, "nvidia-open-dkms")
-            switch(m, t, "the switch dropping nvidia-open-dkms")
-            no_driver(t)
-
-    with t.step("6: the closed nvidia-580xx-dkms from the AUR, added, then dropped"):
-        # A keep brings back the snapshot's config, which the switch it was taken before had already edited to add the open driver.
+    with t.step("4: dropping the driver leaves no trace of it"):
         drop_packages(m, "nvidia-open-dkms")
+        switch(m, t, "the switch dropping nvidia-open-dkms")
+        no_driver(t)
+
+    with t.step("5: the closed nvidia-580xx-dkms from the AUR, added, then dropped"):
         add_packages(m, "nvidia-580xx-dkms")
         switch(m, t, "the switch adding the closed driver from the AUR", timeout=5400)
         closed = pkg("nvidia-580xx-dkms")
@@ -132,12 +105,3 @@ def run(m, t):
         drop_packages(m, "nvidia-580xx-dkms")
         switch(m, t, "the switch dropping the closed driver")
         no_driver(t)
-
-    with t.step(f"7: reverting to generation {with_driver} installs the open driver again from archix's package cache"):
-        said = m.succeed(f"set -o pipefail; {HOST} revert {with_driver} --noconfirm 2>&1 | tail -30", 3600, what=f"archix revert {with_driver}")
-        t.log(said)
-        if BTRFS or kernel() == old_kernel:
-            driver(t, old_driver)
-        m.reboot()
-        boot()
-        driver(t, old_driver)

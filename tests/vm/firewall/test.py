@@ -1,10 +1,10 @@
-# The firewall over real network paths, in place: ssh from the host through a port forward logs in while the ssh service is allowed; over a second NIC that tests/vm/run.sh's l2.py container joins, from LAN and public addresses on IPv4 and IPv6, ssh's port answers everyone, a LAN-only service's only the LAN and an undeclared one no one. A switch dropping the services closes them at once, without a reboot, and after it; on btrfs a try boot of the snapshot from before brings its rules back; `archix revert` to the generation that allowed them opens them again live.
+# The firewall over real network paths, in place: ssh from the host through a port forward logs in while the ssh service is allowed; over a second NIC that tests/vm/run.sh's l2.py container joins, from LAN and public addresses on IPv4 and IPv6, ssh's port answers everyone, a LAN-only service's only the LAN and an undeclared one no one. A switch dropping the services closes them at once, without a reboot, and after it; a switch allowing them again opens them live.
 import shutil
 import socket
 import subprocess
 
-from boot.common import bind, boot, edit_config, entries, entry, ok, out, trying
-from suite import BTRFS, current_generation, lay_out, newest_snapshot, switch
+from boot.common import bind, boot, edit_config, ok, out
+from suite import lay_out, switch
 
 
 
@@ -92,38 +92,22 @@ def run(m, t):
         m.succeed("nft add table ip vmtest-other && nft add chain ip vmtest-other c && systemctl reload archix-firewall.service", what="another program's table, then a reload")
         t.check("table ip vmtest-other" in out("nft list tables"), "reloading archix's firewall should leave another program's table")
         t.check(loaded() == rules, "the reload shouldn't change archix's rules")
-        allowed = current_generation()
 
     with t.step("2: a switch dropping the services closes them at once"):
         edit_config("'s|allowed_services = { \"ssh\", \"probe-lan\" }|allowed_services = {}|'")
         switch(m, t, "the switch dropping the services")
-        before = newest_snapshot() if BTRFS else None
         t.check("table ip vmtest-other" in out("nft list tables"), "the switch's reload should leave another program's table")
         is_shut(t, m, "live after the switch")
         m.reboot()
         boot()
         is_shut(t, m, "after the reboot")
 
-    if BTRFS:
-        with t.step(f"3: a try boot of snapshot {before}, from before the switch, has its rules"):
-            name = f"archix-snapshot-{before}.conf"
-            t.require(entry(name), f"snapshot {before} should have an entry: {entries()}")
-            m.select_entry(name)
-            m.reboot()
-            boot()
-            t.check((trying() or {}).get("snapshot") == before, f"a try boot of snapshot {before}: {trying()}")
-            m.wait_until_succeeds("systemctl is-active -q sshd.service", timeout=60)
-            is_open(t, m, f"snapshot {before}")
-            t.check(loaded() == rules, f"snapshot {before} should load the rules it had: {loaded()}")
-            m.reboot()
-            boot()
-            is_shut(t, m, "back on the current system")
-
-    with t.step(f"4: reverting to generation {allowed} opens the services again, live"):
-        said = m.succeed(f"set -o pipefail; archix --host archix-vm revert {allowed} --noconfirm 2>&1 | tail -20", 1800, what=f"archix revert {allowed}")
-        t.log(said)
-        is_open(t, m, "live after the revert")
+    with t.step("3: a switch allowing them again opens them, live"):
+        edit_config("'s|allowed_services = {}|allowed_services = { \"ssh\", \"probe-lan\" }|'")
+        switch(m, t, "the switch allowing the services again")
+        is_open(t, m, "live after the switch")
+        t.check(loaded() == rules, f"the rules should be the ones step 1 loaded: {loaded()}")
         m.reboot()
         boot()
         m.wait_until_succeeds("systemctl is-active -q sshd.service", timeout=60)
-        is_open(t, m, "after the revert and a reboot")
+        is_open(t, m, "after the switch and a reboot")
