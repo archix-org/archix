@@ -304,9 +304,7 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
             );
         }
         if FORBIDDEN.iter().any(|prefix| path.starts_with(prefix)) && !path.starts_with("/usr/local/") {
-            bail!(
-                "files: {path} is in a directory archix doesn't write to; home files go in home.files"
-            );
+            bail!("files: {path} is in a directory archix doesn't write to; home files go in home.files");
         }
         let mut mode = u32::from_str_radix(str_of(spec, "mode").unwrap_or("0644"), 8)
             .with_context(|| format!("files.{path}.mode must be octal, like \"0644\""))?;

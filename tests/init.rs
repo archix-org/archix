@@ -63,7 +63,10 @@ fn init_writes_explicit_packages_services_and_users_locked_to_what_is_installed(
     assert_eq!(lock.packages["lemon"].version, "3.54.0-1");
     let host = fs::read_to_string(format!("{config}/lua/hosts/initbox/init.lua")).unwrap();
     assert!(host.contains("dotuser = "), "users are declared:\n{host}");
-    assert!(!host.contains("files = {") && !host.contains("home = {"), "init scrapes no files or dotfiles:\n{host}");
+    assert!(
+        !host.contains("files = {") && !host.contains("home = {"),
+        "init scrapes no files or dotfiles:\n{host}"
+    );
     assert!(!Path::new(&format!("{config}/files")).exists() && !Path::new(&format!("{config}/home")).exists());
     let packages = archix::installed::read(Path::new(&format!("{config}/lua/hosts/initbox/installed.lua"))).unwrap();
     assert!(packages.iter().any(|p| p == "base-devel"), "{packages:?}");

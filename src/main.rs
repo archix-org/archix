@@ -275,7 +275,10 @@ fn hold_exclusive() -> Result<()> {
     let mut file = running_file()?;
     if !try_lock(&file) {
         let who = fs::read_to_string(&path).unwrap_or_default();
-        anyhow::bail!("another archix is already running ({}); wait for it to finish", who.trim());
+        anyhow::bail!(
+            "another archix is already running ({}); wait for it to finish",
+            who.trim()
+        );
     }
     file.set_len(0)?;
     let args: Vec<String> = std::env::args().collect();

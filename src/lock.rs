@@ -99,7 +99,13 @@ impl Locked {
 
 impl HostLock {
     /// Whether this lock was resolved for the same declared packages, preferred providers, repos and recipes.
-    pub fn matches(&self, declared: &[String], prefer: &[String], repos: &[String], recipes: &BTreeMap<String, String>) -> bool {
+    pub fn matches(
+        &self,
+        declared: &[String],
+        prefer: &[String],
+        repos: &[String],
+        recipes: &BTreeMap<String, String>,
+    ) -> bool {
         self.declared == declared && self.prefer == prefer && self.repos == repos && self.recipes == *recipes
     }
 

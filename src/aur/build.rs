@@ -659,8 +659,7 @@ impl Builder<'_> {
         let files = self.build_inputs(&missing, &installed_before, date, repos, inputs)?;
         if !files.is_empty() {
             let mut cmd = Command::new("pacman");
-            cmd.args(["-U", "--noconfirm", "--needed", "--asdeps"])
-                .args(&files);
+            cmd.args(["-U", "--noconfirm", "--needed", "--asdeps"]).args(&files);
             run(&mut cmd, "pacman -U")?;
         }
         let mut makepkg = Command::new("runuser");

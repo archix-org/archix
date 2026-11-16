@@ -112,7 +112,6 @@ impl Declared {
     fn repo_names(&self) -> Vec<String> {
         self.repos.iter().map(|repo| repo.name.clone()).collect()
     }
-
 }
 
 fn declared(config: &Value) -> Result<Declared> {
@@ -425,7 +424,11 @@ mod tests {
         let declared = declared_from(
             r#"return { packages = { "zsh", "base", "zsh" }, flatpak = { apps = { "org.a.App", "mine:org.b.App" }, remotes = { mine = { url = "https://example.org/repo", gpg_verify = false } } } }"#,
         );
-        assert_eq!(declared.packages, ["base", "flatpak", "zsh"], "flatpak apps bring flatpak");
+        assert_eq!(
+            declared.packages,
+            ["base", "flatpak", "zsh"],
+            "flatpak apps bring flatpak"
+        );
         assert_eq!(
             declared.flatpak_apps,
             [

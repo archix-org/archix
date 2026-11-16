@@ -227,7 +227,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         check_space(dir.path(), 0, 0).unwrap();
         let error = check_space(dir.path(), u64::MAX / 2, 0).unwrap_err().to_string();
-        assert!(error.contains("MiB free") && error.contains("nothing was changed"), "{error}");
+        assert!(
+            error.contains("MiB free") && error.contains("nothing was changed"),
+            "{error}"
+        );
         check_space(dir.path(), u64::MAX / 2, u64::MAX / 2).unwrap();
     }
 

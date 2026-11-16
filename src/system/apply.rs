@@ -1528,7 +1528,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("etc")).unwrap();
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-        fs::write(root.path().join("etc/passwd"), format!("root:x:{uid}:{gid}::/root:/bin/bash\n")).unwrap();
+        fs::write(
+            root.path().join("etc/passwd"),
+            format!("root:x:{uid}:{gid}::/root:/bin/bash\n"),
+        )
+        .unwrap();
         fs::write(root.path().join("etc/group"), format!("root:x:{gid}:\n")).unwrap();
         fs::write(root.path().join("etc/issue"), "Arch\n").unwrap();
         fs::set_permissions(root.path().join("etc/issue"), fs::Permissions::from_mode(0o644)).unwrap();
@@ -1542,7 +1546,13 @@ mod tests {
         };
         let mut from = SystemState::default();
         from.files.insert("/etc/old".into(), file("old\n"));
-        from.groups.insert("gone".into(), super::super::Group { gid: None, system: false });
+        from.groups.insert(
+            "gone".into(),
+            super::super::Group {
+                gid: None,
+                system: false,
+            },
+        );
         let mut to = SystemState::default();
         to.files.insert("/etc/motd".into(), file("hello\n"));
         to.files.insert("/etc/issue".into(), file("Arch\n"));
@@ -1561,7 +1571,13 @@ mod tests {
                 hashed_password_secret: None,
             },
         );
-        to.groups.insert("media".into(), super::super::Group { gid: Some(1500), system: false });
+        to.groups.insert(
+            "media".into(),
+            super::super::Group {
+                gid: Some(1500),
+                system: false,
+            },
+        );
         to.services.insert("sshd.service".into(), true);
         let change = SystemChange { from, to };
         let locate = |path: &str| Some(root.path().join(path.trim_start_matches('/')));

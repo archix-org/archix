@@ -51,10 +51,7 @@ pub fn init(config_dir: &Path, host: &str) -> Result<()> {
     eprintln!("reading this system");
     let facts = gather(&paths)?;
     if !facts.unknown.is_empty() {
-        eprintln!(
-            "left out, as no repo or the AUR has them: {}",
-            facts.unknown.join(", ")
-        );
+        eprintln!("left out, as no repo or the AUR has them: {}", facts.unknown.join(", "));
     }
     fs::create_dir_all(config_dir).with_context(|| format!("creating {}", config_dir.display()))?;
     write_config(config_dir, host, &facts, &[])?;
@@ -63,13 +60,22 @@ pub fn init(config_dir: &Path, host: &str) -> Result<()> {
     let mut lock = lock_as_installed(&declared, &facts, &paths, config_dir)?;
     let swapped = swapped_providers(&lock, &facts);
     if !swapped.is_empty() {
-        eprintln!("preferring {}, so the lock keeps the providers this machine has", swapped.join(", "));
+        eprintln!(
+            "preferring {}, so the lock keeps the providers this machine has",
+            swapped.join(", ")
+        );
         write_config(config_dir, host, &facts, &swapped)?;
         declared = super::declared(&evaluate(config_dir, host)?.config)?;
         lock = lock_as_installed(&declared, &facts, &paths, config_dir)?;
     }
     let git = aur_git(&declared)?;
-    review(&git, None, &lock, declared.aur_review && std::io::stdin().is_terminal(), &confirm_or)?;
+    review(
+        &git,
+        None,
+        &lock,
+        declared.aur_review && std::io::stdin().is_terminal(),
+        &confirm_or,
+    )?;
     let mut lockfile = Lockfile::default();
     lockfile.hosts.insert(host.to_string(), lock.clone());
     lockfile.save(&config_dir.join(LOCK_FILE))?;
@@ -91,14 +97,23 @@ fn gather(paths: &Paths) -> Result<Facts> {
     let local = read_local_db(&paths.local_db())?;
     let foreign: BTreeSet<String> = machine::pacman_query("m")?.into_iter().collect();
     let explicit = machine::pacman_query("e")?;
-    let conf = fs::read_to_string(&paths.pacman_conf)
-        .with_context(|| format!("reading {}", paths.pacman_conf.display()))?;
+    let conf =
+        fs::read_to_string(&paths.pacman_conf).with_context(|| format!("reading {}", paths.pacman_conf.display()))?;
     let (official, custom) = machine::parse_pacman_conf(&conf, |path| fs::read_to_string(path).ok());
     let in_aur: BTreeSet<String> = match foreign.is_empty() {
         true => BTreeSet::new(),
         false => {
-            let index = Index::load(&Archive::new(ARCHIVE_URL), archix::aur::DEFAULT_URL, &user_cache()?, false)?;
-            foreign.iter().filter(|name| index.get(name).is_some()).cloned().collect()
+            let index = Index::load(
+                &Archive::new(ARCHIVE_URL),
+                archix::aur::DEFAULT_URL,
+                &user_cache()?,
+                false,
+            )?;
+            foreign
+                .iter()
+                .filter(|name| index.get(name).is_some())
+                .cloned()
+                .collect()
         }
     };
     let (packages, unknown): (Vec<String>, Vec<String>) = explicit
@@ -214,7 +229,10 @@ fn host_fields(facts: &Facts, prefer: &[String]) -> Vec<(String, Lua)> {
 
 fn refuse_existing(dir: &Path) -> Result<()> {
     if dir.join("init.lua").exists() {
-        bail!("{} already has an init.lua; init only writes a new config", dir.display());
+        bail!(
+            "{} already has an init.lua; init only writes a new config",
+            dir.display()
+        );
     }
     Ok(())
 }

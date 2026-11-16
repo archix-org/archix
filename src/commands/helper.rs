@@ -9,9 +9,7 @@ use archix::paths::Paths;
 use archix::resolve::snapshot_conf;
 
 use super::lock::load_lockfile;
-use super::{
-    Target, declared, user_cache,
-};
+use super::{Target, declared, user_cache};
 
 /// One search result: where it's from, what it is, and how it's shown.
 struct Hit {

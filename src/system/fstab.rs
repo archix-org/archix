@@ -511,11 +511,10 @@ pub(crate) fn fields(line: &str) -> Option<Vec<String>> {
 /// Lines archix keeps as they are: the root's and the ESP's (at `esp`, or a vfat one at /boot, /efi or /boot/efi).
 fn kept(fields: &[String], esp: &str) -> bool {
     let vfat_esp = fields.get(2).is_some_and(|fs_type| fs_type == "vfat")
-        && fields.get(1).is_some_and(|point| ["/boot", "/efi", "/boot/efi"].contains(&normal(point)));
-    fields.len() >= 2
-        && (normal(&fields[1]) == "/"
-            || normal(&fields[1]) == normal(esp)
-            || vfat_esp)
+        && fields
+            .get(1)
+            .is_some_and(|point| ["/boot", "/efi", "/boot/efi"].contains(&normal(point)));
+    fields.len() >= 2 && (normal(&fields[1]) == "/" || normal(&fields[1]) == normal(esp) || vfat_esp)
 }
 
 /// The fstab archix writes where the fstab was `old`: its root and ESP lines as they are, then the declared lines.
@@ -1495,7 +1494,11 @@ mod tests {
                 "/var/www /mnt/www none bind,nofail 0 0",
             ]
         );
-        assert!(declared.files.is_empty(), "required mounts write no file: {:?}", declared.files);
+        assert!(
+            declared.files.is_empty(),
+            "required mounts write no file: {:?}",
+            declared.files
+        );
         let optional = render(
             &config(serde_json::json!({
                 "boot": { "loader": "systemd-boot" },
@@ -1762,7 +1765,11 @@ mod tests {
                 "{HEADER}\nUUID=root / btrfs rw,subvol=/@ 0 0\nUUID=b /efi vfat defaults 0 0\nUUID=data /mnt/data ext4 nofail 0 2\n"
             )
         );
-        assert_eq!(compose(&text, "/efi", &declared), text, "writing it again changes nothing");
+        assert_eq!(
+            compose(&text, "/efi", &declared),
+            text,
+            "writing it again changes nothing"
+        );
         let cachyos = "UUID=root / btrfs rw 0 0\nUUID=E /boot vfat umask=0077 0 2\n";
         assert_eq!(
             compose(cachyos, "/efi", &[]),

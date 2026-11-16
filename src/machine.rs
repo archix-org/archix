@@ -278,7 +278,10 @@ pub fn build_dates(local_db: &Path) -> Result<BTreeMap<String, u64>> {
         };
         let desc = parse_desc(&desc);
         let name = desc.get("NAME").and_then(|v| v.first());
-        let date = desc.get("BUILDDATE").and_then(|v| v.first()).and_then(|d| d.parse().ok());
+        let date = desc
+            .get("BUILDDATE")
+            .and_then(|v| v.first())
+            .and_then(|d| d.parse().ok());
         if let (Some(name), Some(date)) = (name, date) {
             out.insert(name.clone(), date);
         }

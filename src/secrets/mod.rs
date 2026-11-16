@@ -593,8 +593,7 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
             }
             None if !manifest.secrets.is_empty() => lines.push(format!(
                 "secrets: this boot didn't decrypt them ({} hasn't run); `systemctl status {}` says why",
-                SECRETS_UNIT,
-                SECRETS_UNIT
+                SECRETS_UNIT, SECRETS_UNIT
             )),
             None => {}
         }

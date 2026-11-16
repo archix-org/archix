@@ -864,4 +864,3 @@ fn a_swap_file_is_made_once_and_again_only_at_another_size() {
         "no temporary file is left"
     );
 }
-

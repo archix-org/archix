@@ -513,9 +513,7 @@ fn could_log_in(etc: &Path, user: &str) -> bool {
     let gid = fields.get(3).copied().unwrap_or_default();
     let member = group.lines().any(|line| {
         let g: Vec<&str> = line.split(':').collect();
-        g.len() >= 4
-            && LOGIN_GROUPS.contains(&g[0])
-            && (g[2] == gid || g[3].split(',').any(|m| m == user))
+        g.len() >= 4 && LOGIN_GROUPS.contains(&g[0]) && (g[2] == gid || g[3].split(',').any(|m| m == user))
     });
     let shadow = fs::read_to_string(etc.join("shadow")).unwrap_or_default();
     (fields.get(2) == Some(&"0") || member) && accounts::may_set_hash(&shadow, user, "$y$")
@@ -901,7 +899,11 @@ mod tests {
             "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\nbob:x:1001:1001::/home/bob:/bin/bash\ncarol:x:1002:10::/home/carol:/bin/bash\ndave:x:1003:1003::/home/dave:/bin/bash\n",
         )
         .unwrap();
-        fs::write(dir.path().join("group"), "root:x:0:root\nwheel:x:10:alice,dave\nbob:x:1001:\n").unwrap();
+        fs::write(
+            dir.path().join("group"),
+            "root:x:0:root\nwheel:x:10:alice,dave\nbob:x:1001:\n",
+        )
+        .unwrap();
         fs::write(
             dir.path().join("shadow"),
             format!(
@@ -914,8 +916,15 @@ mod tests {
             ["root", "alice", "carol"],
             "bob isn't in wheel, carol is by her primary group, dave's account expired"
         );
-        fs::write(dir.path().join("shadow"), "root:*:1::::::\nalice:!$y$j9T$x$y:1::::::\ncarol::1::::::\n").unwrap();
-        assert!(password_logins(dir.path()).unwrap().is_empty(), "locked, locked with a hash, empty");
+        fs::write(
+            dir.path().join("shadow"),
+            "root:*:1::::::\nalice:!$y$j9T$x$y:1::::::\ncarol::1::::::\n",
+        )
+        .unwrap();
+        assert!(
+            password_logins(dir.path()).unwrap().is_empty(),
+            "locked, locked with a hash, empty"
+        );
         assert!(password_logins(&dir.path().join("missing")).is_err());
     }
 

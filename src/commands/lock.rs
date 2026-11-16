@@ -9,8 +9,8 @@ use archix::lock::{HostLock, LOCK_FILE, Lockfile};
 use archix::resolve::resolve;
 
 use super::{
-    Declared, Snapshot, Target, aur_git, aur_source, confirm_or, count, declared, floats,
-    recipes, settle_flatpak, user_cache,
+    Declared, Snapshot, Target, aur_git, aur_source, confirm_or, count, declared, floats, recipes, settle_flatpak,
+    user_cache,
 };
 
 /// One config file's text as this command wrote it.
@@ -296,15 +296,11 @@ mod tests {
         let in_repos: BTreeSet<String> = names(&["linux-headers", "linux-lts-headers", "linux-zen-headers"])
             .into_iter()
             .collect();
-        let headers: Vec<String> = kernel_headers(packages.iter(), &in_repos)
-            .into_iter()
-            .collect();
+        let headers: Vec<String> = kernel_headers(packages.iter(), &in_repos).into_iter().collect();
         assert_eq!(headers, ["linux-headers", "linux-lts-headers"]);
         let cachyos = names(&["linux-cachyos", "linux-cachyos-lts"]);
         let in_repos: BTreeSet<String> = names(&["linux-cachyos-headers"]).into_iter().collect();
-        let headers: Vec<String> = kernel_headers(cachyos.iter(), &in_repos)
-            .into_iter()
-            .collect();
+        let headers: Vec<String> = kernel_headers(cachyos.iter(), &in_repos).into_iter().collect();
         assert_eq!(
             headers,
             ["linux-cachyos-headers"],
