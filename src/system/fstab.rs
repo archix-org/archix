@@ -512,9 +512,10 @@ pub(crate) fn fields(line: &str) -> Option<Vec<String>> {
     Some(line.split_whitespace().map(unescape).collect())
 }
 
-/// Whether an fstab line mounts the root or the ESP at `esp`, the lines archix keeps.
-/// Lines archix keeps as they are: the root's, the ESP's, and the rollback layout's (@varlib, @archix and the binds over /var/lib), which setup wrote.
+/// Lines archix keeps as they are: the root's, the ESP's (at `esp`, or a vfat one at /boot, /efi or /boot/efi), and the rollback layout's (@varlib, @archix and the binds over /var/lib), which setup wrote.
 fn kept(fields: &[String], esp: &str) -> bool {
+    let vfat_esp = fields.get(2).is_some_and(|fs_type| fs_type == "vfat")
+        && fields.get(1).is_some_and(|point| ["/boot", "/efi", "/boot/efi"].contains(&normal(point)));
     let layout = [
         "/var/lib",
         "/.archix",
@@ -523,44 +524,34 @@ fn kept(fields: &[String], esp: &str) -> bool {
         "/var/lib/archix",
     ];
     fields.len() >= 2
-        && (normal(&fields[1]) == "/" || normal(&fields[1]) == normal(esp) || layout.contains(&normal(&fields[1])))
+        && (normal(&fields[1]) == "/"
+            || normal(&fields[1]) == normal(esp)
+            || vfat_esp
+            || layout.contains(&normal(&fields[1])))
 }
 
-/// The fstab archix writes where the fstab was `old`: its root and ESP lines, the ESP's with its protections or added for the filesystem `uuid` names, then the declared lines; with what it changed on the ESP's.
-pub fn compose(
-    old: &str,
-    esp: &str,
-    uuid: Option<&str>,
-    declared: &[FstabLine],
-) -> (String, Option<super::boot::EspFstab>) {
+/// The fstab archix writes where the fstab was `old`: its root and ESP lines as they are, then the declared lines.
+pub fn compose(old: &str, esp: &str, declared: &[FstabLine]) -> String {
     let keep: String = old
         .lines()
         .filter(|line| fields(line).is_some_and(|fields| kept(&fields, esp)))
         .map(|line| format!("{line}\n"))
         .collect();
-    let (keep, changed) = match super::boot::esp_fstab(&keep, esp, uuid) {
-        Some((text, changed)) => (text, Some(changed)),
-        None => (keep, None),
-    };
     let mut text = format!("{HEADER}\n{keep}");
     for line in declared {
         text.push_str(&line.line());
         text.push('\n');
     }
-    (text, changed)
+    text
 }
 
-/// Writes the /etc/fstab under `etc` whole: its root line, the ESP's at `esp` with archix's protections, then the declared lines.
+/// Writes the /etc/fstab under `etc` whole: its root and ESP lines as they are, then the declared lines.
 pub fn write_in(etc: &Path, esp: &str, declared: &[FstabLine]) -> Result<()> {
     let path = etc.join("fstab");
     let old = fs::read_to_string(&path).unwrap_or_default();
-    let uuid = super::boot::disk_link_of(Path::new(esp), "by-uuid");
-    let (text, changed) = compose(&old, esp, uuid.as_deref(), declared);
+    let text = compose(&old, esp, declared);
     if text != old {
         crate::durable::write(&path, text.as_bytes())?;
-    }
-    if let Some(changed) = changed {
-        super::boot::report_esp_fstab(esp, &changed);
     }
     Ok(())
 }
@@ -782,8 +773,7 @@ pub fn merge_lines(table: &str, base: &str, live: &str, theirs: &str) -> (String
 pub fn drift(etc: &Path, esp: &str, declared: &[FstabLine], crypttab: Option<&str>) -> Vec<String> {
     let mut out = Vec::new();
     if let Ok(live) = fs::read_to_string(etc.join("fstab")) {
-        let uuid = super::boot::disk_link_of(Path::new(esp), "by-uuid");
-        let (wrote, _) = compose(&live, esp, uuid.as_deref(), declared);
+        let wrote = compose(&live, esp, declared);
         let norm = |text: &str| -> Vec<String> {
             text.lines()
                 .filter(|line| fields(line).is_some())
@@ -1024,11 +1014,9 @@ pub fn rollback_warnings(root: &Path, current: &str, target: &str, esp: &str) ->
         .collect()
 }
 
-/// boot.esp of an evaluated config.
-pub fn esp_of(config: &Value) -> &str {
-    get(config, "boot")
-        .and_then(|boot| str_of(boot, "esp"))
-        .unwrap_or("/efi")
+/// The ESP's mount point archix keeps out of file_systems; a vfat line at /boot or /boot/efi is kept too.
+pub fn esp_of(_config: &Value) -> &str {
+    "/efi"
 }
 
 /// `describe` against the fstab of the system at `here`, for a config.
@@ -1598,7 +1586,7 @@ mod tests {
                    /var/rollback/pacman /var/lib/pacman none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
                    /var/rollback/dkms /var/lib/dkms none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n\
                    /var/rollback/archix /var/lib/archix none bind,x-systemd.requires-mounts-for=/var/lib 0 0\n";
-        let (text, _) = compose(old, "/efi", None, &[]);
+        let text = compose(old, "/efi", &[]);
         assert_eq!(text, format!("{HEADER}\n{old}"));
     }
 
@@ -1801,7 +1789,7 @@ mod tests {
     }
 
     #[test]
-    fn the_fstab_keeps_the_root_and_esp_lines_with_the_esps_protections_and_drops_the_rest() {
+    fn the_fstab_keeps_the_root_and_esp_lines_as_they_are_and_drops_the_rest() {
         let old = "# /dev/vda2\nUUID=root / btrfs rw,subvol=/@ 0 0\n\n# esp\nUUID=b /efi vfat defaults 0 0\nUUID=home /home ext4 defaults 0 2\n/swapfile none swap defaults 0 0\n";
         let declared = [FstabLine {
             device: "UUID=data".into(),
@@ -1811,28 +1799,20 @@ mod tests {
             passno: 2,
             size: None,
         }];
-        let (text, changed) = compose(old, "/efi", None, &declared);
+        let text = compose(old, "/efi", &declared);
         assert_eq!(
             text,
             format!(
-                "{HEADER}\nUUID=root / btrfs rw,subvol=/@ 0 0\nUUID=b /efi vfat defaults,x-systemd.automount,x-systemd.idle-timeout=60,fmask=0077,dmask=0077 0 2\nUUID=data /mnt/data ext4 nofail 0 2\n"
+                "{HEADER}\nUUID=root / btrfs rw,subvol=/@ 0 0\nUUID=b /efi vfat defaults 0 0\nUUID=data /mnt/data ext4 nofail 0 2\n"
             )
         );
-        assert!(changed.is_some_and(|c| c.automount && c.fsck && c.private));
-        let (again, changed) = compose(&text, "/efi", None, &declared);
+        assert_eq!(compose(&text, "/efi", &declared), text, "writing it again changes nothing");
+        let cachyos = "UUID=root / btrfs rw 0 0\nUUID=E /boot vfat umask=0077 0 2\n";
         assert_eq!(
-            (again, changed),
-            (text.clone(), None),
-            "writing it again changes nothing"
+            compose(cachyos, "/efi", &[]),
+            format!("{HEADER}\n{cachyos}"),
+            "a vfat ESP at /boot stays though boot.esp is gone"
         );
-        let (added, changed) = compose("UUID=root / ext4 rw 0 1\n", "/efi", Some("AB12-CD34"), &[]);
-        assert_eq!(
-            added,
-            format!(
-                "{HEADER}\nUUID=root / ext4 rw 0 1\nUUID=AB12-CD34 /efi vfat umask=0077,x-systemd.automount,x-systemd.idle-timeout=60 0 2\n"
-            )
-        );
-        assert!(changed.is_some_and(|c| c.added));
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("fstab"), old).unwrap();
         write_in(dir.path(), "/efi", &declared).unwrap();
@@ -1988,7 +1968,7 @@ mod tests {
             "/efi",
         )
         .unwrap();
-        let (text, _) = compose(fstab, "/efi", None, &declared.lines);
+        let text = compose(fstab, "/efi", &declared.lines);
         assert_eq!(
             text,
             format!(
@@ -2245,7 +2225,7 @@ mod tests {
     fn an_fstab_or_crypttab_edited_since_archix_wrote_it_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let declared = [mount("UUID=data", "/mnt/data")];
-        let (wrote, _) = compose("UUID=root / ext4 rw 0 1\n", "/efi", Some("AB12-CD34"), &declared);
+        let wrote = compose("UUID=root / ext4 rw 0 1\n", "/efi", &declared);
         fs::write(dir.path().join("fstab"), &wrote).unwrap();
         let crypttab = "a UUID=1 none luks\n";
         fs::write(dir.path().join("crypttab"), crypttab).unwrap();

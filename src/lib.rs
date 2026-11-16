@@ -14,7 +14,6 @@ pub mod gc;
 pub mod generations;
 pub mod holds;
 pub mod installed;
-pub mod integration;
 pub mod lock;
 pub mod luagen;
 pub mod machine;

@@ -60,21 +60,6 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
         rest: Vec<String>,
     },
-    /// Keep snapshot N: it becomes the root (`@`) from the next boot, with accounts made since carried over, and the running system is kept as a snapshot; `--cancel` undoes it before that boot
-    Rollback {
-        /// Snapshot number; `archix snapshot list` lists them
-        #[arg(required_unless_present = "cancel")]
-        snapshot: Option<u32>,
-        /// Undo the pending rollback: the running system stays the root
-        #[arg(long, conflicts_with = "snapshot")]
-        cancel: bool,
-        /// Don't ask for confirmation
-        #[arg(long)]
-        noconfirm: bool,
-    },
-    /// Manage accounts a rollback brought back locked
-    #[command(subcommand)]
-    User(UserAction),
     /// Declare packages and install them; being rewritten with switch
     Install {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -97,31 +82,11 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Show which boot loader started this boot, whether boot counting and the fallback entries are in effect, the firmware's boot entries and order, and where a move from Limine to systemd-boot stands
-    BootInfo,
-    /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: arm the fallback slot and note the failed units
-    #[command(hide = true)]
-    BootComplete,
-    /// Run in the initramfs: mount the snapshot the started entry names over the root, read-only with a throwaway layer
-    #[command(hide = true)]
-    BootMount { root: PathBuf },
-    /// Run every minute of a counted boot by archix-unblessed.timer: reboot it once it's stuck past boot.unblessed_timeout with nobody logged in
-    #[command(hide = true)]
-    Unblessed,
     /// Adopt a root archix didn't produce (a snapper or limine-snapper-sync rollback, a restore): check its layout, carry accounts over from the root it replaced when that can be found, and record it
     Resync,
-    /// Run by systemd-bless-boot.service, before its own rename: count the booted entry as good, synced under its new name
-    #[command(hide = true)]
-    Bless,
-    /// Run by archix-health-check.service before boot-complete.target: check a counted boot, and mark its entry bad if it fails
-    #[command(hide = true)]
-    HealthCheck,
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
-    /// Set up and check Secure Boot
-    #[command(subcommand)]
-    SecureBoot(SecureBoot),
     /// Declared secrets: this machine's key, editing, setting, re-encrypting and checking them
     #[command(subcommand)]
     Secrets(Secrets),
@@ -202,12 +167,6 @@ enum Secrets {
 }
 
 #[derive(Subcommand)]
-enum UserAction {
-    /// Enable a declared account a rollback brought back locked: its declared shell and password, not expired
-    Unlock { name: String },
-}
-
-#[derive(Subcommand)]
 enum SnapshotAction {
     /// Take a read-only snapshot of the root now; prune never drops it
     Create {
@@ -224,36 +183,6 @@ enum SnapshotAction {
         /// On a root that is btrfs's top level: move it into an `@` subvolume at the next boot, in the initramfs; other subvolumes at the top level stay as they are
         #[arg(long)]
         move_root: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum SecureBoot {
-    /// Create sbctl keys if needed and enroll them, with Microsoft's, while the firmware is in setup mode
-    Setup {
-        /// Leave Microsoft's keys out; GPU option ROMs and Windows may then fail to start, and some boards won't boot at all
-        #[arg(long)]
-        no_microsoft: bool,
-    },
-    /// Show whether Secure Boot is on and keys are enrolled
-    Check {
-        /// Also check what Easy Anti-Cheat Linux v2 requires of the boot
-        #[arg(long)]
-        anticheat: bool,
-    },
-    /// Experimental, tested on OVMF only: add the boot images archix signed and no longer uses to dbx, signed with your KEK, so the firmware refuses them
-    Revoke {
-        /// List them without writing dbx
-        #[arg(long)]
-        dry_run: bool,
-        /// Don't ask before writing dbx
-        #[arg(long)]
-        noconfirm: bool,
-    },
-    /// Replace systemd's PCR policy signing key in /etc and bind the TPM2 slot of each LUKS volume given to the new one; the next switch builds UKIs whose policies it signs, and UKIs built before no longer unlock those volumes
-    RotatePcrKey {
-        /// LUKS2 volumes to re-enroll, such as /dev/nvme0n1p2; systemd-cryptenroll asks for each one's passphrase or recovery key, or reads $PASSWORD
-        devices: Vec<PathBuf>,
     },
 }
 
@@ -320,8 +249,6 @@ fn with_sudo() -> String {
 /// Commands that change the system, checked before anything (like installed.lua) is touched.
 fn needs_root(command: &Command) -> Option<&'static str> {
     match command {
-        Command::Rollback { .. } => Some("rollback"),
-        Command::User(_) => Some("user"),
         Command::Snapshot(SnapshotAction::Create { .. }) => Some("snapshot create"),
         Command::Snapshot(SnapshotAction::Delete { .. }) => Some("snapshot delete"),
         Command::Snapshot(SnapshotAction::Setup { .. }) => Some("snapshot setup"),
@@ -331,9 +258,6 @@ fn needs_root(command: &Command) -> Option<&'static str> {
         Command::Secrets(Secrets::Edit { machine: true, .. }) => Some("secrets edit --machine"),
         Command::Secrets(Secrets::Rekey { machine: true, .. }) => Some("secrets rekey --machine"),
         Command::Init => Some("init"),
-        Command::SecureBoot(SecureBoot::Setup { .. }) => Some("secure-boot setup"),
-        Command::SecureBoot(SecureBoot::Revoke { .. }) => Some("secure-boot revoke"),
-        Command::SecureBoot(SecureBoot::RotatePcrKey { .. }) => Some("secure-boot rotate-pcr-key"),
         _ => None,
     }
 }
@@ -387,51 +311,20 @@ fn try_lock(file: &fs::File) -> bool {
 /// The lock that keeps two archix runs from changing the system at once; held until the process exits.
 static RUNNING: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
 
-/// The boot units' runs, each over in seconds, which another run waits for rather than failing.
-const SHORT_RUNS: [&str; 5] = ["unblessed", "bless", "boot-check", "boot-complete", "health-check"];
-
-/// How a run that finds archix's lock held waits for it.
-#[derive(Clone, Copy, PartialEq)]
-enum Busy {
-    /// The minutely unblessed check: gives up at once and looks again a minute later.
-    Skip,
-    /// A boot unit, whose failure would fail a healthy boot: waits for any run, however long it takes.
-    Wait,
-    /// A user's run: waits out a boot unit's short run, and refuses for any other.
-    Short,
-}
-
-/// Takes the lock as `busy` says; false when another run holds it and `busy` is Skip.
-fn hold_exclusive(busy: Busy) -> Result<bool> {
+/// Takes the lock, or refuses while another run holds it.
+fn hold_exclusive() -> Result<()> {
     use std::io::Write as _;
     let path = archix::paths::Paths::system().state.join("running");
     let mut file = running_file()?;
-    let mut waited = std::time::Duration::ZERO;
-    while !try_lock(&file) {
+    if !try_lock(&file) {
         let who = fs::read_to_string(&path).unwrap_or_default();
-        let short = SHORT_RUNS
-            .iter()
-            .any(|run| who.trim_end().trim_end_matches('`').ends_with(&format!("archix {run}")));
-        if busy == Busy::Skip {
-            return Ok(false);
-        }
-        if busy == Busy::Short && (!short || waited >= std::time::Duration::from_secs(120)) {
-            anyhow::bail!(
-                "another archix is already running ({}); wait for it to finish",
-                who.trim()
-            );
-        }
-        if waited.is_zero() {
-            eprintln!("archix: waiting for {} to finish", who.trim());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        waited += std::time::Duration::from_millis(200);
+        anyhow::bail!("another archix is already running ({}); wait for it to finish", who.trim());
     }
     file.set_len(0)?;
     let args: Vec<String> = std::env::args().collect();
     write!(file, "pid {}, `{}`", std::process::id(), args.join(" "))?;
     let _ = RUNNING.set(file);
-    Ok(true)
+    Ok(())
 }
 
 fn run() -> Result<ExitCode> {
@@ -488,11 +381,6 @@ fn run() -> Result<ExitCode> {
             commands::snapshot::split_var_lib()?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::BootMount { root } => {
-            let cmdline = archix::testhooks::kernel_cmdline();
-            archix::system::initrd::mount(&root, &archix::testhooks::run_dir(), &cmdline)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Switch { .. } | Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
             eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
             return Ok(ExitCode::from(3));
@@ -511,40 +399,11 @@ fn run() -> Result<ExitCode> {
             with_sudo()
         );
     }
-    let changes_things = needs_root(&command).is_some()
-        || matches!(
-            command,
-            Command::BootComplete | Command::Bless | Command::HealthCheck | Command::Unblessed
-        );
     if needs_root(&command).is_some() {
         leave_login_session();
-    }
-    // The minutely unblessed check skips a minute another run holds; the next one looks again.
-    let busy = match command {
-        Command::Unblessed => Busy::Skip,
-        Command::BootComplete | Command::Bless | Command::HealthCheck => Busy::Wait,
-        _ => Busy::Short,
-    };
-    if changes_things && !hold_exclusive(busy)? {
-        return Ok(ExitCode::SUCCESS);
+        hold_exclusive()?;
     }
     match command {
-        Command::Rollback {
-            snapshot,
-            cancel,
-            noconfirm,
-        } => {
-            match (cancel, snapshot) {
-                (true, _) => commands::keep::cancel()?,
-                (false, Some(number)) => commands::keep::keep(number, noconfirm)?,
-                (false, None) => unreachable!("clap requires a snapshot without --cancel"),
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::User(UserAction::Unlock { name }) => {
-            commands::keep::unlock(&name)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Secrets(Secrets::Init { replace }) => {
             println!(
                 "{}",
@@ -579,55 +438,9 @@ fn run() -> Result<ExitCode> {
             commands::prefetch(&url)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::BootInfo => {
-            let paths = archix::paths::Paths::system();
-            let esp = std::fs::read_to_string(paths.state.join("boot").join("esp")).ok();
-            let esp = esp.as_deref().map(|esp| std::path::Path::new(esp.trim()));
-            for line in archix::system::limine::info(&paths, esp) {
-                println!("{line}");
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::BootComplete => {
-            let paths = archix::paths::Paths::system();
-            archix::system::health::boot_complete(&paths)?;
-            commands::limine_after_good_boot(&paths);
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Unblessed => {
-            archix::system::health::unblessed()?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::Resync => {
             commands::snapshot::resync()?;
             return Ok(ExitCode::SUCCESS);
-        }
-        Command::Bless => {
-            archix::system::boot::bless_booted(&archix::paths::Paths::system())?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::HealthCheck => {
-            let passed = archix::system::health::run_boot(&archix::paths::Paths::system())?;
-            return Ok(if passed { ExitCode::SUCCESS } else { ExitCode::FAILURE });
-        }
-        Command::SecureBoot(SecureBoot::Setup { no_microsoft }) => {
-            commands::secure_boot_setup(!no_microsoft)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::SecureBoot(SecureBoot::Revoke { dry_run, noconfirm }) => {
-            commands::secure_boot_revoke(dry_run, noconfirm)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::SecureBoot(SecureBoot::RotatePcrKey { devices }) => {
-            archix::system::boot::rotate_pcr_key(&archix::paths::Paths::system(), &devices)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::SecureBoot(SecureBoot::Check { anticheat }) => {
-            return Ok(if commands::secure_boot_check(anticheat) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::FAILURE
-            });
         }
         _ => {}
     }
@@ -736,18 +549,9 @@ fn run() -> Result<ExitCode> {
         | Command::Remove { .. }
         | Command::Upgrade { .. }
         | Command::Init
-        | Command::Rollback { .. }
-        | Command::User(_)
         | Command::Prefetch { .. }
-        | Command::BootInfo
-        | Command::BootComplete
-        | Command::BootMount { .. }
-        | Command::Unblessed
         | Command::Resync
-        | Command::Bless
-        | Command::HealthCheck
         | Command::Swapfile { .. }
-        | Command::SecureBoot(_)
         | Command::Snapshot(_)
         | Command::SplitVarLib
         | Command::EvaluateIsolated { .. }

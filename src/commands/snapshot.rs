@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -7,7 +6,7 @@ use anyhow::{Context, Result, bail};
 use archix::date::Date;
 use archix::generations::Generation;
 use archix::paths::Paths;
-use archix::snapshot::{self, Kind, Meta, Policy, Record, Store, layout};
+use archix::snapshot::{self, Kind, Meta, Record, Store, layout};
 use archix::system::mounts;
 
 /// The btrfs top level of the root's filesystem, mounted under /run for as long as this lives.
@@ -89,126 +88,12 @@ pub fn create(note: Option<String>) -> Result<()> {
         Kind::Manual,
         contents(current.as_ref(), "taken by hand".into(), note),
     )?;
-    archix::system::menu::snapshot_taken(&paths, record.number)?;
     println!(
         "snapshot {} taken: {}",
         record.number,
         store.path(record.number).display()
     );
     Ok(())
-}
-
-/// What a switch or rollback does about snapshots, decided before its prompt.
-pub(super) enum Rollbacks {
-    /// Rollbacks off, or a root that can't have them.
-    Off,
-    /// Rollbacks on, but the root isn't laid out for them yet: this switch sets it up and takes no snapshot.
-    Setup,
-    /// A snapshot before the change, pruned after it by the policy.
-    On(Policy),
-}
-
-impl Rollbacks {
-    pub(super) fn of(root: &Path, policy: Option<Policy>) -> Result<Rollbacks> {
-        let Some(policy) = policy else {
-            return Ok(Rollbacks::Off);
-        };
-        if let Some(why) = snapshot::unsupported(root) {
-            if snapshot::top_level_unmoved(root) {
-                bail!(
-                    "rollback.enable is set, but {why}. Set rollback.enable = false to switch without rollbacks until then; nothing was changed"
-                );
-            }
-            eprintln!("warning: rollback.enable is set, but {why}");
-            return Ok(Rollbacks::Off);
-        }
-        Ok(match archix_mounted(root) {
-            true => Rollbacks::On(policy),
-            false => Rollbacks::Setup,
-        })
-    }
-
-    /// The preview line, if any.
-    pub(super) fn line(&self) -> Option<&'static str> {
-        match self {
-            Rollbacks::Setup => Some(
-                "set up     rollbacks: the @archix and @varlib subvolumes and their fstab lines; snapshots start after the next reboot",
-            ),
-            _ => None,
-        }
-    }
-
-    /// Whether the switch lays the root out for rollbacks, before which no snapshot can be taken.
-    pub(super) fn lays_out(&self) -> bool {
-        matches!(self, Rollbacks::Setup)
-    }
-
-    /// The preview line for a switch with `packages` package changes: one that lays the root out stops there, and its packages wait for the switch after the reboot.
-    pub(super) fn line_with(&self, packages: usize) -> Option<&'static str> {
-        match self {
-            Rollbacks::Setup if packages > 0 => Some(
-                "set up     rollbacks first: the @archix and @varlib subvolumes, their fstab lines and the boot menu, then this switch stops; the package changes above wait for the switch after the next reboot, which snapshots the system before them",
-            ),
-            _ => self.line(),
-        }
-    }
-
-    /// The policy, when rollbacks are on.
-    pub(super) fn policy(&self) -> Option<&Policy> {
-        match self {
-            Rollbacks::On(policy) => Some(policy),
-            _ => None,
-        }
-    }
-
-    /// After the prompt, before anything is applied: sets the root up, or takes the snapshot of the system as `current` left it, labelled with what comes next, which boots the image the system boots now.
-    pub(super) fn before(&self, paths: &Paths, current: Option<&Generation>, label: String) -> Result<Option<Record>> {
-        let root = &paths.root;
-        match self {
-            Rollbacks::Off => Ok(None),
-            Rollbacks::Setup => {
-                let (uuid, options) = root_device(root)?;
-                let top = Top::mount(root)?;
-                layout::setup(root, &top.dir, &uuid, &options).context("setting up rollbacks")?;
-                println!(
-                    "the root is set up for rollbacks; snapshots start after the next reboot, once @archix is mounted"
-                );
-                Ok(None)
-            }
-            Rollbacks::On(_) => {
-                archix::testhooks::fail_at("snapshot-before")?;
-                let record = Store::open(root)
-                    .create(root, Kind::Switch, contents(current, label, None))
-                    .context("taking the snapshot before the switch")?;
-                archix::system::menu::snapshot_taken(paths, record.number)?;
-                println!(
-                    "snapshot {} holds the system as it was before this change",
-                    record.number
-                );
-                Ok(Some(record))
-            }
-        }
-    }
-
-    /// After the apply: prunes by the policy, never the snapshots with boot entries, then drops refetchable packages from archix's cache if the root is still short; returns warnings.
-    pub(super) fn after(&self, paths: &Paths, current: &BTreeMap<String, archix::lock::Locked>) -> Vec<String> {
-        let Rollbacks::On(policy) = self else { return Vec::new() };
-        let pinned = archix::system::menu::pinned(paths, policy.entries);
-        let pruned = snapshot::prune_root(paths, policy, current, &pinned, || {
-            archix::system::btrfs::space(&paths.root)
-        });
-        if !pruned.deleted.is_empty() {
-            let numbers: Vec<String> = pruned.deleted.iter().map(u32::to_string).collect();
-            println!("deleted snapshots {}", numbers.join(", "));
-        }
-        if pruned.dropped > 0 {
-            println!(
-                "dropped {} MiB of cached packages the archive can serve again",
-                pruned.dropped >> 20
-            );
-        }
-        pruned.warnings
-    }
 }
 
 pub fn list() -> Result<()> {
@@ -264,18 +149,6 @@ pub fn delete(number: u32) -> Result<()> {
         eprintln!("warning: snapshot {number} is deleted, but btrfs may not have freed its space yet: {e:#}");
     }
     println!("snapshot {number} deleted");
-    let paths = Paths::system();
-    if let Some(generation) = current_generation(&paths)?
-        && let Some(plan) = &generation.settings.boot
-        && let Err(e) = archix::system::menu::refresh(
-            &paths,
-            plan,
-            Some(generation.settings.rollback.as_ref().map_or(0, |p| p.entries)),
-            false,
-        )
-    {
-        eprintln!("warning: snapshot {number}'s boot entry is still on the ESP: {e:#}");
-    }
     Ok(())
 }
 
@@ -306,10 +179,8 @@ pub(super) fn schedule_root_move(root: &Path) -> Result<()> {
             root.display()
         );
     }
-    if !archix::system::initrd::hook_installed(root) {
-        bail!(
-            "the move happens in the initramfs, which doesn't have archix's hook yet: let archix manage booting (boot = {{ loader = \"systemd-boot\" }}) and switch first; nothing was changed"
-        );
+    if root.exists() {
+        bail!("the move happened in archix's initramfs hook, which is gone with its boot management; nothing was changed");
     }
     snapshot::rootmove::schedule(root)?;
     println!(

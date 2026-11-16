@@ -82,11 +82,6 @@ pub fn copy_esp(from: &Path, to: &Path) -> Result<()> {
     })
 }
 
-/// Renames a file on the ESP, flushing nothing, as write_esp; the caller ends the step with sync_esp.
-pub fn rename_esp(from: &Path, to: &Path) -> Result<()> {
-    fs::rename(from, to).with_context(|| format!("renaming {} to {}", from.display(), to.display()))
-}
-
 fn esp_tmp(path: &Path) -> std::path::PathBuf {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -199,7 +194,7 @@ const MSDOS_SUPER_MAGIC: i64 = 0x4d44;
 
 /// Flushes the ESP holding `path` with syncfs, which writes FAT's buffers, and an fsync, as FAT has no sync_fs and only its fsync flushes the disk's cache; anything but FAT is refused, as that pairing is FAT's, and a path that isn't on it isn't on the ESP.
 pub fn sync_esp(path: &Path) -> Result<()> {
-    flush_esp(path, crate::testhooks::check_esp())
+    flush_esp(path, true)
 }
 
 fn flush_esp(path: &Path, fat_only: bool) -> Result<()> {

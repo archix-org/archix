@@ -83,10 +83,8 @@ pub(super) fn current_lock(
         )
     };
     let mut new = resolve_with(&declared.prefer)?;
-    // DKMS builds its modules for every kernel in the staging root that has headers, and only the resolution shows a DKMS module that came in as a dependency.
-    if let Some(boot) = &declared.boot
-        && new.packages.contains_key("dkms")
-    {
+    // DKMS builds its modules for every installed kernel that has headers, and only the resolution shows a DKMS module that came in as a dependency.
+    if new.packages.contains_key("dkms") {
         let (_, db) = archix::resolve::snapshot_conf(&archive, &user_cache()?, date, &declared.repos)?;
         let in_repos: BTreeSet<String> = declared
             .repos
@@ -94,7 +92,7 @@ pub(super) fn current_lock(
             .filter_map(|repo| archix::pacman::read_sync_db(&db.join("sync").join(format!("{}.db", repo.name))).ok())
             .flat_map(|packages| packages.into_keys())
             .collect();
-        let headers: Vec<String> = kernel_headers(&boot.kernel, new.packages.keys(), &in_repos)
+        let headers: Vec<String> = kernel_headers(new.packages.keys(), &in_repos)
             .into_iter()
             .filter(|headers| !new.packages.contains_key(headers))
             .collect();
@@ -121,18 +119,12 @@ pub(super) fn current_lock(
     Ok((new, true))
 }
 
-/// The headers DKMS needs: the boot kernel's, and those of every other kernel among `packages` (a linux* package with a -headers package in the repos).
-fn kernel_headers<'a>(
-    boot_kernel: &str,
-    packages: impl Iterator<Item = &'a String>,
-    in_repos: &BTreeSet<String>,
-) -> BTreeSet<String> {
-    let others = packages
-        .filter(|name| name.starts_with("linux") && !name.ends_with("-headers") && *name != boot_kernel)
+/// The headers DKMS needs: those of every kernel among `packages` (a linux* package with a -headers package in the repos).
+fn kernel_headers<'a>(packages: impl Iterator<Item = &'a String>, in_repos: &BTreeSet<String>) -> BTreeSet<String> {
+    packages
+        .filter(|name| name.starts_with("linux") && !name.ends_with("-headers"))
         .map(|name| format!("{name}-headers"))
-        .filter(|headers| in_repos.contains(headers));
-    std::iter::once(format!("{boot_kernel}-headers"))
-        .chain(others)
+        .filter(|headers| in_repos.contains(headers))
         .collect()
 }
 
@@ -295,7 +287,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dkms_gets_the_headers_of_every_kernel_not_just_the_boot_one() {
+    fn dkms_gets_the_headers_of_every_installed_kernel_the_repos_have_them_for() {
         let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
         let packages = names(&[
             "linux",
@@ -308,13 +300,13 @@ mod tests {
         let in_repos: BTreeSet<String> = names(&["linux-headers", "linux-lts-headers", "linux-zen-headers"])
             .into_iter()
             .collect();
-        let headers: Vec<String> = kernel_headers("linux", packages.iter(), &in_repos)
+        let headers: Vec<String> = kernel_headers(packages.iter(), &in_repos)
             .into_iter()
             .collect();
         assert_eq!(headers, ["linux-headers", "linux-lts-headers"]);
         let cachyos = names(&["linux-cachyos", "linux-cachyos-lts"]);
         let in_repos: BTreeSet<String> = names(&["linux-cachyos-headers"]).into_iter().collect();
-        let headers: Vec<String> = kernel_headers("linux-cachyos", cachyos.iter(), &in_repos)
+        let headers: Vec<String> = kernel_headers(cachyos.iter(), &in_repos)
             .into_iter()
             .collect();
         assert_eq!(

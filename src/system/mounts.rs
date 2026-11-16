@@ -126,19 +126,9 @@ fn split_options(options: &str) -> (libc::c_ulong, String) {
     (flags, data.join(","))
 }
 
-/// Mounts `source`, a block device or an image file, at `target`, made if it isn't there, as `mount -t fs_type -o options` does.
+/// Mounts `source`, a block device, at `target`, made if it isn't there, as `mount -t fs_type -o options` does.
 pub fn mount(source: &str, target: &Path, fs_type: &str, options: &str) -> Result<()> {
     fs::create_dir_all(target).with_context(|| format!("creating {}", target.display()))?;
-    // A loop device for an image file, as mount makes one, held open until the mount has it.
-    let image = Path::new(source);
-    let looped = match image.is_absolute() && image.is_file() {
-        true => Some(super::initrd::attach_loop(image).with_context(|| format!("making a loop device for {source}"))?),
-        false => None,
-    };
-    let source = looped
-        .as_ref()
-        .and_then(|(device, _)| device.to_str())
-        .unwrap_or(source);
     let (flags, data) = split_options(options);
     let (c_source, c_target) = (c_string(source.as_bytes())?, c_string(target.as_os_str().as_bytes())?);
     let (c_type, c_data) = (c_string(fs_type.as_bytes())?, c_string(data.as_bytes())?);

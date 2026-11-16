@@ -1,6 +1,5 @@
 mod helper;
 mod init;
-pub mod keep;
 mod lock;
 pub mod snapshot;
 
@@ -9,7 +8,7 @@ use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use archix::archive::Archive;
 use archix::aur;
@@ -18,7 +17,6 @@ use archix::aur::index::Index;
 use archix::date::Date;
 use archix::flatpak;
 use archix::lock::{HostLock, Locked};
-use archix::packages::{self, PacmanLock};
 use archix::paths::Paths;
 use archix::recipes::Recipes;
 use archix::repos::{Custom, Repo, is_official, ordered};
@@ -27,49 +25,7 @@ use archix::value::Value;
 
 pub use helper::{prefetch, search};
 pub use init::init;
-pub use keep::limine_after_good_boot;
 pub use lock::lock;
-
-/// `archix secure-boot setup`.
-pub fn secure_boot_revoke(dry_run: bool, noconfirm: bool) -> Result<()> {
-    if !dry_run {
-        require_root("secure-boot revoke")?;
-    }
-    archix::system::revoke::revoke(&Paths::system(), dry_run, false, &|question| {
-        if noconfirm { Ok(true) } else { confirm(question) }
-    })
-}
-
-pub fn secure_boot_setup(microsoft: bool) -> Result<()> {
-    require_root("secure-boot setup")?;
-    if !microsoft {
-        eprintln!(
-            "warning: without Microsoft's keys, GPU option ROMs and Windows may fail to start, and some boards won't boot at all"
-        );
-    }
-    archix::system::secureboot::setup(microsoft)
-}
-
-/// `archix secure-boot check`; true when everything checked is met.
-pub fn secure_boot_check(anticheat: bool) -> bool {
-    let lines = archix::system::secureboot::Machine::new().check(anticheat);
-    for (ok, line) in &lines {
-        println!("{} {line}", if *ok { "  ok " } else { "  no " });
-    }
-    let missing = lines.iter().filter(|(ok, _)| !ok).count();
-    if anticheat && missing > 0 {
-        println!(
-            "Easy Anti-Cheat Linux v2 would refuse this boot: {}",
-            count(missing, "requirement isn't met", "requirements aren't met")
-        );
-    }
-    if Paths::system().state.join("boot").join("esp").exists()
-        && let Some(why) = archix::system::boot::counting_off()
-    {
-        println!("note: {why}");
-    }
-    missing == 0
-}
 
 const FLATHUB: &str = "https://dl.flathub.org/repo/flathub.flatpakrepo";
 
@@ -146,29 +102,12 @@ struct Declared {
     archive_url: String,
     archive_mirrors: Vec<String>,
     package_caches: Vec<String>,
-    boot: Option<BootSettings>,
     /// (remote, app id) pairs.
     flatpak_apps: Vec<(String, String)>,
     flatpak_remotes: BTreeMap<String, flatpak::Remote>,
     /// Official packages to rebuild with these patch files, relative to the config directory.
     patches: BTreeMap<String, Vec<String>>,
     holds: archix::holds::Holds,
-}
-
-/// The boot.* settings, present when archix manages booting.
-struct BootSettings {
-    loader: archix::system::boot::Loader,
-    esp: String,
-    kernel: String,
-    microcode: Vec<String>,
-    secure_boot: Option<bool>,
-    cmdline: String,
-    protected_entry: bool,
-    tries: u32,
-    revoke_unused: bool,
-    health_check: Option<archix::system::health::HealthCheck>,
-    rescue_entry: bool,
-    unblessed_timeout: u32,
 }
 
 impl Declared {
@@ -180,55 +119,6 @@ impl Declared {
         self.repos.iter().map(|repo| repo.name.clone()).collect()
     }
 
-}
-
-/// `boot.health_check`, the default checks when it's not set.
-fn health_check(value: Option<&Value>) -> Result<Option<archix::system::health::HealthCheck>> {
-    let Some(Value::Map(check)) = value else {
-        return Ok(Some(archix::system::health::HealthCheck::default()));
-    };
-    let strings = |key: &str| -> Vec<String> {
-        match check.get(key) {
-            Some(Value::List(items)) => items
-                .iter()
-                .filter_map(|item| match item {
-                    Value::Str(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect(),
-            _ => Vec::new(),
-        }
-    };
-    let listening = match check.get("listening") {
-        Some(Value::List(items)) => items
-            .iter()
-            .filter_map(|item| match item {
-                Value::Int(port) => Some(
-                    u16::try_from(*port)
-                        .ok()
-                        .filter(|port| *port > 0)
-                        .with_context(|| format!("boot.health_check.listening: {port} isn't a TCP port")),
-                ),
-                _ => None,
-            })
-            .collect::<Result<Vec<u16>>>()?,
-        _ => Vec::new(),
-    };
-    let parsed = archix::system::health::HealthCheck {
-        default_target: check.get("default_target") != Some(&Value::Bool(false)),
-        failed_units: check.get("failed_units") != Some(&Value::Bool(false)),
-        display_manager: check.get("display_manager") != Some(&Value::Bool(false)),
-        units: strings("units"),
-        listening,
-        reachable: strings("reachable"),
-        login: check.get("login") == Some(&Value::Bool(true)),
-        timeout: match check.get("timeout") {
-            Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
-            _ => 120,
-        },
-        reboot_on_failure: check.get("reboot_on_failure") == Some(&Value::Bool(true)),
-    };
-    Ok(Some(parsed))
 }
 
 fn declared(config: &Value) -> Result<Declared> {
@@ -312,58 +202,6 @@ fn declared(config: &Value) -> Result<Declared> {
             _ => archix::archive::ARCHIVE_URL.to_string(),
         },
         aur_review: !matches!(map.get("aur"), Some(Value::Map(aur)) if aur.get("review") == Some(&Value::Bool(false))),
-        boot: match map.get("boot") {
-            Some(Value::Map(boot)) if matches!(boot.get("loader"), Some(Value::Str(_))) => {
-                let loader = match boot.get("loader") {
-                    Some(Value::Str(name)) => archix::system::boot::Loader::parse(name)
-                        .with_context(|| format!("boot.loader is {name:?}, which archix doesn't write entries for"))?,
-                    _ => archix::system::boot::Loader::SystemdBoot,
-                };
-                let text = |key: &str, default: &str| match boot.get(key) {
-                    Some(Value::Str(s)) => s.clone(),
-                    _ => default.to_string(),
-                };
-                let params = strings("kernel_params");
-                if !params.iter().any(|p| p.starts_with("root=")) {
-                    bail!(
-                        "boot.loader is set, but kernel_params has no root=; archix needs the full kernel command line"
-                    );
-                }
-                Some(BootSettings {
-                    loader,
-                    esp: text("esp", "/efi"),
-                    kernel: text("kernel", "linux"),
-                    microcode: match boot.get("microcode") {
-                        Some(Value::List(items)) => items
-                            .iter()
-                            .filter_map(|i| match i {
-                                Value::Str(s) => Some(s.clone()),
-                                _ => None,
-                            })
-                            .collect(),
-                        _ => Vec::new(),
-                    },
-                    secure_boot: match boot.get("secure_boot") {
-                        Some(Value::Bool(b)) => Some(*b),
-                        _ => None,
-                    },
-                    cmdline: params.join(" "),
-                    protected_entry: boot.get("protected_entry") == Some(&Value::Bool(true)),
-                    tries: match boot.get("tries") {
-                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
-                        _ => 2,
-                    },
-                    unblessed_timeout: match boot.get("unblessed_timeout") {
-                        Some(Value::Int(n)) => u32::try_from(*n).unwrap_or(0),
-                        _ => 10,
-                    },
-                    revoke_unused: boot.get("revoke_unused") == Some(&Value::Bool(true)),
-                    health_check: health_check(boot.get("health_check"))?,
-                    rescue_entry: boot.get("rescue_entry") != Some(&Value::Bool(false)),
-                })
-            }
-            _ => None,
-        },
         flatpak_apps: Vec::new(),
         flatpak_remotes: BTreeMap::new(),
         patches: match map.get("patches") {
@@ -430,34 +268,6 @@ fn declared(config: &Value) -> Result<Declared> {
             }
         }
     }
-    if let Some(boot) = &declared.boot {
-        let mut needed = vec![
-            boot.kernel.clone(),
-            "mkinitcpio".to_string(),
-            "systemd-ukify".to_string(),
-            // Without fsck.vfat no unit checks the ESP at boot, and the first broken cluster chain a power cut left makes the kernel remount it read-only.
-            "dosfstools".to_string(),
-        ];
-        if boot.secure_boot == Some(true) {
-            needed.push("sbctl".to_string());
-        }
-        if boot.revoke_unused {
-            needed.push("efitools".to_string());
-        }
-        // DKMS builds its modules for a new kernel in the staging root, which needs that kernel's headers.
-        if declared
-            .packages
-            .iter()
-            .any(|name| name == "dkms" || name.ends_with("-dkms"))
-        {
-            needed.push(format!("{}-headers", boot.kernel));
-        }
-        declared
-            .prefer
-            .extend(needed.into_iter().filter(|name| !declared.packages.contains(name)));
-        declared.prefer.sort();
-        declared.prefer.dedup();
-    }
     Ok(declared)
 }
 
@@ -468,26 +278,6 @@ fn floats(name: &str, pkg: &Locked) -> bool {
         && ["-git", "-hg", "-svn", "-bzr", "-fossil", "-darcs"]
             .iter()
             .any(|suffix| name.ends_with(suffix))
-}
-
-fn check_pacman_free(paths: &Paths) -> Result<()> {
-    match packages::pacman_lock(paths) {
-        PacmanLock::Free => Ok(()),
-        PacmanLock::Running => bail!("pacman is running; wait for it to finish"),
-        PacmanLock::Stale if packages::from_an_earlier_boot(&paths.pacman_lock()) => {
-            std::fs::remove_file(paths.pacman_lock())
-                .with_context(|| format!("removing {}", paths.pacman_lock().display()))?;
-            eprintln!(
-                "removed {}, left by a pacman that a reboot or power cut stopped",
-                paths.pacman_lock().display()
-            );
-            Ok(())
-        }
-        PacmanLock::Stale => bail!(
-            "{} exists but no pacman is running; if no package manager is in use, remove it and try again",
-            paths.pacman_lock().display()
-        ),
-    }
 }
 
 fn require_root(command: &str) -> Result<()> {
@@ -638,42 +428,19 @@ mod tests {
     }
 
     #[test]
-    fn a_dkms_package_brings_the_boot_kernels_headers() {
-        let boot =
-            r#"boot = { loader = "systemd-boot", kernel = "linux-cachyos" }, kernel_params = { "root=/dev/vda2" }"#;
-        let with_dkms = declared_from(&format!(
-            r#"return {{ packages = {{ "base", "nvidia-dkms" }}, {boot} }}"#
-        ));
-        assert!(
-            with_dkms.prefer.contains(&"linux-cachyos-headers".to_string()),
-            "{:?}",
-            with_dkms.prefer
+    fn packages_are_sorted_once_and_flatpak_apps_bring_flathub_unless_they_name_a_remote() {
+        let declared = declared_from(
+            r#"return { packages = { "zsh", "base", "zsh" }, flatpak = { apps = { "org.a.App", "mine:org.b.App" }, remotes = { mine = { url = "https://example.org/repo", gpg_verify = false } } } }"#,
         );
-        let without = declared_from(&format!(r#"return {{ packages = {{ "base" }}, {boot} }}"#));
-        assert!(
-            !without.prefer.iter().any(|name| name.ends_with("-headers")),
-            "{:?}",
-            without.prefer
+        assert_eq!(declared.packages, ["base", "flatpak", "zsh"], "flatpak apps bring flatpak");
+        assert_eq!(
+            declared.flatpak_apps,
+            [
+                ("flathub".to_string(), "org.a.App".to_string()),
+                ("mine".to_string(), "org.b.App".to_string())
+            ]
         );
-        let unmanaged = declared_from(r#"return { packages = { "base", "nvidia-dkms" } }"#);
-        assert!(
-            !unmanaged.prefer.iter().any(|name| name.ends_with("-headers")),
-            "{:?}",
-            unmanaged.prefer
-        );
-    }
-
-    #[test]
-    fn a_managed_boot_brings_fsck_vfat_so_a_boot_after_a_power_cut_repairs_the_esp() {
-        let managed = declared_from(
-            r#"return { packages = { "base" }, boot = { loader = "systemd-boot" }, kernel_params = { "root=/dev/vda2" } }"#,
-        );
-        assert!(
-            managed.prefer.contains(&"dosfstools".to_string()),
-            "{:?}",
-            managed.prefer
-        );
-        let unmanaged = declared_from(r#"return { packages = { "base" } }"#);
-        assert!(!unmanaged.prefer.contains(&"dosfstools".to_string()));
+        assert_eq!(declared.flatpak_remotes["flathub"].url, FLATHUB);
+        assert!(!declared.flatpak_remotes["mine"].gpg_verify);
     }
 }

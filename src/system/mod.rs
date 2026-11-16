@@ -1,29 +1,17 @@
 pub mod accounts;
 pub mod apply;
-pub mod authenticode;
 pub mod blobs;
-pub mod boot;
 pub mod btrfs;
 pub mod capabilities;
 pub mod credentials;
-pub mod dkms;
-pub mod esp;
 pub mod firewall;
 pub mod fstab;
-pub mod grub;
-pub mod health;
 pub mod hooks;
-pub mod initrd;
-pub mod limine;
 pub mod live;
-pub mod menu;
 pub mod merge;
 pub mod mounts;
 pub mod password;
 pub mod restart;
-pub mod revoke;
-pub mod running;
-pub mod secureboot;
 pub mod sleep;
 pub mod xattr;
 
@@ -319,7 +307,7 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
         }
         if FORBIDDEN.iter().any(|prefix| path.starts_with(prefix)) && !path.starts_with("/usr/local/") {
             bail!(
-                "files: {path} is in a directory archix doesn't write to; home files go in home.files, and boot entries in boot.extra_entries"
+                "files: {path} is in a directory archix doesn't write to; home files go in home.files"
             );
         }
         let mut mode = u32::from_str_radix(str_of(spec, "mode").unwrap_or("0644"), 8)
@@ -467,26 +455,6 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
         }
     }
     capabilities::validate(&b.state.capabilities)?;
-    if let Some(boot) = root("boot") {
-        let esp = str_of(boot, "esp").unwrap_or("/boot").trim_end_matches('/').to_string();
-        for (name, text) in map(boot, "extra_entries").into_iter().flatten() {
-            if !name.ends_with(".conf") {
-                bail!("boot.extra_entries: {name:?} must end in .conf, as systemd-boot reads only those");
-            }
-            if name.starts_with("archix-") {
-                bail!(
-                    "boot.extra_entries: {name:?} starts with archix-, which archix's own generation entries use; pick another name"
-                );
-            }
-            b.text(&format!("{esp}/loader/entries/{}", unit_name(name)?), &lines(text));
-        }
-        if !strings(get(boot, "health_check").and_then(|check| get(check, "reachable"))).is_empty() {
-            b.text(
-                &format!("/etc/systemd/system/{}.d/network.conf", crate::integration::HEALTH_UNIT),
-                "[Unit]\nWants=network-online.target\nAfter=network-online.target\n",
-            );
-        }
-    }
     let mounts = fstab::render(config, fstab::esp_of(config))?;
     for (path, text, from) in mounts.files {
         if b.state.files.contains_key(&path) {
@@ -588,8 +556,7 @@ pub fn render_linked(config: &Value, config_dir: &Path, links: &Path) -> Result<
     let tmpfiles = strings(root("tmpfiles"));
     let mut warnings = Vec::new();
     if !tmpfiles.is_empty() {
-        let esp = root("boot").and_then(|boot| str_of(boot, "esp")).unwrap_or("/efi");
-        let own = ["/archix", "/var/lib/archix", "/var/usrlocal", esp].map(str::to_string);
+        let own = ["/archix", "/var/lib/archix", "/var/usrlocal", fstab::esp_of(config)].map(str::to_string);
         warnings.extend(credentials::check_tmpfiles(&tmpfiles, &own)?);
         b.text(credentials::TMPFILES, &format!("{}\n", tmpfiles.join("\n")));
     }
@@ -873,22 +840,6 @@ mod tests {
     }
 
     #[test]
-    fn a_health_check_with_hosts_to_reach_waits_for_the_network_first() {
-        let dropin = "/etc/systemd/system/archix-health-check.service.d/network.conf";
-        let with = |check: serde_json::Value| {
-            render(
-                &config(serde_json::json!({ "boot": { "health_check": check } })),
-                Path::new("/"),
-            )
-            .unwrap()
-            .state
-            .files
-        };
-        assert!(with(serde_json::json!({ "reachable": ["gateway"] })).contains_key(dropin));
-        assert!(!with(serde_json::json!({ "reachable": [], "listening": [22] })).contains_key(dropin));
-    }
-
-    #[test]
     fn renders_every_kind_of_setting_to_files() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("motd"), "hello\n").unwrap();
@@ -992,17 +943,5 @@ mod tests {
         let live_text =
             serde_json::json!({ "home": { "user": "u", "files": { ".x": { "text": "x", "live": true } } } });
         assert!(render(&config(live_text), dir.path()).is_err());
-        for (name, why) in [
-            ("archix-5.conf", "starts with archix-"),
-            ("memtest", "must end in .conf"),
-        ] {
-            let boot =
-                serde_json::json!({ "boot": { "loader": "systemd-boot", "extra_entries": { name: "title x" } } });
-            let error = render(&config(boot), dir.path())
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default();
-            assert!(error.contains(why), "{name}: {error}");
-        }
     }
 }

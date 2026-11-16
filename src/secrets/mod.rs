@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::value::Value;
 
+/// The unit that decrypts the config's secrets at boot.
+pub const SECRETS_UNIT: &str = "archix-secrets.service";
+
 /// The ramfs the boot decrypts into; a secret's link points at RUN_DIR/<name>.
 pub const RUN_DIR: &str = "/run/archix/secrets";
 /// Where each deployment keeps its secrets' ciphertexts, manifest and templates.
@@ -590,8 +593,8 @@ pub fn status_lines(paths: &crate::paths::Paths, current: Option<&Manifest>) -> 
             }
             None if !manifest.secrets.is_empty() => lines.push(format!(
                 "secrets: this boot didn't decrypt them ({} hasn't run); `systemctl status {}` says why",
-                crate::integration::SECRETS_UNIT,
-                crate::integration::SECRETS_UNIT
+                SECRETS_UNIT,
+                SECRETS_UNIT
             )),
             None => {}
         }

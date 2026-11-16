@@ -50,9 +50,6 @@ pub struct Settings {
     pub ignored: Vec<String>,
     pub keep: u32,
     pub keep_days: u32,
-    /// The boot.* settings the boot entries were written with.
-    #[serde(default)]
-    pub boot: Option<crate::system::boot::BootPlan>,
     /// The config's `rollback` table, which a rollback away from this generation snapshots and prunes by.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollback: Option<crate::snapshot::Policy>,
@@ -293,7 +290,6 @@ mod tests {
                 ignored: vec![],
                 keep: 10,
                 keep_days: 30,
-                boot: None,
                 rollback: None,
             },
             config_commit: None,
