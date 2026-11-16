@@ -398,12 +398,25 @@ fn run() -> Result<ExitCode> {
         }
         return Ok(ExitCode::SUCCESS);
     }
-    if let Command::Diff { json, stat, save, cached } = command {
-        let args = commands::diff::DiffArgs { json, stat, save, cached };
-        return Ok(ExitCode::from(commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
-            eprintln!("error: {e:#}");
-            commands::diff::error_code()
-        })));
+    if let Command::Diff {
+        json,
+        stat,
+        save,
+        cached,
+    } = command
+    {
+        let args = commands::diff::DiffArgs {
+            json,
+            stat,
+            save,
+            cached,
+        };
+        return Ok(ExitCode::from(
+            commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
+                eprintln!("error: {e:#}");
+                commands::diff::error_code()
+            }),
+        ));
     }
     if !cli.config.join("init.lua").is_file() {
         anyhow::bail!(

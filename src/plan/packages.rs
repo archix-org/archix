@@ -102,7 +102,10 @@ pub fn implicit(local: &BTreeMap<String, LocalPkg>, inputs: &PackageInputs) -> B
 }
 
 fn files_of(name: &str, local: &BTreeMap<String, LocalPkg>, new: &BTreeMap<String, Vec<String>>) -> Vec<String> {
-    let mut files: BTreeSet<String> = local.get(name).map(|p| p.files.iter().cloned().collect()).unwrap_or_default();
+    let mut files: BTreeSet<String> = local
+        .get(name)
+        .map(|p| p.files.iter().cloned().collect())
+        .unwrap_or_default();
     files.extend(new.get(name).into_iter().flatten().cloned());
     files.into_iter().collect()
 }
@@ -189,10 +192,14 @@ pub fn build(handle: &mut Alpm, inputs: &PackageInputs) -> Result<PackageGroup> 
     } else {
         let undeclared = local
             .iter()
-            .filter(|(n, p)| p.explicit && !inputs.declared.contains(*n) && !implicit.contains(*n) && !inputs.ignored.contains(*n))
+            .filter(|(n, p)| {
+                p.explicit && !inputs.declared.contains(*n) && !implicit.contains(*n) && !inputs.ignored.contains(*n)
+            })
             .count();
         if undeclared > 0 {
-            group.notes.push(format!("{undeclared} undeclared explicit packages kept (remove_undeclared = false)"));
+            group.notes.push(format!(
+                "{undeclared} undeclared explicit packages kept (remove_undeclared = false)"
+            ));
         }
     }
     let rm_targets: Vec<String> = candidates.iter().cloned().collect();
@@ -226,7 +233,11 @@ pub fn build(handle: &mut Alpm, inputs: &PackageInputs) -> Result<PackageGroup> 
         true => first,
         false => prepare_sync_skipping(handle, &targets, true, Answers::Record, &skip).unwrap_or(first),
     };
-    let replacing: BTreeMap<&str, &str> = install.replaced.iter().map(|(old, new)| (new.as_str(), old.as_str())).collect();
+    let replacing: BTreeMap<&str, &str> = install
+        .replaced
+        .iter()
+        .map(|(old, new)| (new.as_str(), old.as_str()))
+        .collect();
     for added in &install.add {
         let (action, reason, detail) = match &added.old_version {
             None => {
@@ -288,10 +299,14 @@ pub fn build(handle: &mut Alpm, inputs: &PackageInputs) -> Result<PackageGroup> 
         .map(|(n, _)| n.as_str())
         .collect();
     for name in local.keys().filter(|n| !removed.contains(n.as_str())) {
-        group.final_files.insert(name.clone(), files_of(name, &local, &inputs.new_files));
+        group
+            .final_files
+            .insert(name.clone(), files_of(name, &local, &inputs.new_files));
     }
     for added in &install.add {
-        group.final_files.insert(added.name.clone(), files_of(&added.name, &local, &inputs.new_files));
+        group
+            .final_files
+            .insert(added.name.clone(), files_of(&added.name, &local, &inputs.new_files));
     }
 
     for item in &mut group.items {
@@ -302,7 +317,9 @@ pub fn build(handle: &mut Alpm, inputs: &PackageInputs) -> Result<PackageGroup> 
         };
         item.risk = risk::package_risks(&facts, &inputs.risk);
     }
-    group.items.sort_by(|a, b| (a.action, &a.name).cmp(&(b.action, &b.name)));
+    group
+        .items
+        .sort_by(|a, b| (a.action, &a.name).cmp(&(b.action, &b.name)));
     group.refusals.extend(refusals(&local, &group, &removed, inputs));
     group.install = install;
     group.removal = removal;
@@ -325,7 +342,9 @@ fn refusals(
         && removed.contains(running.as_str())
         && kernels.keys().all(|k| *k == running)
     {
-        out.push(format!("the running kernel's package {running} would be removed without another kernel"));
+        out.push(format!(
+            "the running kernel's package {running} would be removed without another kernel"
+        ));
     }
     for name in removed.iter().filter(|n| !replaced.contains_key(**n)) {
         let pkg = &local[*name];
@@ -387,7 +406,10 @@ mod tests {
     }
 
     fn find<'a>(g: &'a PackageGroup, name: &str) -> &'a PackageItem {
-        g.items.iter().find(|i| i.name == name).unwrap_or_else(|| panic!("{name} not in {:?}", g.items))
+        g.items
+            .iter()
+            .find(|i| i.name == name)
+            .unwrap_or_else(|| panic!("{name} not in {:?}", g.items))
     }
 
     #[test]
@@ -414,7 +436,10 @@ mod tests {
         assert_eq!(find(&g, "zlib").detail.as_deref(), Some("dependency"));
         assert_eq!(find(&g, "glibc").action, PkgAction::Upgrade);
         assert_eq!(find(&g, "vim").action, PkgAction::MarkExplicit);
-        assert!(!g.items.iter().any(|i| i.name == "pacman"), "pacman is implicitly declared");
+        assert!(
+            !g.items.iter().any(|i| i.name == "pacman"),
+            "pacman is implicitly declared"
+        );
         assert!(g.refusals.is_empty(), "{:?}", g.refusals);
     }
 
@@ -434,7 +459,10 @@ mod tests {
         let declared = ["linux", "bash", "user-of-needed"];
         let g = build(&mut handle, &inputs(&declared)).unwrap();
         assert_eq!(find(&g, "htop").reason, PkgReason::DriftInstalled);
-        assert_eq!(find(&g, "libold").detail.as_deref(), Some("only needed by removed packages"));
+        assert_eq!(
+            find(&g, "libold").detail.as_deref(),
+            Some("only needed by removed packages")
+        );
         assert_eq!(find(&g, "needed").action, PkgAction::MarkDependency);
 
         let last = LastApplied {
@@ -442,7 +470,10 @@ mod tests {
             installed: ["old".to_string(), "libold".to_string()].into(),
             ..LastApplied::default()
         };
-        let with_record = PackageInputs { last: Some(&last), ..inputs(&declared) };
+        let with_record = PackageInputs {
+            last: Some(&last),
+            ..inputs(&declared)
+        };
         let g = build(&mut handle, &with_record).unwrap();
         assert_eq!(find(&g, "old").reason, PkgReason::NoLongerDeclared);
         assert_eq!(find(&g, "htop").reason, PkgReason::DriftInstalled);
@@ -458,7 +489,14 @@ mod tests {
             ..LastApplied::default()
         };
         let mut handle = open(&t.conf(&["core"]), &t.plan_dbpath()).unwrap();
-        let g = build(&mut handle, &PackageInputs { last: Some(&last), ..inputs(&["git"]) }).unwrap();
+        let g = build(
+            &mut handle,
+            &PackageInputs {
+                last: Some(&last),
+                ..inputs(&["git"])
+            },
+        )
+        .unwrap();
         assert_eq!(find(&g, "git").reason, PkgReason::DriftRemoved);
     }
 
@@ -468,9 +506,19 @@ mod tests {
         base(&t);
         t.install(&[pkg("glibc", "2.40-1").dep(), pkg("zlib", "1.2-1").dep()]);
         t.repo("core", &[pkg("glibc", "2.41-1"), pkg("zlib", "1.3-1")]);
-        let at_lock = BTreeMap::from([("glibc".to_string(), "2.40-1".to_string()), ("zlib".to_string(), "1.3-1".to_string())]);
+        let at_lock = BTreeMap::from([
+            ("glibc".to_string(), "2.40-1".to_string()),
+            ("zlib".to_string(), "1.3-1".to_string()),
+        ]);
         let mut handle = open(&t.conf(&["core"]), &t.plan_dbpath()).unwrap();
-        let g = build(&mut handle, &PackageInputs { moved_from: Some(at_lock), ..inputs(&[]) }).unwrap();
+        let g = build(
+            &mut handle,
+            &PackageInputs {
+                moved_from: Some(at_lock),
+                ..inputs(&[])
+            },
+        )
+        .unwrap();
         assert_eq!(find(&g, "glibc").reason, PkgReason::LockMoved);
         assert_eq!(find(&g, "zlib").reason, PkgReason::Declared);
     }
@@ -479,17 +527,27 @@ mod tests {
     fn conflict_replacement_is_planned_and_flagged() {
         let t = TestRoot::new();
         base(&t);
-        t.install(&[pkg("zlib", "1.3-1").dep().files(&["usr/lib/libz.so.1"]), pkg("app", "1-1").deps(&["zlib"])]);
+        t.install(&[
+            pkg("zlib", "1.3-1").dep().files(&["usr/lib/libz.so.1"]),
+            pkg("app", "1-1").deps(&["zlib"]),
+        ]);
         t.repo(
             "cachyos",
-            &[pkg("zlib-ng-compat", "2.2-1").provides(&["zlib=1.3"]).conflicts(&["zlib"]).replaces(&["zlib"])],
+            &[pkg("zlib-ng-compat", "2.2-1")
+                .provides(&["zlib=1.3"])
+                .conflicts(&["zlib"])
+                .replaces(&["zlib"])],
         );
         let mut handle = open(&t.conf(&["cachyos"]), &t.plan_dbpath()).unwrap();
         let g = build(&mut handle, &inputs(&["linux", "bash", "app"])).unwrap();
         let new = find(&g, "zlib-ng-compat");
         assert_eq!(new.reason, PkgReason::ConflictReplacement);
         assert!(!new.risk.is_empty());
-        let old = g.items.iter().find(|i| i.name == "zlib" && i.action == PkgAction::Remove).unwrap();
+        let old = g
+            .items
+            .iter()
+            .find(|i| i.name == "zlib" && i.action == PkgAction::Remove)
+            .unwrap();
         assert_eq!(old.reason, PkgReason::ConflictReplacement);
     }
 
@@ -503,12 +561,18 @@ mod tests {
         ]);
         let mut handle = open(&t.conf(&[]), &t.plan_dbpath()).unwrap();
         let mut i = inputs(&["nvidia-open-dkms"]);
-        i.shells = vec![("alice".into(), "/usr/bin/zsh".into()), ("bob".into(), "/usr/bin/fish".into())];
+        i.shells = vec![
+            ("alice".into(), "/usr/bin/zsh".into()),
+            ("bob".into(), "/usr/bin/fish".into()),
+        ];
         i.etc_shells = Some("/bin/sh\n/usr/bin/zsh\n".into());
         let g = build(&mut handle, &i).unwrap();
         let all = g.refusals.join("\n");
         assert!(all.contains("no kernel would be installed"), "{all}");
-        assert!(all.contains("alice's login shell /usr/bin/zsh would be removed with zsh"), "{all}");
+        assert!(
+            all.contains("alice's login shell /usr/bin/zsh would be removed with zsh"),
+            "{all}"
+        );
         assert!(all.contains("/usr/bin/fish is not in /etc/shells"), "{all}");
     }
 
@@ -528,7 +592,14 @@ mod tests {
         base(&t);
         t.install(&[pkg("htop", "3-1")]);
         let mut handle = open(&t.conf(&[]), &t.plan_dbpath()).unwrap();
-        let g = build(&mut handle, &PackageInputs { remove_undeclared: false, ..inputs(&["linux", "bash"]) }).unwrap();
+        let g = build(
+            &mut handle,
+            &PackageInputs {
+                remove_undeclared: false,
+                ..inputs(&["linux", "bash"])
+            },
+        )
+        .unwrap();
         assert!(g.items.is_empty(), "{:?}", g.items);
         assert_eq!(g.notes.len(), 1);
     }
@@ -587,6 +658,9 @@ mod tests {
         let alpm_rm: BTreeSet<_> = rm.remove.iter().map(|(n, _)| n.clone()).collect();
         assert_eq!(planned_rm, alpm_rm);
         assert_eq!(planned_rm, ["htop", "ncurses"].map(String::from).into());
-        assert!(!planned_add.iter().any(|(n, _)| n == "ncurses"), "a package the removal takes isn't upgraded first");
+        assert!(
+            !planned_add.iter().any(|(n, _)| n == "ncurses"),
+            "a package the removal takes isn't upgraded first"
+        );
     }
 }

@@ -50,7 +50,10 @@ fn walk(dir: &Path, base: &Path, skip: &dyn Fn(&str) -> bool, out: &mut BTreeMap
         } else if kind.is_dir() {
             walk(&path, base, skip, out)?;
         } else {
-            out.insert(rel, fs::read(&path).with_context(|| format!("reading {}", path.display()))?);
+            out.insert(
+                rel,
+                fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+            );
         }
     }
     Ok(())
@@ -207,7 +210,10 @@ mod tests {
         let mut saved = base();
         saved.unchecked = vec!["secret: not checked without root (/etc/wifi)".into()];
         let now = saved.clone();
-        assert_eq!(compare(&saved, &now), ["still unchecked: secret: not checked without root (/etc/wifi)"]);
+        assert_eq!(
+            compare(&saved, &now),
+            ["still unchecked: secret: not checked without root (/etc/wifi)"]
+        );
         let mut checked = saved.clone();
         checked.unchecked.clear();
         assert!(compare(&saved, &checked).is_empty());
@@ -238,7 +244,10 @@ mod tests {
             fingerprint: base().digest(),
             cached_dbs: false,
         });
-        let saved = SavedPlan { plan, fingerprint: base() };
+        let saved = SavedPlan {
+            plan,
+            fingerprint: base(),
+        };
         let path = tmp.path().join("plan.json");
         saved.save(&path).unwrap();
         assert_eq!(SavedPlan::load(&path).unwrap(), saved);

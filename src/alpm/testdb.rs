@@ -59,7 +59,10 @@ impl Pkg {
             }
         };
         if !local {
-            field("FILENAME", &[format!("{}-{}-x86_64.pkg.tar.zst", self.name, self.version)]);
+            field(
+                "FILENAME",
+                &[format!("{}-{}-x86_64.pkg.tar.zst", self.name, self.version)],
+            );
         }
         field("NAME", std::slice::from_ref(&self.name));
         field("VERSION", std::slice::from_ref(&self.version));
@@ -85,7 +88,13 @@ impl Pkg {
         let mut dirs = std::collections::BTreeSet::new();
         for file in &self.files {
             let mut at = String::new();
-            for part in file.split('/').collect::<Vec<_>>().split_last().map(|(_, d)| d).unwrap_or(&[]) {
+            for part in file
+                .split('/')
+                .collect::<Vec<_>>()
+                .split_last()
+                .map(|(_, d)| d)
+                .unwrap_or(&[])
+            {
                 at.push_str(part);
                 at.push('/');
                 dirs.insert(at.clone());
@@ -142,7 +151,9 @@ impl TestRoot {
     pub fn repo(&self, name: &str, pkgs: &[Pkg]) {
         let sync = self.dir.path().join("plan/sync");
         fs::create_dir_all(&sync).unwrap();
-        write_tar(&sync.join(format!("{name}.db")), pkgs, |p| vec![("desc", p.desc(false))]);
+        write_tar(&sync.join(format!("{name}.db")), pkgs, |p| {
+            vec![("desc", p.desc(false))]
+        });
         write_tar(&sync.join(format!("{name}.files")), pkgs, |p| {
             vec![("desc", p.desc(false)), ("files", p.file_list())]
         });

@@ -32,7 +32,9 @@ pub const PKG_RULES: [PkgRule; 11] = [
 impl PkgRule {
     pub fn text(self) -> &'static str {
         match self {
-            PkgRule::BootFiles => "owns files under /boot, /efi, /usr/lib/modules, /usr/lib/initcpio or /usr/lib/firmware",
+            PkgRule::BootFiles => {
+                "owns files under /boot, /efi, /usr/lib/modules, /usr/lib/initcpio or /usr/lib/firmware"
+            }
             PkgRule::LibClosure => "in the shared-library closure of pacman, sudo, systemd, login or the boot tools",
             PkgRule::Dkms => "a DKMS module",
             PkgRule::Gpu => "a GPU driver",
@@ -42,7 +44,9 @@ impl PkgRule {
             PkgRule::RunningKernel => "the running kernel's package",
             PkgRule::Swap => "a provider swap, conflict replacement or downgrade",
             PkgRule::Tooling => "archix, the AUR helper, base-devel or devtools",
-            PkgRule::PamWhileLocked => "pam or libxcrypt while a screen locker runs: don't lock the screen until reboot",
+            PkgRule::PamWhileLocked => {
+                "pam or libxcrypt while a screen locker runs: don't lock the screen until reboot"
+            }
         }
     }
 }
@@ -64,7 +68,13 @@ pub struct RiskContext {
     pub screen_locker_running: bool,
 }
 
-const BOOT_DIRS: [&str; 5] = ["boot/", "efi/", "usr/lib/modules/", "usr/lib/initcpio/", "usr/lib/firmware/"];
+const BOOT_DIRS: [&str; 5] = [
+    "boot/",
+    "efi/",
+    "usr/lib/modules/",
+    "usr/lib/initcpio/",
+    "usr/lib/firmware/",
+];
 
 pub fn is_dkms(files: &[String]) -> bool {
     files.iter().any(|f| {
@@ -82,9 +92,10 @@ pub fn is_keyring(files: &[String]) -> bool {
 
 pub fn is_mirrorlist(name: &str, files: &[String]) -> bool {
     name.ends_with("mirrorlist")
-        || files
-            .iter()
-            .any(|f| f.strip_prefix("etc/pacman.d/").is_some_and(|rest| rest.contains("mirrorlist")))
+        || files.iter().any(|f| {
+            f.strip_prefix("etc/pacman.d/")
+                .is_some_and(|rest| rest.contains("mirrorlist"))
+        })
 }
 
 pub fn is_gpu_driver(name: &str) -> bool {
@@ -104,7 +115,10 @@ pub fn is_tooling(name: &str, helper: Option<&str>) -> bool {
 
 pub fn applies(rule: PkgRule, p: &PkgFacts, ctx: &RiskContext) -> bool {
     match rule {
-        PkgRule::BootFiles => p.files.iter().any(|f| BOOT_DIRS.iter().any(|d| f.starts_with(d) && f.len() > d.len())),
+        PkgRule::BootFiles => p
+            .files
+            .iter()
+            .any(|f| BOOT_DIRS.iter().any(|d| f.starts_with(d) && f.len() > d.len())),
         PkgRule::LibClosure => ctx.closure.contains(&p.name),
         PkgRule::Dkms => is_dkms(&p.files),
         PkgRule::Gpu => is_gpu_driver(&p.name),
@@ -198,7 +212,10 @@ pub fn file_applies(rule: FileRule, path: &str) -> bool {
                 || in_dir(path, "/etc/mkinitcpio.conf.d")
                 || (in_dir(path, "/etc/mkinitcpio.d") && path.ends_with(".preset"))
         }
-        FileRule::BootConfig => matches!(path, "/etc/kernel/cmdline" | "/etc/default/limine" | "/boot/limine.conf"),
+        FileRule::BootConfig => matches!(
+            path,
+            "/etc/kernel/cmdline" | "/etc/default/limine" | "/boot/limine.conf"
+        ),
         FileRule::Modules => {
             in_dir(path, "/etc/modprobe.d") || in_dir(path, "/etc/modules-load.d") || path == "/etc/vconsole.conf"
         }
@@ -339,10 +356,19 @@ mod tests {
             (PkgRule::Dkms, facts("zfs-dkms", &["usr/src/zfs-2.2/dkms.conf"])),
             (PkgRule::Gpu, facts("vulkan-radeon", &[])),
             (PkgRule::Chwd, facts("chwd-profile-pkg", &[])),
-            (PkgRule::Keyring, facts("cachyos-keyring", &["usr/share/pacman/keyrings/cachyos.gpg"])),
+            (
+                PkgRule::Keyring,
+                facts("cachyos-keyring", &["usr/share/pacman/keyrings/cachyos.gpg"]),
+            ),
             (PkgRule::Mirrorlist, facts("cachyos-mirrorlist", &[])),
             (PkgRule::RunningKernel, facts("linux-cachyos", &[])),
-            (PkgRule::Swap, PkgFacts { swap: true, ..facts("zlib", &[]) }),
+            (
+                PkgRule::Swap,
+                PkgFacts {
+                    swap: true,
+                    ..facts("zlib", &[])
+                },
+            ),
             (PkgRule::Tooling, facts("paru", &[])),
             (PkgRule::PamWhileLocked, facts("pam", &[])),
         ]
@@ -370,7 +396,10 @@ mod tests {
     #[test]
     fn ordinary_packages_are_unflagged() {
         assert!(package_risks(&facts("ripgrep", &["usr/bin/rg", "usr/lib/modules-load.d/x"]), &ctx()).is_empty());
-        let unlocked = RiskContext { screen_locker_running: false, ..ctx() };
+        let unlocked = RiskContext {
+            screen_locker_running: false,
+            ..ctx()
+        };
         assert!(package_risks(&facts("pam", &[]), &unlocked).is_empty());
         assert!(package_risks(&facts("x", &["usr/lib/modules/"]), &ctx()).is_empty());
     }
@@ -403,13 +432,21 @@ mod tests {
     #[test]
     fn disabling_any_file_rule_fails_its_fixture() {
         for (rule, path) in file_fixtures() {
-            assert!(file_rules_with(path, |r| r != rule).is_empty(), "{rule:?} not load-bearing for {path}");
+            assert!(
+                file_rules_with(path, |r| r != rule).is_empty(),
+                "{rule:?} not load-bearing for {path}"
+            );
         }
     }
 
     #[test]
     fn unlisted_files_are_unflagged() {
-        for path in ["/etc/foo.conf", "/etc/pam.dx", "/etc/mkinitcpio.d/notes.txt", "/etc/sudoersx"] {
+        for path in [
+            "/etc/foo.conf",
+            "/etc/pam.dx",
+            "/etc/mkinitcpio.d/notes.txt",
+            "/etc/sudoersx",
+        ] {
             assert!(file_risks(path).is_empty(), "{path}");
         }
     }
@@ -422,7 +459,10 @@ mod tests {
     fn dkms_refuses_a_kernel_without_headers() {
         let mut pkgs = BTreeMap::new();
         pkgs.insert("linux".to_string(), files(&["usr/lib/modules/6.1-arch1/vmlinuz"]));
-        pkgs.insert("linux-headers".to_string(), files(&["usr/lib/modules/6.1-arch1/build/Makefile"]));
+        pkgs.insert(
+            "linux-headers".to_string(),
+            files(&["usr/lib/modules/6.1-arch1/build/Makefile"]),
+        );
         pkgs.insert("linux-lts".to_string(), files(&["usr/lib/modules/6.6-lts/vmlinuz"]));
         assert!(dkms_refusals(&pkgs).is_empty());
         pkgs.insert("nvidia-open-dkms".to_string(), files(&["usr/src/nvidia-560/dkms.conf"]));
@@ -441,7 +481,9 @@ mod tests {
             ("usr/lib/ld-linux-x86-64.so.2", "glibc"),
         ]
         .into();
-        let set = closure(&[("/usr/bin/pacman".into(), ldd.into())], &|p| owners.get(p).map(|s| s.to_string()));
+        let set = closure(&[("/usr/bin/pacman".into(), ldd.into())], &|p| {
+            owners.get(p).map(|s| s.to_string())
+        });
         assert_eq!(set, ["glibc", "pacman", "zlib-ng-compat"].map(String::from).into());
     }
 }

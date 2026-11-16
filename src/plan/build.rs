@@ -130,7 +130,10 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
         .map(|(n, u)| (n.clone(), u.shell.clone()))
         .collect();
     let etc_shells = match rendered.state.files.get("/etc/shells") {
-        Some(f) => rendered.blobs.get(&f.sha256).map(|b| String::from_utf8_lossy(b).into_owned()),
+        Some(f) => rendered
+            .blobs
+            .get(&f.sha256)
+            .map(|b| String::from_utf8_lossy(b).into_owned()),
         None => fs::read_to_string(env.root.join("etc/shells")).ok(),
     };
     let owners: BTreeMap<&str, &str> = local
@@ -176,8 +179,14 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
     plan.refusals.extend(group.refusals);
     plan.notes.extend(group.notes);
     for name in ["archix", "archix-git"] {
-        if plan.packages.iter().any(|p| p.name == name && p.action == PkgAction::Upgrade) {
-            plan.notes.push(format!("{name} upgrades on the next switch or with pacman, never inside its own switch"));
+        if plan
+            .packages
+            .iter()
+            .any(|p| p.name == name && p.action == PkgAction::Upgrade)
+        {
+            plan.notes.push(format!(
+                "{name} upgrades on the next switch or with pacman, never inside its own switch"
+            ));
         }
     }
 
@@ -197,7 +206,11 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
                 .or_else(|| local.get(&p.name).map(|l| &l.files))
                 .cloned()
                 .unwrap_or_default();
-            Some(Change { op, name: p.name.clone(), files })
+            Some(Change {
+                op,
+                name: p.name.clone(),
+                files,
+            })
         })
         .collect();
     plan.hooks = hooks::items(&hooks::load(&inputs.conf.hook_dirs()), &changes);
@@ -259,7 +272,8 @@ pub fn plan(handle: &mut Alpm, dbpath: &Path, inputs: &PlanInputs) -> Result<Pla
     if let Some(Value::Map(users)) = get(config, "home")
         && users.values().any(|u| get(u, "home_manager").is_some())
     {
-        plan.unchecked.push("home: home-manager build isn't run by this diff yet".into());
+        plan.unchecked
+            .push("home: home-manager build isn't run by this diff yet".into());
     }
 
     if !inputs.flatpak.is_empty() {

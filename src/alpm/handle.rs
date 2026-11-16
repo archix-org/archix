@@ -31,23 +31,58 @@ pub fn siglevel(tokens: &[&str], base: SigLevel) -> Result<SigLevel> {
         match word {
             "Never" => {
                 set(&mut level, SigLevel::PACKAGE, SigLevel::DATABASE, false);
-                set(&mut level, SigLevel::PACKAGE_OPTIONAL, SigLevel::DATABASE_OPTIONAL, true);
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_OPTIONAL,
+                    SigLevel::DATABASE_OPTIONAL,
+                    true,
+                );
             }
             "Optional" => {
                 set(&mut level, SigLevel::PACKAGE, SigLevel::DATABASE, true);
-                set(&mut level, SigLevel::PACKAGE_OPTIONAL, SigLevel::DATABASE_OPTIONAL, true);
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_OPTIONAL,
+                    SigLevel::DATABASE_OPTIONAL,
+                    true,
+                );
             }
             "Required" => {
                 set(&mut level, SigLevel::PACKAGE, SigLevel::DATABASE, true);
-                set(&mut level, SigLevel::PACKAGE_OPTIONAL, SigLevel::DATABASE_OPTIONAL, false);
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_OPTIONAL,
+                    SigLevel::DATABASE_OPTIONAL,
+                    false,
+                );
             }
             "TrustedOnly" => {
-                set(&mut level, SigLevel::PACKAGE_MARGINAL_OK, SigLevel::DATABASE_MARGINAL_OK, false);
-                set(&mut level, SigLevel::PACKAGE_UNKNOWN_OK, SigLevel::DATABASE_UNKNOWN_OK, false);
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_MARGINAL_OK,
+                    SigLevel::DATABASE_MARGINAL_OK,
+                    false,
+                );
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_UNKNOWN_OK,
+                    SigLevel::DATABASE_UNKNOWN_OK,
+                    false,
+                );
             }
             "TrustAll" => {
-                set(&mut level, SigLevel::PACKAGE_MARGINAL_OK, SigLevel::DATABASE_MARGINAL_OK, true);
-                set(&mut level, SigLevel::PACKAGE_UNKNOWN_OK, SigLevel::DATABASE_UNKNOWN_OK, true);
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_MARGINAL_OK,
+                    SigLevel::DATABASE_MARGINAL_OK,
+                    true,
+                );
+                set(
+                    &mut level,
+                    SigLevel::PACKAGE_UNKNOWN_OK,
+                    SigLevel::DATABASE_UNKNOWN_OK,
+                    true,
+                );
             }
             other => bail!("unknown SigLevel {other:?}"),
         }
@@ -110,12 +145,21 @@ pub fn plan_dbpath(dir: &Path, real_dbpath: &Path) -> Result<PathBuf> {
 /// A libalpm handle with every setting pacman would apply from `conf`, on `dbpath` (the plan's).
 pub fn open(conf: &PacmanConf, dbpath: &Path) -> Result<Alpm> {
     let root = conf.root_dir();
-    let mut handle = Alpm::new(root.to_string_lossy().as_bytes().to_vec(), dbpath.to_string_lossy().as_bytes().to_vec())
-        .map_err(|e| anyhow!("initialising libalpm on {}: {e}", dbpath.display()))?;
+    let mut handle = Alpm::new(
+        root.to_string_lossy().as_bytes().to_vec(),
+        dbpath.to_string_lossy().as_bytes().to_vec(),
+    )
+    .map_err(|e| anyhow!("initialising libalpm on {}: {e}", dbpath.display()))?;
     let alpm_err = |what: &str, e: alpm::Error| anyhow!("setting {what}: {e}");
     let cachedirs = conf.values("CacheDir");
-    let cachedirs = if cachedirs.is_empty() { vec!["/var/cache/pacman/pkg/"] } else { cachedirs };
-    handle.set_cachedirs(cachedirs.iter()).map_err(|e| alpm_err("CacheDir", e))?;
+    let cachedirs = if cachedirs.is_empty() {
+        vec!["/var/cache/pacman/pkg/"]
+    } else {
+        cachedirs
+    };
+    handle
+        .set_cachedirs(cachedirs.iter())
+        .map_err(|e| alpm_err("CacheDir", e))?;
     handle
         .set_hookdirs(conf.hook_dirs().iter().map(String::as_str))
         .map_err(|e| alpm_err("HookDir", e))?;
@@ -146,26 +190,44 @@ pub fn open(conf: &PacmanConf, dbpath: &Path) -> Result<Alpm> {
             .map(str::to_string)
             .collect()
     };
-    handle.set_noupgrades(words("NoUpgrade").iter().map(String::as_str)).map_err(|e| alpm_err("NoUpgrade", e))?;
-    handle.set_noextracts(words("NoExtract").iter().map(String::as_str)).map_err(|e| alpm_err("NoExtract", e))?;
-    handle.set_ignorepkgs(words("IgnorePkg").iter().map(String::as_str)).map_err(|e| alpm_err("IgnorePkg", e))?;
+    handle
+        .set_noupgrades(words("NoUpgrade").iter().map(String::as_str))
+        .map_err(|e| alpm_err("NoUpgrade", e))?;
+    handle
+        .set_noextracts(words("NoExtract").iter().map(String::as_str))
+        .map_err(|e| alpm_err("NoExtract", e))?;
+    handle
+        .set_ignorepkgs(words("IgnorePkg").iter().map(String::as_str))
+        .map_err(|e| alpm_err("IgnorePkg", e))?;
     handle
         .set_ignoregroups(words("IgnoreGroup").iter().map(String::as_str))
         .map_err(|e| alpm_err("IgnoreGroup", e))?;
     let arches = words("Architecture");
     let arches: Vec<String> = arches
         .into_iter()
-        .map(|a| if a == "auto" { std::env::consts::ARCH.to_string() } else { a })
+        .map(|a| {
+            if a == "auto" {
+                std::env::consts::ARCH.to_string()
+            } else {
+                a
+            }
+        })
         .collect();
     handle
         .set_architectures(arches.iter().map(String::as_str))
         .map_err(|e| alpm_err("Architecture", e))?;
     let default = siglevel(&conf.values("SigLevel"), default_siglevel())?;
-    handle.set_default_siglevel(default).map_err(|e| alpm_err("SigLevel", e))?;
+    handle
+        .set_default_siglevel(default)
+        .map_err(|e| alpm_err("SigLevel", e))?;
     let local = siglevel(&conf.values("LocalFileSigLevel"), default)?;
-    handle.set_local_file_siglevel(local).map_err(|e| alpm_err("LocalFileSigLevel", e))?;
+    handle
+        .set_local_file_siglevel(local)
+        .map_err(|e| alpm_err("LocalFileSigLevel", e))?;
     let remote = siglevel(&conf.values("RemoteFileSigLevel"), default)?;
-    handle.set_remote_file_siglevel(remote).map_err(|e| alpm_err("RemoteFileSigLevel", e))?;
+    handle
+        .set_remote_file_siglevel(remote)
+        .map_err(|e| alpm_err("RemoteFileSigLevel", e))?;
     for repo in &conf.repos {
         let level = match repo.sig_level.is_empty() {
             true => SigLevel::USE_DEFAULT,
@@ -176,7 +238,8 @@ pub fn open(conf: &PacmanConf, dbpath: &Path) -> Result<Alpm> {
             .map_err(|e| anyhow!("registering repo {}: {e}", repo.name))?;
         db.set_servers(repo.servers.iter().map(String::as_str))
             .map_err(|e| anyhow!("servers of {}: {e}", repo.name))?;
-        db.set_usage(usage(&repo.usage)).map_err(|e| anyhow!("usage of {}: {e}", repo.name))?;
+        db.set_usage(usage(&repo.usage))
+            .map_err(|e| anyhow!("usage of {}: {e}", repo.name))?;
     }
     Ok(handle)
 }
@@ -205,7 +268,8 @@ pub fn sync_versions(handle: &Alpm) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for db in handle.syncdbs() {
         for pkg in db.pkgs() {
-            out.entry(pkg.name().to_string()).or_insert_with(|| pkg.version().to_string());
+            out.entry(pkg.name().to_string())
+                .or_insert_with(|| pkg.version().to_string());
         }
     }
     out
@@ -342,7 +406,9 @@ pub fn prepare_sync_skipping(
         .filter(|name| !handle.ignorepkgs().iter().any(|i| i == name.as_str()))
         .collect();
     for name in &added {
-        handle.add_ignorepkg(name.as_str()).map_err(|e| anyhow!("ignoring {name}: {e}"))?;
+        handle
+            .add_ignorepkg(name.as_str())
+            .map_err(|e| anyhow!("ignoring {name}: {e}"))?;
     }
     let result = prepare_sync_inner(handle, targets, sysupgrade, answers);
     for name in added {
@@ -358,7 +424,9 @@ fn prepare_sync_inner(handle: &mut Alpm, targets: &[String], sysupgrade: bool, a
         .map_err(|e| anyhow!("starting a libalpm transaction: {e}"))?;
     let result = (|| {
         if sysupgrade {
-            handle.sync_sysupgrade(false).map_err(|e| anyhow!("full upgrade: {e}"))?;
+            handle
+                .sync_sysupgrade(false)
+                .map_err(|e| anyhow!("full upgrade: {e}"))?;
         }
         for target in targets {
             let pkg = handle

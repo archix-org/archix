@@ -125,7 +125,10 @@ impl PacmanConf {
         let root = self.root_dir();
         let mut dirs = vec![format!(
             "{}/",
-            root.join(SYSHOOKDIR.trim_start_matches('/')).display().to_string().trim_end_matches('/')
+            root.join(SYSHOOKDIR.trim_start_matches('/'))
+                .display()
+                .to_string()
+                .trim_end_matches('/')
         )];
         let configured = self.values("HookDir");
         if configured.is_empty() {

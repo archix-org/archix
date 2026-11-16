@@ -80,7 +80,12 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
             let detail = p.detail.as_ref().map(|d| format!(", {d}")).unwrap_or_default();
             (
                 line(
-                    format!("{:<15} {}{version}{repo}  ({}{detail})", pkg_verb(p.action), p.name, p.reason.text()),
+                    format!(
+                        "{:<15} {}{version}{repo}  ({}{detail})",
+                        pkg_verb(p.action),
+                        p.name,
+                        p.reason.text()
+                    ),
                     &p.risk,
                 ),
                 None,
@@ -94,7 +99,10 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
         .map(|a| {
             let commit = a.commit.as_deref().unwrap_or("commit unknown");
             let helper = a.helper.as_ref().map(|h| format!(", helper {h}")).unwrap_or_default();
-            (line(format!("build {} at {commit}{helper}  ({})", a.name, a.reason), &a.risk), None)
+            (
+                line(format!("build {} at {commit}{helper}  ({})", a.name, a.reason), &a.risk),
+                None,
+            )
         })
         .collect();
     out.push(("AUR", aur));
@@ -103,7 +111,13 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
         .iter()
         .map(|h| {
             (
-                line(format!("{} ({}): {}  (triggered by {})", h.name, h.when, h.description, h.reason), &h.risk),
+                line(
+                    format!(
+                        "{} ({}): {}  (triggered by {})",
+                        h.name, h.when, h.description, h.reason
+                    ),
+                    &h.risk,
+                ),
                 None,
             )
         })
@@ -119,8 +133,18 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
                 Some(SecretStatus::NotChecked) => " [secret: not checked without root]",
                 None => "",
             };
-            let diff = if with_diffs && f.secret.is_none() { f.diff.clone() } else { None };
-            (line(format!("{:<15} {}{secret}  ({})", file_verb(f.action), f.path, f.reason), &f.risk), diff)
+            let diff = if with_diffs && f.secret.is_none() {
+                f.diff.clone()
+            } else {
+                None
+            };
+            (
+                line(
+                    format!("{:<15} {}{secret}  ({})", file_verb(f.action), f.path, f.reason),
+                    &f.risk,
+                ),
+                diff,
+            )
         })
         .collect();
     out.push(("files", files));
@@ -131,7 +155,15 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
             let user = if s.user { " (user)" } else { "" };
             let reboot = if s.at_reboot { ", applies at reboot" } else { "" };
             (
-                line(format!("{:<15} {}{user}  ({}{reboot})", service_verb(s.action), s.unit, s.reason), &s.risk),
+                line(
+                    format!(
+                        "{:<15} {}{user}  ({}{reboot})",
+                        service_verb(s.action),
+                        s.unit,
+                        s.reason
+                    ),
+                    &s.risk,
+                ),
                 None,
             )
         })
@@ -141,8 +173,18 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
         .users
         .iter()
         .map(|u| {
-            let changes = if u.changes.is_empty() { String::new() } else { format!(": {}", u.changes.join(", ")) };
-            (line(format!("{:<15} {}{changes}  ({})", account_verb(u.action), u.name, u.reason), &u.risk), None)
+            let changes = if u.changes.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", u.changes.join(", "))
+            };
+            (
+                line(
+                    format!("{:<15} {}{changes}  ({})", account_verb(u.action), u.name, u.reason),
+                    &u.risk,
+                ),
+                None,
+            )
         })
         .collect();
     out.push(("users and groups", users));
@@ -154,7 +196,10 @@ fn groups(plan: &Plan, with_diffs: bool) -> Vec<Group> {
         out.push((title, lines));
     }
     if let Some(s) = &plan.snapshot {
-        out.push(("snapshot", vec![(line(format!("{}  ({})", s.line, s.reason), &s.risk), None)]));
+        out.push((
+            "snapshot",
+            vec![(line(format!("{}  ({})", s.line, s.reason), &s.risk), None)],
+        ));
     }
     out
 }
@@ -250,12 +295,36 @@ pub fn human(plan: &Plan) -> String {
 pub fn stat(plan: &Plan) -> String {
     let mut out = header(plan);
     for (title, names) in [
-        ("packages", plan.packages.iter().map(|p| format!("{} {}", pkg_verb(p.action), p.name)).collect::<Vec<_>>()),
+        (
+            "packages",
+            plan.packages
+                .iter()
+                .map(|p| format!("{} {}", pkg_verb(p.action), p.name))
+                .collect::<Vec<_>>(),
+        ),
         ("AUR", plan.aur.iter().map(|a| a.name.clone()).collect()),
         ("hooks", plan.hooks.iter().map(|h| h.name.clone()).collect()),
-        ("files", plan.files.iter().map(|f| format!("{} {}", file_verb(f.action), f.path)).collect()),
-        ("services", plan.services.iter().map(|s| format!("{} {}", service_verb(s.action), s.unit)).collect()),
-        ("users and groups", plan.users.iter().map(|u| format!("{} {}", account_verb(u.action), u.name)).collect()),
+        (
+            "files",
+            plan.files
+                .iter()
+                .map(|f| format!("{} {}", file_verb(f.action), f.path))
+                .collect(),
+        ),
+        (
+            "services",
+            plan.services
+                .iter()
+                .map(|s| format!("{} {}", service_verb(s.action), s.unit))
+                .collect(),
+        ),
+        (
+            "users and groups",
+            plan.users
+                .iter()
+                .map(|u| format!("{} {}", account_verb(u.action), u.name))
+                .collect(),
+        ),
     ] {
         if !names.is_empty() {
             writeln!(out, "{title}: {}", names.join(", ")).unwrap();
@@ -332,9 +401,18 @@ mod tests {
     #[test]
     fn human_output_groups_reasons_marks_and_summary() {
         let text = human(&plan());
-        assert!(text.starts_with("pinning: archive 2026-11-03 (moved from the lock's 2026-11-01"), "{text}");
-        assert!(text.contains("\npackages\n! upgrade         glibc 2.40-1 -> 2.41-1 [core]  (lock moved)\n"), "{text}");
-        assert!(text.contains("  install         ripgrep 14-1 [extra]  (declared)\n"), "{text}");
+        assert!(
+            text.starts_with("pinning: archive 2026-11-03 (moved from the lock's 2026-11-01"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\npackages\n! upgrade         glibc 2.40-1 -> 2.41-1 [core]  (lock moved)\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  install         ripgrep 14-1 [extra]  (declared)\n"),
+            "{text}"
+        );
         assert!(text.contains("applies at reboot"), "{text}");
         assert!(!text.contains("SHOULD NOT PRINT"));
         let summary = &text[text.find("\nsummary").unwrap()..];

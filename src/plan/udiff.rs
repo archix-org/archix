@@ -57,7 +57,12 @@ pub fn unified(old: &[u8], new: &[u8], path: &str) -> Option<String> {
         return Some("too large to show\n".into());
     };
     let mut out = format!("--- {path}\n+++ {path} (planned)\n");
-    let changed: Vec<usize> = ops.iter().enumerate().filter(|(_, o)| o.0 != Op::Keep).map(|(k, _)| k).collect();
+    let changed: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| o.0 != Op::Keep)
+        .map(|(k, _)| k)
+        .collect();
     if changed.is_empty() {
         out.push_str("(only the final newline differs)\n");
         return Some(out);
@@ -77,7 +82,13 @@ pub fn unified(old: &[u8], new: &[u8], path: &str) -> Option<String> {
         let a_len = hunk.iter().filter(|o| o.0 != Op::Add).count();
         let b_len = hunk.iter().filter(|o| o.0 != Op::Del).count();
         let shown = |start: usize, len: usize| if len == 0 { start } else { start + 1 };
-        writeln!(out, "@@ -{},{a_len} +{},{b_len} @@", shown(a_start, a_len), shown(b_start, b_len)).unwrap();
+        writeln!(
+            out,
+            "@@ -{},{a_len} +{},{b_len} @@",
+            shown(a_start, a_len),
+            shown(b_start, b_len)
+        )
+        .unwrap();
         for (op, i, j) in hunk {
             match op {
                 Op::Keep => writeln!(out, " {}", a[*i]).unwrap(),
@@ -104,7 +115,10 @@ mod tests {
         let old = "1\n2\n3\n4\n5\n6\n7\n8\n";
         let new = "1\n2\n3\n4\nfive\n6\n7\n8\n";
         let diff = unified(old.as_bytes(), new.as_bytes(), "/etc/x").unwrap();
-        assert_eq!(diff, "--- /etc/x\n+++ /etc/x (planned)\n@@ -2,7 +2,7 @@\n 2\n 3\n 4\n-5\n+five\n 6\n 7\n 8\n");
+        assert_eq!(
+            diff,
+            "--- /etc/x\n+++ /etc/x (planned)\n@@ -2,7 +2,7 @@\n 2\n 3\n 4\n-5\n+five\n 6\n 7\n 8\n"
+        );
     }
 
     #[test]

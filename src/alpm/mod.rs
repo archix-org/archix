@@ -11,7 +11,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 pub use conf::{PacmanConf, PinMode};
-pub use handle::{Added, Answers, Prepared, fetch, fetch_files, open, plan_dbpath, root_sync_dir, sync_versions, user_sync_dir, prepare_remove, prepare_sync, prepare_sync_skipping};
+pub use handle::{
+    Added, Answers, Prepared, fetch, fetch_files, open, plan_dbpath, prepare_remove, prepare_sync,
+    prepare_sync_skipping, root_sync_dir, sync_versions, user_sync_dir,
+};
 
 /// The file lists in a `<repo>.files` db (plain, gzip or zstd tar), by package name.
 pub fn read_files_db(path: &Path) -> Result<BTreeMap<String, Vec<String>>> {
@@ -31,7 +34,9 @@ pub fn read_files_db(path: &Path) -> Result<BTreeMap<String, Vec<String>>> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_string_lossy().into_owned();
-        let Some((dir, file)) = path.split_once('/') else { continue };
+        let Some((dir, file)) = path.split_once('/') else {
+            continue;
+        };
         let mut text = String::new();
         if entry.read_to_string(&mut text).is_err() {
             continue;
@@ -112,14 +117,25 @@ mod tests {
         t.install(&[pkg("zlib", "1.3-1").dep(), pkg("app", "1-1").deps(&["zlib"])]);
         t.repo(
             "cachyos",
-            &[pkg("zlib-ng-compat", "2.2-1").provides(&["zlib=1.3"]).conflicts(&["zlib"]).replaces(&["zlib"])],
+            &[pkg("zlib-ng-compat", "2.2-1")
+                .provides(&["zlib=1.3"])
+                .conflicts(&["zlib"])
+                .replaces(&["zlib"])],
         );
         let conf = t.conf(&["cachyos"]);
         let mut handle = open(&conf, &t.plan_dbpath()).unwrap();
         let recorded = prepare_sync(&mut handle, &["zlib-ng-compat".into()], false, Answers::Record).unwrap();
-        assert_eq!(recorded.replaced.get("zlib").map(String::as_str), Some("zlib-ng-compat"));
+        assert_eq!(
+            recorded.replaced.get("zlib").map(String::as_str),
+            Some("zlib-ng-compat")
+        );
         assert_eq!(recorded.remove, [("zlib".to_string(), "1.3-1".to_string())]);
-        let refused = prepare_sync(&mut handle, &["zlib-ng-compat".into()], false, Answers::Only(Default::default()));
+        let refused = prepare_sync(
+            &mut handle,
+            &["zlib-ng-compat".into()],
+            false,
+            Answers::Only(Default::default()),
+        );
         assert!(refused.is_err(), "{refused:?}");
     }
 

@@ -16,11 +16,20 @@ pub fn at_reboot(unit: &str, ssh_session: bool, display_manager: Option<&str>) -
     let base = unit.trim_end_matches(".service");
     matches!(
         base,
-        "dbus" | "dbus-broker" | "systemd-logind" | "NetworkManager" | "systemd-networkd" | "user@" | "systemd-journald"
+        "dbus"
+            | "dbus-broker"
+            | "systemd-logind"
+            | "NetworkManager"
+            | "systemd-networkd"
+            | "user@"
+            | "systemd-journald"
     ) || base.starts_with("user@")
         || (ssh_session && base == "sshd")
         || display_manager.is_some_and(|dm| dm.trim_end_matches(".service") == base)
-        || matches!(base, "display-manager" | "gdm" | "sddm" | "lightdm" | "ly" | "greetd" | "lxdm")
+        || matches!(
+            base,
+            "display-manager" | "gdm" | "sddm" | "lightdm" | "ly" | "greetd" | "lxdm"
+        )
 }
 
 pub struct SystemInputs<'a> {
@@ -69,12 +78,18 @@ fn combine(statuses: impl IntoIterator<Item = SecretStatus>) -> SecretStatus {
 
 /// The secrets whose values a managed path's content comes from; None when it isn't secret-derived.
 fn secret_names(path: &str, file: &ManagedFile, manifest: Option<&Manifest>) -> Option<Vec<String>> {
-    let all = || manifest.map(|m| m.secrets.keys().cloned().collect()).unwrap_or_default();
+    let all = || {
+        manifest
+            .map(|m| m.secrets.keys().cloned().collect())
+            .unwrap_or_default()
+    };
     if path.starts_with(&format!("{}/", secrets::DEPLOY_DIR)) {
         return Some(all());
     }
     let target = file.link.as_deref().filter(|t| secrets::is_secret_link(t))?;
-    let rest = target.strip_prefix(&format!("{}/", secrets::RUN_DIR)).unwrap_or_default();
+    let rest = target
+        .strip_prefix(&format!("{}/", secrets::RUN_DIR))
+        .unwrap_or_default();
     match rest.strip_prefix("files/") {
         Some(id) => Some(
             manifest
@@ -90,7 +105,12 @@ enum Disk {
     Missing,
     Unreadable,
     Link(String),
-    File { content: Vec<u8>, mode: u32, uid: u32, gid: u32 },
+    File {
+        content: Vec<u8>,
+        mode: u32,
+        uid: u32,
+        gid: u32,
+    },
     Other,
 }
 
@@ -134,7 +154,11 @@ fn files(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
         let disk = read_disk(&inputs.root.join(path.trim_start_matches('/')));
         let previous = from_files.and_then(|f| f.get(path));
         if let Some(names) = secret_names(path, want, manifest) {
-            let status = combine(names.iter().map(|n| secret_status(n, inputs.secret_hmacs, inputs.last_hmacs)));
+            let status = combine(
+                names
+                    .iter()
+                    .map(|n| secret_status(n, inputs.secret_hmacs, inputs.last_hmacs)),
+            );
             let in_place = match (&disk, &want.link) {
                 (Disk::Link(target), Some(link)) => target == link,
                 (Disk::File { content, .. }, None) => sha256_bytes(content) == want.sha256,
@@ -182,8 +206,12 @@ fn files(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
         if let Some(link) = &want.link {
             match &disk {
                 Disk::Link(target) if target == link => {}
-                Disk::Missing => group.files.push(item(FileAction::Create, path, format!("declared, link to {link}"))),
-                _ => group.files.push(item(FileAction::Modify, path, format!("declared, link to {link}"))),
+                Disk::Missing => group
+                    .files
+                    .push(item(FileAction::Create, path, format!("declared, link to {link}"))),
+                _ => group
+                    .files
+                    .push(item(FileAction::Modify, path, format!("declared, link to {link}"))),
             }
             continue;
         }
@@ -198,12 +226,29 @@ fn files(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
                 group.files.push(it);
             }
             Disk::Unreadable => group.unchecked.push(format!("file {path}: not readable without root")),
-            Disk::Link(_) | Disk::Other => group.files.push(item(FileAction::Modify, path, "declared, replaces what's there")),
-            Disk::File { content, mode, uid, gid } => {
+            Disk::Link(_) | Disk::Other => {
+                group
+                    .files
+                    .push(item(FileAction::Modify, path, "declared, replaces what's there"))
+            }
+            Disk::File {
+                content,
+                mode,
+                uid,
+                gid,
+            } => {
                 let sha = sha256_bytes(content);
                 let hand_edited = previous.is_some_and(|p| p.link.is_none() && p.merge.is_none() && p.sha256 != sha);
                 if sha != want.sha256 {
-                    let mut it = item(FileAction::Modify, path, if hand_edited { "declared; the hand edit goes to .archix-save" } else { "declared" });
+                    let mut it = item(
+                        FileAction::Modify,
+                        path,
+                        if hand_edited {
+                            "declared; the hand edit goes to .archix-save"
+                        } else {
+                            "declared"
+                        },
+                    );
                     it.hand_edited = hand_edited;
                     it.diff = match new {
                         Some(new) => udiff::unified(content, new, path),
@@ -211,9 +256,17 @@ fn files(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
                     };
                     group.files.push(it);
                 } else if *mode != want.mode {
-                    group.files.push(item(FileAction::Mode, path, format!("mode {:04o} -> {:04o}", mode, want.mode)));
+                    group.files.push(item(
+                        FileAction::Mode,
+                        path,
+                        format!("mode {:04o} -> {:04o}", mode, want.mode),
+                    ));
                 } else if Some(*uid) != accounts.uid(&want.owner) || Some(*gid) != accounts.gid(&want.group) {
-                    group.files.push(item(FileAction::Owner, path, format!("owner {}:{}", want.owner, want.group)));
+                    group.files.push(item(
+                        FileAction::Owner,
+                        path,
+                        format!("owner {}:{}", want.owner, want.group),
+                    ));
                 }
             }
         }
@@ -231,12 +284,24 @@ fn files(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
         match (&disk, untouched) {
             (Disk::Missing, _) => {}
             (_, true) => group.files.push(item(FileAction::Delete, path, "no longer declared")),
-            (_, false) => group.files.push(item(FileAction::Unmanage, path, "no longer declared; edited by hand, so left in place")),
+            (_, false) => group.files.push(item(
+                FileAction::Unmanage,
+                path,
+                "no longer declared; edited by hand, so left in place",
+            )),
         }
     }
-    for it in group.files.iter().filter(|it| risk::file_applies(risk::FileRule::Sudoers, &it.path)) {
-        let Some(want) = inputs.to.files.get(&it.path) else { continue };
-        let Some(content) = inputs.blobs.get(&want.sha256) else { continue };
+    for it in group
+        .files
+        .iter()
+        .filter(|it| risk::file_applies(risk::FileRule::Sudoers, &it.path))
+    {
+        let Some(want) = inputs.to.files.get(&it.path) else {
+            continue;
+        };
+        let Some(content) = inputs.blobs.get(&want.sha256) else {
+            continue;
+        };
         match (inputs.visudo)(content) {
             Some(true) => {}
             Some(false) => group.refusals.push(format!("{} fails visudo -cf", it.path)),
@@ -255,12 +320,20 @@ fn services(inputs: &SystemInputs, group: &mut SystemGroup) {
         let mut push = |unit: &str, enable: bool, reason: &str| {
             let reboot = at_reboot(unit, inputs.ssh_session, inputs.display_manager);
             group.services.push(ServiceItem {
-                action: if enable { ServiceAction::Enable } else { ServiceAction::Disable },
+                action: if enable {
+                    ServiceAction::Enable
+                } else {
+                    ServiceAction::Disable
+                },
                 unit: unit.to_string(),
                 user,
                 at_reboot: reboot,
                 reason: reason.to_string(),
-                risk: if reboot { vec!["applies at reboot".into()] } else { Vec::new() },
+                risk: if reboot {
+                    vec!["applies at reboot".into()]
+                } else {
+                    Vec::new()
+                },
             });
         };
         for (unit, enable) in wanted {
@@ -334,7 +407,11 @@ fn users(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
             changes,
             reason: "declared".into(),
             secret,
-            risk: if shell_change { vec!["login shell change".into()] } else { Vec::new() },
+            risk: if shell_change {
+                vec!["login shell change".into()]
+            } else {
+                Vec::new()
+            },
         });
     }
     for name in from_users.into_iter().flatten().map(|(n, _)| n) {
@@ -352,14 +429,20 @@ fn users(inputs: &SystemInputs, accounts: &Accounts, group: &mut SystemGroup) {
     let from_groups = inputs.from.map(|f| &f.groups);
     for (name, want) in &inputs.to.groups {
         if accounts.gid(name).is_none() {
-            group.users.push(account_line(AccountAction::AddGroup, name, "declared"));
+            group
+                .users
+                .push(account_line(AccountAction::AddGroup, name, "declared"));
         } else if want.gid.is_some_and(|id| Some(id) != accounts.gid(name)) {
-            group.users.push(account_line(AccountAction::ModifyGroup, name, "declared gid"));
+            group
+                .users
+                .push(account_line(AccountAction::ModifyGroup, name, "declared gid"));
         }
     }
     for name in from_groups.into_iter().flatten().map(|(n, _)| n) {
         if !inputs.to.groups.contains_key(name) && accounts.gid(name).is_some() {
-            group.users.push(account_line(AccountAction::RemoveGroup, name, "no longer declared"));
+            group
+                .users
+                .push(account_line(AccountAction::RemoveGroup, name, "no longer declared"));
         }
     }
 }
@@ -444,8 +527,16 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir_all(dir.path().join("etc")).unwrap();
             let me = unsafe { libc::geteuid() };
-            fs::write(dir.path().join("etc/passwd"), format!("root:x:{me}:{me}::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n")).unwrap();
-            fs::write(dir.path().join("etc/group"), format!("root:x:{me}:\nwheel:x:998:alice\n")).unwrap();
+            fs::write(
+                dir.path().join("etc/passwd"),
+                format!("root:x:{me}:{me}::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n"),
+            )
+            .unwrap();
+            fs::write(
+                dir.path().join("etc/group"),
+                format!("root:x:{me}:\nwheel:x:998:alice\n"),
+            )
+            .unwrap();
             Fixture {
                 dir,
                 blobs: BTreeMap::new(),
@@ -466,7 +557,12 @@ mod tests {
             self.to.files.insert(path.into(), f);
         }
 
-        fn run(&self, from: Option<&SystemState>, hmacs: Option<&BTreeMap<String, String>>, last: &BTreeMap<String, String>) -> SystemGroup {
+        fn run(
+            &self,
+            from: Option<&SystemState>,
+            hmacs: Option<&BTreeMap<String, String>>,
+            last: &BTreeMap<String, String>,
+        ) -> SystemGroup {
             build(&SystemInputs {
                 root: self.dir.path(),
                 to: &self.to,
@@ -492,14 +588,21 @@ mod tests {
         fx.write("/etc/same", "x\n");
         let mut from = SystemState::default();
         let mut old_blobs = BTreeMap::new();
-        from.files.insert("/etc/hosts".into(), file(b"127.0.0.1 localhost\n10.0.0.2 old\n", &mut old_blobs));
+        from.files.insert(
+            "/etc/hosts".into(),
+            file(b"127.0.0.1 localhost\n10.0.0.2 old\n", &mut old_blobs),
+        );
         from.files.insert("/etc/gone".into(), file(b"bye\n", &mut old_blobs));
         fx.write("/etc/gone", "bye\n");
         let g = fx.run(Some(&from), None, &BTreeMap::new());
         let paths: Vec<_> = g.files.iter().map(|f| (f.path.as_str(), f.action)).collect();
         assert_eq!(
             paths,
-            [("/etc/gone", FileAction::Delete), ("/etc/hosts", FileAction::Modify), ("/etc/new.conf", FileAction::Create)]
+            [
+                ("/etc/gone", FileAction::Delete),
+                ("/etc/hosts", FileAction::Modify),
+                ("/etc/new.conf", FileAction::Create)
+            ]
         );
         let hosts = &g.files[1];
         assert!(hosts.hand_edited);
@@ -521,14 +624,21 @@ mod tests {
     #[test]
     fn secret_files_never_show_content_and_need_the_key() {
         let mut fx = Fixture::new();
-        fx.to.files.insert("/etc/wifi.psk".into(), link(&secrets::link_target("wifi")));
+        fx.to
+            .files
+            .insert("/etc/wifi.psk".into(), link(&secrets::link_target("wifi")));
         fx.write("/run/archix/secrets/placeholder", "");
         let last = BTreeMap::from([("wifi".to_string(), "h1".to_string())]);
         let unchecked = fx.run(None, None, &last);
         let item = &unchecked.files[0];
         assert_eq!(item.secret, Some(SecretStatus::NotChecked));
         assert!(item.diff.is_none());
-        assert!(unchecked.unchecked.iter().any(|u| u.starts_with("secret: not checked without root")));
+        assert!(
+            unchecked
+                .unchecked
+                .iter()
+                .any(|u| u.starts_with("secret: not checked without root"))
+        );
 
         std::os::unix::fs::symlink(secrets::link_target("wifi"), fx.dir.path().join("etc/wifi.psk")).unwrap();
         let same = BTreeMap::from([("wifi".to_string(), "h1".to_string())]);
@@ -571,7 +681,11 @@ mod tests {
         fx.to.services.insert("cups.service".into(), true);
         fx.to.services.insert("NetworkManager.service".into(), true);
         let g = fx.run(None, None, &BTreeMap::new());
-        let lines: Vec<_> = g.services.iter().map(|s| (s.unit.as_str(), s.action, s.at_reboot)).collect();
+        let lines: Vec<_> = g
+            .services
+            .iter()
+            .map(|s| (s.unit.as_str(), s.action, s.at_reboot))
+            .collect();
         assert_eq!(
             lines,
             [
@@ -600,9 +714,21 @@ mod tests {
     #[test]
     fn users_add_modify_remove_without_hashes() {
         let mut fx = Fixture::new();
-        fx.to.users.insert("alice".into(), User { hashed_password: Some("$6$new-hash".into()), ..user("/usr/bin/zsh") });
+        fx.to.users.insert(
+            "alice".into(),
+            User {
+                hashed_password: Some("$6$new-hash".into()),
+                ..user("/usr/bin/zsh")
+            },
+        );
         fx.to.users.insert("bob".into(), user("/bin/bash"));
-        fx.to.groups.insert("media".into(), Group { gid: None, system: false });
+        fx.to.groups.insert(
+            "media".into(),
+            Group {
+                gid: None,
+                system: false,
+            },
+        );
         let mut from = SystemState::default();
         from.users.insert("alice".into(), user("/bin/bash"));
         from.users.insert("root".into(), user("/bin/bash"));
@@ -610,11 +736,19 @@ mod tests {
         let alice = g.users.iter().find(|u| u.name == "alice").unwrap();
         assert_eq!(alice.action, AccountAction::ModifyUser);
         assert!(!alice.risk.is_empty());
-        assert!(g.users.iter().any(|u| u.name == "bob" && u.action == AccountAction::AddUser));
+        assert!(
+            g.users
+                .iter()
+                .any(|u| u.name == "bob" && u.action == AccountAction::AddUser)
+        );
         let root = g.users.iter().find(|u| u.name == "root").unwrap();
         assert_eq!(root.action, AccountAction::RemoveUser);
         assert!(!root.risk.is_empty());
-        assert!(g.users.iter().any(|u| u.name == "media" && u.action == AccountAction::AddGroup));
+        assert!(
+            g.users
+                .iter()
+                .any(|u| u.name == "media" && u.action == AccountAction::AddGroup)
+        );
         let json = serde_json::to_string(&g.users).unwrap();
         assert!(!json.contains("hash"), "{json}");
     }

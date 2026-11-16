@@ -139,7 +139,11 @@ pub fn items(hooks: &BTreeMap<String, Hook>, changes: &[Change]) -> Vec<HookItem
             continue;
         }
         let shown: Vec<&str> = by.iter().take(3).map(String::as_str).collect();
-        let more = if by.len() > 3 { format!(" and {} more", by.len() - 3) } else { String::new() };
+        let more = if by.len() > 3 {
+            format!(" and {} more", by.len() - 3)
+        } else {
+            String::new()
+        };
         out.push(HookItem {
             name: name.clone(),
             description: hook.description.clone(),

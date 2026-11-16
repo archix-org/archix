@@ -64,16 +64,25 @@ fn visudo(content: &[u8]) -> Option<bool> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = std::env::temp_dir().join(format!("archix-sudoers-{}", std::process::id()));
     let _ = fs::remove_file(&path);
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).ok()?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .ok()?;
     let written = file.write_all(content);
-    let status = written.ok().and_then(|()| Command::new("visudo").arg("-cf").arg(&path).output().ok());
+    let status = written
+        .ok()
+        .and_then(|()| Command::new("visudo").arg("-cf").arg(&path).output().ok());
     let _ = fs::remove_file(&path);
     Some(status?.status.success())
 }
 
 fn ldd(path: &Path) -> Option<String> {
     let out = Command::new("ldd").arg(path).output().ok()?;
-    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn secret_hmacs(state: &Path, rendered: &archix::system::Rendered) -> Option<BTreeMap<String, String>> {
@@ -81,7 +90,9 @@ fn secret_hmacs(state: &Path, rendered: &archix::system::Rendered) -> Option<BTr
         return Some(BTreeMap::new());
     };
     archix::secrets::crypto::hmac_key(state).ok()?;
-    Some(archix::secrets::prepare::hmacs(state, manifest, &|sha| rendered.ciphertext(sha)))
+    Some(archix::secrets::prepare::hmacs(state, manifest, &|sha| {
+        rendered.ciphertext(sha)
+    }))
 }
 
 fn environment(flatpak: bool) -> Environment {
@@ -123,7 +134,11 @@ fn prepared_handle(conf: &PacmanConf, dir: &Path, cached: bool) -> Result<(::alp
         for repo in &conf.repos {
             let db = dbpath.join("sync").join(format!("{}.db", repo.name));
             if !db.exists() {
-                return Err(anyhow!("--cached, but there is no cached db for {} in {}", repo.name, dbpath.display()));
+                return Err(anyhow!(
+                    "--cached, but there is no cached db for {} in {}",
+                    repo.name,
+                    dbpath.display()
+                ));
             }
         }
     } else {
@@ -161,7 +176,9 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         false => None,
     };
     let mode = system_conf.pin_mode();
-    let archive = str_option(&config, "archive_url").unwrap_or(archix::archive::ARCHIVE_URL).to_string();
+    let archive = str_option(&config, "archive_url")
+        .unwrap_or(archix::archive::ARCHIVE_URL)
+        .to_string();
     let lock_date = lock.as_ref().map(|l| l.date).filter(|_| mode == PinMode::Archive);
     let conf_at = |date: Option<Date>| match date {
         Some(date) => system_conf.pinned(&archive, date),
@@ -238,7 +255,12 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
             .state
             .files
             .keys()
-            .map(|p| (p.clone(), fingerprint::hash_file(&env.root.join(p.trim_start_matches('/')))))
+            .map(|p| {
+                (
+                    p.clone(),
+                    fingerprint::hash_file(&env.root.join(p.trim_start_matches('/'))),
+                )
+            })
             .collect(),
         archix_version: env!("CARGO_PKG_VERSION").to_string(),
         unchecked: plan.unchecked.clone(),
@@ -253,7 +275,11 @@ pub fn diff(config_dir: &Path, host: &str, args: &DiffArgs) -> Result<u8> {
         out(&render::human(&plan));
     }
     if let Some(path) = &args.save {
-        SavedPlan { plan: plan.clone(), fingerprint: print }.save(path)?;
+        SavedPlan {
+            plan: plan.clone(),
+            fingerprint: print,
+        }
+        .save(path)?;
     }
     Ok(plan.exit_code())
 }
