@@ -274,7 +274,7 @@ Removed:
 - displaced swap, conflict takeover, repack, soname machinery;
 - generations, revert;
 - holds, strict;
-- capture/captured and the init TUI's dotfile scraping;
+- capture (dotfile scraping) and the init TUI; captured.rs stays only for evaluating the config as its owner in an isolated uid, the one evaluation path root uses for both diff and switch;
 - uninstall;
 - old_model;
 - archix-static packaging, its .sig, release-key publishing;
