@@ -155,8 +155,11 @@ fn prepared_handle(conf: &PacmanConf, dir: &Path, cached: bool) -> Result<(::alp
             }
         }
     } else {
-        alpm::fetch(&mut handle).context("fetching the sync dbs (offline?)")?;
-        let _ = alpm::fetch_files(conf, &dbpath);
+        alpm::with_plan_dbpath_lock(&dbpath, || {
+            alpm::fetch(&mut handle).context("fetching the sync dbs (offline?)")?;
+            let _ = alpm::fetch_files(conf, &dbpath);
+            Ok(())
+        })?;
     }
     Ok((handle, dbpath))
 }

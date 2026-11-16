@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 pub use conf::{PacmanConf, PinMode};
 pub use handle::{
     Added, Answers, Prepared, fetch, fetch_files, open, plan_dbpath, prepare_remove, prepare_sync,
-    prepare_sync_skipping, root_sync_dir, sync_versions, user_sync_dir,
+    prepare_sync_skipping, root_sync_dir, sync_versions, user_sync_dir, with_plan_dbpath_lock,
 };
 
 /// The file lists in a `<repo>.files` db (plain, gzip or zstd tar), by package name.

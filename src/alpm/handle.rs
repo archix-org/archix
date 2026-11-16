@@ -127,6 +127,9 @@ pub fn root_sync_dir(fingerprint: &str) -> PathBuf {
 
 /// Makes `dir` a DBPath whose sync/ is the plan's and whose local is a link to the real local db, as checkupdates does.
 pub fn plan_dbpath(dir: &Path, real_dbpath: &Path) -> Result<PathBuf> {
+    if dir == real_dbpath {
+        bail!("the plan's dbpath can't be the system's own ({})", dir.display());
+    }
     fs::create_dir_all(dir.join("sync")).with_context(|| format!("creating {}", dir.display()))?;
     let local = dir.join("local");
     let target = real_dbpath.join("local");
@@ -140,6 +143,30 @@ pub fn plan_dbpath(dir: &Path, real_dbpath: &Path) -> Result<PathBuf> {
             .with_context(|| format!("linking {} to {}", local.display(), target.display()))?,
     }
     Ok(dir.to_path_buf())
+}
+
+/// Holds the plan dbpath's own lock while `f` runs, so concurrent archix runs never meet libalpm's db.lck there.
+pub fn with_plan_dbpath_lock<T>(dir: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    use std::os::fd::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("archix.lock"))
+        .with_context(|| format!("opening {}", dir.join("archix.lock").display()))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        bail!("locking {}: {}", dir.display(), std::io::Error::last_os_error());
+    }
+    // Only archix uses this dbpath and it holds archix.lock first, so a db.lck here was left by a run that died.
+    match fs::remove_file(dir.join("db.lck")) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            return Err(e).with_context(|| format!("removing a stale {}", dir.join("db.lck").display()));
+        }
+        _ => {}
+    }
+    let out = f();
+    drop(file);
+    out
 }
 
 /// A libalpm handle with every setting pacman would apply from `conf`, on `dbpath` (the plan's).
@@ -495,5 +522,42 @@ mod tests {
         assert_eq!(fs::read_link(dir.join("local")).unwrap(), real.join("local"));
         assert!(dir.join("sync").is_dir());
         plan_dbpath(&dir, &real).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod plan_lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_stale_db_lck_in_the_plan_dbpath_is_cleared_under_archix_lock_and_concurrent_runs_serialise() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("db.lck"), "").unwrap();
+        with_plan_dbpath_lock(dir.path(), || Ok(())).unwrap();
+        assert!(!dir.path().join("db.lck").exists());
+        let inside = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let (path, inside) = (dir.path().to_path_buf(), inside.clone());
+                std::thread::spawn(move || {
+                    with_plan_dbpath_lock(&path, || {
+                        assert_eq!(inside.fetch_add(1, std::sync::atomic::Ordering::SeqCst), 0);
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        inside.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn the_plan_dbpath_is_never_the_systems_own() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(plan_dbpath(dir.path(), dir.path()).is_err());
     }
 }
