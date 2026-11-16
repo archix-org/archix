@@ -446,8 +446,61 @@ pub fn apply(etc: &Path, live: &Path, passwords: &Passwords, existed: &dyn Fn(&s
     Ok(kept)
 }
 
-/// Whether `user` in the /etc at `etc` is root or a wheel or sudo member whose account isn't locked or expired, so a password set there at boot would open the rescue entry.
-fn could_open_rescue(etc: &Path, user: &str) -> bool {
+/// Groups whose members' passwords count as a way in, besides root's.
+const LOGIN_GROUPS: &[&str] = &["wheel", "sudo"];
+
+/// Root and every wheel or sudo member in the /etc at `etc` with a password that can be checked: not locked, not empty, not expired, and yescrypt or SHA-crypt.
+fn password_logins(etc: &Path) -> Result<Vec<String>> {
+    let read = |name: &str| {
+        let path = etc.join(name);
+        fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+    };
+    let (passwd, shadow) = (read("passwd")?, read("shadow")?);
+    let group = read("group").unwrap_or_default();
+    let mut gids = Vec::new();
+    let mut members = Vec::new();
+    for line in group.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        if fields.len() >= 4 && LOGIN_GROUPS.contains(&fields[0]) {
+            gids.push(fields[2]);
+            members.extend(fields[3].split(',').filter(|m| !m.is_empty()));
+        }
+    }
+    let today = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| (since.as_secs() / 86_400) as i64);
+    let mut found: Vec<String> = Vec::new();
+    for line in passwd.lines() {
+        let fields: Vec<&str> = line.split(':').collect();
+        let [user, field, uid, gid, ..] = fields[..] else {
+            continue;
+        };
+        if uid != "0" && !gids.contains(&gid) && !members.contains(&user) {
+            continue;
+        }
+        let entry = shadow
+            .lines()
+            .map(|line| line.split(':').collect::<Vec<_>>())
+            .find(|fields| fields.first() == Some(&user));
+        let hash = match (field, &entry) {
+            ("x", Some(fields)) => fields.get(1).copied().unwrap_or(""),
+            ("x", None) => continue,
+            (hash, _) => hash,
+        };
+        let expired = entry
+            .as_ref()
+            .and_then(|fields| fields.get(7))
+            .and_then(|days| days.parse::<i64>().ok())
+            .is_some_and(|days| days <= today);
+        if !expired && super::password::checkable(hash) && !found.iter().any(|known| known == user) {
+            found.push(user.to_string());
+        }
+    }
+    Ok(found)
+}
+
+/// Whether `user` in the /etc at `etc` is root or a wheel or sudo member whose account isn't locked or expired, so a password set there at boot would let them log in.
+fn could_log_in(etc: &Path, user: &str) -> bool {
     let passwd = fs::read_to_string(etc.join("passwd")).unwrap_or_default();
     let group = fs::read_to_string(etc.join("group")).unwrap_or_default();
     let Some(fields) = passwd
@@ -461,23 +514,23 @@ fn could_open_rescue(etc: &Path, user: &str) -> bool {
     let member = group.lines().any(|line| {
         let g: Vec<&str> = line.split(':').collect();
         g.len() >= 4
-            && super::rescue_auth::GROUPS.contains(&g[0])
+            && LOGIN_GROUPS.contains(&g[0])
             && (g[2] == gid || g[3].split(',').any(|m| m == user))
     });
     let shadow = fs::read_to_string(etc.join("shadow")).unwrap_or_default();
     (fields.get(2) == Some(&"0") || member) && accounts::may_set_hash(&shadow, user, "$y$")
 }
 
-/// Refuses a deployment whose /etc at `etc` leaves no account the rescue entry and a console login can use (root, or a wheel or sudo member with a password) when the running system at `live` has one; with none on either, a warning. `logins` are users whose crypt_hash secret the switch decrypted and checked, which the deployment's boot sets; no other secret counts.
+/// Refuses a deployment whose /etc at `etc` leaves no account a console login can use (root, or a wheel or sudo member with a password) when the running system at `live` has one; with none on either, a warning. `logins` are users whose crypt_hash secret the switch decrypted and checked, which the deployment's boot sets; no other secret counts.
 pub fn lockout(etc: &Path, live: &Path, allowed: bool, logins: &BTreeSet<String>) -> Result<Option<String>> {
-    let usable = |etc: &Path| super::rescue_auth::accounts(etc).is_ok_and(|found| !found.is_empty());
-    if allowed || usable(etc) || logins.iter().any(|user| could_open_rescue(etc, user)) {
+    let usable = |etc: &Path| password_logins(etc).is_ok_and(|found| !found.is_empty());
+    if allowed || usable(etc) || logins.iter().any(|user| could_log_in(etc, user)) {
         return Ok(None);
     }
     let what = "root is locked and no wheel or sudo member has a yescrypt or SHA-512 password";
     if usable(live) {
         bail!(
-            "this config leaves no account that can log in with a password: {what} after this switch, though the running system has one. The rescue boot entry needs one, else recovering needs a live USB. Give root or a wheel user a password (users.<name>.hashed_password, or passwd), or set allow_no_password_login = true; nothing was changed"
+            "this config leaves no account that can log in with a password: {what} after this switch, though the running system has one. Recovering would then need a live USB. Give root or a wheel user a password (users.<name>.hashed_password, or passwd), or set allow_no_password_login = true; nothing was changed"
         );
     }
     Ok(Some(format!(
@@ -838,6 +891,32 @@ mod tests {
             lockout(locked.path(), some.path(), false, &alice).is_err(),
             "nor one the boot won't set, as the account is locked"
         );
+    }
+
+    #[test]
+    fn logins_are_root_and_wheel_or_sudo_members_with_a_checkable_unexpired_password() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("passwd"),
+            "root:x:0:0::/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\nbob:x:1001:1001::/home/bob:/bin/bash\ncarol:x:1002:10::/home/carol:/bin/bash\ndave:x:1003:1003::/home/dave:/bin/bash\n",
+        )
+        .unwrap();
+        fs::write(dir.path().join("group"), "root:x:0:root\nwheel:x:10:alice,dave\nbob:x:1001:\n").unwrap();
+        fs::write(
+            dir.path().join("shadow"),
+            format!(
+                "root:{SHA512}:20000::::::\nalice:{YESCRYPT}:20000::::::\nbob:{YESCRYPT}:20000::::::\ncarol:{YESCRYPT}:20000::::::\ndave:{YESCRYPT}:20000:0:99999:7::1:\n"
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            password_logins(dir.path()).unwrap(),
+            ["root", "alice", "carol"],
+            "bob isn't in wheel, carol is by her primary group, dave's account expired"
+        );
+        fs::write(dir.path().join("shadow"), "root:*:1::::::\nalice:!$y$j9T$x$y:1::::::\ncarol::1::::::\n").unwrap();
+        assert!(password_logins(dir.path()).unwrap().is_empty(), "locked, locked with a hash, empty");
+        assert!(password_logins(&dir.path().join("missing")).is_err());
     }
 
     #[test]

@@ -97,13 +97,6 @@ enum Command {
     },
     /// Download a file and print the archix.fetchurl { url, sha256 } line to paste into the config
     Prefetch { url: String },
-    /// Repair a machine from the rescue boot entry or a live USB: finds and mounts the root itself and runs none of its programs; with no command, the rescue prompt
-    Rescue {
-        #[command(flatten)]
-        options: commands::rescue::Options,
-        #[command(subcommand)]
-        action: Option<commands::rescue::Action>,
-    },
     /// Show which boot loader started this boot, whether boot counting and the fallback entries are in effect, the firmware's boot entries and order, and where a move from Limine to systemd-boot stands
     BootInfo,
     /// Run by archix-boot-complete.service once systemd-boot has counted the boot as good: arm the fallback slot and note the failed units
@@ -126,12 +119,6 @@ enum Command {
     /// Run at boot before a swap file declared with a size is swapped on: make it unless it's there with that size
     #[command(hide = true)]
     Swapfile { path: PathBuf, bytes: u64 },
-    /// Run by emergency.service before sulogin where the config declares required mounts: say which didn't mount and what to do
-    #[command(hide = true)]
-    EmergencyHint {
-        #[arg(long)]
-        no_rescue_entry: bool,
-    },
     /// Set up and check Secure Boot
     #[command(subcommand)]
     SecureBoot(SecureBoot),
@@ -501,20 +488,9 @@ fn run() -> Result<ExitCode> {
             commands::snapshot::split_var_lib()?;
             return Ok(ExitCode::SUCCESS);
         }
-        Command::EmergencyHint { no_rescue_entry } => {
-            archix::system::emergency::run(&archix::paths::Paths::system(), !no_rescue_entry);
-            return Ok(ExitCode::SUCCESS);
-        }
         Command::BootMount { root } => {
             let cmdline = archix::testhooks::kernel_cmdline();
             archix::system::initrd::mount(&root, &archix::testhooks::run_dir(), &cmdline)?;
-            return Ok(ExitCode::SUCCESS);
-        }
-        Command::Rescue { options, action } => {
-            if !is_root() {
-                anyhow::bail!("`archix rescue` mounts filesystems, so it needs root");
-            }
-            commands::rescue::run(options, action)?;
             return Ok(ExitCode::SUCCESS);
         }
         Command::Switch { .. } | Command::Install { .. } | Command::Remove { .. } | Command::Upgrade { .. } => {
@@ -614,9 +590,6 @@ fn run() -> Result<ExitCode> {
         }
         Command::BootComplete => {
             let paths = archix::paths::Paths::system();
-            if archix::system::boot::booted() == Some(archix::system::menu::Entry::Current) {
-                archix::system::emergency::forget(&paths);
-            }
             archix::system::health::boot_complete(&paths)?;
             commands::limine_after_good_boot(&paths);
             return Ok(ExitCode::SUCCESS);
@@ -766,7 +739,6 @@ fn run() -> Result<ExitCode> {
         | Command::Rollback { .. }
         | Command::User(_)
         | Command::Prefetch { .. }
-        | Command::Rescue { .. }
         | Command::BootInfo
         | Command::BootComplete
         | Command::BootMount { .. }
@@ -775,7 +747,6 @@ fn run() -> Result<ExitCode> {
         | Command::Bless
         | Command::HealthCheck
         | Command::Swapfile { .. }
-        | Command::EmergencyHint { .. }
         | Command::SecureBoot(_)
         | Command::Snapshot(_)
         | Command::SplitVarLib

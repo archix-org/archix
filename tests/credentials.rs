@@ -65,14 +65,6 @@ fn declared_passwords_are_enforced_but_never_undo_a_lock_and_a_revert_keeps_the_
         Some(true),
         "alice logs in with the declared password",
     );
-    c.check(
-        archix::system::rescue_auth::accounts(&machine.root.join("etc"))
-            .unwrap()
-            .iter()
-            .any(|account| account.user == "alice"),
-        "alice, in wheel, opens the rescue entry",
-    );
-
     let live = machine.root.join("etc");
     password::set(&live, "alice", OTHER).unwrap();
     password::set(&live, "bob", OTHER).unwrap();

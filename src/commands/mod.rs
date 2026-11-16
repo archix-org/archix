@@ -2,7 +2,6 @@ mod helper;
 mod init;
 pub mod keep;
 mod lock;
-pub mod rescue;
 pub mod snapshot;
 
 use std::collections::{BTreeMap, BTreeSet};

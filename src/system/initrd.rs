@@ -407,9 +407,7 @@ pub fn refusal(snapshot: u32) -> (String, String) {
 
 /// In the initramfs, with the root mounted at `root`: works out what the started entry boots and, for a snapshot, mounts it over `root` read-only with the throwaway layer; for the current system leaves `root` as it is and drops the last try's layer. `run` is RUN, where the choice is recorded.
 pub fn mount(root: &Path, run: &Path, cmdline: &str) -> Result<Choice> {
-    if super::rescue::requested(cmdline) {
-        return Ok(Choice::Current);
-    }
+    let _ = cmdline;
     let Some((device, fs_type)) = mounted_at(root) else {
         bail!("nothing is mounted at {}", root.display());
     };
@@ -556,7 +554,7 @@ fn rescue_next(why: &str) -> Result<()> {
     let path = dir.join("LoaderEntryOneShot-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f");
     let mut bytes = vec![7u8, 0, 0, 0];
     bytes.extend(
-        super::rescue::ENTRY
+        "archix-rescue.conf"
             .encode_utf16()
             .chain([0])
             .flat_map(u16::to_le_bytes),

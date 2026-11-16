@@ -10,7 +10,6 @@ use anyhow::{Context, Result};
 pub fn clean_esp(esp: &Path) -> Result<()> {
     for (dir, prefix) in [
         ("EFI/archix", ""),
-        (super::rescue::DIR, ""),
         ("loader/entries", "archix-"),
         ("loader", "loader.conf"),
         ("EFI/systemd", "systemd-bootx64.efi"),

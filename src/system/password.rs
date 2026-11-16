@@ -1,4 +1,4 @@
-//! Passwords in a deployment's /etc from the rescue boot, where neither PAM nor chpasswd runs: setting SHA-512 crypt hashes, which libxcrypt and PAM accept, and checking the rescue's login against shadow.
+//! Passwords in a deployment's /etc without PAM or chpasswd: setting SHA-512 crypt hashes, which libxcrypt and PAM accept, and checking a login against shadow.
 
 use std::fs;
 use std::path::Path;

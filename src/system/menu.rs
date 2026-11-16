@@ -675,9 +675,6 @@ pub fn boot_step_missing(paths: &Paths, plan: &BootPlan) -> Option<String> {
     if !loader_points_here(esp) {
         return Some("loader.conf doesn't point systemd-boot at archix's entries".to_string());
     }
-    if plan.rescue && !super::rescue::entry_whole(esp) {
-        return Some("the rescue entry isn't on the ESP".to_string());
-    }
     None
 }
 
@@ -878,15 +875,6 @@ mod tests {
             "timeout 3\ndefault archix-current[.~]*\npreferred archix-*\n",
         )
         .unwrap();
-        assert!(boot_step_missing(&paths, &plan(true)).is_some_and(|why| why.contains("rescue")));
-        assert_eq!(boot_step_missing(&paths, &plan(false)), None);
-        fs::create_dir_all(esp.join(crate::system::rescue::DIR)).unwrap();
-        fs::write(esp.join(crate::system::rescue::DIR).join("r.efi"), "r").unwrap();
-        fs::write(
-            esp.join("loader/entries").join(crate::system::rescue::ENTRY),
-            crate::system::rescue::entry_text("r.efi", "1"),
-        )
-        .unwrap();
         assert_eq!(boot_step_missing(&paths, &plan(true)), None);
     }
 
@@ -1019,7 +1007,6 @@ mod tests {
             ]
         );
         assert!(SORT_CURRENT < SORT_SLOT && SORT_SLOT < SORT_SNAPSHOT && SORT_SNAPSHOT < SORT_EXTRA);
-        assert!(SORT_EXTRA < crate::system::rescue::SORT_KEY);
     }
 
     fn planned(entry: Entry, image: &str) -> Planned {

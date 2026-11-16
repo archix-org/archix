@@ -360,21 +360,6 @@ pub fn render(config: &Value, esp: &str) -> Result<Declared> {
             bail!("{what}: file_systems declares {entry} too; drop_mounts is for lines nothing declares");
         }
     }
-    if out.lines.iter().any(|line| {
-        !line
-            .options
-            .split(',')
-            .any(|option| matches!(option, "nofail" | "noauto" | "x-systemd.automount"))
-    }) {
-        let boot = get(config, "boot");
-        let rescue_entry = matches!(boot.and_then(|boot| get(boot, "loader")), Some(Value::Str(_)))
-            && boot.and_then(|boot| get(boot, "rescue_entry")) != Some(&Value::Bool(false));
-        out.files.push((
-            super::emergency::DROP_IN.into(),
-            super::emergency::drop_in(rescue_entry),
-            "file_systems' required mounts",
-        ));
-    }
     if !crypttab.is_empty() {
         let mut text = "# Written by archix from file_systems' encrypted devices.\n".to_string();
         for line in crypttab.values() {
@@ -1549,15 +1534,7 @@ mod tests {
                 "/var/www /mnt/www none bind,nofail 0 0",
             ]
         );
-        assert_eq!(
-            declared.files,
-            [(
-                super::super::emergency::DROP_IN.to_string(),
-                "[Service]\nExecStartPre=-/usr/bin/archix emergency-hint --no-rescue-entry\n".to_string(),
-                "file_systems' required mounts"
-            )],
-            "a required /home gets emergency mode's hint, without the rescue entry when there's no boot.loader"
-        );
+        assert!(declared.files.is_empty(), "required mounts write no file: {:?}", declared.files);
         let optional = render(
             &config(serde_json::json!({
                 "boot": { "loader": "systemd-boot" },
@@ -1604,12 +1581,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            declared.files[0].0,
-            super::super::emergency::DROP_IN,
-            "required mounts get emergency mode's hint"
-        );
-        assert_eq!(
-            declared.files[1].1, "# Written by archix from file_systems' encrypted devices.\nsrv UUID=luks none luks\n",
+            declared.files[0].1, "# Written by archix from file_systems' encrypted devices.\nsrv UUID=luks none luks\n",
             "a required mount's volume isn't nofail either"
         );
         assert!(
@@ -1704,7 +1676,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            declared.files[1..],
+            declared.files,
             [(
                 "/etc/crypttab".to_string(),
                 "# Written by archix from file_systems' encrypted devices.\nsecret UUID=luks /etc/keys/secret.key luks,discard,nofail\nvault /dev/vdc none luks\n".to_string(),

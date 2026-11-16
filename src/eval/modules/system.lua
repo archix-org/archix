@@ -118,7 +118,7 @@ return {
     allow_no_password_login = archix.option {
       type = t.bool,
       default = false,
-      description = "Let a switch leave a system in which neither root nor a wheel or sudo member has a password, which a switch otherwise refuses when the running system has one, as the rescue boot entry needs one to open.",
+      description = "Let a switch leave a system in which neither root nor a wheel or sudo member has a password, which a switch otherwise refuses when the running system has one, as recovering would then need a live USB.",
     },
     tmpfiles = archix.option {
       type = t.list_of(t.str),
