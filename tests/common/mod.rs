@@ -456,14 +456,6 @@ pub struct Setup {
     pub machine: Machine,
 }
 
-/// The boot settings every test config gets unless it sets its own, for a machine's ESP.
-pub fn boot_body(machine: &Machine) -> String {
-    format!(
-        r#"boot = {{ loader = "systemd-boot", esp = "{}", kernel = "linux", rescue_entry = false }}, kernel_params = {{ "root=/dev/vda2 rw" }}"#,
-        machine.esp().display()
-    )
-}
-
 impl Setup {
     /// A config declaring everything explicitly installed in the image plus `extra`, locked at the image's snapshot, for a fresh machine.
     pub fn new(extra: &[&str], body: &str) -> Setup {
@@ -512,7 +504,7 @@ impl Setup {
         self.config = etc;
     }
 
-    /// Writes init.lua declaring the image's explicit packages plus `extra`, with the machine's boot settings unless `body` has its own.
+    /// Writes init.lua declaring the image's explicit packages plus `extra`.
     fn write_init(&self, extra: &[&str], body: &str) {
         let mut packages: Vec<String> = read_local_db(Path::new("/var/lib/pacman/local"))
             .unwrap()
@@ -526,9 +518,6 @@ impl Setup {
         let mut fields = vec![format!("packages = {{ {} }}", quoted.join(", "))];
         if !body.trim().is_empty() {
             fields.push(body.to_string());
-        }
-        if !body.contains("boot =") {
-            fields.push(boot_body(&self.machine));
         }
         let init = format!("return {{ {} }}", fields.join(", "));
         fs::write(self.config.join("init.lua"), init).unwrap();

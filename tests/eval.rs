@@ -734,10 +734,6 @@ fn credentials_that_arent_what_they_should_be_are_refused_without_printing_the_h
         ),
         (r#"tmpfiles = { "R /var/lib" }"#.to_string(), "would reach into /var/lib/archix"),
         (r#"tmpfiles = { "d /archix/x 0755 root root -" }"#.to_string(), "touches /archix"),
-        (
-            r#"boot = { esp = "/boot/efi" }, tmpfiles = { "r /boot/efi/x" }"#.to_string(),
-            "touches /boot/efi",
-        ),
         (r#"tmpfiles = { "y /x" }"#.to_string(), "isn't a tmpfiles.d type"),
         (
             r#"sudo = { enable = true, extra_rules = { "a\nb" } }"#.to_string(),
@@ -812,10 +808,6 @@ fn a_config_that_writes_fstab_or_what_the_mount_options_write_is_refused() {
         (
             r#"return { file_systems = { ["/mnt/x"] = { fs_type = "ext4" } } }"#,
             "device must name what to mount",
-        ),
-        (
-            r#"return { swap = { { file = "/.archix/swapfile", size = "1G" } } }"#,
-            "snapshots live in /.archix",
         ),
     ] {
         let dir = config(&[("init.lua", body)]);
@@ -919,10 +911,10 @@ fn secrets_render_to_links_templates_and_ciphertexts_and_never_their_values() {
 fn subcommand_help_answers_without_a_config() {
     let empty = tempfile::tempdir().unwrap();
     for args in [
-        &["snapshot", "setup", "--help"][..],
-        &["user", "unlock", "--help"],
-        &["rescue", "rollback", "--help"],
-        &["help", "snapshot", "setup"],
+        &["secrets", "edit", "--help"][..],
+        &["diff", "--help"],
+        &["lock", "--help"],
+        &["help", "secrets", "rekey"],
     ] {
         for config in [empty.path().to_path_buf(), empty.path().join("missing")] {
             let out = std::process::Command::new(env!("CARGO_BIN_EXE_archix"))

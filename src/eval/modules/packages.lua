@@ -53,12 +53,12 @@ return {
     package_caches = archix.option {
       type = t.list_of(t.str),
       default = {},
-      description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what `archix cache push` copied. Repo packages and AUR builds are checked against the lock's sha256; an AUR build the lock has no sha256 for yet is taken as the cache's build record says, so list only caches you control.",
+      description = "Package caches tried before the archive: directories (file:///mnt/nas/archix) or HTTP servers holding what package_cache_push copied. Repo packages and AUR builds are checked against the lock's sha256; an AUR build the lock has no sha256 for yet is taken as the cache's build record says, so list only caches you control.",
     },
     package_cache_push = archix.option {
       type = t.nullable(t.str),
       default = nil,
-      description = "A package cache directory (file:///mnt/nas/archix) every switch copies this machine's new package files, signatures and AUR build records into, as `archix cache push` does, so other machines get its exact third-party versions and AUR builds. A failed copy only warns.",
+      description = "A package cache directory (file:///mnt/nas/archix) every switch copies this machine's new package files, signatures and AUR build records into, so other machines get its exact third-party versions and AUR builds. A failed copy only warns.",
     },
     lock_warn_after_days = archix.option {
       type = t.int,

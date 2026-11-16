@@ -168,7 +168,7 @@ fn a_dkms_module_pulled_in_as_a_dependency_brings_the_kernels_headers() {
     // v4l2loopback-utils needs a V4L2LOOPBACK-MODULE, which v4l2loopback-dkms provides; nothing declares the DKMS package itself.
     fs::write(
         dir.path().join("init.lua"),
-        r#"return { packages = { "base", "v4l2loopback-utils" }, boot = { loader = "systemd-boot" }, kernel_params = { "root=/dev/vda2" } }"#,
+        r#"return { packages = { "base", "v4l2loopback-utils" }, kernel_params = { "root=/dev/vda2" } }"#,
     )
     .unwrap();
     let out = stdout(&archix(dir.path(), &["update", "--to", "2026-10-10", "--noconfirm"]));
