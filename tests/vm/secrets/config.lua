@@ -1,10 +1,8 @@
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "age", "wireguard-tools", "networkmanager", "strace", "openssl", "arch-install-scripts", "sbctl", "efitools", "e2fsprogs", "git" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "age", "wireguard-tools", "networkmanager", "strace", "openssl", "arch-install-scripts", "e2fsprogs", "git" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot" },
-  rollback = { enable = true },
   allow_no_password_login = true,
   files = {
     ["/opt/archix-vmtest/bin/archix-backdoor"] = { source = "archix-backdoor", mode = "0755" },

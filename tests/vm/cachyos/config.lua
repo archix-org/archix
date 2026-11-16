@@ -1,4 +1,4 @@
--- tests/vm/cachyos/test.py: CachyOS's repos ahead of Arch's, booted by Limine until the test moves it to systemd-boot.
+-- tests/vm/cachyos/test.py: CachyOS's repos ahead of Arch's, booted by Limine as its installer leaves it.
 local function cachyos(name, arch)
   return { name = name, servers = { "https://mirror.cachyos.org/repo/" .. arch .. "/$repo" }, before_official = true }
 end
@@ -14,7 +14,6 @@ return {
     cachyos("cachyos", "$arch"),
   },
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "limine", kernel = "linux-cachyos" },
   file_systems = {
     ["/home"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@home", "noatime", "compress=zstd" } },
     ["/root"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@root", "noatime", "compress=zstd" } },
@@ -23,7 +22,6 @@ return {
     ["/var/tmp"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@tmp", "noatime", "compress=zstd" } },
     ["/var/log"] = { device = "UUID=@FS_UUID@", fs_type = "btrfs", options = { "subvol=/@log", "noatime", "compress=zstd" } },
   },
-  rollback = { enable = true },
   allow_no_password_login = true,
   files = {
     ["/opt/archix-vmtest/bin/archix-backdoor"] = { source = "archix-backdoor", mode = "0755" },

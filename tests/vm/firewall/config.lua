@@ -1,11 +1,9 @@
 -- tests/vm/firewall/test.py: ssh allowed, and probe-lan on 2201 from the LAN only, until the test drops them; 2202 is never declared.
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "sbctl", "efitools", "e2fsprogs", "git", "openssh", "nftables" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "e2fsprogs", "git", "openssh", "nftables" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot" },
-  rollback = { enable = true },
   firewall = { enable = true, allowed_services = { "ssh", "probe-lan" }, service_ports = { ["probe-lan"] = { tcp = { 2201 }, sources = "lan" } } },
   allow_no_password_login = true,
   files = {

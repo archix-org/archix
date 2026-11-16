@@ -1,17 +1,15 @@
-# The split boot tests' shared helpers, bound to one test's machine and steps by bind(); each test starts from base.py's disk, set up for rollbacks with the boot menu written and one good boot behind it.
-import json
+# The VM suites' shared helpers, bound to one test's machine and steps by bind().
 import re
 import time
 
-LOADER = "/efi/loader/loader.conf"
-ENTRIES = "/efi/loader/entries"
 CONFIG = "/etc/archix/init.lua"
 EFIVAR = "/sys/firmware/efi/efivars/LoaderEntrySelected-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
-STATE = "/.archix/boot/state.json"
 HOST = "archix --host archix-vm"
 BACKDOOR = "archix-backdoor.service"
 ATTRIBUTED = "ATTRIBUTED: "
 NIC_STATE ="for nic in /sys/class/net/en*; do echo \"$(basename $nic) carrier=$(cat $nic/carrier 2>&1) carrier_changes=$(cat $nic/carrier_changes) operstate=$(cat $nic/operstate) flags=$(cat $nic/flags)\"; done"
+# What the switch stub prints until the rescope's rewrite (docs/SCOPE.md 2.2), exiting 3.
+STUB = "switch is being rewritten for the rescope"
 m = t = None
 
 
@@ -28,112 +26,26 @@ def ok(cmd, timeout=900):
     return m.execute(cmd, timeout)[0] == 0
 
 
-def loader():
-    return out(f"cat {LOADER}")
-
-
-def has_line(text, line):
-    return line in text.splitlines()
-
-
 def edit_config(sed):
     m.succeed(f"sed -i {sed} {CONFIG}")
 
 
-def entries():
-    """archix's entry files on the ESP, with their counters."""
-    return out(f"ls {ENTRIES} | grep '^archix-' || true").split()
-
-
-def entry_id(name):
-    """What boot::entry_id makes of an entry file's name: without its counters (+1-1) or the version an uncounted one carries (~3)."""
-    stem = name.removesuffix(".conf")
-    if "+" in stem:
-        return stem.split("+", 1)[0] + ".conf"
-    base, _, version = stem.rpartition("~")
-    return base + ".conf" if base and version.isdigit() else name
-
-
-def entry(name):
-    """The file of entry id name (archix-snapshot-3.conf), whatever its counters or version, or None."""
-    return next((f for f in entries() if entry_id(f) == name), None)
-
-
-def counts_tries(name, tries):
-    """Whether entry id name counts tries untouched boots, under either spelling: a rewrite renames +2 to +2-0."""
-    stem = name.removesuffix(".conf")
-    return entry(name) in (f"{stem}+{tries}.conf", f"{stem}+{tries}-0.conf")
-
-
 def selected():
-    """The entry id systemd-boot started this boot from, an uncounted entry's version left out as its counters are."""
-    return entry_id(out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip())
+    """The entry the firmware's loader started this boot from, if systemd-boot set LoaderEntrySelected."""
+    return out(f"tail -c +5 {EFIVAR} 2>/dev/null | tr -d '\\000'").strip()
 
 
-def trying():
-    """This boot's try record, or None outside try mode."""
-    text = out("cat /run/archix/try 2>/dev/null")
-    return json.loads(text) if text.strip() else None
+def not_stub(status, said, what):
+    """Fails the step loudly when what ran into the switch stub, naming it, rather than as an unexplained exit 3."""
+    t.require(not (status == 3 and STUB in said), f"{what}: `archix switch` is a stub until the rescope's rewrite (docs/SCOPE.md 2.2; tests/ci/rescope-pending.txt): {said[-300:]}")
 
 
-def snapshots():
-    """The snapshot numbers, oldest first."""
-    return [int(line.split()[0]) for line in out("archix snapshot list").splitlines() if line.split() and line.split()[0].isdigit()]
-
-
-def state():
-    text = out(f"cat {STATE} 2>/dev/null")
-    return json.loads(text) if text.strip() else {}
-
-
-# What a switch that lays the root out for rollbacks says when it stops there, its package changes left to the switch after the reboot that mounts @archix.
-LAID_OUT_FIRST = "reboot, then run `archix switch` again"
-
-
-def switch(what="a switch"):
-    """A switch; one that lays the root out and stops for the reboot gets it, and the switch after it."""
-    said = m.succeed(f"{HOST} switch --noconfirm", what=what)
-    if LAID_OUT_FIRST in said:
-        said += finish_layout(what)
+def switch(what="a switch", timeout=3600):
+    """A switch, its output on the console and in /root/switch.log; returns its output's tail."""
+    status, said = m.execute(f"set -o pipefail; timeout {timeout - 60} {HOST} switch --noconfirm 2>&1 | tee /root/switch.log | tail -c 4000", timeout)
+    not_stub(status, said, what)
+    t.require(status == 0, f"{what} exited {status}: {said[-3000:]}")
     return said
-
-
-def finish_layout(what, allowed=()):
-    """After a switch that laid the root out and stopped: the reboot that mounts @archix, then the switch that applies the rest; returns its output."""
-    t.log(f"{what} laid the root out and stopped for the reboot; rebooting and switching again")
-    m.succeed("bootctl set-timeout 0")
-    m.reboot()
-    boot(allowed)
-    return m.succeed(f"{HOST} switch --noconfirm", 3600, what=f"{what}, after the layout's reboot")
-
-
-def first_switch(log, timeout=1800, allowed=()):
-    """The first switch on a plain image, its output in log and on the console, and if it laid the root out and stopped, the reboot and the switch after it; returns the first one's exit status."""
-    status, _ = m.execute(f"set -o pipefail; timeout {timeout - 100} {HOST} switch --noconfirm 2>&1 | tee {log} > /dev/console", timeout)
-    if status == 0 and ok(f"grep -qF '{LAID_OUT_FIRST}' {log}"):
-        t.log("after the layout's reboot: " + finish_layout("the first switch", allowed)[-1500:])
-    return status
-
-
-def add_unit(name, body, enable=True):
-    """Declares unit name with body in the config, enabled by default; the next switch installs it."""
-    text = body.replace("\n", "\\\\n").replace("\"", "\\\\\"")
-    edit_config(f"'s|  units = {{|  units = {{\\n    [\"{name}\"] = \"{text}\",|'")
-    if enable:
-        edit_config(f"'s|  services = {{|  services = {{\\n    [\"{name}\"] = true,|'")
-
-
-def wait_fallback(began, timeout=2400):
-    """Waits, with nobody touching the machine, for the boots after a bad one to fall back: a boot in try mode; returns its seconds since began."""
-    m.wait_for_console_text(r"archix: this boot is snapshot", timeout=timeout)
-    m.connected = False
-    m.wait_for_shell(timeout=900)
-    return time.monotonic() - began
-
-
-def bump(n):
-    """Changes the managed file /etc/archix-vmtest, so a switch has something to apply and takes a snapshot first."""
-    edit_config(f"'s|\\[\"/etc/archix-vmtest\"\\] = {{ text = \"[0-9]*\" }}|[\"/etc/archix-vmtest\"] = {{ text = \"{n}\" }}|'")
 
 
 def carrier_race(networkctl, nic_state):
@@ -172,12 +84,12 @@ def network(wait=True):
 
 
 def boot(allowed=()):
-    """Judges a boot by the guest itself: multi-user.target reached, no failed unit but the backdoor's own and allowed, the NIC up; returns the entry systemd-boot started."""
+    """Judges a boot by the guest itself: multi-user.target reached, no failed unit but the backdoor's own and allowed, the NIC up; returns the running kernel."""
     m.execute("systemctl is-system-running --wait > /dev/null", 900)
-    started = selected()
-    t.log(f"booted entry {started}, try {trying()}, entries {entries()}")
+    kernel = out("uname -r").strip()
+    t.log(f"booted {kernel} from entry {selected() or 'unknown'}")
     settled(allowed)
-    return started
+    return kernel
 
 
 def settled(allowed=()):

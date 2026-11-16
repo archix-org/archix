@@ -1,11 +1,9 @@
 -- tests/vm/dkms2/test.py: linux and linux-lts, with v4l2loopback-dkms added by the test.
 return {
-  packages = { "base", "linux", "linux-lts", "mkinitcpio", "systemd-ukify", "sbctl", "efitools", "e2fsprogs", "git" },
+  packages = { "base", "linux", "linux-lts", "mkinitcpio", "systemd-ukify", "e2fsprogs", "git" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot" },
-  rollback = { enable = true },
   allow_no_password_login = true,
   files = {
     ["/opt/archix-vmtest/bin/archix-backdoor"] = { source = "archix-backdoor", mode = "0755" },

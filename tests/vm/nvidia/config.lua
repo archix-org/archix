@@ -1,11 +1,9 @@
 -- tests/vm/nvidia/test.py: nvidia-open-dkms, then the AUR's nvidia-580xx-dkms, added and dropped by the test.
 return {
-  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "sbctl", "efitools", "e2fsprogs", "git", "devtools" },
+  packages = { "base", "linux", "mkinitcpio", "systemd-ukify", "e2fsprogs", "git", "devtools" },
   hostname = "archix-vm",
   archive_url = "@ARCHIVE_URL@",
   kernel_params = { "root=PARTUUID=@ROOT_UUID@", "rw", "console=ttyS0" },
-  boot = { loader = "systemd-boot" },
-  rollback = { enable = true },
   allow_no_password_login = true,
   files = {
     ["/opt/archix-vmtest/bin/archix-backdoor"] = { source = "archix-backdoor", mode = "0755" },
