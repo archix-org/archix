@@ -61,7 +61,7 @@ pub fn fetch_all(archive: &Archive, dir: &Path, also_look_in: &[PathBuf], wanted
     let errors = errors.into_inner().unwrap();
     if full.into_inner() {
         bail!(
-            "{} ran out of space while downloading packages; nothing was changed. Free some space (`archix gc`, `pacman -Sc`) and try again",
+            "{} ran out of space while downloading packages; nothing was changed. Free some space (`pacman -Sc`) and try again",
             dir.display()
         );
     }

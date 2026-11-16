@@ -21,7 +21,7 @@ local text_file = t.submodule {
   on_change = archix.option {
     type = t.nullable(t.lines),
     default = archix.null,
-    description = "A bash script run as root when a switch or revert changed this file, right after the switch has written it and started or stopped the services, before the hooks.",
+    description = "A bash script run as root when a switch changed this file, right after the switch has written it and started or stopped the services, before the hooks.",
   },
   mutable = archix.option {
     type = t.nullable(t.bool),

@@ -33,7 +33,7 @@ return {
           on_change = archix.option {
             type = t.nullable(t.lines),
             default = archix.null,
-            description = "A bash script run as home.user right after a switch or revert writes a change to this file, so a reload signal reaches the running app.",
+            description = "A bash script run as home.user right after a switch writes a change to this file, so a reload signal reaches the running app.",
           },
           mutable = archix.option {
             type = t.nullable(t.bool),
