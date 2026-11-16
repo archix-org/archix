@@ -1,5 +1,5 @@
 always	lib:archix bin:archix test:no_global_sync test:no_bare_rename test:eval test:formats test:hm
-src/aur/	test:aur test:helper test:recipes test:repos
+src/aur/	test:aur test:aur_chroot test:helper test:recipes test:repos
 src/commands/helper.rs	test:helper test:aur
 src/commands/init.rs	test:init
 src/commands/lock.rs	test:switch test:archlinux test:system
