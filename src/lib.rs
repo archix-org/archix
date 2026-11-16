@@ -1,4 +1,5 @@
 pub mod adopt;
+pub mod alpm;
 pub mod archive;
 pub mod aur;
 pub mod captured;

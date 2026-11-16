@@ -1,3 +1,4 @@
+pub mod diff;
 mod helper;
 mod init;
 mod lock;

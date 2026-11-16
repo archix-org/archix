@@ -50,10 +50,20 @@ enum Command {
         #[arg(long)]
         noconfirm: bool,
     },
-    /// Show what a switch would change; being rewritten for the rescope
+    /// Show the plan a switch would apply, read-only: exit 0 nothing to do, 1 changes, 2 switch would refuse, 3 error, 4 incomplete
     Diff {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
-        rest: Vec<String>,
+        /// Print the plan as JSON, with its schema version
+        #[arg(long, conflicts_with = "stat")]
+        json: bool,
+        /// Print names only
+        #[arg(long)]
+        stat: bool,
+        /// Write the plan and its fingerprint to this file, for `switch --plan`
+        #[arg(long, value_name = "FILE")]
+        save: Option<PathBuf>,
+        /// Use the sync dbs already cached instead of fetching them; the header says so
+        #[arg(long)]
+        cached: bool,
     },
     /// Apply the config to the running system; being rewritten for the rescope
     Switch {
@@ -322,10 +332,6 @@ fn run() -> Result<ExitCode> {
             eprintln!("archix: switch is being rewritten for the rescope (docs/SCOPE.md)");
             return Ok(ExitCode::from(3));
         }
-        Command::Diff { .. } => {
-            eprintln!("archix: diff is being rewritten for the rescope (docs/SCOPE.md)");
-            return Ok(ExitCode::from(3));
-        }
         command => command,
     };
     if let Some(name) = needs_root(&command)
@@ -391,6 +397,13 @@ fn run() -> Result<ExitCode> {
             print!("{}", render_options(&evaluation, json)?);
         }
         return Ok(ExitCode::SUCCESS);
+    }
+    if let Command::Diff { json, stat, save, cached } = command {
+        let args = commands::diff::DiffArgs { json, stat, save, cached };
+        return Ok(ExitCode::from(commands::diff::diff(&cli.config, &hostname, &args).unwrap_or_else(|e| {
+            eprintln!("error: {e:#}");
+            commands::diff::error_code()
+        })));
     }
     if !cli.config.join("init.lua").is_file() {
         anyhow::bail!(
