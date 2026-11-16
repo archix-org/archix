@@ -7,7 +7,7 @@ RUN --mount=type=secret,id=archive retry() { for attempt in 1 2 3; do "$@" && re
  && sed -i '/^\[options\]/a DisableDownloadTimeout' /etc/pacman.conf \
  && retry pacman -Syyuu --noconfirm \
  && retry pacman -S --noconfirm --needed rust gcc devtools git base-devel linux mkinitcpio systemd-ukify sbctl btrfs-progs \
-    qemu-base edk2-ovmf arch-install-scripts dosfstools rust-musl musl \
+    qemu-base edk2-ovmf arch-install-scripts dosfstools \
  && echo "Server = https://archive.archlinux.org/repos/$SNAPSHOT/\$repo/os/\$arch" > /etc/pacman.d/mirrorlist \
  && pacman -Scc --noconfirm
 # The VM suites' TPM (pcr) and ssh client (firewall), in a layer of their own so the one above stays cached.

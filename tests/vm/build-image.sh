@@ -60,7 +60,6 @@ if declare -F install_archix > /dev/null; then
   install_archix
 else
   install -Dm755 "$archix" /mnt/usr/bin/archix
-  install -Dm755 /work/archix-static /mnt/usr/lib/archix/archix-static
 fi
 if [ "$loader" = limine ]; then
   install -Dm644 /mnt/usr/share/limine/BOOTX64.EFI /mnt/efi/EFI/BOOT/BOOTX64.EFI

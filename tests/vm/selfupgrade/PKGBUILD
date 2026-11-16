@@ -8,11 +8,10 @@ depends=('pacman' 'gcc-libs' 'glibc')
 provides=('archix')
 conflicts=('archix' 'ax')
 options=(!strip !debug)
-source=(archix archix-static)
-sha256sums=(SKIP SKIP)
+source=(archix)
+sha256sums=(SKIP)
 
 package() {
   install -Dm755 archix "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
-  install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
 }

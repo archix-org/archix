@@ -26,7 +26,6 @@ const MACHINES: &str = "/archix-machines";
 /// Where the template every machine's /usr is hardlinked from lives.
 const TEMPLATE: &str = "/archix-machines/template";
 /// The static binary tests/arch/run.sh builds, which the initramfs hook copies.
-const STATIC_BUILD: &str = "/target/x86_64-unknown-linux-musl/release/archix";
 /// The machine archix runs against right now, whose current deployment `installed` reads.
 static ACTIVE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -105,17 +104,12 @@ fn template() -> PathBuf {
     if Path::new(TEMPLATE).join(".done").exists() {
         return PathBuf::from(TEMPLATE);
     }
-    assert!(
-        Path::new(STATIC_BUILD).is_file(),
-        "{STATIC_BUILD} is missing; tests/arch/run.sh builds it before the tests"
-    );
     sh(&format!(
         r#"t={TEMPLATE}; rm -rf "$t"; mkdir -p "$t"
         tar -C / --xattrs --xattrs-include='*' --exclude=usr/lib/rustlib --exclude=usr/lib/gcc --exclude=usr/include \
           --exclude=usr/share/doc --exclude=usr/share/man --exclude=usr/share/info --exclude=usr/share/qemu \
           --exclude=usr/share/edk2 --exclude='usr/lib/modules/*/kernel' --exclude='usr/lib/modules/*/build' -cf - usr \
           | tar -C "$t" --xattrs --xattrs-include='*' -xpf -
-        install -Dm755 {STATIC_BUILD} "$t/usr/lib/archix/archix-static"
         install -Dm755 {archix} "$t{archix}"
         touch "$t/.done""#,
         archix = env!("CARGO_BIN_EXE_archix"),

@@ -7,42 +7,30 @@ arch=('x86_64')
 url="https://archix.dev"
 license=('MIT OR Apache-2.0')
 depends=('pacman' 'libgcc' 'glibc')
-makedepends=('rust' 'rust-musl' 'musl')
+makedepends=('rust')
 optdepends=(
   'git: AUR packages and recording the config commit'
   'devtools: building AUR packages in a clean chroot'
-  'mkinitcpio: boot entries'
-  'systemd-ukify: boot entries'
-  'sbctl: signing boot entries for Secure Boot'
-  'btrfs-progs: snapshots before each switch'
   'flatpak: Flatpak apps'
 )
 # Other AUR packages ship their own /usr/bin/ax.
 conflicts=('ax')
-source=("https://github.com/archix-org/archix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz"{,.sig})
-# packaging/aur/pin.sh fills these in from the signed release.
-sha256sums=('2b3582d91672fbc5392f2f7a5e837625093c6211d4687cdfb2bdb2292e4efc0e' 'SKIP')
-validpgpkeys=('CE9A595A3355AE955DEE7BB415374E7E35BAF667')
+source=("https://github.com/archix-org/archix/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+# packaging/aur/pin.sh fills these in from the release.
+sha256sums=('2b3582d91672fbc5392f2f7a5e837625093c6211d4687cdfb2bdb2292e4efc0e')
 # makepkg's LTO turns the bundled C libraries (zstd, Lua) into GCC bytecode the Rust linker can't read.
 options=('!lto' '!debug')
 
 prepare() {
   export RUSTUP_TOOLCHAIN=stable
   cd "$pkgname-$pkgver"
-  # With rustup instead of pacman's rust, the musl target comes from rustup rather than rust-musl.
-  if command -v rustup >/dev/null; then
-    rustup target add $CARCH-unknown-linux-musl
-  fi
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
-  cargo fetch --locked --target $CARCH-unknown-linux-musl
 }
 
 build() {
   cd "$pkgname-$pkgver"
   export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
   cargo build --frozen --release
-  # The rescue initramfs runs archix before the root filesystem's libraries are usable, so it needs a static build.
-  CFLAGS= CXXFLAGS= LDFLAGS= cargo build --frozen --release --target $CARCH-unknown-linux-musl
 }
 
 check() {
@@ -55,6 +43,5 @@ package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/archix "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
-  install -Dm755 target/$CARCH-unknown-linux-musl/release/archix "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
 }

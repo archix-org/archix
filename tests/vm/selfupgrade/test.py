@@ -102,7 +102,6 @@ def run(m, t):
         started = boot()
         t.check(deployment_entry(started) == "2" and out("cat /run/archix/deployment").strip() == "2", f"deployment 2 should boot again: entry {started}, deployment {out('cat /run/archix/deployment')}")
         t.check(out("pacman -Q archix-git").split()[1:] == [f"{old_version}-1"], f"the booted system should run the old archix-git: {out('pacman -Q archix-git')}")
-        t.check(ok(f"cmp -s /usr/lib/archix/archix-static <(bsdtar -xOf {NEXT}/old.pkg.tar.zst usr/lib/archix/archix-static)"), "the booted deployment's static archix should be the old build's")
         t.check(ok("archix generations > /dev/null && archix status > /dev/null"), f"the old archix should read its state: {out('archix status 2>&1 | tail -5')}")
         m.wait_until_succeeds("[ -f /efi/loader/entries/archix-2.conf ]", timeout=300, what="the boot of deployment 2 should be blessed")
         again = fingerprint(m, "rebooted")

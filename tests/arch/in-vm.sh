@@ -23,8 +23,6 @@ mode=$1
 shift
 case $mode in
   single)
-    # The initramfs runs the static musl build, which can lack libc items the glibc build has.
-    cargo build --locked --release --target x86_64-unknown-linux-musl
     # Arguments after a -- of their own, such as --nocapture, go to the test binaries with --include-ignored.
     case " $* " in
       *" -- "*) exec cargo test --locked --no-fail-fast "$@" --include-ignored ;;
@@ -35,8 +33,7 @@ case $mode in
       tar -I zstd -xf /prebuilt/target.tar.zst -C /
       cp /prebuilt/tests.tsv /out/tests.tsv
     else
-      cargo build --locked --release --target x86_64-unknown-linux-musl
-      # The glibc release build is only for the VM suites, which take it from ARCHIX_BUILD_OUT.
+      # The release build is only for the VM suites, which take it from ARCHIX_BUILD_OUT.
       [ -z "${BUILD_OUT:-}" ] || cargo build --locked --release
       /src/tests/arch/list-tests.sh /out/tests.tsv
       # Doc tests have no executable of their own to hand a shard, so the build runs them.
@@ -44,7 +41,7 @@ case $mode in
     fi
     if [ -n "${BUILD_OUT:-}" ]; then
       tar -I "zstd -T0" -cf /out/target.tar.zst /target/release/archix /target/debug/archix \
-        /target/x86_64-unknown-linux-musl/release/archix $(cut -f2 /out/tests.tsv | sort -u)
+        $(cut -f2 /out/tests.tsv | sort -u)
       # A cached target keeps only the dependencies: archix's own artifacts would go stale against a fresh checkout's mtimes.
       if [ -n "${PRUNE_TARGET:-}" ]; then
         rm -rf /target/*/incremental /target/*/*/incremental

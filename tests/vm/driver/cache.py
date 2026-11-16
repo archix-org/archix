@@ -64,7 +64,7 @@ def inputs(suite, shared=None):
         lines.append(f"old {old}")
     prebuilt = os.environ.get("ARCHIX_PREBUILT")
     if prebuilt:
-        for member in ("target/release/archix", "target/x86_64-unknown-linux-musl/release/archix"):
+        for member in ("target/release/archix",):
             binary = subprocess.run(["tar", "-I", "zstd", "-xOf", f"{prebuilt}/target.tar.zst", member], check=True, capture_output=True).stdout
             lines.append(f"prebuilt {member} {hashlib.sha256(binary).hexdigest()}")
     return lines + (outside() if shared is None else shared)

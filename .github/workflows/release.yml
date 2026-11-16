@@ -21,25 +21,23 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - run: pacman -Syu --noconfirm rust rust-musl musl git
+      - run: pacman -Syu --noconfirm rust git
       - uses: actions/checkout@v4
-      - name: Build archix and the static rescue binary
+      - name: Build archix
         run: |
           version="${GITHUB_REF_NAME#v}"
           grep -q "^version = \"$version\"" Cargo.toml || { echo "tag $GITHUB_REF_NAME doesn't match Cargo.toml"; exit 1; }
           cargo build --locked --release
-          cargo build --locked --release --target x86_64-unknown-linux-musl
           dir="archix-$version-x86_64-linux"
           mkdir "$dir"
           cp target/release/archix "$dir/archix"
-          cp target/x86_64-unknown-linux-musl/release/archix "$dir/archix-static"
           cp LICENSE-MIT LICENSE-APACHE "$dir/"
           tar -czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
           git config --global --add safe.directory "$PWD"
           git archive --format=tar.gz --prefix="archix-$version/" -o "archix-$version.tar.gz" HEAD
           sha256sum "archix-$version.tar.gz" > "archix-$version.tar.gz.sha256"
-      # A draft until scripts/sign-release.sh has signed the tarballs and attached the signatures.
+      # A draft until a maintainer publishes it.
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

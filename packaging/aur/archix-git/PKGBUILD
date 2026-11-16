@@ -7,14 +7,10 @@ arch=('x86_64')
 url="https://archix.dev"
 license=('MIT OR Apache-2.0')
 depends=('pacman' 'libgcc' 'glibc')
-makedepends=('git' 'rust' 'rust-musl' 'musl')
+makedepends=('git' 'rust')
 optdepends=(
   'git: AUR packages and recording the config commit'
   'devtools: building AUR packages in a clean chroot'
-  'mkinitcpio: boot entries'
-  'systemd-ukify: boot entries'
-  'sbctl: signing boot entries for Secure Boot'
-  'btrfs-progs: snapshots before each switch'
   'flatpak: Flatpak apps'
 )
 provides=('archix')
@@ -36,20 +32,13 @@ pkgver() {
 prepare() {
   export RUSTUP_TOOLCHAIN=stable
   cd archix
-  # With rustup instead of pacman's rust, the musl target comes from rustup rather than rust-musl.
-  if command -v rustup >/dev/null; then
-    rustup target add $CARCH-unknown-linux-musl
-  fi
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
-  cargo fetch --locked --target $CARCH-unknown-linux-musl
 }
 
 build() {
   cd archix
   export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR=target
   cargo build --frozen --release
-  # The rescue initramfs runs archix before the root filesystem's libraries are usable, so it needs a static build.
-  CFLAGS= CXXFLAGS= LDFLAGS= cargo build --frozen --release --target $CARCH-unknown-linux-musl
 }
 
 check() {
@@ -62,6 +51,5 @@ package() {
   cd archix
   install -Dm755 target/release/archix "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
-  install -Dm755 target/$CARCH-unknown-linux-musl/release/archix "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
 }

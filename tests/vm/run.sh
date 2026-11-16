@@ -94,18 +94,16 @@ mounts=(-v "$root":/src:ro -v "$target":/target -v archix-cargo:/root/.cargo/reg
 # ARCHIX_PREBUILT=DIR takes the binaries from tests/arch/run.sh's ARCHIX_BUILD_OUT=DIR instead of building them; the power-cut, Limine and replay suites build their own, with the test hooks' debug assertions.
 if [ "$suite" = powercut ] || [ "$suite" = limine ] || [ "$suite" = replay ]; then
   docker run --rm "${mounts[@]}" -e CARGO_TARGET_DIR=/target/powercut -e CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true archix-arch-test bash -c 'set -e
-    cargo build --locked --release && cp /target/powercut/release/archix /work/archix
-    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/powercut/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+    cargo build --locked --release && cp /target/powercut/release/archix /work/archix'
 elif [ -n "${ARCHIX_PREBUILT:-}" ]; then
   docker run --rm -v "$ARCHIX_PREBUILT":/prebuilt:ro -v "$work":/work archix-arch-test bash -c 'set -e
-    tar -I zstd -xf /prebuilt/target.tar.zst -C /tmp target/release/archix target/x86_64-unknown-linux-musl/release/archix
-    cp /tmp/target/release/archix /work/archix && cp /tmp/target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+    tar -I zstd -xf /prebuilt/target.tar.zst -C /tmp target/release/archix
+    cp /tmp/target/release/archix /work/archix'
 else
   docker run --rm "${mounts[@]}" archix-arch-test bash -c 'set -e
-    cargo build --locked --release && cp /target/release/archix /work/archix
-    cargo build --locked --release --target x86_64-unknown-linux-musl && cp /target/x86_64-unknown-linux-musl/release/archix /work/archix-static'
+    cargo build --locked --release && cp /target/release/archix /work/archix'
 fi
-# selfupgrade's two archix-git packages: old, ARCHIX_OLD's static build, and new, this tree's, each versioned as the AUR's PKGBUILD does.
+# selfupgrade's two archix-git packages: old, ARCHIX_OLD's build, and new, this tree's, each versioned as the AUR's PKGBUILD does.
 if [ "$suite" = selfupgrade ]; then
   rm -rf "$work/old-src" && mkdir -p "$work/old-src" "$work/old" "$work/new"
   git -C "$root" archive "$ARCHIX_OLD" | tar -x -C "$work/old-src"
@@ -114,9 +112,9 @@ if [ "$suite" = selfupgrade ]; then
   aur_version HEAD > "$work/new/version" && git -C "$root" rev-parse --short=7 HEAD > "$work/new/commit"
   # git archive dates every file at its commit, so one target dir shared by two old commits would keep the first one's build.
   docker run --rm -v "$work":/work -v "$target":/target -v archix-cargo:/root/.cargo/registry -w /work/old-src -e CARGO_TARGET_DIR="/target/old-$(cat "$work/old/commit")" archix-arch-test bash -c 'set -e
-    cargo build --locked --release --target x86_64-unknown-linux-musl && cp "$CARGO_TARGET_DIR"/x86_64-unknown-linux-musl/release/archix /work/old/archix-static && cp /work/old/archix-static /work/old/archix'
+    cargo build --locked --release && cp "$CARGO_TARGET_DIR"/release/archix /work/old/archix'
   rm -rf "$work/old-src"
-  cp "$work/archix" "$work/new/archix" && cp "$work/archix-static" "$work/new/archix-static"
+  cp "$work/archix" "$work/new/archix"
 fi
 # ARCHIX_TEST_ARCHIVE (e.g. a local caching mirror on http://127.0.0.1:8079) stands in for archive.archlinux.org; the VM reaches the host as 10.0.2.2.
 archive=${ARCHIX_TEST_ARCHIVE:-https://archive.archlinux.org}

@@ -8,14 +8,10 @@ arch=('x86_64')
 url="https://archix.dev"
 license=('MIT OR Apache-2.0')
 depends=('pacman' 'libgcc' 'glibc')
-makedepends=('git' 'rust' 'rust-musl' 'musl')
+makedepends=('git' 'rust')
 optdepends=(
   'git: AUR packages and recording the config commit'
   'devtools: building AUR packages in a clean chroot'
-  'mkinitcpio: boot entries'
-  'systemd-ukify: boot entries'
-  'sbctl: signing boot entries for Secure Boot'
-  'btrfs-progs: snapshots before each switch'
   'flatpak: Flatpak apps'
 )
 provides=('archix')
@@ -35,18 +31,13 @@ pkgver() {
 prepare() {
   export RUSTUP_TOOLCHAIN=stable
   cd "$startdir"
-  if command -v rustup >/dev/null; then
-    rustup target add $CARCH-unknown-linux-musl
-  fi
   cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
-  cargo fetch --locked --target $CARCH-unknown-linux-musl
 }
 
 build() {
   export RUSTUP_TOOLCHAIN=stable CARGO_TARGET_DIR="$srcdir/target"
   cd "$startdir"
   cargo build --frozen --release
-  CFLAGS= CXXFLAGS= LDFLAGS= cargo build --frozen --release --target $CARCH-unknown-linux-musl
 }
 
 check() {
@@ -59,6 +50,5 @@ package() {
   cd "$startdir"
   install -Dm755 "$srcdir/target/release/archix" "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
-  install -Dm755 "$srcdir/target/$CARCH-unknown-linux-musl/release/archix" "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/$pkgname"
 }

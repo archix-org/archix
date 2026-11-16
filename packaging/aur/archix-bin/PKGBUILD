@@ -10,23 +10,17 @@ depends=('pacman' 'libgcc' 'glibc')
 optdepends=(
   'git: AUR packages and recording the config commit'
   'devtools: building AUR packages in a clean chroot'
-  'mkinitcpio: boot entries'
-  'systemd-ukify: boot entries'
-  'sbctl: signing boot entries for Secure Boot'
-  'btrfs-progs: snapshots before each switch'
   'flatpak: Flatpak apps'
 )
 provides=('archix')
 conflicts=('archix' 'ax')
-source_x86_64=("https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-$CARCH-linux.tar.gz"{,.sig})
-# packaging/aur/pin.sh fills these in from the signed release.
-sha256sums_x86_64=('9ef304bccca04dcd75263316a34dd611071a0e355a852bc100b896fcbe43ff1b' 'SKIP')
-validpgpkeys=('CE9A595A3355AE955DEE7BB415374E7E35BAF667')
+source_x86_64=("https://github.com/archix-org/archix/releases/download/v$pkgver/archix-$pkgver-$CARCH-linux.tar.gz")
+# packaging/aur/pin.sh fills these in from the release.
+sha256sums_x86_64=('9ef304bccca04dcd75263316a34dd611071a0e355a852bc100b896fcbe43ff1b')
 
 package() {
   cd "archix-$pkgver-$CARCH-linux"
   install -Dm755 archix "$pkgdir/usr/bin/archix"
   ln -s archix "$pkgdir/usr/bin/ax"
-  install -Dm755 archix-static "$pkgdir/usr/lib/archix/archix-static"
   install -Dm644 LICENSE-MIT LICENSE-APACHE -t "$pkgdir/usr/share/licenses/archix"
 }

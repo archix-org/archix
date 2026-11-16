@@ -4,7 +4,7 @@ set -euo pipefail
 repo=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 head=$(git -C "$repo" rev-parse HEAD)
 exec docker run --rm -v "$repo:/src:ro" -e HEAD="$head" archlinux:latest bash -euo pipefail -c '
-  pacman -Syu --noconfirm --needed base-devel git namcap rust rust-musl musl >/dev/null
+  pacman -Syu --noconfirm --needed base-devel git namcap rust >/dev/null
   useradd -m builder
   for pkg in archix archix-bin archix-git; do
     echo "== namcap $pkg/PKGBUILD"
