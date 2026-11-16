@@ -39,6 +39,4 @@ src/system/live.rs	test:switch test:system
 src/system/restart.rs	test:switch
 src/system/accounts.rs	test:credentials test:system
 src/system/xattr.rs	test:system test:repos
-src/old_model.rs	test:old_model
-src/main.rs	test:old_model
 src/machine.rs	test:init

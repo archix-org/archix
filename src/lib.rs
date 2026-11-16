@@ -12,7 +12,6 @@ pub mod installed;
 pub mod lock;
 pub mod luagen;
 pub mod machine;
-pub mod old_model;
 pub mod options;
 pub mod pacman;
 pub mod paths;
